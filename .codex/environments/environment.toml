@@ -9,3 +9,8 @@ script = ""
 name = "Run"
 icon = "run"
 command = "python C:\\Users\\jiz14\\TeamGH\\wujiang_game\\run.py"
+
+[[actions]]
+name = "run web"
+icon = "tool"
+command = "python C:\\Users\\jiz14\\TeamGH\\wujiang_game\\run.py --host 0.0.0.0 --port 8000"
