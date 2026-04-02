@@ -1,0 +1,2 @@
+"""Wujiang web game package."""
+

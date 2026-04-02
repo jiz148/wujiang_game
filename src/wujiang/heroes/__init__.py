@@ -1,0 +1,1 @@
+"""Hero definitions and registry."""
