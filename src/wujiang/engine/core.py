@@ -217,6 +217,9 @@ class BattleFieldEffect(BattleComponent):
         if self.duration <= 0:
             battle.remove_field_effect(self)
 
+    def blocks_forced_movement(self, battle: "Battle", position: "Position") -> bool:
+        return False
+
     def to_public_dict(self, battle: "Battle") -> dict[str, Any]:
         data = super().to_public_dict(battle)
         data["duration"] = self.duration
@@ -389,6 +392,14 @@ class Skill(BattleComponent, ABC):
     ) -> dict[str, Any]:
         return {"cells": [], "target_unit_ids": [], "secondary_cells": [], "requires_target": False}
 
+    def reaction_window_timing(
+        self,
+        battle: "Battle",
+        actor: "Unit",
+        payload: dict[str, Any],
+    ) -> Literal["before", "after"]:
+        return "before"
+
     def get_target_units_for_payload(
         self,
         battle: "Battle",
@@ -515,7 +526,7 @@ class HealContext:
 
 @dataclass(slots=True)
 class QueuedAction:
-    action_type: Literal["move", "attack", "skill", "reaction_skill", "reaction_action"]
+    action_type: Literal["move", "attack", "skill", "skill_effect", "reaction_skill", "reaction_action"]
     actor_id: str
     display_name: str
     speed: int
@@ -592,6 +603,22 @@ class ReactionWindow:
         }
 
 
+@dataclass(slots=True)
+class RespawnPrompt:
+    unit_id: str
+    player_id: int
+    origin: Position
+    options: list[Position]
+
+    def to_public_dict(self) -> dict[str, Any]:
+        return {
+            "unit_id": self.unit_id,
+            "player_id": self.player_id,
+            "origin": self.origin.to_dict(),
+            "options": [cell.to_dict() for cell in self.options],
+        }
+
+
 class Unit(ABC):
     def __init__(
         self,
@@ -618,7 +645,13 @@ class Unit(ABC):
         self.attribute = attribute
         self.race = race
         self.level = level
-        self.base_stats = base_stats
+        self.base_stats = Stats(
+            attack=base_stats.attack,
+            defense=base_stats.defense,
+            speed=base_stats.speed,
+            attack_range=base_stats.attack_range,
+            mana=base_stats.mana,
+        )
         self.current_hp = max_health
         self.max_health = max_health
         self.current_mana = base_stats.mana
@@ -796,6 +829,8 @@ class Unit(ABC):
             "level": self.level,
             "alive": self.alive,
             "banished": self.banished,
+            "banish_turns_remaining": self.banish_turns_remaining,
+            "banish_return_position": self.banish_return_position.to_dict() if self.banish_return_position else None,
             "is_summon": self.is_summon,
             "turn_ready": self.turn_ready,
             "position": self.position.to_dict() if self.position else None,
@@ -854,6 +889,7 @@ class Battle:
         self.winner: Optional[int] = None
         self.logs: list[str] = []
         self.pending_chain: Optional[ReactionWindow] = None
+        self.pending_respawn_unit_ids: list[str] = []
 
     def log(self, message: str) -> None:
         self.logs.append(message)
@@ -886,23 +922,18 @@ class Battle:
 
     def start_player_turn(self, player_id: int) -> None:
         self.active_player = player_id
+        self.pending_respawn_unit_ids = []
         for unit in self.player_units(player_id):
             unit.refresh_for_turn(self)
         for unit in self.all_units():
             if unit.banished and unit.player_id == player_id:
-                unit.banish_turns_remaining = max(unit.banish_turns_remaining - 1, 0)
+                if unit.banish_turns_remaining > 0:
+                    unit.banish_turns_remaining = max(unit.banish_turns_remaining - 1, 0)
                 if unit.banish_turns_remaining == 0:
-                    unit.banished = False
-                    if unit.banish_return_position and not self.is_occupied(unit.banish_return_position):
-                        unit.position = unit.banish_return_position
-                    self.log(f"{unit.name} 返回战场。")
+                    self.schedule_respawn(unit)
+        self.advance_respawn_queue()
         self.log(f"第 {self.round_number} 轮，玩家 {player_id} 的回合开始。")
-
-        opponent_id = 2 if player_id == 1 else 1
-        if not self.controllable_hero_units(opponent_id):
-            self.winner = player_id
-            self.log(f"玩家 {self.winner} 获胜。")
-            return
+        self.check_win_condition()
 
     def end_turn(self) -> None:
         if self.pending_chain is not None:
@@ -967,6 +998,88 @@ class Battle:
             for unit in self.player_units(player_id)
             if unit.alive and not unit.banished and not unit.is_summon
         ]
+
+    def hero_units(self, player_id: int) -> list[Unit]:
+        return [
+            unit
+            for unit in self.player_units(player_id)
+            if unit.alive and not unit.is_summon
+        ]
+
+    def respawn_options_for(self, unit: Unit) -> list[Position]:
+        origin = unit.banish_return_position or unit.position
+        if origin is None:
+            return []
+        if not self.is_occupied(origin, ignore=unit):
+            return [origin]
+        best_distance: Optional[int] = None
+        options: list[Position] = []
+        for y in range(self.height):
+            for x in range(self.width):
+                cell = Position(x, y)
+                if self.is_occupied(cell, ignore=unit):
+                    continue
+                distance = origin.distance_to(cell)
+                if best_distance is None or distance < best_distance:
+                    best_distance = distance
+                    options = [cell]
+                elif distance == best_distance:
+                    options.append(cell)
+        return sorted(options, key=lambda cell: (cell.y, cell.x))
+
+    def current_respawn_prompt(self) -> Optional[RespawnPrompt]:
+        while self.pending_respawn_unit_ids:
+            unit_id = self.pending_respawn_unit_ids[0]
+            unit = self.units.get(unit_id)
+            if unit is None or not unit.alive or not unit.banished:
+                self.pending_respawn_unit_ids.pop(0)
+                continue
+            origin = unit.banish_return_position or unit.position
+            if origin is None:
+                self.pending_respawn_unit_ids.pop(0)
+                continue
+            options = self.respawn_options_for(unit)
+            if not options:
+                self.pending_respawn_unit_ids.pop(0)
+                self.log(f"{unit.name} 暂时没有可重新出现的空格，将继续等待。")
+                continue
+            return RespawnPrompt(unit.unit_id, unit.player_id, origin, options)
+        return None
+
+    def restore_banished_unit(self, unit: Unit, destination: Position) -> None:
+        origin = unit.banish_return_position or unit.position
+        unit.banished = False
+        unit.banish_turns_remaining = 0
+        unit.position = destination
+        if origin is not None and destination == origin:
+            self.log(f"{unit.name} 在原位重新出现。")
+        else:
+            self.log(f"{unit.name} 在 ({destination.x}, {destination.y}) 重新出现。")
+
+    def schedule_respawn(self, unit: Unit) -> None:
+        options = self.respawn_options_for(unit)
+        if not options:
+            self.log(f"{unit.name} 暂时没有可重新出现的空格，将继续等待。")
+            return
+        origin = unit.banish_return_position or unit.position
+        if origin is not None and len(options) == 1 and options[0] == origin:
+            self.restore_banished_unit(unit, origin)
+            return
+        if unit.unit_id not in self.pending_respawn_unit_ids:
+            self.pending_respawn_unit_ids.append(unit.unit_id)
+            self.log(f"{unit.name} 即将重新出现，请选择其落点。")
+
+    def advance_respawn_queue(self) -> None:
+        while True:
+            prompt = self.current_respawn_prompt()
+            if prompt is None:
+                return
+            if len(prompt.options) == 1 and prompt.options[0] == prompt.origin:
+                unit = self.get_unit(prompt.unit_id)
+                self.pending_respawn_unit_ids.pop(0)
+                self.restore_banished_unit(unit, prompt.origin)
+                continue
+            return
 
     def units_at_cells(self, cells: Iterable[Position]) -> list[Unit]:
         units: list[Unit] = []
@@ -1135,6 +1248,7 @@ class Battle:
         max_distance: Optional[int] = None,
         triggered_by_reaction: bool = False,
         tags: Optional[set[str]] = None,
+        forced: bool = False,
     ) -> MoveContext:
         ignore_units = ignore_units or unit.ignore_units_while_moving
         if unit.position is None:
@@ -1145,7 +1259,7 @@ class Battle:
             raise ActionError("目标位置超出战场边界。")
         if self.is_occupied(destination, ignore=unit):
             raise ActionError("目标位置已被占用。")
-        if unit.cannot_move:
+        if unit.cannot_move and not forced:
             raise ActionError(f"{unit.name} 当前无法移动。")
         if max_distance is None:
             max_distance = int(unit.stat("speed"))
@@ -1419,6 +1533,34 @@ class Battle:
             sanitized["cells"] = target_cells
         return sanitized
 
+    def is_forced_movement_blocked(self, position: Position) -> bool:
+        return any(effect.blocks_forced_movement(self, position) for effect in self.field_effects)
+
+    def declared_source_position(self, payload: dict[str, Any]) -> Optional[Position]:
+        if payload.get("declared_source_x") is None or payload.get("declared_source_y") is None:
+            return None
+        return Position(int(payload["declared_source_x"]), int(payload["declared_source_y"]))
+
+    def resolve_from_declared_origin(
+        self,
+        actor: Unit,
+        payload: dict[str, Any],
+        resolver: Any,
+    ) -> Any:
+        declared = self.declared_source_position(payload)
+        if declared is None or actor.position is None or actor.position == declared:
+            return resolver()
+        actual_position = actor.position
+        actor.position = declared
+        try:
+            result = resolver()
+        except Exception:
+            actor.position = actual_position
+            raise
+        if actor.position == declared:
+            actor.position = actual_position
+        return result
+
     def use_skill(self, actor: Unit, skill_code: str, payload: dict[str, Any]) -> None:
         skill = actor.get_skill(skill_code)
         prepaid = bool(payload.get("resources_prepaid"))
@@ -1486,6 +1628,8 @@ class Battle:
                 raise ActionError("目标超出普攻范围。")
             ignore_stealth = self.attack_ignores_stealth(actor, target)
             self.require_selectable_unit(target, action_name="普攻", ignore_stealth=ignore_stealth)
+            queued_payload["declared_source_x"] = actor.position.x
+            queued_payload["declared_source_y"] = actor.position.y
             queued_payload["declared_target_x"] = target.position.x
             queued_payload["declared_target_y"] = target.position.y
             queued_payload["ignore_shield"] = self.attack_ignores_shield(actor, target)
@@ -1506,6 +1650,9 @@ class Battle:
             ok, reason = skill.can_use(self, actor, payload)
             if not ok:
                 raise ActionError(reason)
+            if actor.position is not None:
+                queued_payload["declared_source_x"] = actor.position.x
+                queued_payload["declared_source_y"] = actor.position.y
             queued_payload["ignore_shield"] = skill.ignores_shield_for_payload(self, actor, payload)
             queued_payload["ignore_stealth"] = skill.ignores_stealth_for_payload(self, actor, payload)
             if payload.get("target_unit_id"):
@@ -1617,7 +1764,7 @@ class Battle:
 
     def shield_auto_blocks_chain(self, unit: Unit, queued_action: QueuedAction) -> bool:
         return (
-            queued_action.action_type in {"attack", "skill"}
+            queued_action.action_type in {"attack", "skill", "skill_effect"}
             and queued_action.speed == 1
             and unit.total_shields() > 0
             and not bool(queued_action.payload.get("ignore_shield"))
@@ -1675,6 +1822,20 @@ class Battle:
             options_by_unit=options_by_unit,
         )
 
+    def present_reaction_window_or_resolve(self, queued_action: QueuedAction) -> None:
+        window = self.create_reaction_window(queued_action)
+        if window is None:
+            if queued_action.speed < 3 and queued_action.hostile and queued_action.target_unit_ids:
+                target_names = "、".join(self.get_unit(unit_id).name for unit_id in queued_action.target_unit_ids)
+                self.log(f"{target_names} 没有可用的更快连锁，【{queued_action.display_name}】直接结算。")
+            self.resolve_queued_action(queued_action)
+            return
+        self.pending_chain = window
+        reactor = self.pending_chain.current_unit_id()
+        self.log(f"等待玩家 {window.reactive_player_id} 的连锁响应。")
+        if reactor is not None:
+            self.log(f"{self.get_unit(reactor).name} 可以进行连锁。")
+
     def execute_reaction_option(
         self,
         option: ReactionOption,
@@ -1721,6 +1882,45 @@ class Battle:
             return
         raise ActionError("未知连锁动作。")
 
+    def resolve_skill_effect(self, actor: Unit, queued_action: QueuedAction) -> None:
+        payload = queued_action.payload
+        effect_code = payload.get("effect_code")
+        target: Optional[Unit] = None
+        if payload.get("declared_target_x") is not None and payload.get("declared_target_y") is not None:
+            declared = Position(int(payload["declared_target_x"]), int(payload["declared_target_y"]))
+            target = self.unit_at(declared)
+            if target is None or target.player_id == actor.player_id:
+                self.log(f"【{queued_action.display_name}】落在原定格上，没有命中有效目标。")
+                return
+        elif payload.get("target_unit_id"):
+            target = self.get_unit(payload["target_unit_id"])
+        if target is None:
+            self.log(f"【{queued_action.display_name}】没有命中有效目标。")
+            return
+        if effect_code == "banish":
+            target_ctx = self.validate_target(
+                actor,
+                target,
+                action_name=queued_action.display_name,
+                is_skill=True,
+                is_hostile=True,
+                ignore_shield=bool(payload.get("ignore_shield")),
+                ignore_magic_immunity=bool(payload.get("ignore_magic_immunity")),
+                cannot_evade=bool(payload.get("cannot_evade")),
+                tags=set(payload.get("tags", [])),
+            )
+            if target_ctx.cancelled:
+                self.log(target_ctx.reason)
+                return
+            turns = int(payload.get("banish_turns", 0))
+            self.banish_unit(target, turns)
+            success_log = payload.get("success_log")
+            if success_log:
+                self.log(str(success_log).format(actor=actor.name, target=target.name))
+            self.check_win_condition()
+            return
+        raise ActionError("未知技能后续效果。")
+
     def resolve_queued_action(self, queued_action: QueuedAction) -> None:
         actor = self.units.get(queued_action.actor_id)
         if actor is None or not actor.alive or actor.banished:
@@ -1745,7 +1945,7 @@ class Battle:
                     return
             else:
                 target = self.get_unit(payload["target_unit_id"])
-            self.basic_attack(actor, target)
+            self.resolve_from_declared_origin(actor, payload, lambda: self.basic_attack(actor, target))
             return
         if queued_action.action_type == "skill":
             resolved_payload = dict(payload)
@@ -1753,7 +1953,10 @@ class Battle:
                 declared = Position(int(payload["declared_target_x"]), int(payload["declared_target_y"]))
                 occupant = self.unit_at(declared)
                 resolved_payload["resolved_target_unit_id"] = occupant.unit_id if occupant is not None else None
-            self.use_skill(actor, payload["skill_code"], resolved_payload)
+            self.resolve_from_declared_origin(actor, payload, lambda: self.use_skill(actor, payload["skill_code"], resolved_payload))
+            return
+        if queued_action.action_type == "skill_effect":
+            self.resolve_skill_effect(actor, queued_action)
             return
         if queued_action.action_type == "reaction_skill":
             source_action = self.source_action_for_reaction(queued_action)
@@ -1800,24 +2003,18 @@ class Battle:
     def start_action_or_chain(self, payload: dict[str, Any]) -> None:
         queued_action = self.build_queued_action(payload)
         actor = self.get_unit(queued_action.actor_id)
+        reaction_window_timing = "before"
         if queued_action.action_type == "skill":
             skill = actor.get_skill(queued_action.payload["skill_code"])
             skill.prepay_resources(self, actor)
             queued_action.payload["resources_prepaid"] = True
+            reaction_window_timing = skill.reaction_window_timing(self, actor, queued_action.payload)
         if queued_action.action_type in {"attack", "skill"}:
             actor.notify_action_declared(self, queued_action.action_type, queued_action.payload)
-        window = self.create_reaction_window(queued_action)
-        if window is None:
-            if queued_action.speed < 3 and queued_action.hostile and queued_action.target_unit_ids:
-                target_names = "、".join(self.get_unit(unit_id).name for unit_id in queued_action.target_unit_ids)
-                self.log(f"{target_names} 没有可用的更快连锁，【{queued_action.display_name}】直接结算。")
+        if queued_action.action_type == "skill" and reaction_window_timing == "after":
             self.resolve_queued_action(queued_action)
             return
-        self.pending_chain = window
-        reactor = self.pending_chain.current_unit_id()
-        self.log(f"等待玩家 {window.reactive_player_id} 的连锁响应。")
-        if reactor is not None:
-            self.log(f"{self.get_unit(reactor).name} 可以进行连锁。")
+        self.present_reaction_window_or_resolve(queued_action)
 
     def pass_turn(self, actor: Unit) -> None:
         actor.turn_ready = False
@@ -1848,8 +2045,7 @@ class Battle:
         unit.banished = True
         unit.banish_turns_remaining = turns
         unit.banish_return_position = unit.position
-        unit.position = None
-        self.log(f"{unit.name} 暂时离开了战场。")
+        self.log(f"{unit.name} 消失了，暂时无法行动。")
 
     def summon_unit(self, unit: Unit, position: Position, *, summoner: Optional[Unit] = None) -> None:
         unit.summoner_id = summoner.unit_id if summoner is not None else None
@@ -1859,12 +2055,9 @@ class Battle:
         self.log(f"{unit.name} 被召唤到战场。")
 
     def check_win_condition(self) -> None:
-        return None
-        alive_players = {
-            unit.player_id
-            for unit in self.units.values()
-            if unit.alive and not unit.is_summon
-        }
+        if self.winner is not None:
+            return
+        alive_players = {player_id for player_id in (1, 2) if self.hero_units(player_id)}
         if len(alive_players) == 1 and self.units:
             self.winner = alive_players.pop()
             self.log(f"玩家 {self.winner} 获胜。")
@@ -1873,6 +2066,25 @@ class Battle:
         if self.winner is not None:
             raise ActionError("对局已结束，请返回选将页面开始新的对局。")
         action_type = payload.get("type")
+        if self.pending_respawn_unit_ids:
+            if action_type != "respawn_select":
+                raise ActionError("当前需要先为消失单位选择重新出现的位置。")
+            prompt = self.current_respawn_prompt()
+            if prompt is None:
+                self.pending_respawn_unit_ids = []
+                return
+            if payload.get("unit_id") != prompt.unit_id:
+                raise ActionError("现在需要先处理当前等待重新出现的单位。")
+            destination = Position(int(payload["x"]), int(payload["y"]))
+            unit = self.get_unit(prompt.unit_id)
+            if destination not in self.respawn_options_for(unit):
+                raise ActionError("该位置不能作为重新出现的落点。")
+            if self.is_occupied(destination, ignore=unit):
+                raise ActionError("该位置已被占用，无法重新出现。")
+            self.pending_respawn_unit_ids.pop(0)
+            self.restore_banished_unit(unit, destination)
+            self.advance_respawn_queue()
+            return
         if self.pending_chain is not None:
             current_unit_id = self.pending_chain.current_unit_id()
             if action_type == "chain_skip":
@@ -2033,10 +2245,15 @@ class Battle:
         return {"actions": [option.to_public_dict() for option in options]}
 
     def to_public_dict(self) -> dict[str, Any]:
+        respawn_prompt = self.current_respawn_prompt()
         return {
             "board": {"width": self.width, "height": self.height},
             "active_player": self.active_player,
-            "input_player": self.pending_chain.reactive_player_id if self.pending_chain else self.active_player,
+            "input_player": (
+                respawn_prompt.player_id
+                if respawn_prompt is not None
+                else (self.pending_chain.reactive_player_id if self.pending_chain else self.active_player)
+            ),
             "turn_number": self.turn_number,
             "round_number": self.round_number,
             "winner": self.winner,
@@ -2044,5 +2261,6 @@ class Battle:
             "units": [unit.to_public_dict(self) for unit in self.all_units()],
             "field_effects": [effect.to_public_dict(self) for effect in self.field_effects],
             "pending_chain": self.pending_chain.to_public_dict() if self.pending_chain else None,
+            "pending_respawn": respawn_prompt.to_public_dict() if respawn_prompt else None,
             "logs": self.logs,
         }

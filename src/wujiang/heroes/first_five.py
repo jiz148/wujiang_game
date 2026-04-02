@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import random
 from typing import Any
@@ -10,6 +10,7 @@ from wujiang.engine.core import (
     DamageContext,
     HeroUnit,
     Position,
+    QueuedAction,
     Skill,
     Stats,
 )
@@ -38,6 +39,7 @@ from wujiang.heroes.common import (
     MachineGunSkill,
     MagicImmuneWhenAttackOneTrait,
     MagicWallSkill,
+    InvincibleUntilActionStatus,
     PassiveEvasionSkill,
     PassiveProtectionSkill,
     PierceSkill,
@@ -290,6 +292,9 @@ class FateKickSkill(Skill):
     def __init__(self) -> None:
         super().__init__("fate_kick", "命运飞踢", "直线冲刺至多 4 格，再判定前方单位；硬币正面则自己消失 1轮，反面则目标消失 1轮。", cooldown_turns=2, target_mode="cell")
 
+    def reaction_window_timing(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> str:
+        return "after"
+
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         if actor.position is None:
             raise ActionError("单位不在战场上。")
@@ -316,8 +321,26 @@ class FateKickSkill(Skill):
             battle.banish_unit(actor, 2)
             battle.log(f"{actor.name} 的命运飞踢判定为正面，自身消失 1轮。")
         else:
-            battle.banish_unit(target, 2)
-            battle.log(f"{actor.name} 的命运飞踢判定为反面，{target.name} 消失 1轮。")
+            battle.log(f"{actor.name} 的命运飞踢判定为反面，{target.name} 将在此效果结算时消失 1轮。")
+            battle.present_reaction_window_or_resolve(
+                QueuedAction(
+                    action_type="skill_effect",
+                    actor_id=actor.unit_id,
+                    display_name="命运飞踢",
+                    speed=self.chain_speed,
+                    payload={
+                        "effect_code": "banish",
+                        "banish_turns": 2,
+                        "declared_target_x": impact.x,
+                        "declared_target_y": impact.y,
+                        "success_log": "{actor} 的命运飞踢判定为反面，{target} 消失 1轮。",
+                    },
+                    target_unit_ids=[target.unit_id],
+                    target_cells=[impact],
+                    source_player_id=actor.player_id,
+                    hostile=True,
+                )
+            )
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
         if actor.position is None:
@@ -338,10 +361,32 @@ class FateKickSkill(Skill):
 
 class IntoDarknessSkill(Skill):
     def __init__(self) -> None:
-        super().__init__("into_darkness", "遁入黑暗", "持续 1轮：无法被选中且无法回复。结束后的第一次攻击 +1 且破魔。", cooldown_turns=4, target_mode="self")
+        super().__init__(
+            "into_darkness",
+            "遁入黑暗",
+            "持续 1轮：进入隐身且无法回复；若以普攻解除隐身，则那次普攻伤害 +1 且破魔。",
+            cooldown_turns=4,
+            target_mode="self",
+        )
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
+        existing_darkness = actor.get_status("遁入黑暗")
+        if existing_darkness is not None:
+            actor.remove_status(existing_darkness, battle)
+        existing_stealth = actor.get_status("隐身")
+        if existing_stealth is not None:
+            actor.remove_status(existing_stealth, battle)
         actor.add_status(DelayedDarknessStatus(duration=2))
+        actor.add_status(
+            InvincibleUntilActionStatus(
+                duration=2,
+                tick_scope="any_turn_end",
+                bonus_attack_on_attack_break=1,
+                ignore_shield_on_attack_break=True,
+                attack_break_buff_name="黑暗突袭",
+                attack_break_buff_description="因遁入黑暗现身时，那次普攻伤害 +1 且破魔。",
+            )
+        )
         battle.log(f"{actor.name} 遁入了黑暗。")
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
@@ -362,6 +407,9 @@ class GreatFireFuneralField(BattleFieldEffect):
         if unit is None:
             return None
         return unit  # type: ignore[return-value]
+
+    def blocks_forced_movement(self, battle: Battle, position: Position) -> bool:
+        return self.in_area(position)
 
     def on_unit_moved(self, battle: Battle, ctx: Any) -> None:
         owner = self.get_owner_unit(battle)
@@ -391,7 +439,9 @@ class GreatFireFuneralField(BattleFieldEffect):
         if owner is None:
             return
         for unit in battle.all_units():
-            if unit.unit_id == self.owner_unit_id or unit.position is None:
+            if unit.unit_id == self.owner_unit_id or unit.position is None or unit.banished:
+                continue
+            if unit.player_id != ended_player_id:
                 continue
             if self.in_area(unit.position):
                 battle.resolve_damage(
@@ -422,7 +472,7 @@ class GreatFireFuneralSkill(Skill):
         for y in range(battle.height):
             affected.add((actor.position.x, y))
         for unit in battle.all_units():
-            if unit.unit_id == actor.unit_id or unit.position is None:
+            if unit.unit_id == actor.unit_id or unit.position is None or unit.banished:
                 continue
             if (unit.position.x, unit.position.y) in affected:
                 battle.resolve_damage(
@@ -476,8 +526,16 @@ class JudgmentFireSkill(Skill):
     def __init__(self) -> None:
         super().__init__("judgment_fire", "审判日之火", "仅在攻击为 1 时才能使用；对全场除最低能力单位外造成 6 点伤害并禁疗。", max_uses_per_battle=1, target_mode="self")
 
+    def can_use(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok:
+            return ok, reason
+        if abs(actor.stat("attack") - 1) > 1e-9:
+            return False, "只有攻击为 1 时才能使用审判日之火。"
+        return True, ""
+
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        if actor.stat("attack") > 1:
+        if abs(actor.stat("attack") - 1) > 1e-9:
             raise ActionError("只有攻击为 1 时才能使用审判日之火。")
         units = [unit for unit in battle.all_units() if unit.position is not None]
         scores = {
@@ -530,7 +588,6 @@ class JudgmentFireSkill(Skill):
         }
         minimum = min(scores.values())
         return [unit for unit in units if scores[unit.unit_id] != minimum]
-
 
 class Ellie(AbstractHero):
     hero_code = "ellie"
