@@ -533,8 +533,10 @@ body.battle-mode .piece-name {
   width: 100%;
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   justify-content: center;
   gap: 2px;
+  min-height: 10px;
 }
 
 .mana-pip {
@@ -551,9 +553,42 @@ body.battle-mode .piece-name {
   box-shadow: 0 0 8px rgba(43, 143, 255, 0.24);
 }
 
+.mana-pip.is-half {
+  background: linear-gradient(90deg, #7fd5ff 0%, #2b8fff 50%, rgba(255, 248, 239, 0.18) 50%, rgba(255, 248, 239, 0.18) 100%);
+  border-color: rgba(187, 231, 255, 0.26);
+  box-shadow: 0 0 7px rgba(43, 143, 255, 0.18);
+}
+
+.mana-pips.is-compact {
+  flex-wrap: nowrap;
+  gap: 5px;
+}
+
+.mana-count {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #d8f2ff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
+}
+
+.mana-zero {
+  font-size: 10px;
+  font-weight: 700;
+  color: rgba(255, 248, 239, 0.72);
+}
+
 body.battle-mode .mana-pip {
   width: 7px;
   height: 5px;
+}
+
+body.battle-mode .mana-pips.is-compact {
+  gap: 4px;
+}
+
+body.battle-mode .mana-count {
+  font-size: 10px;
 }
 
 .cell.has-ghost {

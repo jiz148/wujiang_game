@@ -686,5 +686,32 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertIsNone(dark.get_status("黑暗突袭"))
 
 
+    def test_fly_leap_next_to_enemy_does_not_open_chain_when_no_effect_applies(self) -> None:
+        battle = create_battle("dark_human", "bard")
+        dark = battle.player_units(1)[0]
+        bard = battle.player_units(2)[0]
+        dark.position = Position(1, 4)
+        bard.position = Position(6, 4)
+
+        battle.perform_action({"type": "skill", "unit_id": dark.unit_id, "skill_code": "fly_leap", "x": 5, "y": 4})
+
+        self.assertEqual(dark.position, Position(5, 4))
+        self.assertIsNone(battle.pending_chain)
+
+    def test_all_non_special_shields_expire_at_end_of_turn(self) -> None:
+        battle = create_battle("ellie", "bard")
+        ellie = battle.player_units(1)[0]
+        bard = battle.player_units(2)[0]
+        ellie.shields = 1
+        ellie.temporary_shields = 2
+        bard.shields = 1
+
+        battle.perform_action({"type": "end_turn"})
+
+        self.assertEqual(ellie.shields, 0)
+        self.assertEqual(ellie.temporary_shields, 0)
+        self.assertEqual(bard.shields, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

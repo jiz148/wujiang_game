@@ -219,13 +219,32 @@ function hpRatio(unit) {
   return Math.max(0, Math.min(1, Number(unit.hp || 0) / Number(unit.max_hp)));
 }
 
+function manaValue(unit) {
+  return Math.max(0, Number(unit?.mana || 0));
+}
+
+function manaDisplayClass(unit) {
+  return manaValue(unit) > 5 ? "mana-pips is-compact" : "mana-pips";
+}
+
 function manaPipsMarkup(unit) {
-  const maxPips = Math.max(1, Math.round(Number(unit?.base_stats?.mana || unit?.stats?.mana || unit?.mana || 0) * 2));
-  const currentPips = Math.max(0, Math.min(maxPips, Math.round(Number(unit?.mana || 0) * 2)));
-  return Array.from({ length: maxPips }, (_, index) => {
-    const filled = index < currentPips;
-    return `<span class="mana-pip${filled ? " is-filled" : ""}"></span>`;
-  }).join("");
+  const mana = manaValue(unit);
+  if (mana > 5) {
+    return `<span class="mana-pip is-filled"></span><span class="mana-count">${trimNumber(mana)}</span>`;
+  }
+  const fullPips = Math.floor(mana);
+  const hasHalfPip = Math.abs(mana - fullPips - 0.5) < 0.001;
+  const pips = [];
+  for (let index = 0; index < fullPips; index += 1) {
+    pips.push(`<span class="mana-pip is-filled"></span>`);
+  }
+  if (hasHalfPip) {
+    pips.push(`<span class="mana-pip is-half"></span>`);
+  }
+  if (!pips.length) {
+    return `<span class="mana-zero">0</span>`;
+  }
+  return pips.join("");
 }
 
 function unitStatusSummary(unit) {
@@ -690,7 +709,7 @@ function renderBoard() {
               <div class="piece-name">${occupant.name}</div>
             </div>
           </div>
-          <div class="mana-pips" aria-label="魔力 ${trimNumber(occupant.mana)} / ${trimNumber(occupant.base_stats?.mana || occupant.stats?.mana || occupant.mana)}">
+          <div class="${manaDisplayClass(occupant)}" aria-label="魔力 ${trimNumber(occupant.mana)} / ${trimNumber(occupant.base_stats?.mana || occupant.stats?.mana || occupant.mana)}">
             ${manaPipsMarkup(occupant)}
           </div>
         `;

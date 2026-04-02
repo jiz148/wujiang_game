@@ -763,6 +763,10 @@ class Unit(ABC):
             return True
         return False
 
+    def clear_end_of_turn_shields(self) -> None:
+        self.shields = 0
+        self.temporary_shields = 0
+
     def stat(self, stat_name: Literal["attack", "defense", "speed", "attack_range", "mana"]) -> float:
         base_value = getattr(self.base_stats, stat_name)
         value = float(base_value)
@@ -942,8 +946,8 @@ class Battle:
         for unit in self.player_units(ending_player):
             unit.finish_turn(self)
         for unit in self.all_units():
-            if unit.temporary_shields > 0:
-                unit.temporary_shields = 0
+            if unit.total_shields() > 0:
+                unit.clear_end_of_turn_shields()
         for effect in list(self.field_effects):
             effect.on_any_turn_end(self, ending_player)
         for unit in self.all_units():
