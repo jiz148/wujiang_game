@@ -472,6 +472,12 @@ function actionNeedsTarget(action) {
   return Boolean(action.preview?.requires_target);
 }
 
+function hasCancelableTargetSelection() {
+  if (!canInteract() || isRespawnMode()) return false;
+  const action = state.selectedActionCode ? actionByCode(state.selectedActionCode) : null;
+  return Boolean(action && actionNeedsTarget(action));
+}
+
 function actionLabel(action) {
   if (action.kind === "move") return "移";
   if (action.kind === "attack") return "攻";
@@ -1016,6 +1022,13 @@ function renderMessage() {
   node.textContent = `当前由玩家 ${inputPlayer()} 操作。`;
 }
 
+function renderTargetCancelButton() {
+  const btn = $("cancel-targeting");
+  const visible = hasCancelableTargetSelection();
+  btn.classList.toggle("hidden", !visible);
+  btn.disabled = !visible;
+}
+
 function render() {
   if (isGameOver()) clearActionSelection();
   document.body.classList.toggle("battle-mode", state.screen === "battle");
@@ -1036,6 +1049,7 @@ function render() {
   renderChainPanel();
   renderLogs();
   renderGameOverOverlay();
+  renderTargetCancelButton();
   $("end-turn").disabled = !canInteract() || isChainMode() || isRespawnMode();
   $("skip-chain").disabled = !canInteract() || !isChainMode();
 }
@@ -1283,6 +1297,11 @@ function bindEvents() {
   $("skip-chain").addEventListener("click", () => {
     if (!canInteract()) return;
     performAction({ type: "chain_skip" });
+  });
+  $("cancel-targeting").addEventListener("click", () => {
+    if (!hasCancelableTargetSelection()) return;
+    clearActionSelection();
+    render();
   });
   $("board").addEventListener("pointermove", (event) => {
     const target = event.target instanceof Element ? event.target : null;

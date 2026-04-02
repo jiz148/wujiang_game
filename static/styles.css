@@ -775,6 +775,13 @@ body.battle-mode .board-footer {
   margin-top: 10px;
 }
 
+.board-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .legend {
   display: flex;
   gap: 12px;
