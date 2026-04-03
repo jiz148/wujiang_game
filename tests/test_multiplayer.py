@@ -11,6 +11,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from wujiang.web.multiplayer import RoomError, RoomRegistry  # noqa: E402
+from wujiang.web.server import normalize_public_base_url  # noqa: E402
 
 
 class MultiplayerRoomTests(unittest.TestCase):
@@ -122,6 +123,51 @@ class MultiplayerRoomTests(unittest.TestCase):
         with self.assertRaises(RoomError):
             self.registry.get_room(room.room_id)
 
+    def test_guest_can_leave_lobby_and_free_their_seat(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        _, guest_token = room.join("Bob")
+
+        deleted, leaving_player_id = self.registry.leave_room(room.room_id, guest_token)
+        room_state = room.serialize_state(host_token)["room"]
+
+        self.assertFalse(deleted)
+        self.assertEqual(leaving_player_id, 2)
+        self.assertFalse(room_state["is_full"])
+        self.assertFalse(room_state["seats"][1]["occupied"])
+        self.assertIsNone(room_state["seats"][1]["name"])
+
+    def test_host_leave_transfers_host_to_remaining_player(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        _, guest_token = room.join("Bob")
+
+        deleted, leaving_player_id = self.registry.leave_room(room.room_id, host_token)
+        guest_view = room.serialize_state(guest_token)["room"]
+
+        self.assertFalse(deleted)
+        self.assertEqual(leaving_player_id, 1)
+        self.assertEqual(guest_view["host_player_id"], 2)
+        self.assertTrue(guest_view["viewer_is_host"])
+
+    def test_last_player_leave_removes_room(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+
+        deleted, leaving_player_id = self.registry.leave_room(room.room_id, host_token)
+
+        self.assertTrue(deleted)
+        self.assertEqual(leaving_player_id, 1)
+        with self.assertRaises(RoomError):
+            self.registry.get_room(room.room_id)
+
+    def test_player_cannot_leave_while_battle_is_running(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        _, guest_token = room.join("Bob")
+        room.select_hero(host_token, "ellie")
+        room.select_hero(guest_token, "bard")
+        room.start_battle(host_token)
+
+        with self.assertRaises(RoomError):
+            self.registry.leave_room(room.room_id, guest_token)
+
     def test_player_can_surrender_and_finish_battle(self) -> None:
         room, _, host_token = self.registry.create_room("Alice")
         _, guest_token = room.join("Bob")
@@ -135,6 +181,16 @@ class MultiplayerRoomTests(unittest.TestCase):
         self.assertIsNotNone(room.battle)
         self.assertEqual(room.battle.winner, 1)
         self.assertIn("投降", room.battle.logs[-1])
+ 
+    def test_normalize_public_base_url_accepts_bare_host_and_trailing_slash(self) -> None:
+        self.assertEqual(
+            normalize_public_base_url("203.0.113.10:8000/"),
+            "http://203.0.113.10:8000",
+        )
+
+    def test_normalize_public_base_url_rejects_non_root_urls(self) -> None:
+        with self.assertRaises(ValueError):
+            normalize_public_base_url("https://example.com/wujiang")
 
 
 if __name__ == "__main__":

@@ -571,13 +571,41 @@ class BattleSmokeTests(unittest.TestCase):
         bard.shields = 1
         battle.add_unit(soldier, Position(6, 4))
 
-        battle.perform_action({"type": "skill", "unit_id": fire.unit_id, "skill_code": "pierce", "x": 6, "y": 4})
+        battle.perform_action(
+            {
+                "type": "skill",
+                "unit_id": fire.unit_id,
+                "skill_code": "pierce",
+                "x": 5,
+                "y": 4,
+                "second_x": 6,
+                "second_y": 4,
+            }
+        )
 
         self.assertIsNotNone(battle.pending_chain)
         battle.perform_action({"type": "chain_skip"})
         self.assertEqual(bard.shields, 0)
         self.assertEqual(bard.current_hp, 1.0)
         self.assertFalse(soldier.alive)
+
+    def test_pierce_requires_two_distinct_cells(self) -> None:
+        battle = create_battle("fire_funeral", "bard")
+        fire = battle.player_units(1)[0]
+        fire.position = Position(4, 4)
+
+        with self.assertRaises(ActionError):
+            battle.perform_action(
+                {
+                    "type": "skill",
+                    "unit_id": fire.unit_id,
+                    "skill_code": "pierce",
+                    "x": 5,
+                    "y": 4,
+                    "second_x": 5,
+                    "second_y": 4,
+                }
+            )
 
     def test_banished_hero_does_not_count_as_destroyed_for_victory(self) -> None:
         battle = create_battle("dark_human", "bard")
@@ -638,13 +666,51 @@ class BattleSmokeTests(unittest.TestCase):
             battle.perform_action({"type": "chain_skip"})
 
         battle.add_unit(enemy, Position(0, 4))
+        enemy.base_stats.defense = 5
+        enemy.max_health = 4.0
+        enemy.current_hp = 4.0
         hp_before = enemy.current_hp
 
         battle.perform_action({"type": "end_turn"})
         self.assertEqual(enemy.current_hp, hp_before)
 
         battle.perform_action({"type": "end_turn"})
-        self.assertFalse(enemy.alive)
+        self.assertEqual(enemy.current_hp, 3.5)
+
+    def test_great_fire_funeral_uses_attack_five_damage_rule_and_exposes_field_cells(self) -> None:
+        battle = create_battle("fire_funeral", "bard")
+        fire = battle.player_units(1)[0]
+        bard = battle.player_units(2)[0]
+        fire.position = Position(4, 4)
+        bard.position = Position(6, 4)
+        bard.base_stats.defense = 5
+        bard.max_health = 4.0
+        bard.current_hp = 4.0
+
+        battle.perform_action({"type": "skill", "unit_id": fire.unit_id, "skill_code": "great_funeral"})
+        if battle.pending_chain is not None:
+            battle.perform_action({"type": "chain_skip"})
+
+        self.assertEqual(bard.current_hp, 3.5)
+        public_effect = battle.to_public_dict()["field_effects"][0]
+        self.assertEqual(public_effect["board_marker"], "火")
+        self.assertIn({"x": 0, "y": 4}, public_effect["cells"])
+        self.assertIn({"x": 4, "y": 7}, public_effect["cells"])
+
+    def test_block_only_applies_to_the_next_damage_during_that_chain(self) -> None:
+        battle = create_battle("dark_human", "fire_funeral")
+        dark = battle.player_units(1)[0]
+        fire = battle.player_units(2)[0]
+        dark.position = Position(4, 4)
+        fire.position = Position(5, 4)
+
+        battle.perform_action({"type": "attack", "unit_id": dark.unit_id, "target_unit_id": fire.unit_id})
+
+        self.assertIsNotNone(battle.pending_chain)
+        battle.perform_action({"type": "chain_react", "unit_id": fire.unit_id, "action_code": "block"})
+
+        self.assertAlmostEqual(fire.current_hp, 0.75, places=4)
+        self.assertIsNone(fire.get_status("格挡"))
 
     def test_into_darkness_attack_breaks_stealth_and_buffs_that_attack(self) -> None:
         battle = create_battle("dark_human", "elite_soldier")

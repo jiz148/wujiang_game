@@ -220,23 +220,39 @@ class BattleFieldEffect(BattleComponent):
     def blocks_forced_movement(self, battle: "Battle", position: "Position") -> bool:
         return False
 
+    def affected_cells(self, battle: "Battle") -> list["Position"]:
+        return []
+
+    def board_marker(self, battle: "Battle") -> str:
+        return self.name[:2]
+
     def to_public_dict(self, battle: "Battle") -> dict[str, Any]:
         data = super().to_public_dict(battle)
         data["duration"] = self.duration
+        data["cells"] = [cell.to_dict() for cell in self.affected_cells(battle)]
+        data["board_marker"] = self.board_marker(battle)
         return data
 
 
 class TemporaryDefenseStatus(StatusEffect):
-    def __init__(self, name: str, defense_delta: float, description: str) -> None:
+    def __init__(
+        self,
+        name: str,
+        defense_delta: float,
+        description: str,
+        *,
+        expire_with_chain: bool = False,
+    ) -> None:
         super().__init__(name, description, duration=1, tick_scope="owner_turn_end")
         self.defense_delta = defense_delta
+        self.expire_with_chain = expire_with_chain
 
     def modify_stat(self, stat_name: str, value: float) -> float:
         if stat_name == "defense":
             return value + self.defense_delta
         return value
 
-    def on_before_damage(self, battle: "Battle", ctx: "DamageContext") -> None:
+    def on_after_damage(self, battle: "Battle", ctx: "DamageContext") -> None:
         if self.owner is None:
             return
         if ctx.target.unit_id != self.owner.unit_id:
@@ -1411,6 +1427,12 @@ class Battle:
         self.cleanup_dead_units()
         return ctx
 
+    def expire_chain_temporary_statuses(self) -> None:
+        for unit in self.all_units():
+            for status in list(unit.statuses):
+                if isinstance(status, TemporaryDefenseStatus) and status.expire_with_chain:
+                    unit.remove_status(status, self)
+
     def heal(self, ctx: HealContext) -> HealContext:
         for effect in list(self.field_effects):
             effect.on_before_heal(self, ctx)
@@ -1741,7 +1763,7 @@ class Battle:
                     action_type="reaction_action",
                     timing="reaction",
                     chain_speed=2,
-                    description="下一次伤害计算前守 +1。",
+                    description="下一次伤害结算时守 +1，只持续到这次连锁结算结束。",
                     preview={"cells": [unit.position.to_dict()] if unit.position else [], "target_unit_ids": [], "requires_target": False},
                 )
             )
@@ -1760,7 +1782,7 @@ class Battle:
                         action_type="reaction_action",
                         timing="reaction",
                         chain_speed=2,
-                        description="对声明动作的单位进行一次反击。",
+                        description="对你所连锁的攻击或技能使用者进行一次普攻式反击，需在自身攻击范围内。",
                         preview={"cells": [attacker.position.to_dict()], "target_unit_ids": [attacker.unit_id], "requires_target": False},
                     )
                 )
@@ -1861,7 +1883,8 @@ class Battle:
                 TemporaryDefenseStatus(
                     "格挡",
                     defense_delta=1,
-                    description="下一次伤害计算前守 +1。",
+                    description="下一次伤害结算时守 +1。",
+                    expire_with_chain=True,
                 )
             )
             self.log(f"{actor.name} 进入格挡姿态。")
@@ -1990,11 +2013,14 @@ class Battle:
         queued = self.pending_chain.queued_action
         reactions = list(reversed(self.pending_chain.chosen_reactions))
         self.pending_chain = None
-        for reaction in reactions:
-            self.resolve_queued_action(reaction)
-            if self.winner is not None:
-                return
-        self.resolve_queued_action(queued)
+        try:
+            for reaction in reactions:
+                self.resolve_queued_action(reaction)
+                if self.winner is not None:
+                    return
+            self.resolve_queued_action(queued)
+        finally:
+            self.expire_chain_temporary_statuses()
 
     def advance_reaction_window(self) -> None:
         if self.pending_chain is None:

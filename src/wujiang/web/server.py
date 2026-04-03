@@ -15,6 +15,7 @@ from wujiang.web.multiplayer import ROOMS, RoomError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 STATIC_ROOT = PROJECT_ROOT / "static"
+PUBLIC_BASE_URL: str | None = None
 
 
 class GameSession:
@@ -50,11 +51,39 @@ def json_response(handler: BaseHTTPRequestHandler, status: int, payload: Any) ->
     handler.wfile.write(body)
 
 
+def normalize_public_base_url(base_url: str | None) -> str | None:
+    raw = str(base_url or "").strip()
+    if not raw:
+        return None
+    candidate = raw.rstrip("/")
+    if "://" not in candidate:
+        candidate = f"http://{candidate}"
+    parsed = urlparse(candidate)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("`--public-base-url` 必须是像 `http://203.0.113.10:8000` 这样的完整地址。")
+    if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment or " " in parsed.netloc:
+        raise ValueError("`--public-base-url` 只能填写站点根地址，不能包含路径、查询参数或空格。")
+    return candidate
+
+
+def configure_public_base_url(base_url: str | None) -> str | None:
+    global PUBLIC_BASE_URL
+    PUBLIC_BASE_URL = normalize_public_base_url(base_url)
+    return PUBLIC_BASE_URL
+
+
+def first_header_value(raw_value: str | None) -> str:
+    return str(raw_value or "").split(",", 1)[0].strip()
+
+
 def request_base_url(handler: BaseHTTPRequestHandler) -> str | None:
-    host = handler.headers.get("Host")
+    if PUBLIC_BASE_URL:
+        return PUBLIC_BASE_URL
+    host = first_header_value(handler.headers.get("X-Forwarded-Host")) or first_header_value(handler.headers.get("Host"))
     if not host:
         return None
-    return f"http://{host}"
+    scheme = first_header_value(handler.headers.get("X-Forwarded-Proto")) or "http"
+    return f"{scheme}://{host}"
 
 
 def request_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
@@ -252,6 +281,31 @@ class WujiangHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/api/rooms/leave":
+            room_id = payload.get("room_id", "")
+            player_token = str(payload.get("player_token") or "")
+            try:
+                deleted, leaving_player_id = ROOMS.leave_room(str(room_id), player_token)
+            except RoomError as exc:
+                room = None
+                try:
+                    room = ROOMS.get_room(str(room_id))
+                except RoomError:
+                    pass
+                error_payload: dict[str, Any] = {"error": str(exc)}
+                if room is not None:
+                    error_payload["state"] = room.serialize_state(None, base_url=request_base_url(self))
+                json_response(self, HTTPStatus.BAD_REQUEST, error_payload)
+                return
+            response_payload = {
+                "left_room_id": str(room_id).strip().upper(),
+                "left_player_id": leaving_player_id,
+                "room_deleted": deleted,
+                "rooms": ROOMS.list_rooms(base_url=request_base_url(self)),
+            }
+            json_response(self, HTTPStatus.OK, response_payload)
+            return
+
         if parsed.path == "/api/rooms/surrender":
             room_id = payload.get("room_id", "")
             player_token = payload.get("player_token")
@@ -313,7 +367,15 @@ class WujiangHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
-def run_server(host: str = "127.0.0.1", port: int = 8000) -> None:
+def run_server(host: str = "127.0.0.1", port: int = 8000, public_base_url: str | None = None) -> None:
+    share_base_url = configure_public_base_url(public_base_url)
     httpd = ThreadingHTTPServer((host, port), WujiangHandler)
     print(f"Wujiang server running at http://{host}:{port}")
+    if host == "0.0.0.0":
+        print(f"Local browser URL: http://127.0.0.1:{port}")
+    if share_base_url:
+        print(f"Share this homepage with friends: {share_base_url}/")
+        print(f"Copied room invite links will use: {share_base_url}/?room=ROOMID")
+    elif host == "0.0.0.0":
+        print(f"Share your LAN/public IP manually, for example: http://<your-ip>:{port}/")
     httpd.serve_forever()

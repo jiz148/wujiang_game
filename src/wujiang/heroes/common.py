@@ -660,7 +660,7 @@ class PierceSkill(Skill):
         super().__init__(
             "pierce",
             "穿刺",
-            "主动：1.5 魔，每回合最多 2 次，选择一个方向，对该方向连续 2 格造成伤害。",
+            "主动：1.5 魔，每回合最多 2 次，分两次选择身前任意 2 格并分别结算伤害。",
             mana_cost=1.5,
             max_uses_per_turn=2,
             target_mode="cell",
@@ -678,20 +678,35 @@ class PierceSkill(Skill):
             (1, 1),
         ]
 
-    def line_cells(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
+    def selectable_cells(self, battle: Battle, actor: HeroUnit) -> list[Position]:
+        cells: list[Position] = []
+        seen: set[tuple[int, int]] = set()
         if actor.position is None:
-            raise ActionError("目标不在战场上。")
-        selected = payload_position(payload)
-        direction = straight_direction(actor.position, selected)
-        cells = battle.line_positions(actor.position, direction, 2)
-        if len(cells) < 2:
-            raise ActionError("穿刺需要选择一个完整的两格方向。")
-        if selected not in cells:
-            raise ActionError("该位置不能用于穿刺。")
+            return cells
+        for direction in self.directions():
+            line = battle.line_positions(actor.position, direction, 2)
+            if len(line) < 2:
+                continue
+            for cell in line:
+                key = (cell.x, cell.y)
+                if key in seen:
+                    continue
+                seen.add(key)
+                cells.append(cell)
         return cells
 
+    def chosen_cells(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
+        first = payload_position(payload)
+        second = payload_position(payload, "second_x", "second_y")
+        if first == second:
+            raise ActionError("穿刺必须选择两个不同的格子。")
+        legal = {(cell.x, cell.y) for cell in self.selectable_cells(battle, actor)}
+        if (first.x, first.y) not in legal or (second.x, second.y) not in legal:
+            raise ActionError("该位置不能用于穿刺。")
+        return [first, second]
+
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        for unit in battle.units_at_cells(self.line_cells(battle, actor, payload)):
+        for unit in battle.units_at_cells(self.chosen_cells(battle, actor, payload)):
             battle.resolve_damage(
                 DamageContext(
                     source=actor,
@@ -704,26 +719,18 @@ class PierceSkill(Skill):
             )
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
-        cells: list[Position] = []
-        seen: set[tuple[int, int]] = set()
-        if actor.position is not None:
-            for direction in self.directions():
-                line = battle.line_positions(actor.position, direction, 2)
-                if len(line) < 2:
-                    continue
-                for cell in line:
-                    key = (cell.x, cell.y)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    cells.append(cell)
-        return {"cells": positions_to_dict(cells), "target_unit_ids": [], "secondary_cells": [], "requires_target": True}
+        return {
+            "cells": positions_to_dict(self.selectable_cells(battle, actor)),
+            "target_unit_ids": [],
+            "secondary_cells": [],
+            "requires_target": True,
+        }
 
     def get_target_cells_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
-        return self.line_cells(battle, actor, payload)
+        return self.chosen_cells(battle, actor, payload)
 
     def get_target_units_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[HeroUnit]:
-        return [unit for unit in battle.units_at_cells(self.line_cells(battle, actor, payload))]  # type: ignore[list-item]
+        return [unit for unit in battle.units_at_cells(self.chosen_cells(battle, actor, payload))]  # type: ignore[list-item]
 
 
 class KnockbackSkill(Skill):
@@ -1210,15 +1217,13 @@ class StealthSkill(SelfBuffSkill):
 
 class BlockSkill(SelfBuffSkill):
     def __init__(self) -> None:
-        super().__init__("block", "格挡", "下一次伤害计算时守 +1。")
+        super().__init__("block", "格挡", "下一次伤害结算时守 +1。")
 
     def apply_to_self(self, battle: Battle, actor: HeroUnit) -> None:
         actor.add_status(
-            StatModifierStatus(
+            TemporaryDefenseStatus(
                 "格挡",
                 defense_delta=1,
-                duration=1,
-                tick_scope="owner_turn_end",
                 description="下一次结算前守 +1。",
             )
         )

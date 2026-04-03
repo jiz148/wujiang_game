@@ -120,6 +120,9 @@ class GameRoom:
         self.version += 1
         self.updated_at = time.time()
 
+    def occupied_seat_count(self) -> int:
+        return sum(1 for seat in self.seats.values() if seat.occupied)
+
     def seat_for_token(self, token: Optional[str]) -> Optional[PlayerSeat]:
         if not token:
             return None
@@ -146,6 +149,12 @@ class GameRoom:
             seat = self.seats[player_id]
             if not seat.occupied:
                 return seat
+        return None
+
+    def _first_occupied_player_id(self) -> Optional[int]:
+        for player_id in (1, 2):
+            if self.seats[player_id].occupied:
+                return player_id
         return None
 
     def create_host(self, player_name: str) -> tuple[int, str]:
@@ -202,6 +211,18 @@ class GameRoom:
             for seat in self.seats.values():
                 seat.hero_code = None
             self.touch()
+
+    def leave(self, token: str) -> int:
+        with self._lock:
+            seat = self.require_seat(token)
+            if self.status == "battle":
+                raise RoomError("å¯¹å±€è¿›è¡Œä¸­ä¸èƒ½ç›´æŽ¥ç¦»å¼€æˆ¿é—´ï¼Œè¯·å…ˆæŠ•é™æˆ–ç­‰å¾…å¯¹å±€ç»“æŸã€‚")
+            leaving_player_id = seat.player_id
+            seat.release()
+            if leaving_player_id == self.host_player_id:
+                self.host_player_id = self._first_occupied_player_id() or 1
+            self.touch()
+            return leaving_player_id
 
     def surrender(self, token: str) -> None:
         with self._lock:
@@ -338,6 +359,18 @@ class RoomRegistry:
             room.require_host(token)
             del self._rooms[normalized]
 
+
+    def leave_room(self, room_id: str, token: str) -> tuple[bool, int]:
+        normalized = normalize_room_id(room_id)
+        with self._lock:
+            room = self._rooms.get(normalized)
+            if room is None:
+                raise RoomError("æˆ¿é—´ä¸å­˜åœ¨ï¼Œå¯èƒ½æ˜¯æˆ¿é—´ç è¾“é”™äº†ã€‚")
+            leaving_player_id = room.leave(token)
+            deleted = room.occupied_seat_count() == 0
+            if deleted:
+                del self._rooms[normalized]
+            return deleted, leaving_player_id
 
     def list_rooms(self, *, base_url: Optional[str] = None) -> list[dict[str, Any]]:
         with self._lock:

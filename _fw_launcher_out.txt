@@ -1,0 +1,8 @@
+WARNING: Firewall setup was skipped: Please run this script as Administrator to change a Windows Firewall rule.
+WARNING: You can still run the server now, but friends outside this machine may not reach it until the port is opened.
+
+Starting Wujiang server...
+Local browser URL: http://127.0.0.1:8772/
+Share homepage URL: http://127.0.0.1:8772/
+Room invite links will use this address.
+

@@ -31,7 +31,7 @@ body {
 body {
   margin: 0;
   min-height: 100vh;
-  overflow: hidden;
+  overflow: auto;
   color: var(--ink);
   font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", serif;
   background:
@@ -174,6 +174,7 @@ body.battle-mode .panel {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: hidden;
 }
 
 .draft-head-actions {
@@ -183,15 +184,32 @@ body.battle-mode .panel {
   flex-wrap: wrap;
 }
 
-.room-home,
+.room-home {
+  display: grid;
+  grid-template-columns: minmax(0, 1.04fr) minmax(320px, 0.9fr);
+  grid-template-areas:
+    "identity directory"
+    "controls directory"
+    "resume directory"
+    "note directory"
+    "heroes heroes";
+  gap: 18px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
 .room-lobby {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
 }
 
 .identity-card {
-  margin-top: 18px;
+  grid-area: identity;
+  margin-top: 0;
   border: 1px solid var(--line);
   border-radius: 22px;
   padding: 18px;
@@ -215,10 +233,12 @@ body.battle-mode .panel {
 }
 
 .room-home-grid {
+  grid-area: controls;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
-  margin-top: 18px;
+  margin-top: 0;
+  align-self: start;
 }
 
 .room-entry-card,
@@ -237,17 +257,28 @@ body.battle-mode .panel {
 }
 
 .room-directory {
-  margin-top: 18px;
+  grid-area: directory;
+  margin-top: 0;
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 14px;
+  min-height: 0;
+  align-self: stretch;
+  overflow: hidden;
 }
 
 #resume-room-panel {
-  margin-top: 16px;
+  grid-area: resume;
+  margin-top: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.room-home > .draft-note:not(#resume-room-panel) {
+  grid-area: note;
+  margin-top: 0;
 }
 
 .room-directory-head {
@@ -256,8 +287,11 @@ body.battle-mode .panel {
 
 .room-list {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 14px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
 }
 
 .room-list-empty,
@@ -520,6 +554,12 @@ button:disabled {
   padding-right: 4px;
 }
 
+#home-hero-cards {
+  grid-area: heroes;
+  margin-top: 0;
+  min-height: 260px;
+}
+
 .hero-card {
   border: 1px solid var(--line);
   border-radius: 22px;
@@ -714,6 +754,35 @@ body.battle-mode .cell {
 .cell.is-chain-reactor {
   border-color: rgba(43, 86, 101, 0.86);
   box-shadow: 0 0 0 3px rgba(43, 86, 101, 0.18);
+}
+
+.cell.has-field-effect {
+  background:
+    linear-gradient(180deg, rgba(255, 252, 245, 0.95), rgba(235, 220, 189, 0.98)),
+    radial-gradient(circle at top left, rgba(255, 121, 74, 0.22), transparent 56%);
+}
+
+.cell-effects {
+  position: absolute;
+  top: 5px;
+  left: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.cell-effect-tag {
+  min-width: 18px;
+  padding: 2px 5px;
+  border-radius: 999px;
+  background: rgba(155, 52, 29, 0.86);
+  color: #fff7ef;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 4px 10px rgba(87, 26, 14, 0.2);
 }
 
 .piece {
@@ -1272,10 +1341,6 @@ body.battle-mode .logs {
     grid-template-columns: 1fr;
   }
 
-  body {
-    overflow: auto;
-  }
-
   .shell {
     min-height: auto;
   }
@@ -1304,6 +1369,135 @@ body.battle-mode .logs {
   }
 }
 
+@media (max-width: 1180px) {
+  .room-home {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "identity"
+      "controls"
+      "resume"
+      "note"
+      "directory"
+      "heroes";
+  }
+
+  .room-directory {
+    overflow: visible;
+  }
+
+  .room-list {
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    overflow: visible;
+    max-height: none;
+  }
+}
+
+@media (max-width: 960px) {
+  body.battle-mode {
+    overflow: auto;
+  }
+
+  body.battle-mode .shell {
+    height: auto;
+    min-height: 100dvh;
+    padding: 10px 10px 16px;
+    gap: 10px;
+  }
+
+  body.battle-mode .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+
+  body.battle-mode .battle-screen,
+  body.battle-mode .battle-screen .arena {
+    min-height: auto;
+    height: auto;
+  }
+
+  body.battle-mode .battle-screen .arena {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  body.battle-mode .board-wrap,
+  body.battle-mode .sidebar {
+    min-height: auto;
+  }
+
+  body.battle-mode .board-wrap {
+    overflow: visible;
+  }
+
+  body.battle-mode .board-stage {
+    flex: 0 0 auto;
+    padding: 10px;
+    margin-top: 8px;
+  }
+
+  body.battle-mode .board {
+    width: min(100%, 560px);
+    height: auto;
+    gap: 6px;
+  }
+
+  body.battle-mode .sidebar {
+    grid-template-rows: auto;
+    gap: 12px;
+  }
+
+  body.battle-mode .log-panel,
+  body.battle-mode .info-panel,
+  body.battle-mode .command-panel {
+    min-height: auto;
+  }
+
+  body.battle-mode .selected-card,
+  body.battle-mode .chain-panel,
+  body.battle-mode .logs,
+  body.battle-mode .unit-strip {
+    max-height: none;
+  }
+
+  body.battle-mode .hover-card {
+    display: none !important;
+  }
+
+  body.battle-mode .board-alert {
+    left: 10px;
+    right: 10px;
+    top: 10px;
+    max-width: none;
+  }
+
+  body.battle-mode .board-footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  body.battle-mode .board-footer-actions {
+    width: 100%;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  body.battle-mode .board-footer-actions button,
+  body.battle-mode #end-turn {
+    width: 100%;
+  }
+
+  body.battle-mode .action-btn {
+    width: 84px;
+    min-height: 46px;
+    font-size: 13px;
+  }
+
+  body.battle-mode .action-btn small {
+    font-size: 11px;
+  }
+}
+
 @media (max-width: 820px) {
   .shell {
     padding: 14px;
@@ -1317,6 +1511,10 @@ body.battle-mode .logs {
   .topbar-tools {
     width: 100%;
     justify-content: space-between;
+  }
+
+  .subline {
+    display: none;
   }
 
   .identity-card {
@@ -1344,12 +1542,17 @@ body.battle-mode .logs {
     padding: 12px;
   }
 
+  body.battle-mode .board {
+    width: min(100%, 520px);
+  }
+
   .board {
     gap: 6px;
   }
 
-  .action-btn {
-    width: 70px;
+  body.battle-mode .action-btn {
+    width: 80px;
+    min-height: 44px;
     font-size: 12px;
   }
 

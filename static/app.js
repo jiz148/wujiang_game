@@ -212,6 +212,19 @@ function clearStoredIdentity(roomId) {
   sessionStorage.removeItem(roomNameKey(roomId));
 }
 
+function resetRoomSession({ rooms = state.rooms, roomId = roomQueryId() } = {}) {
+  clearStoredIdentity(roomId);
+  state.playerToken = "";
+  state.room = null;
+  state.battle = null;
+  state.selectedUnitId = "";
+  state.roomForm.joinRoomCode = "";
+  state.rooms = rooms || [];
+  clearActionSelection();
+  syncLocation("draft", "");
+  syncScreen({ preferBattle: false });
+}
+
 function saveStoredIdentity(roomId, token, name) {
   if (!roomId || !token) return;
   sessionStorage.setItem(roomTokenKey(roomId), token);
@@ -356,6 +369,8 @@ function hydrateStaticLabels() {
   if (createButton) createButton.textContent = "\u521b\u5efa\u623f\u95f4";
   const joinButton = $("join-room");
   if (joinButton) joinButton.textContent = "\u52a0\u5165\u623f\u95f4";
+  const leaveRoomButton = $("leave-room");
+  if (leaveRoomButton) leaveRoomButton.textContent = "\u79bb\u5f00\u623f\u95f4";
   const deleteRoomButton = $("delete-room");
   if (deleteRoomButton) deleteRoomButton.textContent = "\u5220\u9664\u623f\u95f4";
   const directoryTitle = document.querySelector(".room-directory-head h3");
@@ -528,32 +543,32 @@ function unitIdsAtCells(cells = []) {
     .map((unit) => unit.id);
 }
 
-function pierceImpactCells(action) {
-  const unit = selectedUnit();
-  const hovered = state.hoveredBoardCell;
-  if (!action || action.code !== "pierce" || !unit?.position || !hovered || !cellInBounds(hovered)) {
-    return [];
-  }
-  const previewKeys = positionsToSet(action.preview?.cells || []);
-  if (!previewKeys.has(positionKey(hovered))) {
-    return [];
-  }
-  const dx = hovered.x - unit.position.x;
-  const dy = hovered.y - unit.position.y;
-  if (dx === 0 && dy === 0) {
-    return [];
-  }
-  if (dx !== 0 && dy !== 0 && Math.abs(dx) !== Math.abs(dy)) {
-    return [];
-  }
-  const stepX = dx === 0 ? 0 : dx / Math.abs(dx);
-  const stepY = dy === 0 ? 0 : dy / Math.abs(dy);
-  const first = { x: unit.position.x + stepX, y: unit.position.y + stepY };
-  const second = { x: first.x + stepX, y: first.y + stepY };
-  if (!cellInBounds(first) || !cellInBounds(second)) {
-    return [];
-  }
-  return [first, second];
+function sameCell(left, right) {
+  return Boolean(left && right) && left.x === right.x && left.y === right.y;
+}
+
+function stagedPierceCells() {
+  if (state.selectedActionCode !== "pierce") return [];
+  return Array.isArray(state.stagedPayload?.pierceCells) ? state.stagedPayload.pierceCells : [];
+}
+
+function fieldEffectsByCell() {
+  const map = new Map();
+  fieldEffects().forEach((effect) => {
+    (effect.cells || []).forEach((cell) => {
+      const key = positionKey(cell);
+      if (!map.has(key)) {
+        map.set(key, []);
+      }
+      map.get(key).push(effect);
+    });
+  });
+  return map;
+}
+
+function fieldEffectMarker(effect) {
+  const marker = String(effect?.board_marker || effect?.name || "").trim();
+  return marker ? marker.slice(0, 2) : "场";
 }
 
 function currentPreview() {
@@ -583,14 +598,15 @@ function currentPreview() {
 
   const filteredTargetIds = (action.preview?.target_unit_ids || []).filter((id) => unitIsSelectableTarget(unitById(id)));
   if (action.code === "pierce") {
-    const impactCells = pierceImpactCells(action);
-    const activeCells = impactCells.length ? impactCells : (action.preview?.cells || []);
-    const secondaryCells = impactCells.length ? (action.preview?.cells || []) : [];
-    const targetIds = impactCells.length ? unitIdsAtCells(impactCells) : [];
+    const chosenCells = stagedPierceCells();
+    const activeCells = (action.preview?.cells || []).filter(
+      (cell) => !chosenCells.some((picked) => sameCell(picked, cell)),
+    );
+    const targetIds = chosenCells.length ? unitIdsAtCells(chosenCells) : [];
     return {
       cellKeys: positionsToSet(activeCells),
       targetIds: targetIdsToSet(targetIds),
-      secondaryCellKeys: positionsToSet(secondaryCells),
+      secondaryCellKeys: positionsToSet(chosenCells),
     };
   }
   const useDirectTargetCells = action.kind === "attack"
@@ -987,6 +1003,23 @@ function renderBoardAlert() {
     return;
   }
 
+  if (action?.code === "pierce") {
+    const chosenCells = stagedPierceCells();
+    node.className = "board-alert is-step";
+    if (!chosenCells.length) {
+      node.innerHTML = `
+        <strong>穿刺</strong>
+        <span>请先点击第 1 个要被穿刺的格子。</span>
+      `;
+      return;
+    }
+    node.innerHTML = `
+      <strong>穿刺</strong>
+      <span>已选中第 1 格 (${chosenCells[0].x}, ${chosenCells[0].y})，请再点击第 2 个不同的格子。</span>
+    `;
+    return;
+  }
+
   if (action && actionNeedsTarget(action)) {
     node.className = "board-alert is-step";
     node.innerHTML = `
@@ -1034,6 +1067,7 @@ function renderBoard() {
   const chain = state.battle.pending_chain;
   const chainSource = unitById(chain?.queued_action?.actor_id || "");
   const chainReactor = unitById(chain?.current_unit_id || "");
+  const fieldCellMap = fieldEffectsByCell();
 
   for (let y = 0; y < state.battle.board.height; y += 1) {
     for (let x = 0; x < state.battle.board.width; x += 1) {
@@ -1051,12 +1085,27 @@ function renderBoard() {
       const ghostUnits = unitsHere.filter((unit) => unit.banished);
 
       const key = `${x},${y}`;
+      const cellEffects = fieldCellMap.get(key) || [];
       if (preview.cellKeys.has(key)) cell.classList.add("is-preview");
       if (preview.secondaryCellKeys.has(key)) cell.classList.add("is-secondary");
       if (occupant && preview.targetIds.has(occupant.id)) cell.classList.add("is-target");
       if (selected?.position?.x === x && selected?.position?.y === y) cell.classList.add("is-selected");
       if (chainSource?.position?.x === x && chainSource?.position?.y === y) cell.classList.add("is-chain-source");
       if (chainReactor?.position?.x === x && chainReactor?.position?.y === y) cell.classList.add("is-chain-reactor");
+      if (cellEffects.length) cell.classList.add("has-field-effect");
+
+      if (cellEffects.length) {
+        const markerStack = document.createElement("div");
+        markerStack.className = "cell-effects";
+        cellEffects.forEach((effect) => {
+          const marker = document.createElement("span");
+          marker.className = "cell-effect-tag";
+          marker.textContent = fieldEffectMarker(effect);
+          marker.title = effect.description ? `${effect.name}：${effect.description}` : effect.name;
+          markerStack.append(marker);
+        });
+        cell.append(markerStack);
+      }
 
       if (occupant && !occupant.banished) {
         const piece = document.createElement("div");
@@ -1267,7 +1316,7 @@ function renderRoomPanels() {
   $("viewer-seat-note").textContent = state.room.viewer_name
     ? `${state.room.viewer_name}${state.room.viewer_is_host ? " · 房主" : ""}`
     : "当前浏览器还没有占用席位";
-  $("invite-path-label").textContent = state.room.invite_path;
+  $("invite-path-label").textContent = state.room.invite_url || state.room.invite_path;
 
   copyInvite.classList.toggle("hidden", !state.room.invite_url);
   deleteRoomBtn.classList.toggle("hidden", !state.room.viewer_is_host);
@@ -1548,12 +1597,14 @@ function renderRoomPanels() {
   const copyInvite = $("copy-invite");
   const roomBattle = $("room-battle");
   const startRoom = $("start-room");
+  const leaveRoomBtn = $("leave-room");
   const deleteRoomBtn = $("delete-room");
   const joinRoomButton = $("join-room");
 
   if (!hasRoom()) {
     title.textContent = "\u5728\u7ebf\u623f\u95f4";
     caption.textContent = "\u5148\u786e\u8ba4\u4f60\u8981\u4f7f\u7528\u7684\u6635\u79f0\uff0c\u7136\u540e\u521b\u5efa\u623f\u95f4\u6216\u8f93\u5165\u623f\u95f4\u7801\u52a0\u5165\u3002\u8fdb\u5165\u623f\u95f4\u540e\uff0c\u6bcf\u4f4d\u73a9\u5bb6\u5404\u81ea\u9009\u62e9\u81ea\u5df1\u7684\u6b66\u5c06\uff0c\u518d\u5f00\u59cb\u5bf9\u5c40\u3002";
+    leaveRoomBtn.classList.add("hidden");
     deleteRoomBtn.classList.add("hidden");
     copyInvite.classList.add("hidden");
     roomBattle.classList.add("hidden");
@@ -1565,6 +1616,8 @@ function renderRoomPanels() {
   if (!showLobby) {
     title.textContent = `\u52a0\u5165\u623f\u95f4 ${state.room.room_id}`;
     caption.textContent = `\u8fd9\u4e2a\u623f\u95f4\u4ecd\u5728\u7b49\u5f85\u73a9\u5bb6\u5360\u4f4d\u3002\u70b9\u51fb\u201c\u52a0\u5165\u623f\u95f4\u201d\u540e\uff0c\u5c31\u4f1a\u4ee5\u5f53\u524d\u6635\u79f0\u201c${effectiveProfileName()}\u201d\u8fdb\u5165\u623f\u95f4\u5927\u5385\u5f00\u59cb\u9009\u5c06\u3002`;
+    leaveRoomBtn.classList.remove("hidden");
+    leaveRoomBtn.disabled = false;
     deleteRoomBtn.classList.toggle("hidden", !state.room.viewer_is_host);
     deleteRoomBtn.disabled = !state.room.viewer_is_host;
     copyInvite.classList.remove("hidden");
@@ -1587,8 +1640,12 @@ function renderRoomPanels() {
   $("viewer-seat-note").textContent = state.room.viewer_name
     ? `${state.room.viewer_name}${state.room.viewer_is_host ? " \u00b7 \u623f\u4e3b" : ""}`
     : "\u5f53\u524d\u6d4f\u89c8\u5668\u8fd8\u6ca1\u6709\u5360\u7528\u5e2d\u4f4d";
-  $("invite-path-label").textContent = state.room.invite_path;
+  $("invite-path-label").textContent = state.room.invite_url || state.room.invite_path;
 
+  leaveRoomBtn.classList.remove("hidden");
+  leaveRoomBtn.disabled = false;
+  deleteRoomBtn.classList.toggle("hidden", !state.room.viewer_is_host);
+  deleteRoomBtn.disabled = !state.room.viewer_is_host;
   copyInvite.classList.toggle("hidden", !state.room.invite_url);
   roomBattle.classList.toggle("hidden", !hasBattle());
   roomBattle.disabled = !hasBattle();
@@ -2042,20 +2099,46 @@ async function deleteRoom() {
         player_token: state.playerToken,
       }),
     });
-    clearStoredIdentity(deletedRoomId);
-    state.playerToken = "";
-    state.room = null;
-    state.battle = null;
-    state.selectedUnitId = "";
-    state.roomForm.joinRoomCode = "";
-    state.rooms = payload.rooms || [];
-    clearActionSelection();
-    syncLocation("draft", "");
-    syncScreen({ preferBattle: false });
+    resetRoomSession({ rooms: payload.rooms || [], roomId: deletedRoomId });
     render();
     $("lobby-caption").textContent = `房间 ${deletedRoomId} 已删除。`;
   } catch (error) {
     $("lobby-caption").textContent = error.error || "删除房间失败。";
+  }
+}
+
+async function leaveRoom() {
+  if (!hasRoom()) return;
+  const leftRoomId = state.room.room_id;
+  const seatLabel = state.room.viewer_player_id ? `玩家 ${state.room.viewer_player_id}` : "当前观战视角";
+  if (!window.confirm(`确定要离开房间 ${leftRoomId} 吗？${seatLabel} 将返回大厅。`)) {
+    return;
+  }
+  if (!state.playerToken || state.room.viewer_player_id === null) {
+    resetRoomSession({ roomId: leftRoomId });
+    await refreshState({ preserveScreen: false });
+    $("lobby-caption").textContent = `你已离开房间 ${leftRoomId}。`;
+    return;
+  }
+  try {
+    const payload = await fetchJson("/api/rooms/leave", {
+      method: "POST",
+      body: JSON.stringify({
+        room_id: leftRoomId,
+        player_token: state.playerToken,
+      }),
+    });
+    resetRoomSession({ rooms: payload.rooms || [], roomId: leftRoomId });
+    render();
+    $("lobby-caption").textContent = payload.room_deleted
+      ? `你已离开房间 ${leftRoomId}，该房间因已无玩家而被关闭。`
+      : `你已离开房间 ${leftRoomId}。`;
+  } catch (error) {
+    if (error.state) {
+      applyRoomPayload(error.state, { preserveScreen: false });
+      render();
+    }
+    $("lobby-caption").textContent = error.error || "离开房间失败。";
   }
 }
 
@@ -2320,6 +2403,30 @@ function onBoardClick(x, y, occupant) {
     return;
   }
 
+  if (action.code === "pierce") {
+    const chosenCells = stagedPierceCells();
+    if (!chosenCells.length) {
+      state.stagedPayload = { pierceCells: [{ x, y }] };
+      render();
+      return;
+    }
+    if (sameCell(chosenCells[0], { x, y })) {
+      state.stagedPayload = null;
+      render();
+      return;
+    }
+    performAction({
+      type: "skill",
+      unit_id: state.selectedUnitId,
+      skill_code: action.code,
+      x: chosenCells[0].x,
+      y: chosenCells[0].y,
+      second_x: x,
+      second_y: y,
+    });
+    return;
+  }
+
   if (action.preview?.requires_target) {
     if (action.target_mode === "cell" || action.kind === "move") {
       performAction({
@@ -2366,6 +2473,7 @@ function bindEvents() {
   $("create-room").addEventListener("click", createRoom);
   $("join-room").addEventListener("click", () => joinRoom());
   $("resume-room").addEventListener("click", () => resumeStoredSeat());
+  $("leave-room").addEventListener("click", leaveRoom);
   $("delete-room").addEventListener("click", deleteRoom);
   $("start-room").addEventListener("click", startRoomBattle);
   $("copy-invite").addEventListener("click", copyInviteLink);

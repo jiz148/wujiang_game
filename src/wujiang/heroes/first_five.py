@@ -395,7 +395,7 @@ class IntoDarknessSkill(Skill):
 
 class GreatFireFuneralField(BattleFieldEffect):
     def __init__(self, owner_unit_id: str, cells: set[tuple[int, int]]) -> None:
-        super().__init__("大火葬余烬", "烈焰区域会灼伤和灼烧穿行单位。", duration=None)
+        super().__init__("大火葬余烬", "烈焰区域会以攻 5 灼伤停留单位，并灼烧穿行单位。", duration=None)
         self.owner_unit_id = owner_unit_id
         self.cells = cells
 
@@ -410,6 +410,12 @@ class GreatFireFuneralField(BattleFieldEffect):
 
     def blocks_forced_movement(self, battle: Battle, position: Position) -> bool:
         return self.in_area(position)
+
+    def affected_cells(self, battle: Battle) -> list[Position]:
+        return [Position(x, y) for x, y in sorted(self.cells)]
+
+    def board_marker(self, battle: Battle) -> str:
+        return "火"
 
     def on_unit_moved(self, battle: Battle, ctx: Any) -> None:
         owner = self.get_owner_unit(battle)
@@ -448,12 +454,10 @@ class GreatFireFuneralField(BattleFieldEffect):
                     DamageContext(
                         source=owner,
                         target=unit,
-                        attack_power=0,
+                        attack_power=5,
                         is_skill=True,
                         action_name="大火葬余烬",
-                        raw_damage=5,
                         ignore_magic_immunity=True,
-                        cannot_evade=True,
                         tags={"fire_zone"},
                     )
                 )
@@ -461,7 +465,7 @@ class GreatFireFuneralField(BattleFieldEffect):
 
 class GreatFireFuneralSkill(Skill):
     def __init__(self) -> None:
-        super().__init__("great_funeral", "大火葬", "命中自身所在横竖列并留下烈焰区域，使用后攻击 -1。", cooldown_turns=2, target_mode="self")
+        super().__init__("great_funeral", "大火葬", "命中自身所在横竖列，以攻 5 结算伤害并留下烈焰区域，使用后攻击 -1。", cooldown_turns=2, target_mode="self")
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         if actor.position is None:
@@ -479,10 +483,9 @@ class GreatFireFuneralSkill(Skill):
                     DamageContext(
                         source=actor,
                         target=unit,
-                        attack_power=0,
+                        attack_power=5,
                         is_skill=True,
                         action_name="大火葬",
-                        raw_damage=5,
                         ignore_magic_immunity=True,
                         tags={"fire", "skill"},
                     )
