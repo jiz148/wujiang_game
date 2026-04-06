@@ -23,7 +23,7 @@ from wujiang.engine.core import (
 
 
 def clamp_mana(unit: HeroUnit) -> None:
-    unit.current_mana = round(max(unit.current_mana, 0.0), 2)
+    unit.clamp_mana()
 
 
 def positions_to_dict(cells: list[Position]) -> list[dict[str, int]]:
@@ -34,6 +34,24 @@ def payload_position(payload: dict[str, Any], x_key: str = "x", y_key: str = "y"
     if x_key not in payload or y_key not in payload:
         raise ActionError("缺少目标坐标。")
     return Position(int(payload[x_key]), int(payload[y_key]))
+
+
+def payload_cells(payload: dict[str, Any], key: str = "cells") -> list[Position]:
+    raw_cells = payload.get(key)
+    if not isinstance(raw_cells, list) or not raw_cells:
+        raise ActionError("缺少目标格子。")
+    cells: list[Position] = []
+    seen: set[tuple[int, int]] = set()
+    for raw_cell in raw_cells:
+        if not isinstance(raw_cell, dict) or raw_cell.get("x") is None or raw_cell.get("y") is None:
+            raise ActionError("目标格子格式不正确。")
+        cell = Position(int(raw_cell["x"]), int(raw_cell["y"]))
+        key_pair = (cell.x, cell.y)
+        if key_pair in seen:
+            raise ActionError("不能重复选择同一个格子。")
+        seen.add(key_pair)
+        cells.append(cell)
+    return cells
 
 
 def payload_target_unit(battle: Battle, payload: dict[str, Any], key: str = "target_unit_id") -> HeroUnit:
@@ -66,6 +84,115 @@ def straight_direction(start: Position, end: Position) -> tuple[int, int]:
     if dx != 0 and dy != 0 and abs(dx) != abs(dy):
         raise ActionError("目标必须位于直线或对角线上。")
     return step_x, step_y
+
+
+def dedupe_positions(cells: list[Position]) -> list[Position]:
+    unique: list[Position] = []
+    seen: set[tuple[int, int]] = set()
+    for cell in cells:
+        key = (cell.x, cell.y)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(cell)
+    return unique
+
+
+def pattern_signature(cells: list[Position]) -> tuple[tuple[int, int], ...]:
+    return tuple(sorted((cell.x, cell.y) for cell in dedupe_positions(cells)))
+
+
+def line_patterns(
+    battle: Battle,
+    origin: Optional[Position],
+    directions: list[tuple[int, int]],
+    length: int,
+    *,
+    min_length: int = 1,
+) -> list[list[Position]]:
+    if origin is None:
+        return []
+    patterns: list[list[Position]] = []
+    seen: set[tuple[tuple[int, int], ...]] = set()
+    for direction in directions:
+        line = battle.line_positions(origin, direction, length)
+        if len(line) < min_length:
+            continue
+        key = pattern_signature(line)
+        if key in seen:
+            continue
+        seen.add(key)
+        patterns.append(line)
+    return patterns
+
+
+def localized_line_patterns(
+    battle: Battle,
+    origin: Optional[Position],
+    directions: list[tuple[int, int]],
+    length: int,
+    *,
+    max_distance: Optional[int] = None,
+) -> list[list[Position]]:
+    if origin is None or length <= 0:
+        return []
+    radius = length if max_distance is None else max_distance
+    patterns: list[list[Position]] = []
+    seen: set[tuple[tuple[int, int], ...]] = set()
+    for direction in directions:
+        for start_x in range(-length + 1, battle.width):
+            for start_y in range(-length + 1, battle.height):
+                cells = [
+                    Position(start_x + direction[0] * step, start_y + direction[1] * step)
+                    for step in range(length)
+                ]
+                in_bounds = [cell for cell in cells if battle.in_bounds(cell)]
+                if not in_bounds:
+                    continue
+                if any(cell == origin for cell in in_bounds):
+                    continue
+                if any(origin.distance_to(cell) > radius for cell in in_bounds):
+                    continue
+                key = pattern_signature(in_bounds)
+                if key in seen:
+                    continue
+                seen.add(key)
+                patterns.append(dedupe_positions(in_bounds))
+    patterns.sort(key=pattern_signature)
+    return patterns
+
+
+def match_payload_pattern(payload: dict[str, Any], patterns: list[list[Position]]) -> list[Position]:
+    chosen = payload_cells(payload)
+    chosen_key = pattern_signature(chosen)
+    for pattern in patterns:
+        if pattern_signature(pattern) == chosen_key:
+            return dedupe_positions(pattern)
+    raise ActionError("所选格子不符合该技能的形状要求。")
+
+
+def pattern_selection_preview(patterns: list[list[Position]]) -> dict[str, Any]:
+    unique_cells: list[Position] = []
+    seen_cells: set[tuple[int, int]] = set()
+    preview_patterns: list[list[dict[str, int]]] = []
+    for pattern in patterns:
+        deduped = dedupe_positions(pattern)
+        if not deduped:
+            continue
+        preview_patterns.append(positions_to_dict(deduped))
+        for cell in deduped:
+            key = (cell.x, cell.y)
+            if key in seen_cells:
+                continue
+            seen_cells.add(key)
+            unique_cells.append(cell)
+    return {
+        "cells": positions_to_dict(unique_cells),
+        "selection": {
+            "mode": "pattern_cells",
+            "patterns": preview_patterns,
+        },
+    }
 
 
 def ensure_enemy(actor: HeroUnit, target: HeroUnit) -> None:
@@ -134,6 +261,72 @@ class StatModifierStatus(StatusEffect):
         return value
 
 
+class SourcedDefenseStatus(StatusEffect):
+    def __init__(
+        self,
+        name: str,
+        *,
+        source_unit_id: str,
+        defense_delta: float,
+        description: str = "",
+        duration: Optional[int] = None,
+        tick_scope: str = "owner_turn_end",
+    ) -> None:
+        super().__init__(name, description, duration=duration, tick_scope=tick_scope)
+        self.source_unit_id = source_unit_id
+        self.defense_delta = defense_delta
+
+    def modify_stat(self, stat_name: str, value: float) -> float:
+        if stat_name == "defense":
+            return value + self.defense_delta
+        return value
+
+
+class MagicImmunityStatus(StatusEffect):
+    def __init__(self, *, source_name: str = "洗礼", duration: int = 2) -> None:
+        super().__init__(
+            f"魔免（来自{source_name}）" if source_name else "魔免",
+            "敌方主动技能造成的伤害与效果无效，但仍会受到场地效果影响。",
+            duration=duration,
+            tick_scope="any_turn_end",
+        )
+
+    def bind(self, owner: HeroUnit) -> "MagicImmunityStatus":
+        super().bind(owner)
+        owner.magic_immunity = True
+        return self
+
+    def on_removed(self, battle: Battle) -> None:
+        if self.owner is None:
+            return
+        still_active = any(
+            isinstance(status, MagicImmunityStatus) and status is not self
+            for status in self.owner.statuses
+        )
+        self.owner.magic_immunity = still_active
+
+
+class NextNormalMoveBoostStatus(StatusEffect):
+    def __init__(self, amount: int, *, duration: int = 1) -> None:
+        super().__init__(
+            "神速",
+            f"本回合内下一次普通移动格数 +{amount}。",
+            duration=duration,
+            tick_scope="owner_turn_end",
+        )
+        self.amount = amount
+
+    def modify_normal_move_distance(self, value: int) -> int:
+        return value + self.amount
+
+    def on_unit_moved(self, battle: Battle, ctx: MoveContext) -> None:
+        if self.owner is None:
+            return
+        if ctx.unit.unit_id != self.owner.unit_id or ctx.via_skill:
+            return
+        self.owner.remove_status(self, battle)
+
+
 class SlowStatus(StatusEffect):
     def __init__(self, amount: int, *, duration: int = 1) -> None:
         super().__init__("迟缓", f"速度 -{amount}", duration=duration, tick_scope="owner_turn_end")
@@ -175,10 +368,14 @@ class NextAttackBuffStatus(StatusEffect):
         bonus_attack: float = 0.0,
         ignore_shield: bool = False,
         description: str = "",
+        duration: Optional[int] = None,
+        tick_scope: str = "owner_turn_end",
+        consume_on_attack_attempt: bool = False,
     ) -> None:
-        super().__init__(name, description, duration=None)
+        super().__init__(name, description, duration=duration, tick_scope=tick_scope)
         self.bonus_attack = bonus_attack
         self.ignore_shield = ignore_shield
+        self.consume_on_attack_attempt = consume_on_attack_attempt
 
     def on_before_damage(self, battle: Battle, ctx: DamageContext) -> None:
         if self.owner is None or ctx.source is None:
@@ -197,6 +394,27 @@ class NextAttackBuffStatus(StatusEffect):
             return
         if self.ignore_shield:
             ctx.ignore_shield = True
+
+
+class HeadshotStanceStatus(StatusEffect):
+    def __init__(self, *, duration: int = 1) -> None:
+        super().__init__(
+            "爆头姿态",
+            "本回合内攻击只能选择直线或对角线上的目标。",
+            duration=duration,
+            tick_scope="owner_turn_end",
+        )
+
+    def can_attack_target(self, battle: Battle, actor: HeroUnit, target: HeroUnit) -> tuple[bool, str]:
+        if self.owner is None or actor.unit_id != self.owner.unit_id:
+            return True, ""
+        if actor.position is None or target.position is None:
+            return True, ""
+        try:
+            straight_direction(actor.position, target.position)
+        except ActionError:
+            return False, "爆头状态下只能攻击直线上的目标。"
+        return True, ""
 
 
 class ExperimentCountdownStatus(StatusEffect):
@@ -293,7 +511,7 @@ class InvincibleUntilActionStatus(StatusEffect):
     ) -> None:
         super().__init__(
             "隐身",
-            "不受敌方普攻或技能的伤害与效果，直到自己下次普攻或使用技能前。",
+            "仅己方可见；敌方不能直接选中，但点地施放的技能仍可能命中，直到自己下次普攻或使用技能前。",
             duration=duration,
             tick_scope=tick_scope,
         )
@@ -301,22 +519,6 @@ class InvincibleUntilActionStatus(StatusEffect):
         self.ignore_shield_on_attack_break = ignore_shield_on_attack_break
         self.attack_break_buff_name = attack_break_buff_name
         self.attack_break_buff_description = attack_break_buff_description
-
-    def on_targeted(self, battle: Battle, ctx: TargetContext) -> None:
-        if self.owner is None:
-            return
-        if ctx.target.unit_id != self.owner.unit_id or not ctx.is_hostile:
-            return
-        ctx.cancelled = True
-        ctx.reason = f"{self.owner.name} 处于隐身无敌状态，这次效果无效。"
-
-    def on_before_damage(self, battle: Battle, ctx: DamageContext) -> None:
-        if self.owner is None or ctx.target.unit_id != self.owner.unit_id:
-            return
-        if ctx.source is None or ctx.source.player_id == self.owner.player_id:
-            return
-        ctx.cancelled = True
-        ctx.reason = f"{self.owner.name} 处于隐身无敌状态，这次伤害无效。"
 
     def on_owner_action_declared(self, battle: Battle, action_type: str, payload: dict[str, Any]) -> None:
         if self.owner is None:
@@ -375,22 +577,55 @@ class StationaryRecoveryTrait(Trait):
     def on_owner_turn_end(self, battle: Battle) -> None:
         if self.owner is None or self.owner.moved_this_turn:
             return
-        self.owner.current_mana = round(self.owner.current_mana + 1, 2)
+        self.owner.gain_mana(1)
         battle.heal(HealContext(source=self.owner, target=self.owner, amount=0.25, action_name="原地回复"))
 
 
 class PrecisionTrainingTrait(Trait):
+    PROC_TAG = "precision_training_slow_proc"
+    CHECKED_TAG = "precision_training_slow_checked"
+
     def __init__(self) -> None:
-        super().__init__("压制射击", "普攻命中后使目标速度降低。")
+        super().__init__("压制射击", "普攻有 1/3 概率附带破魔减速，使目标下回合速度 -2，最低到 1。")
+
+    def _is_owners_attack(self, ctx: DamageContext) -> bool:
+        return (
+            self.owner is not None
+            and ctx.source is not None
+            and ctx.source.unit_id == self.owner.unit_id
+            and "attack" in ctx.tags
+            and ctx.target.unit_id != self.owner.unit_id
+        )
+
+    def _roll_proc(self, tags: set[str]) -> None:
+        if self.CHECKED_TAG in tags:
+            return
+        tags.add(self.CHECKED_TAG)
+        if random.random() < 1 / 3:
+            tags.add(self.PROC_TAG)
+
+    def _apply_slow(self, battle: Battle, target: HeroUnit) -> None:
+        target.add_status(SlowStatus(2, duration=1))
+        battle.log(f"{target.name} 被精兵压制，下一回合速度下降。")
+
+    def on_before_damage(self, battle: Battle, ctx: DamageContext) -> None:
+        if not self._is_owners_attack(ctx):
+            return
+        self._roll_proc(ctx.tags)
 
     def on_after_damage(self, battle: Battle, ctx: DamageContext) -> None:
-        if self.owner is None or ctx.source is None:
+        if not self._is_owners_attack(ctx):
             return
-        if ctx.source.unit_id != self.owner.unit_id or "attack" not in ctx.tags or ctx.target.unit_id == self.owner.unit_id:
+        if self.PROC_TAG not in ctx.tags:
             return
-        if random.random() <= 1 / 3:
-            ctx.target.add_status(SlowStatus(2, duration=1))
-            battle.log(f"{ctx.target.name} 被精兵压制，下一回合速度下降。")
+        self._apply_slow(battle, ctx.target)  # type: ignore[arg-type]
+
+    def on_damage_cancelled(self, battle: Battle, ctx: DamageContext) -> None:
+        if not self._is_owners_attack(ctx):
+            return
+        if self.PROC_TAG not in ctx.tags or not ctx.shield_consumed:
+            return
+        self._apply_slow(battle, ctx.target)  # type: ignore[arg-type]
 
 
 class MagicImmuneWhenAttackOneTrait(Trait):
@@ -400,7 +635,7 @@ class MagicImmuneWhenAttackOneTrait(Trait):
     def on_targeted(self, battle: Battle, ctx: TargetContext) -> None:
         if self.owner is None:
             return
-        if ctx.target.unit_id != self.owner.unit_id or not ctx.is_skill or not ctx.is_hostile:
+        if ctx.target.unit_id != self.owner.unit_id or not ctx.is_skill or not ctx.is_hostile or ctx.from_field_effect:
             return
         if self.owner.stat("attack") <= 1 and not ctx.ignore_magic_immunity:
             ctx.cancelled = True
@@ -430,7 +665,7 @@ class NoMoveActiveSkillImmunityTrait(Trait):
             return
         if ctx.target.unit_id != self.owner.unit_id:
             return
-        if ctx.is_skill and ctx.is_hostile and not ctx.actor.moved_this_turn:
+        if ctx.is_skill and ctx.is_hostile and not ctx.from_field_effect and not ctx.actor.moved_this_turn:
             ctx.cancelled = True
             ctx.reason = f"{ctx.actor.name} 本回合尚未移动，主动技能对 {self.owner.name} 无效。"
 
@@ -454,6 +689,24 @@ class SelfBuffSkill(Skill):
         }
 
 
+class ShensuSkill(SelfBuffSkill):
+    def __init__(self) -> None:
+        super().__init__(
+            "shensu",
+            "神速",
+            "普通技能：费 1 魔，本回合内下一次普通移动的格数 +3。",
+            mana_cost=1,
+            max_uses_per_turn=1,
+        )
+
+    def apply_to_self(self, battle: Battle, actor: HeroUnit) -> None:
+        existing = actor.get_status("神速")
+        if existing is not None:
+            actor.remove_status(existing, battle)
+        actor.add_status(NextNormalMoveBoostStatus(3))
+        battle.log(f"{actor.name} 获得了神速，本回合下一次普通移动格数 +3。")
+
+
 class DashMoveSkill(Skill):
     def __init__(
         self,
@@ -467,6 +720,7 @@ class DashMoveSkill(Skill):
         straight_only: bool = False,
         ignore_units: bool = False,
         allow_anywhere: bool = False,
+        exact_distance: int | None = None,
     ) -> None:
         super().__init__(
             code,
@@ -480,6 +734,7 @@ class DashMoveSkill(Skill):
         self.straight_only = straight_only
         self.ignore_units = ignore_units
         self.allow_anywhere = allow_anywhere
+        self.exact_distance = exact_distance
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         destination = payload_position(payload)
@@ -491,6 +746,7 @@ class DashMoveSkill(Skill):
             ignore_units=self.ignore_units,
             allow_anywhere=self.allow_anywhere,
             max_distance=self.max_distance,
+            exact_distance=self.exact_distance,
             tags={self.code},
         )
 
@@ -498,6 +754,7 @@ class DashMoveSkill(Skill):
         cells = battle.reachable_positions(
             actor,
             max_distance=self.max_distance,
+            exact_distance=self.exact_distance,
             straight_only=self.straight_only,
             ignore_units=self.ignore_units,
             allow_anywhere=self.allow_anywhere,
@@ -561,6 +818,7 @@ class MagicWallSkill(Skill):
     def threatened_allies(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> list[HeroUnit]:
         threatened: list[HeroUnit] = []
         seen: set[str] = set()
+        source = battle.units.get(queued_action.actor_id)
         for unit_id in queued_action.target_unit_ids:
             if unit_id in seen:
                 continue
@@ -568,7 +826,11 @@ class MagicWallSkill(Skill):
             unit = battle.units.get(unit_id)
             if unit is None or unit.player_id != actor.player_id or unit.position is None or unit.banished or not unit.alive:
                 continue
-            ok, _ = battle.unit_can_be_selected(unit, ignore_stealth=battle.action_ignores_stealth(queued_action))
+            ok, _ = battle.unit_can_be_selected(
+                unit,
+                actor=source,
+                ignore_stealth=battle.action_ignores_stealth(queued_action),
+            )
             if not ok or battle.shield_auto_blocks_chain(unit, queued_action):
                 continue
             threatened.append(unit)  # type: ignore[arg-type]
@@ -621,8 +883,8 @@ class DrainManaSkill(Skill):
             battle.log(target_ctx.reason)
             return
         lost = min(target.current_mana, 1.0)
-        target.current_mana = round(max(target.current_mana - lost, 0.0), 2)
-        actor.current_mana = round(actor.current_mana + lost, 2)
+        target.spend_mana(lost)
+        actor.gain_mana(lost)
         battle.log(f"{actor.name} 吸取了 {target.name} 的 {lost} 点魔力。")
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
@@ -660,7 +922,7 @@ class PierceSkill(Skill):
         super().__init__(
             "pierce",
             "穿刺",
-            "主动：1.5 魔，每回合最多 2 次，分两次选择身前任意 2 格并分别结算伤害。",
+            "主动：1.5 魔，每回合最多 2 次，逐格选择一片直线区域；通常需要点满 2 格，贴边时按实际存在的格子结算。",
             mana_cost=1.5,
             max_uses_per_turn=2,
             target_mode="cell",
@@ -679,31 +941,13 @@ class PierceSkill(Skill):
         ]
 
     def selectable_cells(self, battle: Battle, actor: HeroUnit) -> list[Position]:
-        cells: list[Position] = []
-        seen: set[tuple[int, int]] = set()
-        if actor.position is None:
-            return cells
-        for direction in self.directions():
-            line = battle.line_positions(actor.position, direction, 2)
-            if len(line) < 2:
-                continue
-            for cell in line:
-                key = (cell.x, cell.y)
-                if key in seen:
-                    continue
-                seen.add(key)
-                cells.append(cell)
-        return cells
+        return dedupe_positions([cell for pattern in self.patterns(battle, actor) for cell in pattern])
+
+    def patterns(self, battle: Battle, actor: HeroUnit) -> list[list[Position]]:
+        return localized_line_patterns(battle, actor.position, self.directions(), 2, max_distance=2)
 
     def chosen_cells(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
-        first = payload_position(payload)
-        second = payload_position(payload, "second_x", "second_y")
-        if first == second:
-            raise ActionError("穿刺必须选择两个不同的格子。")
-        legal = {(cell.x, cell.y) for cell in self.selectable_cells(battle, actor)}
-        if (first.x, first.y) not in legal or (second.x, second.y) not in legal:
-            raise ActionError("该位置不能用于穿刺。")
-        return [first, second]
+        return match_payload_pattern(payload, self.patterns(battle, actor))
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         for unit in battle.units_at_cells(self.chosen_cells(battle, actor, payload)):
@@ -719,12 +963,9 @@ class PierceSkill(Skill):
             )
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
-        return {
-            "cells": positions_to_dict(self.selectable_cells(battle, actor)),
-            "target_unit_ids": [],
-            "secondary_cells": [],
-            "requires_target": True,
-        }
+        preview = pattern_selection_preview(self.patterns(battle, actor))
+        preview.update({"target_unit_ids": [], "secondary_cells": [], "requires_target": True})
+        return preview
 
     def get_target_cells_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
         return self.chosen_cells(battle, actor, payload)
@@ -809,110 +1050,169 @@ class KnockbackSkill(Skill):
 
 class MachineGunSkill(Skill):
     def __init__(self) -> None:
-        super().__init__("machine_gun", "机枪", "直线 3 格攻击。", max_uses_per_turn=1, target_mode="enemy")
-
-    def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        target = payload_target_unit(battle, payload)
-        ensure_enemy(actor, target)
-        ensure_distance(actor, target, 3)
-        if actor.position is None or target.position is None:
-            raise ActionError("目标不在战场上。")
-        straight_direction(actor.position, target.position)
-        target_ctx = battle.validate_target(actor, target, action_name="机枪", is_skill=True, is_hostile=True)
-        if target_ctx.cancelled:
-            battle.log(target_ctx.reason)
-            return
-        battle.resolve_damage(
-            DamageContext(
-                source=actor,
-                target=target,
-                attack_power=actor.stat("attack"),
-                is_skill=True,
-                action_name="机枪",
-                tags={"skill", "attack"},
-            )
+        super().__init__(
+            "machine_gun",
+            "机枪",
+            "普通技能：每回合最多 1 次，逐格选择一片直线区域；通常需要点满 3 格，贴边时按实际存在的格子结算，对其中敌方单位分别结算伤害。",
+            max_uses_per_turn=1,
+            target_mode="cell",
         )
 
+    def selectable_cells(self, battle: Battle, actor: HeroUnit) -> list[Position]:
+        return dedupe_positions([cell for pattern in self.patterns(battle, actor) for cell in pattern])
+
+    def directions(self) -> list[tuple[int, int]]:
+        return [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+
+    def patterns(self, battle: Battle, actor: HeroUnit) -> list[list[Position]]:
+        return localized_line_patterns(battle, actor.position, self.directions(), 3, max_distance=3)
+
+    def chosen_line(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
+        return match_payload_pattern(payload, self.patterns(battle, actor))
+
+    def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
+        for unit in battle.units_at_cells(self.chosen_line(battle, actor, payload)):
+            if unit.player_id == actor.player_id:
+                continue
+            battle.resolve_damage(
+                DamageContext(
+                    source=actor,
+                    target=unit,
+                    attack_power=actor.stat("attack"),
+                    is_skill=True,
+                    action_name="机枪",
+                    tags={"skill", "attack"},
+                )
+            )
+
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
-        cells = []
-        if actor.position is not None:
-            for direction in [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]:
-                cells.extend(battle.line_positions(actor.position, direction, 3))
-        targets = [unit.unit_id for unit in battle.enemy_units(actor.player_id) if unit.position and actor.position and unit.position.distance_to(actor.position) <= 3]
-        return {"cells": positions_to_dict(cells), "target_unit_ids": targets, "secondary_cells": [], "requires_target": True}
+        cells = self.selectable_cells(battle, actor)
+        cell_keys = {(cell.x, cell.y) for cell in cells}
+        targets = [
+            unit.unit_id
+            for unit in battle.enemy_units(actor.player_id)
+            if unit.position is not None and (unit.position.x, unit.position.y) in cell_keys
+        ]
+        preview = pattern_selection_preview(self.patterns(battle, actor))
+        preview.update({"target_unit_ids": targets, "secondary_cells": [], "requires_target": True})
+        return preview
+
+    def get_target_cells_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
+        return self.chosen_line(battle, actor, payload)
+
+    def get_target_units_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[HeroUnit]:
+        return [
+            unit
+            for unit in battle.units_at_cells(self.chosen_line(battle, actor, payload))
+            if unit.player_id != actor.player_id
+        ]  # type: ignore[list-item]
 
 
 class HeadshotSkill(SelfBuffSkill):
     def __init__(self) -> None:
-        super().__init__("headshot", "爆头", "本回合第一道敌方效果无效，下一次普攻 +2 且破魔。", max_uses_per_turn=1)
+        super().__init__(
+            "headshot",
+            "爆头",
+            "本回合内失去周围方形普攻特性；本回合内下一次攻击伤害 +2 且破魔。",
+            max_uses_per_turn=1,
+        )
 
     def apply_to_self(self, battle: Battle, actor: HeroUnit) -> None:
-        actor.add_status(FirstHostileEffectNegationStatus())
+        actor.add_status(HeadshotStanceStatus(duration=1))
         actor.add_status(
             NextAttackBuffStatus(
                 "爆头强化",
                 bonus_attack=2,
                 ignore_shield=True,
-                description="下一次普攻伤害 +2 且破魔。",
+                description="本回合内下一次攻击伤害 +2 且破魔。",
+                duration=1,
+                consume_on_attack_attempt=True,
             )
         )
         battle.log(f"{actor.name} 进入爆头准备状态。")
 
 
-class DefendTwiceSkill(SelfBuffSkill):
+class DefendTwiceSkill(Skill):
     def __init__(self) -> None:
-        super().__init__("defend_twice", "守*2", "守 +1，持续 1轮。", mana_cost=0)
+        super().__init__(
+            "defend_twice",
+            "守*2",
+            "普通技能：费 1 魔，每回合最多 1 次，可对己方单位或自己使用；目标守 +1，持续 1 轮，来自同一武将的不叠加。",
+            mana_cost=1,
+            max_uses_per_turn=1,
+            target_mode="ally",
+        )
 
-    def apply_to_self(self, battle: Battle, actor: HeroUnit) -> None:
-        if actor.has_status("守*2"):
-            raise ActionError("守*2 已在持续中。")
-        actor.add_status(
-            StatModifierStatus(
+    def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
+        target = payload_target_unit(battle, payload)
+        ensure_ally(actor, target)
+        ensure_distance(actor, target, actor.targeting_range())
+        existing = next(
+            (
+                status
+                for status in target.statuses
+                if isinstance(status, SourcedDefenseStatus)
+                and status.name == "守*2"
+                and status.source_unit_id == actor.unit_id
+            ),
+            None,
+        )
+        if existing is not None:
+            raise ActionError("来自同一武将的守*2效果不能叠加。")
+        target.add_status(
+            SourcedDefenseStatus(
                 "守*2",
+                source_unit_id=actor.unit_id,
                 defense_delta=1,
                 duration=2,
                 tick_scope="any_turn_end",
                 description="守 +1。",
             )
         )
-        battle.log(f"{actor.name} 的守备提升了。")
+        battle.log(f"{target.name} 获得了来自 {actor.name} 的守*2加成。")
+
+    def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
+        targets = [
+            unit
+            for unit in battle.player_units(actor.player_id)
+            if unit.position is not None
+            and actor.position is not None
+            and actor.position.distance_to(unit.position) <= actor.targeting_range()
+        ]
+        return {"cells": positions_to_dict([unit.position for unit in targets if unit.position]), "target_unit_ids": [unit.unit_id for unit in targets], "secondary_cells": [], "requires_target": True}
 
 
 class HealSkill(Skill):
     def __init__(self) -> None:
-        super().__init__("heal", "回血", "恢复目标 1/4 生命；暗属性或灵体/恶魔则改为受伤。", mana_cost=1, max_uses_per_turn=1, target_mode="unit")
+        super().__init__(
+            "heal",
+            "回血",
+            "普通技能：费 1 魔，每回合最多 1 次，可对包括自己在内的己方单位使用；目标回复 1/4 生命。",
+            mana_cost=1,
+            max_uses_per_turn=1,
+            target_mode="ally",
+        )
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         target = payload_target_unit(battle, payload)
+        ensure_ally(actor, target)
         ensure_distance(actor, target, actor.targeting_range())
-        is_harmful = target.attribute == "暗" or target.race in {"灵体", "恶魔"}
-        if is_harmful:
-            target_ctx = battle.validate_target(actor, target, action_name="回血", is_skill=True, is_hostile=True)
-            if target_ctx.cancelled:
-                battle.log(target_ctx.reason)
-                return
-            battle.resolve_damage(
-                DamageContext(
-                    source=actor,
-                    target=target,
-                    attack_power=0,
-                    is_skill=True,
-                    action_name="回血",
-                    raw_damage=0.25,
-                    tags={"skill"},
-                )
-            )
-            return
         battle.heal(HealContext(source=actor, target=target, amount=0.25, action_name="回血"))
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
-        targets = [unit for unit in battle.all_units() if unit.position and actor.position and actor.position.distance_to(unit.position) <= actor.targeting_range()]
+        targets = [unit for unit in battle.player_units(actor.player_id) if unit.position and actor.position and actor.position.distance_to(unit.position) <= actor.targeting_range()]
         return {"cells": positions_to_dict([unit.position for unit in targets if unit.position]), "target_unit_ids": [unit.unit_id for unit in targets], "secondary_cells": [], "requires_target": True}
 
 
 class BaptismSkill(Skill):
     def __init__(self) -> None:
-        super().__init__("baptism", "洗礼", "仅对人类使用，使其获得 1轮魔免。", mana_cost=2, target_mode="ally")
+        super().__init__(
+            "baptism",
+            "洗礼",
+            "普通技能：费 2 魔，仅对人类使用，使其获得 1 轮魔免。魔免只抵消敌方主动技能的伤害与效果，不会抵消场地效果。",
+            mana_cost=2,
+            target_mode="ally",
+        )
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         target = payload_target_unit(battle, payload)
@@ -920,16 +1220,8 @@ class BaptismSkill(Skill):
         ensure_distance(actor, target, actor.targeting_range())
         if target.race != "人类":
             raise ActionError("洗礼只能对人类使用。")
-        target.add_status(
-            FlagStatus(
-                "洗礼",
-                "magic_immunity",
-                description="获得魔免。",
-                duration=2,
-                tick_scope="any_turn_end",
-            )
-        )
-        battle.log(f"{target.name} 获得了洗礼。")
+        target.add_status(MagicImmunityStatus(source_name="洗礼", duration=2))
+        battle.log(f"{target.name} 获得了魔免（来自洗礼）。")
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
         targets = [unit for unit in battle.player_units(actor.player_id) if unit.race == "人类" and unit.position and actor.position and actor.position.distance_to(unit.position) <= actor.targeting_range()]
@@ -938,13 +1230,19 @@ class BaptismSkill(Skill):
 
 class ChantSkill(Skill):
     def __init__(self) -> None:
-        super().__init__("chant", "吟唱", "令目标魔力 +2。", max_uses_per_turn=1, target_mode="unit")
+        super().__init__(
+            "chant",
+            "吟唱",
+            "普通技能：不费魔，每回合最多 1 次，选择一个范内目标，令其魔力点 +2。",
+            max_uses_per_turn=1,
+            target_mode="unit",
+        )
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         target = payload_target_unit(battle, payload)
         ensure_distance(actor, target, actor.targeting_range())
-        target.current_mana = round(target.current_mana + 2, 2)
-        battle.log(f"{target.name} 获得了 2 点魔力。")
+        gained = target.gain_mana_points(2)
+        battle.log(f"{target.name} 获得了 {gained} 点魔力点。")
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
         targets = [unit for unit in battle.all_units() if unit.position and actor.position and actor.position.distance_to(unit.position) <= actor.targeting_range()]
@@ -953,7 +1251,7 @@ class ChantSkill(Skill):
 
 class GreatHolyLightField(BattleFieldEffect):
     def __init__(self, owner_unit_id: str, *, duration: int = 5) -> None:
-        super().__init__("大圣光", "移动惩罚与友军守备加成。", duration=duration)
+        super().__init__("大圣光", "以吟游诗人为中心的持续圣光场。", duration=duration)
         self.owner_unit_id = owner_unit_id
 
     def get_owner_unit(self, battle: Battle) -> Optional[HeroUnit]:
@@ -962,11 +1260,27 @@ class GreatHolyLightField(BattleFieldEffect):
             return None
         return unit  # type: ignore[return-value]
 
+    def affected_cells(self, battle: Battle) -> list[Position]:
+        owner = self.get_owner_unit(battle)
+        if owner is None or owner.position is None:
+            return []
+        return [
+            Position(x, y)
+            for x in range(battle.width)
+            for y in range(battle.height)
+            if owner.position.distance_to(Position(x, y)) <= 5
+        ]
+
+    def board_marker(self, battle: Battle) -> str:
+        return "圣"
+
     def on_unit_moved(self, battle: Battle, ctx: MoveContext) -> None:
         owner = self.get_owner_unit(battle)
         if owner is None or owner.position is None:
             return
         if ctx.unit.player_id == owner.player_id:
+            return
+        if ctx.via_skill:
             return
         if ctx.end.distance_to(owner.position) > 5:
             return
@@ -977,6 +1291,7 @@ class GreatHolyLightField(BattleFieldEffect):
                 target=ctx.unit,
                 attack_power=0,
                 is_skill=True,
+                from_field_effect=True,
                 action_name="大圣光",
                 raw_damage=4,
                 cannot_evade=True,
@@ -1004,7 +1319,7 @@ class GreatHolyLightField(BattleFieldEffect):
 
 class GreatHolyLightSkill(SelfBuffSkill):
     def __init__(self) -> None:
-        super().__init__("great_holy_light", "大圣光", "持续 2.5轮的范围圣光。", max_uses_per_battle=1)
+        super().__init__("great_holy_light", "大圣光", "大招：持续 2.5 轮，以自己为中心生成范围会变化的圣光场。", max_uses_per_battle=1)
 
     def apply_to_self(self, battle: Battle, actor: HeroUnit) -> None:
         battle.add_field_effect(GreatHolyLightField(actor.unit_id, duration=5))
@@ -1047,7 +1362,7 @@ class PassiveEvasionSkill(Skill):
         super().__init__(
             "evasion",
             "回避",
-            "被动：连锁速度 2，每回合最多 2 次，直线移动恰好 2 格。",
+            "被动：连锁速度 2，每回合最多 2 次，直线移动恰好 1 格。",
             mana_cost=0.5,
             max_uses_per_turn=2,
             timing="passive",
@@ -1070,7 +1385,7 @@ class PassiveEvasionSkill(Skill):
             (1, 0),
             (1, 1),
         ):
-            destination = actor.position.offset(dx * 2, dy * 2)
+            destination = actor.position.offset(dx, dy)
             if not battle.in_bounds(destination):
                 continue
             if battle.is_occupied(destination, ignore=actor):
@@ -1101,7 +1416,7 @@ class PassiveEvasionSkill(Skill):
             straight_only=True,
             ignore_units=True,
             triggered_by_reaction=True,
-            max_distance=2,
+            max_distance=1,
             tags={"evasion"},
         )
         battle.log(f"{actor.name} 使用回避离开了原定目标格。")
@@ -1121,7 +1436,7 @@ class BackstepShotSkill(Skill):
         super().__init__(
             "backstep_shot",
             "撤步射击",
-            "被动：连锁速度 2，被普攻时后撤 2 格并反击。",
+            "被动：连锁速度 2，被普攻时先由玩家选择一个直线穿人的 2 格撤步落点；随后再选择一个仍在普攻范围内的敌方目标反击。",
             mana_cost=0.5,
             max_uses_per_turn=2,
             timing="passive",
@@ -1138,70 +1453,135 @@ class BackstepShotSkill(Skill):
             return False, "撤步射击只能响应普攻。"
         if actor.unit_id not in queued_action.target_unit_ids:
             return False, "当前动作没有攻击到自己。"
+        if not self.retreat_cells(battle, actor):
+            return False, "没有可用于撤步射击的落点。"
         return True, ""
 
+    def retreat_cells(self, battle: Battle, actor: HeroUnit) -> list[Position]:
+        if actor.position is None or actor.cannot_move:
+            return []
+        cells: list[Position] = []
+        for dx, dy in (
+            (-1, -1),
+            (-1, 0),
+            (-1, 1),
+            (0, -1),
+            (0, 1),
+            (1, -1),
+            (1, 0),
+            (1, 1),
+        ):
+            destination = actor.position.offset(dx * 2, dy * 2)
+            if not battle.in_bounds(destination):
+                continue
+            if battle.is_occupied(destination, ignore=actor):
+                continue
+            cells.append(destination)
+        return sorted(cells, key=lambda cell: (cell.y, cell.x))
+
+    def attack_targets_after_retreat(
+        self,
+        battle: Battle,
+        actor: HeroUnit,
+        destination: Position,
+    ) -> list[HeroUnit]:
+        if actor.position is None:
+            return []
+        actual_position = actor.position
+        actor.position = destination
+        try:
+            targets = [
+                unit
+                for unit in battle.enemy_units(actor.player_id)
+                if battle.attack_target_allowed(
+                    actor,
+                    unit,
+                    ignore_stealth=battle.attack_ignores_stealth(actor, unit),
+                )[0]
+            ]
+        finally:
+            actor.position = actual_position
+        return sorted(
+            targets,
+            key=lambda unit: (
+                unit.position.y if unit.position is not None else 99,
+                unit.position.x if unit.position is not None else 99,
+                unit.unit_id,
+            ),
+        )
+
+    def preview_targets_by_retreat_cell(
+        self,
+        battle: Battle,
+        actor: HeroUnit,
+    ) -> dict[str, list[HeroUnit]]:
+        targets_by_cell: dict[str, list[HeroUnit]] = {}
+        for destination in self.retreat_cells(battle, actor):
+            targets_by_cell[f"{destination.x},{destination.y}"] = self.attack_targets_after_retreat(
+                battle,
+                actor,
+                destination,
+            )
+        return targets_by_cell
+
     def react(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any], queued_action: QueuedAction) -> None:
-        source = battle.units.get(queued_action.actor_id)
-        if actor.position is None or source is None or source.position is None:
-            return
-        step_x = actor.position.x - source.position.x
-        step_y = actor.position.y - source.position.y
-        step_x = 0 if step_x == 0 else step_x // abs(step_x)
-        step_y = 0 if step_y == 0 else step_y // abs(step_y)
-        destination = actor.position
-        for _ in range(2):
-            candidate = destination.offset(step_x, step_y)
-            if not battle.in_bounds(candidate) or battle.is_occupied(candidate):
-                candidate = destination
-                break
-            destination = candidate
-        if destination == actor.position:
-            actor.dodge_charges += 1
-            battle.log(f"{actor.name} 触发撤步射击失败，改为获得 1 次闪避。")
-            return
+        if payload.get("x") is None or payload.get("y") is None:
+            raise ActionError("撤步射击需要选择落点。")
+        destination = Position(int(payload["x"]), int(payload["y"]))
+        if destination not in self.retreat_cells(battle, actor):
+            raise ActionError("该位置不能用于撤步射击。")
         battle.move_unit(
             actor,
             destination,
             via_skill=True,
             straight_only=True,
+            exact_distance=2,
+            ignore_units=True,
             triggered_by_reaction=True,
             max_distance=2,
             tags={"backstep"},
         )
         battle.log(f"{actor.name} 触发撤步射击。")
-        if actor.position.distance_to(source.position) <= actor.targeting_range():
-            battle.resolve_damage(
-                DamageContext(
-                    source=actor,
-                    target=source,
-                    attack_power=actor.stat("attack"),
-                    is_skill=False,
-                    action_name="撤步反击",
-                    tags={"attack", "counter"},
-                )
-            )
+        valid_targets = self.attack_targets_after_retreat(battle, actor, destination)
+        if not valid_targets:
+            battle.log(f"{actor.name} 撤步后没有可反击的敌方目标。")
+            return
+        target = payload_target_unit(battle, payload)
+        valid_target_ids = {unit.unit_id for unit in valid_targets}
+        if target.unit_id not in valid_target_ids:
+            raise ActionError("该目标不在撤步射击后的反击范围内。")
+        battle.resolve_attack_damage(actor, target, action_name="撤步反击", tags={"counter"})
 
     def reaction_preview(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> dict[str, Any]:
-        source = battle.units.get(queued_action.actor_id)
-        cells: list[dict[str, int]] = []
-        if source is not None and source.position is not None and actor.position is not None:
-            step_x = actor.position.x - source.position.x
-            step_y = actor.position.y - source.position.y
-            step_x = 0 if step_x == 0 else step_x // abs(step_x)
-            step_y = 0 if step_y == 0 else step_y // abs(step_y)
-            destination = actor.position
-            for _ in range(2):
-                candidate = destination.offset(step_x, step_y)
-                if not battle.in_bounds(candidate) or battle.is_occupied(candidate):
-                    break
-                cells.append(candidate.to_dict())
-                destination = candidate
-        return {"cells": cells, "target_unit_ids": [queued_action.actor_id], "secondary_cells": [], "requires_target": False}
+        retreat_cells = self.retreat_cells(battle, actor)
+        targets_by_cell = self.preview_targets_by_retreat_cell(battle, actor)
+        target_unit_ids: list[str] = []
+        seen_target_ids: set[str] = set()
+        for targets in targets_by_cell.values():
+            for unit in targets:
+                if unit.unit_id in seen_target_ids:
+                    continue
+                seen_target_ids.add(unit.unit_id)
+                target_unit_ids.append(unit.unit_id)
+        return {
+            "cells": positions_to_dict(retreat_cells),
+            "target_unit_ids": target_unit_ids,
+            "secondary_cells": [actor.position.to_dict()] if actor.position else [],
+            "requires_target": True,
+            "follow_up_target_ids_by_cell": {
+                key: [unit.unit_id for unit in targets]
+                for key, targets in targets_by_cell.items()
+            },
+            "follow_up_target_cells_by_cell": {
+                key: positions_to_dict([unit.position for unit in targets if unit.position is not None])
+                for key, targets in targets_by_cell.items()
+            },
+        }
 
 
 class StealthSkill(SelfBuffSkill):
     def __init__(self) -> None:
-        super().__init__("stealth", "隐身", "费 1.5 魔，进入无敌状态，直到自己下次普攻或使用技能前。", mana_cost=1.5)
+        super().__init__("stealth", "隐身", "普通技能：费 1.5 魔，仅己方可见，直到自己第一次普攻或使用技能后解除。", mana_cost=1.5)
 
     def apply_to_self(self, battle: Battle, actor: HeroUnit) -> None:
         existing = actor.get_status("隐身")
@@ -1212,7 +1592,8 @@ class StealthSkill(SelfBuffSkill):
         if glove is not None:
             glove.cooldown_remaining = 0
             glove.uses_this_battle = max(glove.uses_this_battle - 1, 0)
-        battle.log(f"{actor.name} 进入隐身无敌状态。")
+        battle.log(f"{actor.name} 进入隐身状态。")
+        battle.clear_all_stealth_if_all_heroes_stealthed()
 
 
 class BlockSkill(SelfBuffSkill):

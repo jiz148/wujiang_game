@@ -27,7 +27,14 @@ class AbstractHero(HeroUnit, ABC):
     raw_trait_text = ""
     max_health = 1.0
 
-    def __init__(self, player_id: int, *, unit_id: Optional[str] = None, is_summon: bool = False) -> None:
+    def __init__(
+        self,
+        player_id: int,
+        *,
+        unit_id: Optional[str] = None,
+        is_summon: bool = False,
+        is_clone: bool = False,
+    ) -> None:
         super().__init__(
             unit_id=unit_id or build_unit_id(self.hero_code),
             player_id=player_id,
@@ -42,4 +49,5 @@ class AbstractHero(HeroUnit, ABC):
             raw_trait_text=self.raw_trait_text,
             max_health=self.max_health,
             is_summon=is_summon,
+            is_clone=is_clone,
         )

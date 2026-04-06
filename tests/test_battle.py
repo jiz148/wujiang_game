@@ -65,7 +65,7 @@ class BattleSmokeTests(unittest.TestCase):
         battle.perform_action({"type": "chain_skip"})
 
         self.assertEqual(target.position, Position(4, 4))
-        self.assertTrue(target.cannot_move)
+        self.assertTrue(target.cannot_normal_move)
 
     def test_mana_pull_moves_adjacent_target_after_chain_skip(self) -> None:
         battle = create_battle("ellie", "bard")
@@ -89,7 +89,36 @@ class BattleSmokeTests(unittest.TestCase):
         battle.perform_action({"type": "chain_skip"})
 
         self.assertEqual(bard.position, Position(7, 4))
-        self.assertTrue(bard.cannot_move)
+        self.assertTrue(bard.cannot_normal_move)
+
+    def test_mana_pull_only_blocks_normal_move_and_not_movement_skills(self) -> None:
+        battle = create_battle("ellie", "dark_human")
+        ellie = battle.player_units(1)[0]
+        dark = battle.player_units(2)[0]
+        ellie.position = Position(4, 4)
+        dark.position = Position(5, 4)
+
+        battle.perform_action(
+            {
+                "type": "skill",
+                "unit_id": ellie.unit_id,
+                "skill_code": "mana_pull",
+                "target_unit_id": dark.unit_id,
+                "dest_x": 7,
+                "dest_y": 4,
+            }
+        )
+
+        self.assertIsNotNone(battle.pending_chain)
+        battle.perform_action({"type": "chain_skip"})
+        battle.perform_action({"type": "end_turn"})
+
+        self.assertTrue(dark.cannot_normal_move)
+        with self.assertRaises(ActionError):
+            battle.perform_action({"type": "move", "unit_id": dark.unit_id, "x": 6, "y": 4})
+
+        battle.perform_action({"type": "skill", "unit_id": dark.unit_id, "skill_code": "fly_leap", "x": 4, "y": 1})
+        self.assertEqual(dark.position, Position(4, 1))
 
     def test_stealth_resets_paralyzing_glove_usage(self) -> None:
         battle = create_battle("dark_human", "fire_funeral")
@@ -121,6 +150,23 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertFalse(dark.has_status("\u9690\u8eab"))
         if battle.pending_chain is not None:
             battle.perform_action({"type": "chain_skip"})
+
+    def test_all_on_field_heroes_lose_stealth_when_everyone_is_hidden(self) -> None:
+        battle = create_battle("dark_human", "dark_human")
+        first = battle.player_units(1)[0]
+        second = battle.player_units(2)[0]
+        first.position = Position(2, 4)
+        second.position = Position(5, 4)
+
+        battle.perform_action({"type": "skill", "unit_id": first.unit_id, "skill_code": "stealth"})
+        self.assertTrue(first.has_status("隐身"))
+
+        battle.perform_action({"type": "end_turn"})
+        battle.perform_action({"type": "skill", "unit_id": second.unit_id, "skill_code": "stealth"})
+
+        self.assertFalse(first.has_status("隐身"))
+        self.assertFalse(second.has_status("隐身"))
+        self.assertTrue(any("所有在场武将的隐身自动解除" in line for line in battle.logs))
 
     def test_great_fire_funeral_creates_persistent_field(self) -> None:
         battle = create_battle("fire_funeral", "bard")
@@ -161,6 +207,344 @@ class BattleSmokeTests(unittest.TestCase):
 
         self.assertLess(dark.current_hp, hp_before)
 
+    def test_great_holy_light_does_not_trigger_on_skill_movement(self) -> None:
+        battle = create_battle("bard", "dark_human")
+        bard = battle.player_units(1)[0]
+        dark = battle.player_units(2)[0]
+        bard.position = Position(4, 4)
+        dark.position = Position(0, 4)
+        dark.max_health = 4.0
+        dark.current_hp = 4.0
+
+        battle.perform_action({"type": "skill", "unit_id": bard.unit_id, "skill_code": "great_holy_light"})
+        battle.perform_action({"type": "end_turn"})
+        hp_before = dark.current_hp
+        battle.perform_action({"type": "skill", "unit_id": dark.unit_id, "skill_code": "fly_leap", "x": 3, "y": 4})
+
+        self.assertEqual(dark.current_hp, hp_before)
+
+    def test_great_holy_light_exposes_dynamic_field_cells(self) -> None:
+        battle = create_battle("bard", "ellie")
+        bard = battle.player_units(1)[0]
+        ellie = battle.player_units(2)[0]
+        bard.position = Position(1, 1)
+        ellie.position = Position(7, 7)
+
+        battle.perform_action({"type": "skill", "unit_id": bard.unit_id, "skill_code": "great_holy_light"})
+
+        effect = battle.to_public_dict()["field_effects"][0]
+        self.assertEqual(effect["board_marker"], "圣")
+        self.assertIn({"x": 0, "y": 0}, effect["cells"])
+        self.assertIn({"x": 6, "y": 6}, effect["cells"])
+        self.assertNotIn({"x": 7, "y": 7}, effect["cells"])
+
+    def test_magic_immunity_blocks_enemy_active_skill(self) -> None:
+        battle = create_battle("bard", "ellie")
+        bard = battle.player_units(1)[0]
+        ellie = battle.player_units(2)[0]
+        bard.position = Position(4, 4)
+        ellie.position = Position(5, 4)
+
+        battle.perform_action({"type": "skill", "unit_id": bard.unit_id, "skill_code": "baptism", "target_unit_id": bard.unit_id})
+        battle.perform_action({"type": "end_turn"})
+        mana_before = bard.current_mana
+        enemy_mana_before = ellie.current_mana
+        battle.perform_action({"type": "skill", "unit_id": ellie.unit_id, "skill_code": "drain_mana", "target_unit_id": bard.unit_id})
+
+        self.assertEqual(bard.current_mana, mana_before)
+        self.assertEqual(ellie.current_mana, enemy_mana_before)
+
+    def test_magic_immunity_does_not_block_great_holy_light_field(self) -> None:
+        battle = create_battle("bard", "bard")
+        first = battle.player_units(1)[0]
+        second = battle.player_units(2)[0]
+        first.position = Position(2, 4)
+        second.position = Position(6, 4)
+        first.max_health = 5.0
+        first.current_hp = 5.0
+
+        battle.perform_action({"type": "skill", "unit_id": first.unit_id, "skill_code": "baptism", "target_unit_id": first.unit_id})
+        battle.perform_action({"type": "end_turn"})
+        battle.perform_action({"type": "skill", "unit_id": second.unit_id, "skill_code": "great_holy_light"})
+        battle.perform_action({"type": "end_turn"})
+
+        hp_before = first.current_hp
+        battle.perform_action({"type": "move", "unit_id": first.unit_id, "x": 3, "y": 4})
+
+        self.assertLess(first.current_hp, hp_before)
+
+    def test_stealthed_ally_can_be_targeted_by_friendly_heal(self) -> None:
+        battle = create_battle("dark_human", "ellie")
+        dark = battle.player_units(1)[0]
+        enemy = battle.player_units(2)[0]
+        bard = create_hero("bard", 1)
+        battle.add_unit(bard, Position(4, 4))
+        dark.position = Position(5, 4)
+        enemy.position = Position(7, 7)
+        dark.current_hp = 0.5
+
+        battle.perform_action({"type": "skill", "unit_id": dark.unit_id, "skill_code": "stealth"})
+        battle.perform_action({"type": "skill", "unit_id": bard.unit_id, "skill_code": "heal", "target_unit_id": dark.unit_id})
+
+        self.assertEqual(dark.current_hp, 0.75)
+
+    def test_chant_adds_mana_points_without_changing_mana(self) -> None:
+        battle = create_battle("bard", "ellie")
+        bard = battle.player_units(1)[0]
+        enemy = battle.player_units(2)[0]
+        bard.position = Position(4, 4)
+        enemy.position = Position(7, 7)
+        bard.current_mana = 4.0
+
+        battle.perform_action({"type": "skill", "unit_id": bard.unit_id, "skill_code": "chant", "target_unit_id": bard.unit_id})
+
+        self.assertEqual(bard.current_mana, 4.0)
+        self.assertEqual(bard.mana_points, 2.0)
+
+    def test_chant_only_offers_and_affects_targets_within_range(self) -> None:
+        battle = create_battle("bard", "ellie")
+        bard = battle.player_units(1)[0]
+        enemy = battle.player_units(2)[0]
+        bard.position = Position(0, 0)
+        enemy.position = Position(5, 5)
+
+        snapshot = battle.action_snapshot_for(bard)
+        chant = next(action for action in snapshot["actions"] if action["code"] == "chant")
+
+        self.assertNotIn(enemy.unit_id, chant["preview"]["target_unit_ids"])
+
+        battle.perform_action(
+            {"type": "skill", "unit_id": bard.unit_id, "skill_code": "chant", "target_unit_id": enemy.unit_id}
+        )
+
+        self.assertEqual(enemy.mana_points, 0.0)
+
+    def test_shensu_only_boosts_the_next_normal_move(self) -> None:
+        battle = create_battle("fire_funeral", "ellie")
+        fire = battle.player_units(1)[0]
+        enemy = battle.player_units(2)[0]
+        fire.position = Position(1, 4)
+        enemy.position = Position(7, 7)
+
+        battle.perform_action({"type": "skill", "unit_id": fire.unit_id, "skill_code": "shensu"})
+        move_action = next(action for action in battle.action_snapshot_for(fire)["actions"] if action["code"] == "move")
+        move_cells = {(cell["x"], cell["y"]) for cell in move_action["preview"]["cells"]}
+
+        self.assertIn((6, 4), move_cells)
+        self.assertTrue(fire.has_status("神速"))
+
+        battle.perform_action({"type": "move", "unit_id": fire.unit_id, "x": 6, "y": 4})
+
+        self.assertEqual(fire.position, Position(6, 4))
+        self.assertIsNone(fire.get_status("神速"))
+
+    def test_defend_twice_can_target_ally(self) -> None:
+        battle = create_battle("bard", "ellie")
+        bard = battle.player_units(1)[0]
+        enemy = battle.player_units(2)[0]
+        ally = create_hero("elite_soldier", 1)
+        bard.position = Position(4, 4)
+        enemy.position = Position(7, 7)
+        battle.add_unit(ally, Position(5, 4))
+
+        battle.perform_action({"type": "skill", "unit_id": bard.unit_id, "skill_code": "defend_twice", "target_unit_id": ally.unit_id})
+
+        self.assertEqual(ally.stat("defense"), ally.base_stats.defense + 1)
+
+    def test_machine_gun_hits_the_selected_three_cell_line(self) -> None:
+        battle = create_battle("elite_soldier", "elite_soldier")
+        soldier = battle.player_units(1)[0]
+        enemy_front = battle.player_units(2)[0]
+        enemy_mid = create_hero("elite_soldier", 2)
+        enemy_offline = create_hero("elite_soldier", 2)
+        soldier.position = Position(4, 4)
+        enemy_front.position = Position(5, 4)
+        battle.add_unit(enemy_mid, Position(6, 4))
+        battle.add_unit(enemy_offline, Position(6, 5))
+        for unit in (enemy_front, enemy_mid, enemy_offline):
+            unit.max_health = 4.0
+            unit.current_hp = 4.0
+
+        battle.perform_action(
+            {
+                "type": "skill",
+                "unit_id": soldier.unit_id,
+                "skill_code": "machine_gun",
+                "cells": [{"x": 5, "y": 4}, {"x": 6, "y": 4}, {"x": 7, "y": 4}],
+            }
+        )
+
+        self.assertLess(enemy_front.current_hp, 4.0)
+        self.assertLess(enemy_mid.current_hp, 4.0)
+        self.assertEqual(enemy_offline.current_hp, 4.0)
+
+    def test_machine_gun_can_hit_stealthed_enemy_with_cell_targeting(self) -> None:
+        battle = create_battle("elite_soldier", "dark_human")
+        soldier = battle.player_units(1)[0]
+        dark = battle.player_units(2)[0]
+        soldier.position = Position(4, 4)
+        dark.position = Position(5, 4)
+        dark.max_health = 4.0
+        dark.current_hp = 4.0
+
+        battle.perform_action({"type": "end_turn"})
+        battle.perform_action({"type": "skill", "unit_id": dark.unit_id, "skill_code": "stealth"})
+        battle.perform_action({"type": "end_turn"})
+        battle.perform_action(
+            {
+                "type": "skill",
+                "unit_id": soldier.unit_id,
+                "skill_code": "machine_gun",
+                "cells": [{"x": 5, "y": 4}, {"x": 6, "y": 4}, {"x": 7, "y": 4}],
+            }
+        )
+
+        self.assertIsNone(battle.pending_chain)
+        self.assertLess(dark.current_hp, 4.0)
+        self.assertTrue(dark.has_status("隐身"))
+
+    def test_machine_gun_accepts_vertical_line_that_does_not_extend_straight_from_actor(self) -> None:
+        battle = create_battle("elite_soldier", "elite_soldier")
+        soldier = battle.player_units(1)[0]
+        enemy_bottom = battle.player_units(2)[0]
+        enemy_mid = create_hero("elite_soldier", 2)
+        enemy_offline = create_hero("elite_soldier", 2)
+        soldier.position = Position(1, 0)
+        enemy_bottom.position = Position(0, 2)
+        battle.add_unit(enemy_mid, Position(0, 1))
+        battle.add_unit(enemy_offline, Position(1, 2))
+        for unit in (enemy_mid, enemy_bottom, enemy_offline):
+            unit.max_health = 4.0
+            unit.current_hp = 4.0
+
+        battle.perform_action(
+            {
+                "type": "skill",
+                "unit_id": soldier.unit_id,
+                "skill_code": "machine_gun",
+                "cells": [{"x": 0, "y": 0}, {"x": 0, "y": 1}, {"x": 0, "y": 2}],
+            }
+        )
+
+        self.assertLess(enemy_mid.current_hp, 4.0)
+        self.assertLess(enemy_bottom.current_hp, 4.0)
+        self.assertEqual(enemy_offline.current_hp, 4.0)
+
+    def test_headshot_only_allows_straight_line_attacks_for_this_turn(self) -> None:
+        battle = create_battle("elite_soldier", "bard")
+        soldier = battle.player_units(1)[0]
+        enemy_offline = battle.player_units(2)[0]
+        enemy_inline = create_hero("bard", 2)
+        soldier.position = Position(4, 4)
+        enemy_offline.position = Position(6, 5)
+        battle.add_unit(enemy_inline, Position(6, 4))
+
+        battle.perform_action({"type": "skill", "unit_id": soldier.unit_id, "skill_code": "headshot"})
+        snapshot = battle.action_snapshot_for(soldier)
+        attack_targets = set(snapshot["attack_targets"])
+
+        self.assertIn(enemy_inline.unit_id, attack_targets)
+        self.assertNotIn(enemy_offline.unit_id, attack_targets)
+        with self.assertRaises(ActionError):
+            battle.perform_action({"type": "attack", "unit_id": soldier.unit_id, "target_unit_id": enemy_offline.unit_id})
+
+    def test_headshot_bonus_attack_expires_at_end_of_turn(self) -> None:
+        battle = create_battle("elite_soldier", "bard")
+        soldier = battle.player_units(1)[0]
+        bard = battle.player_units(2)[0]
+        soldier.position = Position(4, 4)
+        bard.position = Position(5, 4)
+        bard.max_health = 5.0
+        bard.current_hp = 5.0
+
+        battle.perform_action({"type": "skill", "unit_id": soldier.unit_id, "skill_code": "headshot"})
+        battle.perform_action({"type": "end_turn"})
+        battle.perform_action({"type": "end_turn"})
+        battle.perform_action({"type": "attack", "unit_id": soldier.unit_id, "target_unit_id": bard.unit_id})
+        if battle.pending_chain is not None:
+            battle.perform_action({"type": "chain_skip"})
+
+        self.assertEqual(bard.current_hp, 4.75)
+
+    def test_precision_training_proc_applies_through_shield(self) -> None:
+        battle = create_battle("elite_soldier", "bard")
+        soldier = battle.player_units(1)[0]
+        bard = battle.player_units(2)[0]
+        soldier.position = Position(4, 4)
+        bard.position = Position(5, 4)
+        bard.shields = 1
+
+        with mock.patch("wujiang.heroes.common.random.random", return_value=0.2):
+            battle.perform_action({"type": "attack", "unit_id": soldier.unit_id, "target_unit_id": bard.unit_id})
+
+        self.assertEqual(bard.shields, 0)
+        self.assertEqual(bard.stat("speed"), 1.0)
+        self.assertTrue(any(status.name == "迟缓" for status in bard.statuses))
+
+    def test_backstep_shot_requires_exactly_two_cells_and_can_pass_through_units(self) -> None:
+        battle = create_battle("elite_soldier", "elite_soldier")
+        attacker = battle.player_units(1)[0]
+        defender = battle.player_units(2)[0]
+        blocker = create_hero("bard", 2)
+        attacker.position = Position(4, 4)
+        defender.position = Position(5, 4)
+        battle.add_unit(blocker, Position(6, 4))
+
+        battle.perform_action({"type": "attack", "unit_id": attacker.unit_id, "target_unit_id": defender.unit_id})
+        self.assertIsNotNone(battle.pending_chain)
+        reactions = battle.reaction_snapshot_for(defender)["actions"]
+        backstep = next(action for action in reactions if action["action_code"] == "backstep_shot")
+        preview_cells = {(cell["x"], cell["y"]) for cell in backstep["preview"]["cells"]}
+
+        self.assertIn((7, 4), preview_cells)
+        self.assertNotIn((6, 4), preview_cells)
+        self.assertNotIn((5, 5), preview_cells)
+
+        battle.perform_action(
+            {
+                "type": "chain_react",
+                "unit_id": defender.unit_id,
+                "action_code": "backstep_shot",
+                "x": 7,
+                "y": 4,
+                "target_unit_id": attacker.unit_id,
+            }
+        )
+
+        self.assertEqual(defender.position, Position(7, 4))
+        self.assertFalse(attacker.alive)
+
+    def test_backstep_shot_attacks_the_chosen_target_after_retreat(self) -> None:
+        battle = create_battle("elite_soldier", "elite_soldier")
+        attacker = battle.player_units(1)[0]
+        defender = battle.player_units(2)[0]
+        decoy = create_hero("bard", 1)
+        attacker.position = Position(4, 4)
+        defender.position = Position(5, 4)
+        battle.add_unit(decoy, Position(7, 5))
+        attacker.max_health = 4.0
+        attacker.current_hp = 4.0
+        decoy.max_health = 4.0
+        decoy.current_hp = 4.0
+
+        battle.perform_action({"type": "attack", "unit_id": attacker.unit_id, "target_unit_id": defender.unit_id})
+        self.assertIsNotNone(battle.pending_chain)
+        battle.perform_action(
+            {
+                "type": "chain_react",
+                "unit_id": defender.unit_id,
+                "action_code": "backstep_shot",
+                "x": 7,
+                "y": 4,
+                "target_unit_id": decoy.unit_id,
+            }
+        )
+
+        self.assertEqual(defender.position, Position(7, 4))
+        self.assertTrue(attacker.alive)
+        self.assertEqual(attacker.current_hp, 4.0)
+        self.assertLess(decoy.current_hp, 4.0)
+
     def test_protection_chain_consumes_one_temp_shield_then_leaves_one(self) -> None:
         battle = create_battle("ellie", "bard")
         ellie = battle.player_units(1)[0]
@@ -177,7 +561,7 @@ class BattleSmokeTests(unittest.TestCase):
 
         self.assertEqual(bard.temporary_shields, 1)
 
-    def test_evasion_moves_two_cells_and_attack_hits_original_cell(self) -> None:
+    def test_evasion_moves_one_cell_and_attack_hits_original_cell(self) -> None:
         battle = create_battle("ellie", "dark_human")
         ellie = battle.player_units(1)[0]
         dark = battle.player_units(2)[0]
@@ -188,10 +572,10 @@ class BattleSmokeTests(unittest.TestCase):
 
         self.assertIsNotNone(battle.pending_chain)
         battle.perform_action(
-            {"type": "chain_react", "unit_id": dark.unit_id, "action_code": "evasion", "x": 7, "y": 4}
+            {"type": "chain_react", "unit_id": dark.unit_id, "action_code": "evasion", "x": 6, "y": 4}
         )
 
-        self.assertEqual(dark.position, Position(7, 4))
+        self.assertEqual(dark.position, Position(6, 4))
         self.assertEqual(dark.current_hp, 1.0)
 
     def test_evasion_can_choose_any_legal_cell_at_board_edge(self) -> None:
@@ -205,13 +589,13 @@ class BattleSmokeTests(unittest.TestCase):
 
         self.assertIsNotNone(battle.pending_chain)
         battle.perform_action(
-            {"type": "chain_react", "unit_id": dark.unit_id, "action_code": "evasion", "x": 0, "y": 2}
+            {"type": "chain_react", "unit_id": dark.unit_id, "action_code": "evasion", "x": 0, "y": 1}
         )
 
-        self.assertEqual(dark.position, Position(0, 2))
+        self.assertEqual(dark.position, Position(0, 1))
         self.assertEqual(dark.current_hp, 1.0)
 
-    def test_evasion_requires_exactly_two_cells(self) -> None:
+    def test_evasion_requires_exactly_one_cell(self) -> None:
         battle = create_battle("ellie", "dark_human")
         ellie = battle.player_units(1)[0]
         dark = battle.player_units(2)[0]
@@ -223,10 +607,10 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertIsNotNone(battle.pending_chain)
         with self.assertRaises(ActionError):
             battle.perform_action(
-                {"type": "chain_react", "unit_id": dark.unit_id, "action_code": "evasion", "x": 6, "y": 4}
+                {"type": "chain_react", "unit_id": dark.unit_id, "action_code": "evasion", "x": 7, "y": 4}
             )
 
-    def test_evasion_can_pass_through_unit_while_moving_two_cells(self) -> None:
+    def test_evasion_can_move_to_adjacent_empty_cell_even_if_further_cell_is_blocked(self) -> None:
         battle = create_battle("ellie", "dark_human")
         ellie = battle.player_units(1)[0]
         dark = battle.player_units(2)[0]
@@ -239,10 +623,10 @@ class BattleSmokeTests(unittest.TestCase):
 
         self.assertIsNotNone(battle.pending_chain)
         battle.perform_action(
-            {"type": "chain_react", "unit_id": dark.unit_id, "action_code": "evasion", "x": 7, "y": 4}
+            {"type": "chain_react", "unit_id": dark.unit_id, "action_code": "evasion", "x": 5, "y": 5}
         )
 
-        self.assertEqual(dark.position, Position(7, 4))
+        self.assertEqual(dark.position, Position(5, 5))
         self.assertEqual(blocker.position, Position(6, 4))
         self.assertEqual(dark.current_hp, 1.0)
 
@@ -283,6 +667,25 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertTrue(summon.can_take_turn_actions(battle))
         blink = next(action for action in battle.action_snapshot_for(summon)["actions"] if action["code"] == "medusa_blink")
         self.assertTrue(blink["available"])
+
+    def test_clone_is_destroyed_immediately_when_damage_connects(self) -> None:
+        battle = create_battle("bard", "ellie")
+        bard = battle.player_units(1)[0]
+        ellie = battle.player_units(2)[0]
+        bard.position = Position(4, 4)
+        ellie.position = Position(5, 4)
+        ellie.is_clone = True
+
+        battle.perform_action({"type": "attack", "unit_id": bard.unit_id, "target_unit_id": ellie.unit_id})
+        if battle.pending_chain is not None:
+            battle.perform_action({"type": "chain_skip"})
+
+        self.assertFalse(ellie.alive)
+        self.assertEqual(ellie.current_hp, 0.0)
+        self.assertTrue(all(unit.unit_id != ellie.unit_id for unit in battle.all_units()))
+        self.assertTrue(
+            any("\u5206\u8eab" in line and "\u76f4\u63a5\u7834\u574f" in line for line in battle.logs)
+        )
 
     def test_paralyzing_glove_breaks_one_shield_and_applies_effect(self) -> None:
         battle = create_battle("dark_human", "bard")
@@ -576,10 +979,7 @@ class BattleSmokeTests(unittest.TestCase):
                 "type": "skill",
                 "unit_id": fire.unit_id,
                 "skill_code": "pierce",
-                "x": 5,
-                "y": 4,
-                "second_x": 6,
-                "second_y": 4,
+                "cells": [{"x": 5, "y": 4}, {"x": 6, "y": 4}],
             }
         )
 
@@ -589,7 +989,7 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertEqual(bard.current_hp, 1.0)
         self.assertFalse(soldier.alive)
 
-    def test_pierce_requires_two_distinct_cells(self) -> None:
+    def test_pierce_requires_full_pattern_away_from_edge(self) -> None:
         battle = create_battle("fire_funeral", "bard")
         fire = battle.player_units(1)[0]
         fire.position = Position(4, 4)
@@ -600,12 +1000,31 @@ class BattleSmokeTests(unittest.TestCase):
                     "type": "skill",
                     "unit_id": fire.unit_id,
                     "skill_code": "pierce",
-                    "x": 5,
-                    "y": 4,
-                    "second_x": 5,
-                    "second_y": 4,
+                    "cells": [{"x": 5, "y": 4}],
                 }
             )
+
+    def test_pierce_allows_edge_truncated_line(self) -> None:
+        battle = create_battle("fire_funeral", "bard")
+        fire = battle.player_units(1)[0]
+        bard = battle.player_units(2)[0]
+        fire.position = Position(6, 4)
+        bard.position = Position(7, 4)
+        bard.max_health = 4.0
+        bard.current_hp = 4.0
+
+        battle.perform_action(
+            {
+                "type": "skill",
+                "unit_id": fire.unit_id,
+                "skill_code": "pierce",
+                "cells": [{"x": 7, "y": 4}],
+            }
+        )
+        if battle.pending_chain is not None:
+            battle.perform_action({"type": "chain_skip"})
+
+        self.assertLess(bard.current_hp, 4.0)
 
     def test_banished_hero_does_not_count_as_destroyed_for_victory(self) -> None:
         battle = create_battle("dark_human", "bard")
@@ -759,10 +1178,57 @@ class BattleSmokeTests(unittest.TestCase):
         dark.position = Position(1, 4)
         bard.position = Position(6, 4)
 
-        battle.perform_action({"type": "skill", "unit_id": dark.unit_id, "skill_code": "fly_leap", "x": 5, "y": 4})
+        battle.perform_action({"type": "skill", "unit_id": dark.unit_id, "skill_code": "fly_leap", "x": 4, "y": 4})
 
-        self.assertEqual(dark.position, Position(5, 4))
+        self.assertEqual(dark.position, Position(4, 4))
         self.assertIsNone(battle.pending_chain)
+
+    def test_fly_leap_requires_exactly_three_cells(self) -> None:
+        battle = create_battle("dark_human", "bard")
+        dark = battle.player_units(1)[0]
+        dark.position = Position(3, 3)
+
+        actions = {action["code"]: action for action in battle.action_snapshot_for(dark)["actions"]}
+        leap_cells = {(cell["x"], cell["y"]) for cell in actions["fly_leap"]["preview"]["cells"]}
+
+        self.assertIn((6, 3), leap_cells)
+        self.assertNotIn((5, 3), leap_cells)
+
+        with self.assertRaises(ActionError):
+            battle.perform_action({"type": "skill", "unit_id": dark.unit_id, "skill_code": "fly_leap", "x": 5, "y": 3})
+
+    def test_pending_chain_state_includes_source_effect_summary(self) -> None:
+        battle = create_battle("dark_human", "ellie")
+        dark = battle.player_units(1)[0]
+        ellie = battle.player_units(2)[0]
+        dark.position = Position(4, 4)
+        ellie.position = Position(5, 4)
+
+        battle.perform_action(
+            {"type": "skill", "unit_id": dark.unit_id, "skill_code": "paralyzing_glove", "target_unit_id": ellie.unit_id}
+        )
+
+        self.assertIsNotNone(battle.pending_chain)
+        pending_chain = battle.to_public_dict()["pending_chain"]
+        self.assertIn("【麻痹手套】", pending_chain["queued_action_effect_summary"])
+        self.assertIn("破魔", pending_chain["queued_action_effect_summary"])
+        self.assertIn("不能移动", pending_chain["queued_action_effect_summary"])
+        self.assertIn("艾莉", pending_chain["queued_action_effect_summary"])
+
+    def test_pending_chain_attack_summary_includes_attack_value(self) -> None:
+        battle = create_battle("dark_human", "ellie")
+        dark = battle.player_units(1)[0]
+        ellie = battle.player_units(2)[0]
+        dark.position = Position(4, 4)
+        ellie.position = Position(5, 4)
+
+        battle.perform_action({"type": "attack", "unit_id": dark.unit_id, "target_unit_id": ellie.unit_id})
+
+        self.assertIsNotNone(battle.pending_chain)
+        pending_chain = battle.to_public_dict()["pending_chain"]
+        self.assertIn("【普攻】", pending_chain["queued_action_effect_summary"])
+        self.assertIn("攻 3", pending_chain["queued_action_effect_summary"])
+        self.assertIn("艾莉", pending_chain["queued_action_effect_summary"])
 
     def test_all_non_special_shields_expire_at_end_of_turn(self) -> None:
         battle = create_battle("ellie", "bard")

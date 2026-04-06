@@ -12,7 +12,7 @@
         <div>
           <p class="eyebrow">Online Tactical Duel Prototype</p>
           <h1>武将</h1>
-          <p class="subline" id="topbar-subline">创建房间、复制邀请链接，让两位玩家分别进入同一房间后在线对战。</p>
+          <p class="subline" id="topbar-subline">创建房间、复制邀请链接,让两位玩家分别进入同一房间后在线对战。</p>
         </div>
         <div class="topbar-tools">
           <div id="profile-pill" class="turn-pill">昵称 · 未命名玩家</div>
@@ -29,7 +29,7 @@
           <div class="section-head">
             <div>
               <h2 id="lobby-title">在线房间</h2>
-              <p id="lobby-caption">先创建房间或输入房间码加入。进入房间后，每位玩家各自选择自己的武将，再开始对局。</p>
+              <p id="lobby-caption">先创建房间或输入房间码加入。进入房间后,每位玩家各自选择自己的武将,再开始对局。</p>
             </div>
             <div class="draft-head-actions">
               <button id="leave-room" class="ghost hidden">离开房间</button>
@@ -53,16 +53,16 @@
             <div class="room-home-grid">
               <section class="room-entry-card">
                 <h3>创建房间</h3>
-                <p>直接使用你当前设置好的昵称创建房间，并生成可分享给朋友的邀请链接。</p>
+                <p>直接使用你当前设置好的昵称创建房间,并生成可分享给朋友的邀请链接。</p>
                 <button id="create-room" class="primary">创建房间</button>
               </section>
 
               <section class="room-entry-card">
                 <h3>加入房间</h3>
-                <p>输入房间码后，直接以你当前设置好的昵称加入朋友已经创建好的房间。</p>
+                <p>输入房间码后,直接以你当前设置好的昵称加入朋友已经创建好的房间。</p>
                 <label>
                   <span>房间码</span>
-                  <input id="join-room-code" type="text" maxlength="6" placeholder="例如：A7K9Q2" />
+                  <input id="join-room-code" type="text" maxlength="6" placeholder="例如:A7K9Q2" />
                 </label>
                 <button id="join-room" class="primary">加入房间</button>
               </section>
@@ -74,14 +74,14 @@
             </div>
 
             <div class="draft-note">
-              当前联机测试版采用房间制与 HTTP 轮询同步。你把当前页面部署到 Windows 机器并开放端口后，朋友就能通过同一个房间链接进入并在线对战。
+              当前联机测试版采用房间制与 HTTP 轮询同步。你把当前页面部署到 Windows 机器并开放端口后,朋友就能通过同一个房间链接进入并在线对战。
             </div>
 
             <section class="room-directory">
               <div class="section-head room-directory-head">
                 <div>
                   <h3>已有房间</h3>
-                  <p>可直接加入正在等人的房间，或查看已经开战的房间。</p>
+                  <p>可直接加入正在等人的房间,或查看已经开战的房间。</p>
                 </div>
               </div>
               <div id="room-list" class="room-list"></div>
@@ -125,6 +125,7 @@
 
       <main id="battle-screen" class="screen battle-screen hidden">
         <section class="arena">
+          <section id="hover-card" class="hover-card is-empty" aria-live="polite"></section>
           <section class="board-wrap panel">
             <div class="section-head">
               <div>
@@ -137,19 +138,20 @@
               </div>
             </div>
             <div id="battle-effects" class="battle-effects"></div>
-            <div id="board-stage" class="board-stage">
-              <div id="board" class="board"></div>
-              <div id="action-wheel" class="action-wheel"></div>
-              <div id="hover-card" class="hover-card hidden"></div>
-              <div id="board-alert" class="board-alert hidden"></div>
-              <div id="game-over-overlay" class="game-over-overlay hidden">
-                <div class="game-over-card">
-                  <p class="eyebrow">Battle Over</p>
-                  <h3 id="game-over-title">游戏结束</h3>
-                  <p id="game-over-text">本局对战已经结束。</p>
-                  <div class="game-over-actions">
-                    <button id="game-over-rematch" class="primary">重新开始选将</button>
-                    <button id="game-over-back" class="ghost">返回房间大厅</button>
+            <div id="battle-stage-row" class="battle-stage-row">
+              <div id="board-stage" class="board-stage">
+                <div id="board" class="board"></div>
+                <div id="action-wheel" class="action-wheel"></div>
+                <div id="board-alert" class="board-alert hidden"></div>
+                <div id="game-over-overlay" class="game-over-overlay hidden">
+                  <div class="game-over-card">
+                    <p class="eyebrow">Battle Over</p>
+                    <h3 id="game-over-title">游戏结束</h3>
+                    <p id="game-over-text">本局对战已经结束。</p>
+                    <div class="game-over-actions">
+                      <button id="game-over-rematch" class="primary">重新开始选将</button>
+                      <button id="game-over-back" class="ghost">返回房间大厅</button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -158,6 +160,7 @@
               <div class="board-footer-actions">
                 <button id="surrender-battle" class="danger hidden">投降</button>
                 <button id="skip-chain" class="ghost hidden">放弃当前连锁</button>
+                <button id="complete-targeting" class="ghost hidden">完成选择</button>
                 <button id="cancel-targeting" class="ghost hidden">取消选择</button>
               </div>
               <button id="end-turn" class="primary">结束回合</button>
@@ -165,44 +168,59 @@
           </section>
 
           <aside class="sidebar">
-            <section class="panel log-panel">
-              <div class="section-head">
+            <section class="panel log-panel sidebar-panel" data-sidebar-panel="logs">
+              <div class="section-head sidebar-section-head">
                 <div>
                   <h2>战斗记录</h2>
                   <p>房间内双方的最新结算会固定显示在这里。</p>
                 </div>
+                <button type="button" class="ghost sidebar-toggle" data-sidebar-panel="logs" aria-expanded="false">展开</button>
               </div>
-              <div id="logs" class="logs"></div>
+              <div class="sidebar-content">
+                <div id="logs" class="logs"></div>
+              </div>
             </section>
 
-            <section class="panel info-panel">
-              <div class="section-head">
+            <section class="panel info-panel sidebar-panel" data-sidebar-panel="info">
+              <div class="section-head sidebar-section-head">
                 <div>
                   <h2>当前信息</h2>
                   <p id="message">尚未开始对局。</p>
                 </div>
+                <button type="button" class="ghost sidebar-toggle" data-sidebar-panel="info" aria-expanded="false">展开</button>
               </div>
-              <div id="selected-card" class="selected-card">点击棋子后，这里会显示该武将的数值、技能与状态。</div>
+              <div class="sidebar-content">
+                <div id="selected-card" class="selected-card">点击棋子后,这里会显示该武将的数值、技能与状态。</div>
+              </div>
             </section>
 
-            <section class="panel command-panel">
-              <div class="stack-block">
-                <div class="section-head">
-                  <div>
-                    <h2>行动队列</h2>
-                    <p>当前由你可操作的单位会显示在这里。</p>
-                  </div>
+            <section class="panel command-panel sidebar-panel" data-sidebar-panel="command">
+              <div class="section-head sidebar-section-head">
+                <div>
+                  <h2>行动与连锁</h2>
+                  <p>点击标题展开行动队列与连锁窗口。</p>
                 </div>
-                <div id="unit-strip" class="unit-strip"></div>
+                <button type="button" class="ghost sidebar-toggle" data-sidebar-panel="command" aria-expanded="true">收起</button>
               </div>
-              <div class="stack-block">
-                <div class="section-head">
-                  <div>
-                    <h2>连锁窗口</h2>
-                    <p id="chain-caption">当前没有待响应的连锁。</p>
+              <div class="sidebar-content">
+                <div class="stack-block">
+                  <div class="section-head">
+                    <div>
+                      <h2>行动队列</h2>
+                      <p>当前由你可操作的单位会显示在这里。</p>
+                    </div>
                   </div>
+                  <div id="unit-strip" class="unit-strip"></div>
                 </div>
-                <div id="chain-panel" class="chain-panel"></div>
+                <div class="stack-block">
+                  <div class="section-head">
+                    <div>
+                      <h2>连锁窗口</h2>
+                      <p id="chain-caption">当前没有待响应的连锁。</p>
+                    </div>
+                  </div>
+                  <div id="chain-panel" class="chain-panel"></div>
+                </div>
               </div>
             </section>
           </aside>
@@ -214,10 +232,10 @@
       <div class="profile-modal-card">
         <p class="eyebrow">Player Identity</p>
         <h2 id="profile-modal-title">先设置你的昵称</h2>
-        <p id="profile-modal-text">这个昵称会用于创建房间和加入房间。留空也可以，系统会自动给你默认昵称。</p>
+        <p id="profile-modal-text">这个昵称会用于创建房间和加入房间。留空也可以,系统会自动给你默认昵称。</p>
         <label>
           <span>昵称</span>
-          <input id="profile-name-input" type="text" maxlength="20" placeholder="例如：暗人玩家" />
+          <input id="profile-name-input" type="text" maxlength="20" placeholder="例如:暗人玩家" />
         </label>
         <div class="profile-modal-actions">
           <button id="profile-save" class="primary">进入大厅</button>

@@ -64,6 +64,18 @@ function Read-YesNo([string]$Prompt, [bool]$Default = $false) {
     return $raw.Trim().ToLowerInvariant().StartsWith("y")
 }
 
+function Copy-TextToClipboard([string]$Value, [string]$Label) {
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return
+    }
+    try {
+        Set-Clipboard -Value $Value -ErrorAction Stop
+        Write-Host "$Label copied to clipboard."
+    } catch {
+        Write-Warning "Could not copy ${Label} to the clipboard: $($_.Exception.Message)"
+    }
+}
+
 function Stop-RunningProcess([System.Diagnostics.Process]$Process, [string]$Label) {
     if (-not $Process) {
         return
@@ -339,10 +351,12 @@ if ($PublicBaseUrl) {
         Write-Host "Public temporary URL: $PublicBaseUrl/"
         Write-Host "Room invite links will use this public URL."
         Write-Host "This quick tunnel is for online testing and may change every time you restart."
+        Write-Host "If you reopen the launcher or cloudflared disconnects, old trycloudflare links will stop working and may show Cloudflare Error 1033."
     } else {
         Write-Host "Share homepage URL: $PublicBaseUrl/"
         Write-Host "Room invite links will use this address."
     }
+    Copy-TextToClipboard -Value "$PublicBaseUrl/" -Label "Share homepage URL"
 } elseif ($suggestedBaseUrl) {
     Write-Host "Suggested share homepage URL: $suggestedBaseUrl/"
 }

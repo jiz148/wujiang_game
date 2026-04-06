@@ -11,6 +11,7 @@ const state = {
   hoveredBoardCell: null,
   stagedPayload: null,
   screen: "draft",
+  sidebarExpanded: "command",
   roomForm: {
     createName: "",
     joinName: "",
@@ -107,6 +108,15 @@ function hoveredUnit() {
   return unitById(state.hoveredUnitId);
 }
 
+function effectiveSidebarPanel() {
+  if (isChainMode()) return "command";
+  return state.sidebarExpanded || "";
+}
+
+function toggleSidebarPanel(panel) {
+  state.sidebarExpanded = state.sidebarExpanded === panel ? "" : panel;
+}
+
 function activeOccupantAt(x, y) {
   return allUnits().find(
     (unit) => !unit.banished && unit.position && unit.position.x === x && unit.position.y === y,
@@ -125,6 +135,34 @@ function selectedUnit() {
 
 function stagedTarget() {
   return unitById(state.stagedPayload?.targetUnitId || "");
+}
+
+function normalizedCell(cell) {
+  if (!cell || cell.x == null || cell.y == null) return null;
+  return { x: Number(cell.x), y: Number(cell.y) };
+}
+
+function stagedBackstepRetreatCell(action = actionByCode(state.selectedActionCode)) {
+  if (!action || action.code !== "backstep_shot" || !isChainMode() || state.selectedActionCode !== action.code) {
+    return null;
+  }
+  return normalizedCell(state.stagedPayload?.retreatCell);
+}
+
+function setStagedBackstepRetreatCell(cell) {
+  const normalized = normalizedCell(cell);
+  state.stagedPayload = normalized ? { retreatCell: normalized } : null;
+}
+
+function backstepFollowUpTargetIds(action, retreatCell = stagedBackstepRetreatCell(action)) {
+  if (!action || action.code !== "backstep_shot" || !retreatCell) return [];
+  const mapping = action.preview?.follow_up_target_ids_by_cell || {};
+  const ids = mapping[positionKey(retreatCell)];
+  return Array.isArray(ids) ? ids : [];
+}
+
+function backstepSelectionCanComplete(action, retreatCell = stagedBackstepRetreatCell(action)) {
+  return Boolean(retreatCell) && backstepFollowUpTargetIds(action, retreatCell).length === 0;
 }
 
 function roomQueryId() {
@@ -480,7 +518,7 @@ function displayActions() {
       kind: "chain_skip",
       timing: "reaction",
       chain_speed: 0,
-      description: "放弃本次连锁，让原动作按原本声明继续结算。",
+      description: "放弃本次连锁,让原动作按原本声明继续结算。",
       preview: { cells: [], target_unit_ids: [], secondary_cells: [], requires_target: false },
       available: true,
     });
@@ -513,11 +551,21 @@ function targetIdsToSet(targets = []) {
   return new Set(targets);
 }
 
+function viewerOwnsUnit(unit) {
+  return Boolean(unit) && viewerPlayerId() !== null && unit.player_id === viewerPlayerId();
+}
+
+function actingSideCanSeeUnit(unit) {
+  const actor = selectedUnit();
+  return Boolean(unit)
+    && ((viewerOwnsUnit(unit)) || (viewerPlayerId() === null && actor && actor.player_id === unit.player_id));
+}
+
 function unitIsSelectableTarget(unit) {
   return Boolean(unit)
     && !unit.banished
     && !unit.cannot_be_targeted
-    && !unit.statuses.some((status) => status.name === "隐身");
+    && (!unit.statuses.some((status) => status.name === "隐身") || actingSideCanSeeUnit(unit));
 }
 
 function previewCellsForTargetIds(targetIds = []) {
@@ -547,9 +595,75 @@ function sameCell(left, right) {
   return Boolean(left && right) && left.x === right.x && left.y === right.y;
 }
 
-function stagedPierceCells() {
-  if (state.selectedActionCode !== "pierce") return [];
-  return Array.isArray(state.stagedPayload?.pierceCells) ? state.stagedPayload.pierceCells : [];
+function patternSelection(action) {
+  return action?.preview?.selection?.mode === "pattern_cells" ? action.preview.selection : null;
+}
+
+function normalizedPatternCells(cells = []) {
+  const normalized = [];
+  const seen = new Set();
+  cells.forEach((cell) => {
+    if (!cell || cell.x == null || cell.y == null) return;
+    const next = { x: Number(cell.x), y: Number(cell.y) };
+    const key = positionKey(next);
+    if (seen.has(key)) return;
+    seen.add(key);
+    normalized.push(next);
+  });
+  return normalized;
+}
+
+function selectionPatterns(action) {
+  const selection = patternSelection(action);
+  if (!selection) return [];
+  return (Array.isArray(selection.patterns) ? selection.patterns : [])
+    .map((pattern) => normalizedPatternCells(pattern))
+    .filter((pattern) => pattern.length);
+}
+
+function stagedPatternCells(action = actionByCode(state.selectedActionCode)) {
+  if (!action || state.selectedActionCode !== action.code || !patternSelection(action)) return [];
+  return normalizedPatternCells(Array.isArray(state.stagedPayload?.cells) ? state.stagedPayload.cells : []);
+}
+
+function setStagedPatternCells(cells) {
+  const normalized = normalizedPatternCells(cells);
+  state.stagedPayload = normalized.length ? { cells: normalized } : null;
+}
+
+function cellsMatchExactly(left = [], right = []) {
+  if (left.length !== right.length) return false;
+  const rightKeys = positionsToSet(right);
+  return left.every((cell) => rightKeys.has(positionKey(cell)));
+}
+
+function matchingSelectionPatterns(action, chosen = stagedPatternCells(action)) {
+  const patterns = selectionPatterns(action);
+  if (!chosen.length) return patterns;
+  return patterns.filter((pattern) => {
+    const patternKeys = positionsToSet(pattern);
+    return chosen.every((cell) => patternKeys.has(positionKey(cell)));
+  });
+}
+
+function nextPatternSelectionCells(action, chosen = stagedPatternCells(action)) {
+  const chosenKeys = positionsToSet(chosen);
+  const next = [];
+  const seen = new Set();
+  matchingSelectionPatterns(action, chosen).forEach((pattern) => {
+    pattern.forEach((cell) => {
+      const key = positionKey(cell);
+      if (chosenKeys.has(key) || seen.has(key)) return;
+      seen.add(key);
+      next.push(cell);
+    });
+  });
+  return next;
+}
+
+function patternSelectionCanComplete(action, chosen = stagedPatternCells(action)) {
+  if (!chosen.length) return false;
+  return matchingSelectionPatterns(action, chosen).some((pattern) => cellsMatchExactly(pattern, chosen));
 }
 
 function fieldEffectsByCell() {
@@ -569,6 +683,27 @@ function fieldEffectsByCell() {
 function fieldEffectMarker(effect) {
   const marker = String(effect?.board_marker || effect?.name || "").trim();
   return marker ? marker.slice(0, 2) : "场";
+}
+
+function actionManaLabel(action) {
+  if (action.kind !== "skill") return "";
+  return action.mana_cost > 0 ? `费 ${trimNumber(action.mana_cost)} 魔` : "不费魔";
+}
+
+function actionTierLabel(action) {
+  if (action.kind !== "skill") return "基础动作";
+  if (action.timing !== "active") return "被动技能";
+  if (action.max_uses_per_battle === 1) return "大招";
+  return "普通技能";
+}
+
+function actionLimitLabel(action) {
+  if (action.kind === "chain_skip") return "仅本次连锁";
+  if (action.kind !== "skill") {
+    return action.kind === "attack" ? "按本回合攻击次数上限" : "每回合一次";
+  }
+  if (action.max_uses_per_turn == null) return "每回合次数不限";
+  return `每回合最多 ${action.max_uses_per_turn} 次`;
 }
 
 function currentPreview() {
@@ -596,16 +731,32 @@ function currentPreview() {
     };
   }
 
+  if (isChainMode() && action?.code === "backstep_shot") {
+    const retreatCell = stagedBackstepRetreatCell(action);
+    if (!retreatCell) {
+      return {
+        cellKeys: positionsToSet(action.preview?.cells || []),
+        targetIds: new Set(),
+        secondaryCellKeys: positionsToSet(action.preview?.secondary_cells || []),
+      };
+    }
+    const targetIds = backstepFollowUpTargetIds(action, retreatCell)
+      .filter((id) => unitIsSelectableTarget(unitById(id)));
+    return {
+      cellKeys: positionsToSet(previewCellsForTargetIds(targetIds)),
+      targetIds: targetIdsToSet(targetIds),
+      secondaryCellKeys: positionsToSet([...(action.preview?.secondary_cells || []), retreatCell]),
+    };
+  }
+
   const filteredTargetIds = (action.preview?.target_unit_ids || []).filter((id) => unitIsSelectableTarget(unitById(id)));
-  if (action.code === "pierce") {
-    const chosenCells = stagedPierceCells();
-    const activeCells = (action.preview?.cells || []).filter(
-      (cell) => !chosenCells.some((picked) => sameCell(picked, cell)),
-    );
-    const targetIds = chosenCells.length ? unitIdsAtCells(chosenCells) : [];
+  if (patternSelection(action)) {
+    const chosenCells = stagedPatternCells(action);
+    const activeCells = chosenCells.length ? nextPatternSelectionCells(action, chosenCells) : (action.preview?.cells || []);
+    const focusCells = [...chosenCells, ...activeCells];
     return {
       cellKeys: positionsToSet(activeCells),
-      targetIds: targetIdsToSet(targetIds),
+      targetIds: targetIdsToSet(unitIdsAtCells(focusCells)),
       secondaryCellKeys: positionsToSet(chosenCells),
     };
   }
@@ -665,10 +816,19 @@ function hasCancelableTargetSelection() {
   return Boolean(action && actionNeedsTarget(action));
 }
 
+function canCompleteTargetSelection() {
+  if (!canInteract() || isRespawnMode()) return false;
+  const action = state.selectedActionCode ? actionByCode(state.selectedActionCode) : null;
+  if (action?.code === "backstep_shot" && isChainMode()) {
+    return backstepSelectionCanComplete(action);
+  }
+  return Boolean(action && patternSelection(action) && patternSelectionCanComplete(action));
+}
+
 function actionLabel(action) {
-  if (action.kind === "move") return "移";
-  if (action.kind === "attack") return "攻";
-  if (action.kind === "chain_skip") return "否";
+  if (action.kind === "move") return "\u79fb";
+  if (action.kind === "attack") return "\u653b";
+  if (action.kind === "chain_skip") return "\u5426";
   if (action.action_name) return action.action_name.length <= 2 ? action.action_name : action.action_name.slice(0, 2);
   return action.name.length <= 2 ? action.name : action.name.slice(0, 2);
 }
@@ -712,8 +872,8 @@ function renderProfilePanel() {
   if (pill) pill.textContent = `昵称 · ${displayName}`;
   if (note) {
     note.textContent = state.profileName
-      ? `当前会以“${displayName}”参与创建房间、输入房间码加入、以及从房间列表直接加入。`
-      : "当前使用自动昵称；你也可以随时修改一个更容易识别的名字。";
+      ? `当前会以"${displayName}"参与创建房间、输入房间码加入、以及从房间列表直接加入。`
+      : "当前使用自动昵称;你也可以随时修改一个更容易识别的名字。";
   }
   if (createButton) createButton.disabled = !state.profileReady;
   if (joinButton) joinButton.disabled = !state.profileReady || !String(joinCode?.value || "").trim();
@@ -731,8 +891,8 @@ function renderProfileModal() {
   input.value = state.profileDraftName;
   title.textContent = state.profileReady ? "修改昵称" : "先设置你的昵称";
   text.textContent = state.profileReady
-    ? "这个昵称会用于之后创建房间和加入房间。留空也可以，系统会继续使用自动昵称。"
-    : "这个昵称会用于创建房间和加入房间。留空也可以，系统会自动给你默认昵称。";
+    ? "这个昵称会用于之后创建房间和加入房间。留空也可以,系统会继续使用自动昵称。"
+    : "这个昵称会用于创建房间和加入房间。留空也可以,系统会自动给你默认昵称。";
   save.textContent = state.profileReady ? "保存昵称" : "进入大厅";
   if (visible && document.activeElement !== input) {
     window.requestAnimationFrame(() => input.focus());
@@ -834,8 +994,8 @@ function renderHeroCards() {
       <h3>${hero.name}</h3>
       <div class="meta">${hero.role} / ${hero.attribute} / ${hero.race} / 等级 ${hero.level}</div>
       <div class="meta">攻 ${hero.stats.attack} · 守 ${hero.stats.defense} · 速 ${hero.stats.speed} · 范 ${hero.stats.attack_range} · 魔 ${hero.stats.mana}</div>
-      <div class="text"><strong>技能：</strong>${hero.raw_skill_text}</div>
-      <div class="text"><strong>特性：</strong>${hero.raw_trait_text}</div>
+      <div class="text"><strong>技能:</strong>${hero.raw_skill_text}</div>
+      <div class="text"><strong>特性:</strong>${hero.raw_trait_text}</div>
     `;
     homeCards.append(homeCard);
 
@@ -846,9 +1006,9 @@ function renderHeroCards() {
       <h3>${hero.name}</h3>
       <div class="meta">${hero.role} / ${hero.attribute} / ${hero.race} / 等级 ${hero.level}</div>
       <div class="meta">攻 ${hero.stats.attack} · 守 ${hero.stats.defense} · 速 ${hero.stats.speed} · 范 ${hero.stats.attack_range} · 魔 ${hero.stats.mana}</div>
-      <div class="text"><strong>技能：</strong>${hero.raw_skill_text}</div>
-      <div class="text"><strong>特性：</strong>${hero.raw_trait_text}</div>
-      <div class="text"><strong>当前选择：</strong>${selectedBy || "尚无人选择"}</div>
+      <div class="text"><strong>技能:</strong>${hero.raw_skill_text}</div>
+      <div class="text"><strong>特性:</strong>${hero.raw_trait_text}</div>
+      <div class="text"><strong>当前选择:</strong>${selectedBy || "尚无人选择"}</div>
     `;
     const pickBtn = document.createElement("button");
     pickBtn.className = selectedHeroCode === hero.code ? "ghost" : "primary";
@@ -897,59 +1057,13 @@ function renderHeader() {
     const current = state.battle.pending_chain?.current_unit_id
       ? unitById(state.battle.pending_chain.current_unit_id)?.name
       : "响应方";
-    const sourceAction = state.battle.pending_chain?.queued_action?.display_name || "原动作";
+    const sourceSummary = chainQueuedActionPrompt(state.battle.pending_chain);
     pill.textContent = `房间 ${state.room.room_id} · 玩家 ${inputPlayer()} 连锁中`;
-    caption.textContent = `等待 ${current} 响应【${sourceAction}】。`;
+    caption.textContent = `等待 ${current} 响应 ${sourceSummary}`;
     return;
   }
   pill.textContent = `房间 ${state.room.room_id} · 第 ${state.battle.round_number} 轮 · 玩家 ${inputPlayer()} 行动`;
   caption.textContent = "点击己方棋子，在棋子周围选择动作。";
-}
-
-function renderHeader() {
-  const pill = $("turn-pill");
-  const topbarSubline = $("topbar-subline");
-  const caption = $("board-caption");
-  if (!hasRoom()) {
-    pill.textContent = "\u5c1a\u672a\u8fdb\u5165\u623f\u95f4";
-    topbarSubline.textContent = "\u521b\u5efa\u623f\u95f4\u3001\u590d\u5236\u9080\u8bf7\u94fe\u63a5\uff0c\u8ba9\u4e24\u4f4d\u73a9\u5bb6\u5206\u522b\u8fdb\u5165\u540c\u4e00\u623f\u95f4\u540e\u5728\u7ebf\u5bf9\u6218\u3002";
-    caption.textContent = "\u8bf7\u5148\u521b\u5efa\u623f\u95f4\u6216\u52a0\u5165\u623f\u95f4\u3002";
-    return;
-  }
-  if (!state.battle) {
-    pill.textContent = `\u623f\u95f4 ${state.room.room_id} \u00b7 ${state.room.status === "lobby" ? "\u5927\u5385\u4e2d" : "\u7b49\u5f85\u5f00\u5c40"}`;
-    topbarSubline.textContent = state.room.viewer_player_id
-      ? `\u4f60\u5f53\u524d\u662f\u73a9\u5bb6 ${state.room.viewer_player_id}\u3002\u5728\u5927\u5385\u91cc\u4e3a\u81ea\u5df1\u9009\u62e9\u6b66\u5c06\uff0c\u53cc\u65b9\u90fd\u9009\u597d\u540e\u5f00\u59cb\u5bf9\u5c40\u3002`
-      : "\u4f60\u5f53\u524d\u8fd8\u6ca1\u6709\u5360\u7528\u5e2d\u4f4d\u3002\u82e5\u623f\u95f4\u4ecd\u6709\u7a7a\u4f4d\uff0c\u8f93\u5165\u6635\u79f0\u540e\u5373\u53ef\u52a0\u5165\u3002";
-    caption.textContent = "\u5bf9\u5c40\u5c1a\u672a\u5f00\u59cb\uff0c\u8bf7\u5148\u5728\u623f\u95f4\u5927\u5385\u5b8c\u6210\u9009\u5c06\u3002";
-    return;
-  }
-  topbarSubline.textContent = state.room.viewer_player_id
-    ? `\u623f\u95f4 ${state.room.room_id} \u5728\u7ebf\u5bf9\u6218\u4e2d\u3002\u4f60\u5f53\u524d\u662f\u73a9\u5bb6 ${state.room.viewer_player_id}\u3002`
-    : `\u623f\u95f4 ${state.room.room_id} \u5728\u7ebf\u5bf9\u6218\u4e2d\u3002\u4f60\u5f53\u524d\u4ee5\u89c2\u6218\u89c6\u89d2\u67e5\u770b\u6b64\u623f\u95f4\u3002`;
-  if (isGameOver()) {
-    pill.textContent = `\u623f\u95f4 ${state.room.room_id} \u00b7 \u73a9\u5bb6 ${state.battle.winner} \u83b7\u80dc`;
-    caption.textContent = `\u73a9\u5bb6 ${state.battle.winner} \u5df2\u83b7\u80dc\uff0c\u6218\u573a\u5df2\u9501\u5b9a\u3002`;
-    return;
-  }
-  if (isRespawnMode()) {
-    const prompt = currentRespawnPrompt();
-    const unit = unitById(prompt?.unit_id || "");
-    pill.textContent = `\u623f\u95f4 ${state.room.room_id} \u00b7 \u73a9\u5bb6 ${inputPlayer()} \u91cd\u65b0\u51fa\u73b0\u4e2d`;
-    caption.textContent = `\u8bf7\u9009\u62e9 ${unit?.name || "\u6d88\u5931\u5355\u4f4d"} \u7684\u91cd\u65b0\u51fa\u73b0\u4f4d\u7f6e\u3002`;
-    return;
-  }
-  if (isChainMode()) {
-    const current = state.battle.pending_chain?.current_unit_id
-      ? unitById(state.battle.pending_chain.current_unit_id)?.name
-      : "\u54cd\u5e94\u65b9";
-    const sourceAction = state.battle.pending_chain?.queued_action?.display_name || "\u539f\u52a8\u4f5c";
-    pill.textContent = `\u623f\u95f4 ${state.room.room_id} \u00b7 \u73a9\u5bb6 ${inputPlayer()} \u8fde\u9501\u4e2d`;
-    caption.textContent = `\u7b49\u5f85 ${current} \u54cd\u5e94\u3010${sourceAction}\u3011\u3002`;
-    return;
-  }
-  pill.textContent = `\u623f\u95f4 ${state.room.room_id} \u00b7 \u7b2c ${state.battle.round_number} \u8f6e \u00b7 \u73a9\u5bb6 ${inputPlayer()} \u884c\u52a8`;
-  caption.textContent = "\u70b9\u51fb\u5df1\u65b9\u68cb\u5b50\uff0c\u5728\u68cb\u5b50\u5468\u56f4\u9009\u62e9\u52a8\u4f5c\u3002";
 }
 
 function renderBoardAlert() {
@@ -960,15 +1074,46 @@ function renderBoardAlert() {
     return;
   }
 
+  const action = actionByCode(state.selectedActionCode);
+
+  if (isChainMode() && action?.code === "backstep_shot") {
+    const retreatCell = stagedBackstepRetreatCell(action);
+    const targetIds = backstepFollowUpTargetIds(action, retreatCell)
+      .map((id) => unitById(id))
+      .filter((unit) => unitIsSelectableTarget(unit));
+    node.className = "board-alert is-step";
+    if (!retreatCell) {
+      node.innerHTML = `
+        <strong>撤步射击</strong>
+        <span>先点击一个直线 2 格的撤步落点；落点确认后，再从可攻击到的敌方目标里选择这次反击对象。</span>
+      `;
+      return;
+    }
+    if (!targetIds.length) {
+      node.innerHTML = `
+        <strong>撤步射击</strong>
+        <span>已选定撤步落点。这个位置当前没有可反击的敌人，可以点击“完成选择”只执行撤步，或重新选择落点。</span>
+      `;
+      return;
+    }
+    node.innerHTML = `
+      <strong>撤步射击</strong>
+      <span>已选定撤步落点。请点击蓝色高亮的敌方单位，决定撤步后的反击对象。</span>
+    `;
+    return;
+  }
+
   if (isChainMode()) {
     const chain = state.battle.pending_chain;
     const reactor = unitById(chain?.current_unit_id || "");
     const source = unitById(chain?.queued_action?.actor_id || "");
+    const sourceSummary = chainQueuedActionSummary(chain);
     node.className = "board-alert is-chain";
     node.innerHTML = `
       <strong>对方可连锁</strong>
       <span>${reactor?.name || "响应单位"} 正在决定是否对 ${source?.name || "来源单位"} 的【${chain?.queued_action?.display_name || "动作"}】进行连锁。</span>
     `;
+    node.innerHTML += `<span class="board-alert-detail">${sourceSummary}</span>`;
     return;
   }
 
@@ -983,12 +1128,11 @@ function renderBoardAlert() {
     return;
   }
 
-  const action = actionByCode(state.selectedActionCode);
   if (action?.code === "mana_pull" && !state.stagedPayload?.targetUnitId) {
     node.className = "board-alert is-step";
     node.innerHTML = `
       <strong>魔力牵引</strong>
-      <span>先点击被牵引的单位，再点击 1 到 3 格直线落点。</span>
+      <span>先点击被牵引的单位,再点击 1 到 3 格直线落点。</span>
     `;
     return;
   }
@@ -998,24 +1142,25 @@ function renderBoardAlert() {
     node.className = "board-alert is-step";
     node.innerHTML = `
       <strong>魔力牵引</strong>
-      <span>已选中 ${target?.name || "目标"}，请点击其 1 到 3 格的直线落点。</span>
+      <span>已选中 ${target?.name || "目标"},请点击其 1 到 3 格的直线落点。</span>
     `;
     return;
   }
 
-  if (action?.code === "pierce") {
-    const chosenCells = stagedPierceCells();
+  if (action && patternSelection(action)) {
+    const chosenCells = stagedPatternCells(action);
+    const canComplete = patternSelectionCanComplete(action, chosenCells);
     node.className = "board-alert is-step";
     if (!chosenCells.length) {
       node.innerHTML = `
-        <strong>穿刺</strong>
-        <span>请先点击第 1 个要被穿刺的格子。</span>
+        <strong>${actionTitle(action)}</strong>
+        <span>请依次点击要覆盖的格子；若贴着边界导致剩余格子本应落在棋盘外，可以直接点“完成选择”，也可以随时取消。</span>
       `;
       return;
     }
     node.innerHTML = `
-      <strong>穿刺</strong>
-      <span>已选中第 1 格 (${chosenCells[0].x}, ${chosenCells[0].y})，请再点击第 2 个不同的格子。</span>
+      <strong>${actionTitle(action)}</strong>
+      <span>已选 ${chosenCells.length} 格。${canComplete ? "当前已经可以点击“完成选择”结算；若还想扩大到同一合法区域，可继续点蓝色高亮格子。" : "请继续点击蓝色高亮的剩余格子。"} 点击已选格子可撤回该格。</span>
     `;
     return;
   }
@@ -1101,23 +1246,24 @@ function renderBoard() {
           const marker = document.createElement("span");
           marker.className = "cell-effect-tag";
           marker.textContent = fieldEffectMarker(effect);
-          marker.title = effect.description ? `${effect.name}：${effect.description}` : effect.name;
+          marker.title = effect.description ? `${effect.name}:${effect.description}` : effect.name;
           markerStack.append(marker);
         });
         cell.append(markerStack);
       }
 
       if (occupant && !occupant.banished) {
+        const isStealthed = occupant.statuses.some((status) => status.name === "隐身");
         const piece = document.createElement("div");
-        piece.className = `piece player-${occupant.player_id}`;
+        piece.className = `piece player-${occupant.player_id} ${isStealthed ? "is-stealthed" : ""}`;
         piece.style.setProperty("--hp-angle", `${hpRatio(occupant) * 360}deg`);
         piece.innerHTML = `
-          <div class="piece-ring">
+          <div class="piece-ring ${isStealthed ? "is-stealthed" : ""}">
             <div class="piece-core">
               <div class="piece-name">${occupant.name}</div>
             </div>
           </div>
-          <div class="${manaDisplayClass(occupant)}" aria-label="魔力 ${trimNumber(occupant.mana)} / ${trimNumber(occupant.base_stats?.mana || occupant.stats?.mana || occupant.mana)}">
+          <div class="${manaDisplayClass(occupant)}" aria-label="魔力 ${trimNumber(occupant.mana)} / ${trimNumber(occupant.max_mana || occupant.base_stats?.mana || occupant.stats?.max_mana || occupant.stats?.mana || occupant.mana)}">
             ${manaPipsMarkup(occupant)}
           </div>
         `;
@@ -1197,36 +1343,45 @@ function renderActionWheel() {
   });
 }
 
-function positionHoverCard(card) {
-  if (!state.hoverPointer) return;
-  const gap = 18;
-  const maxLeft = window.innerWidth - card.offsetWidth - 12;
-  const maxTop = window.innerHeight - card.offsetHeight - 12;
-  const left = Math.min(maxLeft, state.hoverPointer.x + gap);
-  const top = Math.min(maxTop, state.hoverPointer.y + gap);
-  card.style.left = `${Math.max(12, left)}px`;
-  card.style.top = `${Math.max(12, top)}px`;
-}
-
 function renderUnitHoverCard(unit) {
   const statuses = unitStatusSummary(unit).join(" · ") || "无";
   const traits = unit.traits.map((trait) => trait.name).join(" · ") || "无";
   return `
+    <div class="hover-card-tag">悬浮信息</div>
     <strong>${unit.name}</strong>
     <p>${unit.role} · ${unit.attribute} / ${unit.race} · 玩家 ${unit.player_id}</p>
-    <p>血 ${trimNumber(unit.hp)} / ${trimNumber(unit.max_hp)} · 魔 ${trimNumber(unit.mana)} / ${trimNumber(unit.base_stats?.mana || unit.stats?.mana || unit.mana)}</p>
+    <p>血 ${trimNumber(unit.hp)} / ${trimNumber(unit.max_hp)} · 魔 ${trimNumber(unit.mana)} / ${trimNumber(unit.max_mana || unit.base_stats?.mana || unit.stats?.max_mana || unit.stats?.mana || unit.mana)} · 魔力点 ${trimNumber(unit.mana_points || unit.stats?.mana_points || 0)}</p>
     <p>盾 ${unit.total_shields} · 闪 ${unit.dodge_charges} · 攻 ${trimNumber(unit.stats.attack)} / 守 ${trimNumber(unit.stats.defense)}</p>
-    <p>状态：${statuses}</p>
-    <p>特性：${traits}</p>
+    <p>状态:${statuses}</p>
+    <p>特性:${traits}</p>
   `;
 }
 
 function renderActionHoverCard(action) {
   return `
+    <div class="hover-card-tag">悬浮说明</div>
     <strong>${actionTitle(action)}</strong>
     <p>${action.description}</p>
-    <p>${actionTimingLabel(action)} · ${actionNeedsTarget(action) ? "需要选取目标" : "无需额外目标"}</p>
+    <p>${actionTierLabel(action)} · ${actionTimingLabel(action)} · ${actionManaLabel(action) || "不消耗魔力"}</p>
+    <p>${actionLimitLabel(action)} · ${actionNeedsTarget(action) ? "需要选取目标" : "无需额外目标"}</p>
   `;
+}
+
+function chainQueuedActionSummary(chain) {
+  return chain?.queued_action_effect_summary || chain?.queued_action?.description || "\u539f\u52a8\u4f5c\u5c06\u6309\u539f\u58f0\u660e\u7ee7\u7eed\u7ed3\u7b97\u3002";
+}
+
+function chainQueuedActionPrompt(chain) {
+  const summary = chainQueuedActionSummary(chain);
+  if (summary && summary.startsWith("\u3010")) return summary;
+  const actionName = chain?.queued_action?.display_name || "\u539f\u52a8\u4f5c";
+  return `\u3010${actionName}\u3011\uff1a${summary}`;
+}
+
+function chainOptionSummary(options = []) {
+  return options
+    .map((action) => `${action.action_name}\uff08\u901f\u5ea6${action.chain_speed}\uff1a${action.description}\uff09`)
+    .join(" / ");
 }
 
 function renderHoverCard() {
@@ -1234,13 +1389,28 @@ function renderHoverCard() {
   const unit = hoveredUnit();
   const action = !unit ? actionByCode(state.hoveredActionCode) : null;
   if ((!unit && !action) || !state.battle || state.screen !== "battle") {
-    card.classList.add("hidden");
+    card.classList.add("is-empty");
     card.innerHTML = "";
     return;
   }
-  card.classList.remove("hidden");
+  card.classList.remove("is-empty");
   card.innerHTML = unit ? renderUnitHoverCard(unit) : renderActionHoverCard(action);
-  positionHoverCard(card);
+}
+
+function renderSidebarPanels() {
+  const expanded = effectiveSidebarPanel();
+  document.querySelectorAll(".sidebar-panel").forEach((panel) => {
+    const panelCode = panel.dataset.sidebarPanel || "";
+    const open = panelCode === expanded;
+    panel.classList.toggle("is-open", open);
+    panel.classList.toggle("is-collapsed", !open);
+  });
+  document.querySelectorAll(".sidebar-toggle").forEach((button) => {
+    const panelCode = button.dataset.sidebarPanel || "";
+    const open = panelCode === expanded;
+    button.setAttribute("aria-expanded", open ? "true" : "false");
+    button.textContent = open ? "收起" : "展开";
+  });
 }
 
 function renderSelectedCard() {
@@ -1248,25 +1418,25 @@ function renderSelectedCard() {
   const unit = selectedUnit();
   if (!unit) {
     panel.textContent = isGameOver()
-      ? `玩家 ${state.battle?.winner || ""} 已获胜，战场操作已锁定。`
-      : "点击棋子后，这里会显示该武将的数值、技能与状态。";
+      ? `玩家 ${state.battle?.winner || ""} 已获胜,战场操作已锁定。`
+      : "点击棋子后,这里会显示该武将的数值、技能与状态。";
     return;
   }
   const statusEntries = unit.statuses.map((status) => `${status.name}${status.duration ? `(${status.duration})` : ""}`);
   if (unit.banished) {
     statusEntries.unshift(`消失${unit.banish_turns_remaining > 0 ? `(${unit.banish_turns_remaining})` : ""}`);
   }
-  const statuses = statusEntries.join("，") || "无";
-  const traits = unit.traits.map((trait) => trait.name).join("，") || "无";
+  const statuses = statusEntries.join(",") || "无";
+  const traits = unit.traits.map((trait) => trait.name).join(",") || "无";
   panel.innerHTML = `
     <strong>${unit.name}</strong>
     <div class="statline">玩家 ${unit.player_id} · ${unit.role} / ${unit.attribute} / ${unit.race} / 等级 ${unit.level}</div>
-    <div class="statline">攻 ${trimNumber(unit.stats.attack)} · 守 ${trimNumber(unit.stats.defense)} · 速 ${trimNumber(unit.stats.speed)} · 范 ${trimNumber(unit.stats.attack_range)} · 魔 ${trimNumber(unit.mana)}</div>
+    <div class="statline">攻 ${trimNumber(unit.stats.attack)} · 守 ${trimNumber(unit.stats.defense)} · 速 ${trimNumber(unit.stats.speed)} · 范 ${trimNumber(unit.stats.attack_range)} · 魔 ${trimNumber(unit.mana)} · 魔力点 ${trimNumber(unit.mana_points || unit.stats?.mana_points || 0)}</div>
     <div class="statline">血 ${trimNumber(unit.hp)} / ${trimNumber(unit.max_hp)} · 固定护盾 ${unit.shields} · 临时护盾 ${unit.temporary_shields} · 闪避 ${unit.dodge_charges}</div>
-    <div class="statline"><strong>状态：</strong>${statuses}</div>
-    <div class="statline"><strong>特性：</strong>${traits}</div>
-    <div class="statline"><strong>原始技能：</strong>${unit.raw_skill_text}</div>
-    <div class="statline"><strong>原始特性：</strong>${unit.raw_trait_text}</div>
+    <div class="statline"><strong>状态:</strong>${statuses}</div>
+    <div class="statline"><strong>特性:</strong>${traits}</div>
+    <div class="statline"><strong>原始技能:</strong>${unit.raw_skill_text}</div>
+    <div class="statline"><strong>原始特性:</strong>${unit.raw_trait_text}</div>
   `;
 }
 
@@ -1287,7 +1457,7 @@ function renderRoomPanels() {
 
   if (!hasRoom()) {
     title.textContent = "在线房间";
-    caption.textContent = "先创建房间或输入房间码加入。进入房间后，每位玩家各自选择自己的武将，再开始对局。";
+    caption.textContent = "先创建房间或输入房间码加入。进入房间后,每位玩家各自选择自己的武将,再开始对局。";
     copyInvite.classList.add("hidden");
     roomBattle.classList.add("hidden");
     startRoom.classList.add("hidden");
@@ -1296,7 +1466,7 @@ function renderRoomPanels() {
 
   if (!showLobby) {
     title.textContent = `加入房间 ${state.room.room_id}`;
-    caption.textContent = "这个房间仍在等待玩家占位。输入昵称后点击加入房间，即可进入房间大厅开始选将。";
+    caption.textContent = "这个房间仍在等待玩家占位。输入昵称后点击加入房间,即可进入房间大厅开始选将。";
     copyInvite.classList.remove("hidden");
     roomBattle.classList.toggle("hidden", !hasBattle());
     startRoom.classList.add("hidden");
@@ -1305,8 +1475,8 @@ function renderRoomPanels() {
 
   title.textContent = `房间 ${state.room.room_id}`;
   caption.textContent = hasBattle()
-    ? "对局已经开始。你可以返回战场继续测试，或留在这里查看房间信息。"
-    : "双方玩家在这里各自选择自己的武将，准备完成后开始对局。";
+    ? "对局已经开始。你可以返回战场继续测试,或留在这里查看房间信息。"
+    : "双方玩家在这里各自选择自己的武将,准备完成后开始对局。";
 
   $("room-code-label").textContent = state.room.room_id;
   $("room-status-label").textContent = state.room.status === "lobby"
@@ -1330,17 +1500,17 @@ function renderRoomPanels() {
   if (hasBattle()) {
     roomMessage.textContent = isGameOver()
       ? `房间 ${state.room.room_id} 的本局对战已经结束。你可以进入战场查看终局盘面。`
-      : `房间 ${state.room.room_id} 的对局正在进行中。点击“进入战场”即可查看并继续操作。`;
+      : `房间 ${state.room.room_id} 的对局正在进行中。点击"进入战场"即可查看并继续操作。`;
   } else if (state.room.viewer_player_id === null) {
     roomMessage.textContent = state.room.is_full
-      ? "这个房间已经满员。你当前可以观战，但不能代替其中任意一位玩家操作。"
-      : "这个房间还有空位。若你是受邀玩家，请在首页的加入房间区域输入昵称并加入。";
+      ? "这个房间已经满员。你当前可以观战,但不能代替其中任意一位玩家操作。"
+      : "这个房间还有空位。若你是受邀玩家,请在首页的加入房间区域输入昵称并加入。";
   } else if (!currentRoomSeat()?.hero_code) {
-    roomMessage.textContent = `你当前是玩家 ${state.room.viewer_player_id}，请从下方选择自己的武将。`;
+    roomMessage.textContent = `你当前是玩家 ${state.room.viewer_player_id},请从下方选择自己的武将。`;
   } else if (!state.room.can_start) {
-    roomMessage.textContent = "你已经选好了武将，正在等待另一位玩家加入或完成选将。";
+    roomMessage.textContent = "你已经选好了武将,正在等待另一位玩家加入或完成选将。";
   } else {
-    roomMessage.textContent = "双方都已就绪，可以开始这场联机测试对局。";
+    roomMessage.textContent = "双方都已就绪,可以开始这场联机测试对局。";
   }
 
   const seatCards = $("seat-cards");
@@ -1356,152 +1526,11 @@ function renderRoomPanels() {
         </div>
         <span class="seat-badge">${seat.is_host ? "房主" : "席位"}</span>
       </div>
-      <div class="seat-hero"><strong>当前武将：</strong>${seat.hero_name || "未选择"}</div>
+      <div class="seat-hero"><strong>当前武将:</strong>${seat.hero_name || "未选择"}</div>
       <div class="seat-note">${seat.occupied ? "已进入房间" : "等待朋友加入该席位"}</div>
     `;
     seatCards.append(card);
   });
-}
-
-function renderRoomList() {
-  const list = $("room-list");
-  if (!list) return;
-  list.innerHTML = "";
-  if (!roomSummaries().length) {
-    const empty = document.createElement("div");
-    empty.className = "room-list-empty";
-    empty.textContent = "当前还没有公开房间。你可以先创建一间，或者稍后等朋友建好房间后直接在这里加入。";
-    list.append(empty);
-    return;
-  }
-
-  roomSummaries().forEach((room) => {
-    const remembered = loadStoredIdentity(room.room_id);
-    const seatSummary = (room.seats || [])
-      .map((seat) => `玩家 ${seat.player_id}：${seat.name || "空位"}${seat.hero_name ? ` · ${seat.hero_name}` : ""}`)
-      .join(" / ");
-    const card = document.createElement("article");
-    card.className = "room-list-card";
-    card.innerHTML = `
-      <div class="room-list-head">
-        <strong>房间 ${room.room_id}</strong>
-        <span class="room-list-state ${roomStateClass(room)}">${roomStateLabel(room)}</span>
-      </div>
-      <div class="room-list-meta">席位 ${room.occupied_seat_count}/${room.seat_count} · ${room.status === "lobby" ? "等待玩家就绪" : "正在进行或已结束"}</div>
-      <div class="room-list-seats">${seatSummary}</div>
-      <div class="room-list-note">${remembered.token ? "这个浏览器之前进过该房间，可直接返回继续。" : "若要直接加入，请先在上方输入你的昵称。"} </div>
-    `;
-    const actions = document.createElement("div");
-    actions.className = "room-list-actions";
-    const primary = document.createElement("button");
-    primary.className = room.can_join ? "primary" : "ghost";
-    primary.textContent = remembered.token ? "返回房间" : (room.can_join ? "加入房间" : "查看房间");
-    primary.addEventListener("click", () => {
-      if (remembered.token) {
-        openListedRoom(room.room_id);
-        return;
-      }
-      if (room.can_join) {
-        joinListedRoom(room.room_id);
-        return;
-      }
-      openListedRoom(room.room_id);
-    });
-    actions.append(primary);
-    if (!remembered.token && room.can_join) {
-      const fillBtn = document.createElement("button");
-      fillBtn.className = "ghost";
-      fillBtn.textContent = "填入房间码";
-      fillBtn.addEventListener("click", () => {
-        state.roomForm.joinRoomCode = room.room_id;
-        $("join-room-code").value = room.room_id;
-        $("lobby-caption").textContent = `已填入房间 ${room.room_id}。输入昵称后即可加入。`;
-      });
-      actions.append(fillBtn);
-    }
-    card.append(actions);
-    list.append(card);
-  });
-}
-
-function renderRoomList() {
-  const list = $("room-list");
-  if (!list) return;
-  list.innerHTML = "";
-  if (!roomSummaries().length) {
-    const empty = document.createElement("div");
-    empty.className = "room-list-empty";
-    empty.textContent = "当前还没有公开房间。你可以先创建一间，或者稍后等朋友建好房间后直接在这里加入。";
-    list.append(empty);
-    return;
-  }
-
-  roomSummaries().forEach((room) => {
-    const remembered = loadStoredIdentity(room.room_id);
-    const seatSummary = (room.seats || [])
-      .map((seat) => `玩家 ${seat.player_id}：${seat.name || "空位"}${seat.hero_name ? ` · ${seat.hero_name}` : ""}`)
-      .join(" / ");
-    const card = document.createElement("article");
-    card.className = "room-list-card";
-    card.innerHTML = `
-      <div class="room-list-head">
-        <strong>房间 ${room.room_id}</strong>
-        <span class="room-list-state ${roomStateClass(room)}">${roomStateLabel(room)}</span>
-      </div>
-      <div class="room-list-meta">席位 ${room.occupied_seat_count}/${room.seat_count} · ${room.status === "lobby" ? "等待玩家就绪" : "正在进行或已结束"}</div>
-      <div class="room-list-seats">${seatSummary}</div>
-      <div class="room-list-note">${remembered.token ? "这个浏览器之前进入过该房间。若你要继续原来的席位，请点“继续原身份”；若你要作为另一位玩家进入，请输入新昵称后点“加入房间”。" : "若要直接加入，请先在上方输入你的昵称。"} </div>
-    `;
-
-    const actions = document.createElement("div");
-    actions.className = "room-list-actions";
-
-    const primary = document.createElement("button");
-    primary.className = room.can_join ? "primary" : "ghost";
-    primary.textContent = room.can_join ? "加入房间" : "查看房间";
-    primary.addEventListener("click", () => {
-      if (room.can_join) {
-        joinListedRoom(room.room_id);
-        return;
-      }
-      openListedRoom(room.room_id);
-    });
-    actions.append(primary);
-
-    if (remembered.token) {
-      const resumeBtn = document.createElement("button");
-      resumeBtn.className = "ghost";
-      resumeBtn.textContent = "继续原身份";
-      resumeBtn.addEventListener("click", () => resumeStoredSeat(room.room_id));
-      actions.append(resumeBtn);
-    }
-
-    if (!remembered.token && room.can_join) {
-      const fillBtn = document.createElement("button");
-      fillBtn.className = "ghost";
-      fillBtn.textContent = "填入房间码";
-      fillBtn.addEventListener("click", () => {
-        state.roomForm.joinRoomCode = room.room_id;
-        $("join-room-code").value = room.room_id;
-        $("lobby-caption").textContent = `已填入房间 ${room.room_id}。输入昵称后即可加入。`;
-      });
-      actions.append(fillBtn);
-    }
-
-    card.append(actions);
-    list.append(card);
-  });
-}
-
-function renderResumePanel() {
-  const panel = $("resume-room-panel");
-  const text = $("resume-room-text");
-  if (!panel || !text) return;
-  const identity = storedIdentityForCurrentRoom();
-  const visible = Boolean(roomQueryId() && identity.token && !viewerPlayerId() && !state.playerToken);
-  panel.classList.toggle("hidden", !visible);
-  if (!visible) return;
-  text.textContent = `检测到这个浏览器之前曾以“${identity.name || "未命名玩家"}”进入当前房间。你可以直接继续原来的席位，或者输入新昵称作为另一位玩家加入。`;
 }
 
 function renderRoomList() {
@@ -1708,7 +1737,7 @@ function renderUnitStrip() {
   if (isGameOver()) {
     const item = document.createElement("div");
     item.className = "queue-item";
-    item.innerHTML = "<strong>对局已结束</strong><p>所有行动已锁定，可返回选将重新开始。</p>";
+    item.innerHTML = "<strong>对局已结束</strong><p>所有行动已锁定,可返回选将重新开始。</p>";
     strip.append(item);
     return;
   }
@@ -1726,6 +1755,7 @@ function renderUnitStrip() {
     btn.addEventListener("click", () => {
       if (!canInteract()) return;
       state.selectedUnitId = unit.id;
+      state.sidebarExpanded = "info";
       clearActionSelection();
       render();
     });
@@ -1739,7 +1769,7 @@ function renderChainPanel() {
   const skipBtn = $("skip-chain");
   panel.innerHTML = "";
   if (isGameOver()) {
-    caption.textContent = "对局已结束，无法再进行连锁。";
+    caption.textContent = "对局已结束,无法再进行连锁。";
     skipBtn.classList.add("hidden");
     return;
   }
@@ -1760,7 +1790,8 @@ function renderChainPanel() {
   const sourceUnit = unitById(chain.queued_action.actor_id);
   const currentReactor = unitById(chain.current_unit_id);
   const currentOptions = bundleFor(chain.current_unit_id)?.reactions.actions || [];
-  caption.textContent = `原动作：${sourceUnit?.name || "未知单位"} 的 ${chain.queued_action.display_name}`;
+  const sourceSummary = chainQueuedActionPrompt(chain);
+  caption.textContent = `\u539f\u52a8\u4f5c\uff1a${sourceUnit?.name || "\u672a\u77e5\u5355\u4f4d"} \u7684 ${sourceSummary}`;
   skipBtn.classList.remove("hidden");
 
   const sourceItem = document.createElement("div");
@@ -1769,14 +1800,15 @@ function renderChainPanel() {
     <strong>${sourceUnit?.name || "未知单位"} · ${chain.queued_action.display_name}</strong>
     <p>速度 ${chain.queued_action.speed}。当前等待 ${currentReactor?.name || "响应方"} 选择连锁动作。</p>
   `;
+  sourceItem.innerHTML += `<p class="queue-detail">${sourceSummary}</p>`;
   panel.append(sourceItem);
 
   if (currentOptions.length) {
     const optionsItem = document.createElement("div");
     optionsItem.className = "queue-item current-options";
     optionsItem.innerHTML = `
-      <strong>${currentReactor?.name || "当前单位"} 可用连锁</strong>
-      <p>${currentOptions.map((action) => `${action.action_name}（速度${action.chain_speed}）`).join(" / ")} / 不连锁</p>
+      <strong>${currentReactor?.name || "\u5f53\u524d\u5355\u4f4d"} \u53ef\u7528\u8fde\u9501</strong>
+      <p>${chainOptionSummary(currentOptions)} / \u4e0d\u8fde\u9501</p>
     `;
     panel.append(optionsItem);
   }
@@ -1814,7 +1846,7 @@ function renderGameOverOverlay() {
     return;
   }
   title.textContent = "游戏结束";
-  text.textContent = `玩家 ${state.battle.winner} 已获胜。战场上的行动与连锁都已锁定。你可以回到房间大厅，或者直接重新开始选将。`;
+  text.textContent = `玩家 ${state.battle.winner} 已获胜。战场上的行动与连锁都已锁定。你可以回到房间大厅,或者直接重新开始选将。`;
   if (rematch) {
     rematch.disabled = !Boolean(state.room?.can_rematch && state.room?.viewer_player_id !== null);
   }
@@ -1837,15 +1869,15 @@ function renderRoomActionButtons() {
 function renderMessage() {
   const node = $("message");
   if (!state.battle) {
-    node.textContent = hasRoom() ? "房间已建立，但对局还没开始。" : "尚未进入房间。";
+    node.textContent = hasRoom() ? "房间已建立,但对局还没开始。" : "尚未进入房间。";
     return;
   }
   if (isGameOver()) {
-    node.textContent = `玩家 ${state.battle.winner} 已获胜。战场已锁定，可回到房间大厅查看本局房间。`;
+    node.textContent = `玩家 ${state.battle.winner} 已获胜。战场已锁定,可回到房间大厅查看本局房间。`;
     return;
   }
   if (!canInteract()) {
-    node.textContent = `当前轮到玩家 ${inputPlayer()} 操作。你可以继续观察战场，等待对手行动完成。`;
+    node.textContent = `当前轮到玩家 ${inputPlayer()} 操作。你可以继续观察战场,等待对手行动完成。`;
     return;
   }
   if (isRespawnMode()) {
@@ -1855,18 +1887,18 @@ function renderMessage() {
     return;
   }
   if (state.selectedActionCode === "mana_pull" && !state.stagedPayload?.targetUnitId) {
-    node.textContent = "魔力牵引分两步：先选单位，再选落点。";
+    node.textContent = "魔力牵引分两步:先选单位,再选落点。";
     return;
   }
   if (state.stagedPayload?.targetUnitId && state.selectedActionCode === "mana_pull") {
-    node.textContent = `已选中 ${stagedTarget()?.name || "被牵引目标"}，请点击蓝色高亮落点。`;
+    node.textContent = `已选中 ${stagedTarget()?.name || "被牵引目标"},请点击蓝色高亮落点。`;
     return;
   }
   if (isChainMode()) {
     const current = unitById(state.battle.pending_chain?.current_unit_id || "");
     const source = unitById(state.battle.pending_chain?.queued_action?.actor_id || "");
     const actionName = state.battle.pending_chain?.queued_action?.display_name || "原动作";
-    node.textContent = `${current?.name || "当前单位"} 可以对 ${source?.name || "对方单位"} 的【${actionName}】进行连锁，点击其周围动作按钮或放弃连锁。`;
+    node.textContent = `${current?.name || "当前单位"} 可以对 ${source?.name || "对方单位"} 的【${actionName}】进行连锁,点击其周围动作按钮或放弃连锁。`;
     return;
   }
   const action = actionByCode(state.selectedActionCode);
@@ -1880,6 +1912,14 @@ function renderMessage() {
 function renderTargetCancelButton() {
   const btn = $("cancel-targeting");
   const visible = hasCancelableTargetSelection();
+  btn.classList.toggle("hidden", !visible);
+  btn.disabled = !visible;
+}
+
+function renderTargetCompleteButton() {
+  const btn = $("complete-targeting");
+  if (!btn) return;
+  const visible = canCompleteTargetSelection();
   btn.classList.toggle("hidden", !visible);
   btn.disabled = !visible;
 }
@@ -1904,6 +1944,7 @@ function render() {
   renderBoardAlert();
   renderActionWheel();
   renderHoverCard();
+  renderSidebarPanels();
   renderSelectedCard();
   renderUnitStrip();
   renderChainPanel();
@@ -1911,6 +1952,7 @@ function render() {
   renderGameOverOverlay();
   renderRoomActionButtons();
   renderTargetCancelButton();
+  renderTargetCompleteButton();
   $("end-turn").disabled = !canInteract() || isChainMode() || isRespawnMode();
   $("skip-chain").disabled = !canInteract() || !isChainMode();
 }
@@ -2047,7 +2089,7 @@ function joinListedRoom(roomId) {
 function resumeStoredSeat(roomId = roomQueryId()) {
   const identity = loadStoredIdentity(roomId);
   if (!identity.token) {
-    $("lobby-caption").textContent = "这个房间没有可继续的旧身份，请直接使用当前昵称加入。";
+    $("lobby-caption").textContent = "这个房间没有可继续的旧身份,请直接使用当前昵称加入。";
     return;
   }
   state.playerToken = identity.token;
@@ -2056,7 +2098,7 @@ function resumeStoredSeat(roomId = roomQueryId()) {
     if (!viewerPlayerId()) {
       clearStoredIdentity(roomId);
       state.playerToken = "";
-      $("lobby-caption").textContent = "之前保存的房间身份已经失效，请直接使用当前昵称重新加入。";
+      $("lobby-caption").textContent = "之前保存的房间身份已经失效,请直接使用当前昵称重新加入。";
       render();
     }
   });
@@ -2087,7 +2129,7 @@ async function restartRoomDraft() {
 
 async function deleteRoom() {
   if (!hasRoom() || !state.playerToken || !state.room?.viewer_is_host) return;
-  if (!window.confirm(`确定要删除房间 ${state.room.room_id} 吗？删除后双方都需要重新建房。`)) {
+  if (!window.confirm(`确定要删除房间 ${state.room.room_id} 吗?删除后双方都需要重新建房。`)) {
     return;
   }
   const deletedRoomId = state.room.room_id;
@@ -2111,7 +2153,7 @@ async function leaveRoom() {
   if (!hasRoom()) return;
   const leftRoomId = state.room.room_id;
   const seatLabel = state.room.viewer_player_id ? `玩家 ${state.room.viewer_player_id}` : "当前观战视角";
-  if (!window.confirm(`确定要离开房间 ${leftRoomId} 吗？${seatLabel} 将返回大厅。`)) {
+  if (!window.confirm(`确定要离开房间 ${leftRoomId} 吗?${seatLabel} 将返回大厅。`)) {
     return;
   }
   if (!state.playerToken || state.room.viewer_player_id === null) {
@@ -2131,7 +2173,7 @@ async function leaveRoom() {
     resetRoomSession({ rooms: payload.rooms || [], roomId: leftRoomId });
     render();
     $("lobby-caption").textContent = payload.room_deleted
-      ? `你已离开房间 ${leftRoomId}，该房间因已无玩家而被关闭。`
+      ? `你已离开房间 ${leftRoomId},该房间因已无玩家而被关闭。`
       : `你已离开房间 ${leftRoomId}。`;
   } catch (error) {
     if (error.state) {
@@ -2144,7 +2186,7 @@ async function leaveRoom() {
 
 async function surrenderBattle() {
   if (!hasRoom() || !hasBattle() || !state.playerToken || isGameOver()) return;
-  if (!window.confirm("确定要投降并立刻结束这局对战吗？")) {
+  if (!window.confirm("确定要投降并立刻结束这局对战吗?")) {
     return;
   }
   try {
@@ -2220,9 +2262,9 @@ async function copyInviteLink() {
   if (!state.room?.invite_url) return;
   try {
     await navigator.clipboard.writeText(state.room.invite_url);
-    $("lobby-caption").textContent = "邀请链接已复制，发给另一位玩家就能加入同一房间。";
+    $("lobby-caption").textContent = "邀请链接已复制,发给另一位玩家就能加入同一房间。";
   } catch {
-    $("lobby-caption").textContent = `请手动复制这个链接：${state.room.invite_url}`;
+    $("lobby-caption").textContent = `请手动复制这个链接:${state.room.invite_url}`;
   }
 }
 
@@ -2253,6 +2295,7 @@ async function performAction(payload) {
 
 function onActionClick(action) {
   if (!canInteract()) return;
+  state.sidebarExpanded = "command";
   if (isChainMode()) {
     if (action.code === "chain_skip") {
       performAction({ type: "chain_skip" });
@@ -2330,6 +2373,7 @@ function onBoardClick(x, y, occupant) {
 
   if (!state.selectedActionCode) {
     state.selectedUnitId = occupant?.id || "";
+    if (occupant) state.sidebarExpanded = "info";
     clearActionSelection();
     render();
     return;
@@ -2338,6 +2382,31 @@ function onBoardClick(x, y, occupant) {
   if (isChainMode()) {
     const action = actionByCode(state.selectedActionCode);
     if (!action || !actionNeedsTarget(action)) return;
+    if (action.code === "backstep_shot") {
+      const retreatKeys = positionsToSet(action.preview?.cells || []);
+      const stagedRetreat = stagedBackstepRetreatCell(action);
+      if (retreatKeys.has(key)) {
+        if (stagedRetreat && sameCell(stagedRetreat, { x, y })) {
+          setStagedBackstepRetreatCell(null);
+        } else {
+          setStagedBackstepRetreatCell({ x, y });
+        }
+        render();
+        return;
+      }
+      if (!stagedRetreat) return;
+      const followUpTargetIds = targetIdsToSet(backstepFollowUpTargetIds(action, stagedRetreat));
+      if (!(occupant && followUpTargetIds.has(occupant.id))) return;
+      performAction({
+        type: "chain_react",
+        unit_id: state.selectedUnitId,
+        action_code: action.code,
+        x: stagedRetreat.x,
+        y: stagedRetreat.y,
+        target_unit_id: occupant.id,
+      });
+      return;
+    }
     if (!canUseCell && !canUseUnit) return;
     const payload = {
       type: "chain_react",
@@ -2360,9 +2429,23 @@ function onBoardClick(x, y, occupant) {
     return;
   }
 
+  if (patternSelection(action)) {
+    const chosenCells = stagedPatternCells(action);
+    if (chosenCells.some((cell) => sameCell(cell, { x, y }))) {
+      setStagedPatternCells(chosenCells.filter((cell) => !sameCell(cell, { x, y })));
+      render();
+      return;
+    }
+    if (!canUseCell) return;
+    setStagedPatternCells([...chosenCells, { x, y }]);
+    render();
+    return;
+  }
+
   if (!canUseCell && !canUseUnit) {
     clearActionSelection();
     state.selectedUnitId = occupant?.id || "";
+    if (occupant) state.sidebarExpanded = "info";
     render();
     return;
   }
@@ -2399,30 +2482,6 @@ function onBoardClick(x, y, occupant) {
       target_unit_id: state.stagedPayload.targetUnitId,
       dest_x: x,
       dest_y: y,
-    });
-    return;
-  }
-
-  if (action.code === "pierce") {
-    const chosenCells = stagedPierceCells();
-    if (!chosenCells.length) {
-      state.stagedPayload = { pierceCells: [{ x, y }] };
-      render();
-      return;
-    }
-    if (sameCell(chosenCells[0], { x, y })) {
-      state.stagedPayload = null;
-      render();
-      return;
-    }
-    performAction({
-      type: "skill",
-      unit_id: state.selectedUnitId,
-      skill_code: action.code,
-      x: chosenCells[0].x,
-      y: chosenCells[0].y,
-      second_x: x,
-      second_y: y,
     });
     return;
   }
@@ -2491,6 +2550,35 @@ function bindEvents() {
   $("skip-chain").addEventListener("click", () => {
     if (!canInteract()) return;
     performAction({ type: "chain_skip" });
+  });
+  document.querySelectorAll(".sidebar-toggle").forEach((button) => {
+    button.addEventListener("click", () => {
+      toggleSidebarPanel(button.dataset.sidebarPanel || "");
+      render();
+    });
+  });
+  $("complete-targeting").addEventListener("click", () => {
+    if (!canCompleteTargetSelection()) return;
+    const action = state.selectedActionCode ? actionByCode(state.selectedActionCode) : null;
+    if (!action) return;
+    if (isChainMode() && action.code === "backstep_shot") {
+      const retreatCell = stagedBackstepRetreatCell(action);
+      if (!retreatCell) return;
+      performAction({
+        type: "chain_react",
+        unit_id: state.selectedUnitId,
+        action_code: action.code,
+        x: retreatCell.x,
+        y: retreatCell.y,
+      });
+      return;
+    }
+    performAction({
+      type: "skill",
+      unit_id: state.selectedUnitId,
+      skill_code: action.code,
+      cells: stagedPatternCells(action),
+    });
   });
   $("cancel-targeting").addEventListener("click", () => {
     if (!hasCancelableTargetSelection()) return;

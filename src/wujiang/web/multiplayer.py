@@ -42,6 +42,13 @@ def battle_state_for_viewer(battle: Battle, viewer_player_id: Optional[int]) -> 
     state = battle.to_public_dict()
     input_player = state["input_player"]
     state["viewer_player_id"] = viewer_player_id
+    hidden_unit_ids = {
+        unit.unit_id
+        for unit in battle.all_units()
+        if unit.has_status("隐身") and (viewer_player_id is None or unit.player_id != viewer_player_id)
+    }
+    if hidden_unit_ids:
+        state["units"] = [unit for unit in state["units"] if unit["id"] not in hidden_unit_ids]
     state["active_units"] = []
     if viewer_player_id is not None and viewer_player_id == input_player:
         state["active_units"] = [

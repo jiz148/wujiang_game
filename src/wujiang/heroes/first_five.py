@@ -44,6 +44,7 @@ from wujiang.heroes.common import (
     PassiveProtectionSkill,
     PierceSkill,
     PrecisionTrainingTrait,
+    ShensuSkill,
     StatModifierStatus,
     StationaryRecoveryTrait,
     StealthSkill,
@@ -61,7 +62,7 @@ class ManaPullSkill(Skill):
         super().__init__(
             "mana_pull",
             "魔力牵引",
-            "将目标沿指定方向移动 1-3 格；若是敌方目标，则其下次行动时不能移动。",
+            "将目标沿指定方向移动 1-3 格；若是敌方目标，则其下次行动时不能进行常规移动。",
             mana_cost=1,
             max_uses_per_turn=1,
             target_mode="unit",
@@ -96,13 +97,13 @@ class ManaPullSkill(Skill):
             target.add_status(
                 FlagStatus(
                     "牵引迟滞",
-                    "cannot_move",
-                    description="下次行动时不能移动。",
+                    "cannot_normal_move",
+                    description="下次行动时不能进行常规移动。",
                     duration=1,
                     tick_scope="owner_turn_end",
                 )
             )
-            battle.log(f"{target.name} 被魔力牵引束缚，下次行动时无法移动。")
+            battle.log(f"{target.name} 被魔力牵引束缚，下次行动时无法进行常规移动。")
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
         targets = [unit for unit in battle.all_units() if unit.position and actor.position and actor.position.distance_to(unit.position) <= actor.targeting_range() and unit.unit_id != actor.unit_id]
@@ -156,7 +157,7 @@ class ExperimentSkill(Skill):
                 description="全能力 +2。",
             )
         )
-        target.current_mana = round(target.current_mana + 2, 2)
+        target.gain_mana(2)
         target.add_status(ExperimentCountdownStatus(duration=3))
         battle.log(f"{target.name} 接受了实验强化。")
 
@@ -388,6 +389,7 @@ class IntoDarknessSkill(Skill):
             )
         )
         battle.log(f"{actor.name} 遁入了黑暗。")
+        battle.clear_all_stealth_if_all_heroes_stealthed()
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
         return {"cells": [actor.position.to_dict()] if actor.position else [], "target_unit_ids": [actor.unit_id], "secondary_cells": [], "requires_target": False}
@@ -432,6 +434,7 @@ class GreatFireFuneralField(BattleFieldEffect):
                     target=ctx.unit,
                     attack_power=0,
                     is_skill=True,
+                    from_field_effect=True,
                     action_name="大火葬余烬",
                     raw_damage=damage,
                     ignore_magic_immunity=True,
@@ -456,6 +459,7 @@ class GreatFireFuneralField(BattleFieldEffect):
                         target=unit,
                         attack_power=5,
                         is_skill=True,
+                        from_field_effect=True,
                         action_name="大火葬余烬",
                         ignore_magic_immunity=True,
                         tags={"fire_zone"},
@@ -621,15 +625,25 @@ class DarkHuman(AbstractHero):
     race = "人类"
     level = 5
     base_stats = Stats(attack=3, defense=4, speed=4, attack_range=1, mana=4)
-    raw_skill_text = "飞跃 保护 回避（被动技能；每回合最多2次；移动2格） 【1.5隐身（直到自己下次普攻或使用技能前进入无敌状态） ￥麻痹手套（破魔；伤4；被击中以后3轮不能移动）命运飞踢（2轮一次；直线移动至多4个以后向移动的方向造成以下效果：被击中的单位投硬币，如果正面，则自己消失1轮；若是反面则被击中单位消失1轮） 遁入黑暗（4轮一次；持续2轮；无法被选中且无法回复，此效果结束后的第一次攻击伤害+1并且破魔）"
+    raw_skill_text = "飞跃 保护 回避（被动技能；每回合最多2次；移动2格） 【1.5隐身（仅己方可见；敌方不能直接点人，但点地技能仍可能命中；直到自己下次普攻或使用技能前解除） ￥麻痹手套（破魔；伤4；被击中以后3轮不能移动）命运飞踢（2轮一次；直线移动至多4个以后向移动的方向造成以下效果：被击中的单位投硬币，如果正面，则自己消失1轮；若是反面则被击中单位消失1轮） 遁入黑暗（4轮一次；持续2轮；无法被选中且无法回复，此效果结束后的第一次攻击伤害+1并且破魔）"
     raw_trait_text = "攻击三次；飞行；使用隐身后重置“麻痹手套”;当回合没有移动的武将的主动技能对此单位无效"
 
-    raw_skill_text = "\u98de\u8dc3 \u4fdd\u62a4 \u56de\u907f\uff08\u88ab\u52a8\u6280\u80fd\uff1b\u6bcf\u56de\u5408\u6700\u591a2\u6b21\uff1b\u79fb\u52a82\u683c\uff09 \u30101.5\u9690\u8eab\uff08\u76f4\u5230\u81ea\u5df1\u4e0b\u6b21\u666e\u653b\u6216\u4f7f\u7528\u6280\u80fd\u524d\u8fdb\u5165\u65e0\u654c\u72b6\u6001\uff09 \uffe5\u9ebb\u75f9\u624b\u5957\uff08\u7834\u9b54\uff1b\u4f244\uff1b\u88ab\u51fb\u4e2d\u4ee5\u540e3\u8f6e\u4e0d\u80fd\u79fb\u52a8\uff09\u547d\u8fd0\u98de\u8e22\uff082\u8f6e\u4e00\u6b21\uff1b\u76f4\u7ebf\u79fb\u52a8\u81f3\u591a4\u4e2a\u4ee5\u540e\u5411\u79fb\u52a8\u7684\u65b9\u5411\u9020\u6210\u4ee5\u4e0b\u6548\u679c\uff1a\u88ab\u51fb\u4e2d\u7684\u5355\u4f4d\u6295\u786c\u5e01\uff0c\u5982\u679c\u6b63\u9762\uff0c\u5219\u81ea\u5df1\u6d88\u59311\u8f6e\uff1b\u82e5\u662f\u53cd\u9762\u5219\u88ab\u51fb\u4e2d\u5355\u4f4d\u6d88\u59311\u8f6e\uff09 \u9041\u5165\u9ed1\u6697\uff084\u8f6e\u4e00\u6b21\uff1b\u6301\u7eed2\u8f6e\uff1b\u65e0\u6cd5\u88ab\u9009\u4e2d\u4e14\u65e0\u6cd5\u56de\u590d\uff0c\u6b64\u6548\u679c\u7ed3\u675f\u540e\u7684\u7b2c\u4e00\u6b21\u653b\u51fb\u4f24\u5bb3+1\u5e76\u4e14\u7834\u9b54\uff09"
+    raw_skill_text = "飞跃（1魔；必须直线穿人移动3格） 保护 回避（被动技能；每回合最多2次；移动1格） 【1.5隐身（仅己方可见；敌方不能直接点人，但点地技能仍可能命中；直到自己第一次普攻或使用技能后解除） ￥麻痹手套（破魔；伤4；被击中以后3轮不能移动） 命运飞踢（2轮一次；直线移动至多4个以后向移动的方向造成以下效果：被击中的单位投硬币，如果正面，则自己消失1轮；若是反面则被击中单位消失1轮） 遁入黑暗（4轮一次；持续2轮；隐身且无法回复；若以普攻现身，则那次普攻伤害+1并破魔）"
     raw_trait_text = "\u653b\u51fb\u4e09\u6b21\uff1b\u98de\u884c\uff1b\u4f7f\u7528\u9690\u8eab\u540e\u91cd\u7f6e\u201c\u9ebb\u75f9\u624b\u5957\u201d"
 
     def build_skills(self) -> list[Skill]:
         return [
-            DashMoveSkill("fly_leap", "飞跃", "直线飞行移动 4 格。", max_distance=4, mana_cost=1, max_uses_per_turn=1, straight_only=True, ignore_units=True),
+            DashMoveSkill(
+                "fly_leap",
+                "飞跃",
+                "直线穿人移动恰好 3 格。",
+                max_distance=3,
+                exact_distance=3,
+                mana_cost=1,
+                max_uses_per_turn=1,
+                straight_only=True,
+                ignore_units=True,
+            ),
             PassiveProtectionSkill(),
             PassiveEvasionSkill(),
             StealthSkill(),
@@ -650,12 +664,12 @@ class FireFuneral(AbstractHero):
     race = "恶魔"
     level = 5
     base_stats = Stats(attack=4, defense=3, speed=2, attack_range=2, mana=4)
-    raw_skill_text = "神速 变硬 穿刺 震开 大火葬（2轮一次；横竖全中，伤5，使用以后攻-1；之后被攻击的区域每个玩家的己方回合结束时都会受到5的伤害；且穿过被此技能击中的区域的单位血*1/2；此技能的效果无视魔免；此技能不会对此单位造成伤害） ￥审判日之火（仅在攻击为1时才能使用；给与全场除了能力值最低的单位以外6的伤害；无视魔免；无法回避；3轮不能回血）"
+    raw_skill_text = "神速（1魔；此回合内下一次普通移动格数+3） 变硬 穿刺 震开 大火葬（2轮一次；横竖全中，伤5，使用以后攻-1；之后被攻击的区域每个玩家的己方回合结束时都会受到5的伤害；且穿过被此技能击中的区域的单位血*1/2；此技能的效果无视魔免；此技能不会对此单位造成伤害） ￥审判日之火（仅在攻击为1时才能使用；给与全场除了能力值最低的单位以外6的伤害；无视魔免；无法回避；3轮不能回血）"
     raw_trait_text = "此单为攻击为1时魔免；可格挡，反击"
 
     def build_skills(self) -> list[Skill]:
         return [
-            DashMoveSkill("shensu", "神速", "移动 4 格。", max_distance=4, mana_cost=1, max_uses_per_turn=1),
+            ShensuSkill(),
             HardenSkill(),
             PierceSkill(),
             KnockbackSkill(),
@@ -675,13 +689,13 @@ class EliteSoldier(AbstractHero):
     race = "人类"
     level = 4
     base_stats = Stats(attack=3, defense=2, speed=2, attack_range=14, mana=3)
-    raw_skill_text = "机枪 神速 爆头（一回合一次；此回合此单位的第一个效果无效；下一次攻击伤害+2并破魔） 【0.5 撤步射击（被动技能；向一个方向直线位移两格，之后进行一次普攻；一回合最多使用2次）"
+    raw_skill_text = "机枪（每回合一次；逐格选择一条直线区域；通常三格，贴边时按实际存在格子结算） 神速（1魔；此回合内下一次普通移动格数+3） 爆头（一回合一次；本回合内失去周围方形普攻特性；本回合内下一次攻击伤害+2并破魔） 【0.5撤步射击（被动技能；先选直线穿人的两格撤步落点，再选一个可反击的敌方目标；一回合最多使用2次）"
     raw_trait_text = "普攻范围是周围（范*2+1）*（范*2+1）；普攻带有以下破魔效果：1/3几率使被攻击单位下次行动时速-2，最低到1"
 
     def build_skills(self) -> list[Skill]:
         return [
             MachineGunSkill(),
-            DashMoveSkill("shensu", "神速", "移动 4 格。", max_distance=4, mana_cost=1, max_uses_per_turn=1),
+            ShensuSkill(),
             HeadshotSkill(),
             BackstepShotSkill(),
         ]
@@ -698,7 +712,7 @@ class Bard(AbstractHero):
     race = "人类"
     level = 3
     base_stats = Stats(attack=2, defense=4, speed=2, attack_range=4, mana=5)
-    raw_skill_text = "守*2【1回血（每回合一次；被击中的单位血+1/4；如果是属性为暗或者种族为灵体或恶魔，则效果变为血-1/4） 保护 【2洗礼（仅可对‘人类’使用；被使用的单位魔免；2轮） ￥大圣光（5轮；对方单位移动后在此单位周围11*11内则受到4的伤害；己方单位在己方回合结束时如果在此单位周围11*11内则直到下次己方回合开始前守+1） 吟唱（每回合一次；被击中单位任意种类魔力点+2）"
+    raw_skill_text = "守*2（1魔；每回合一次；可对己方单位或自己使用；目标守+1，来自同一武将的不叠加） 【1回血（每回合一次；可对包括自己在内的己方单位使用；目标血+1/4） 保护 【2洗礼（仅可对‘人类’使用；被使用的单位获得魔免；2轮） ￥大圣光（持续2.5轮；以自己为中心形成范围会变化的圣光场；敌方单位进行普通移动后受到4伤害；己方单位在己方回合结束时若仍在范围内则守+1） 吟唱（每回合一次；点一个范内目标；目标魔力点+2）"
     raw_trait_text = "原地回魔 原地回血"
 
     def build_skills(self) -> list[Skill]:

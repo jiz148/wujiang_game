@@ -93,6 +93,22 @@ class MultiplayerRoomTests(unittest.TestCase):
         self.assertEqual(spectator_view["battle"]["active_units"], [])
         self.assertTrue(host_view["battle"]["active_units"])
 
+    def test_enemy_stealthed_units_are_hidden_from_viewer_state(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        _, guest_token = room.join("Bob")
+        room.select_hero(host_token, "dark_human")
+        room.select_hero(guest_token, "bard")
+        room.start_battle(host_token)
+
+        room.perform_action(host_token, {"type": "skill", "unit_id": room.battle.player_units(1)[0].unit_id, "skill_code": "stealth"})
+
+        host_view = room.serialize_state(host_token)
+        guest_view = room.serialize_state(guest_token)
+
+        self.assertEqual(len(host_view["battle"]["units"]), 2)
+        self.assertEqual(len(guest_view["battle"]["units"]), 1)
+        self.assertEqual(guest_view["battle"]["units"][0]["player_id"], 2)
+
     def test_finished_room_can_restart_lobby_and_clear_hero_choices(self) -> None:
         room, _, host_token = self.registry.create_room("Alice")
         _, guest_token = room.join("Bob")
