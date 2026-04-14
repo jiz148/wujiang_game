@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlparse
 
 from wujiang.engine.core import ActionError
 from wujiang.heroes.registry import create_battle, list_heroes
-from wujiang.web.multiplayer import ROOMS, RoomError
+from wujiang.web.multiplayer import DEFAULT_ROOM_MODE, ROOMS, RoomError, apply_private_clone_labels
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -36,6 +36,7 @@ class GameSession:
             }
             for unit in self.battle.player_units(input_player)
         ]
+        apply_private_clone_labels(state, input_player)
         return {"battle": state, "heroes": list_heroes()}
 
 
@@ -169,7 +170,12 @@ class WujiangHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/rooms/create":
             player_name = payload.get("player_name", "")
-            room, player_id, player_token = ROOMS.create_room(str(player_name))
+            room_mode = payload.get("mode", DEFAULT_ROOM_MODE)
+            try:
+                room, player_id, player_token = ROOMS.create_room(str(player_name), str(room_mode or DEFAULT_ROOM_MODE))
+            except RoomError as exc:
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
             response = room.serialize_state(player_token, base_url=request_base_url(self))
             response["player_token"] = player_token
             response["joined_player_id"] = player_id
@@ -229,6 +235,27 @@ class WujiangHandler(BaseHTTPRequestHandler):
             try:
                 room = ROOMS.get_room(str(room_id))
                 room.start_battle(str(player_token or ""))
+            except RoomError as exc:
+                room = None
+                try:
+                    room = ROOMS.get_room(str(room_id))
+                except RoomError:
+                    pass
+                error_payload = {"error": str(exc)}
+                if room is not None:
+                    error_payload["state"] = room.serialize_state(str(player_token or ""), base_url=request_base_url(self))
+                json_response(self, HTTPStatus.BAD_REQUEST, error_payload)
+                return
+            json_response(self, HTTPStatus.OK, room.serialize_state(str(player_token or ""), base_url=request_base_url(self)))
+            return
+
+        if parsed.path == "/api/rooms/set-mode":
+            room_id = payload.get("room_id", "")
+            player_token = payload.get("player_token")
+            room_mode = payload.get("mode", DEFAULT_ROOM_MODE)
+            try:
+                room = ROOMS.get_room(str(room_id))
+                room.set_mode(str(player_token or ""), str(room_mode or DEFAULT_ROOM_MODE))
             except RoomError as exc:
                 room = None
                 try:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,6 +64,54 @@ class MultiplayerRoomTests(unittest.TestCase):
         self.assertEqual(room.status, "battle")
         self.assertIsNotNone(room.battle)
 
+    def test_host_can_switch_room_mode_in_lobby_and_clear_existing_choices(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        _, guest_token = room.join("Bob")
+        room.select_hero(host_token, "ellie")
+        room.select_hero(guest_token, "bard")
+
+        room.set_mode(host_token, "random")
+
+        room_state = room.serialize_state(host_token)["room"]
+        self.assertEqual(room_state["mode"], "random")
+        self.assertEqual(room_state["mode_name"], "随机选人")
+        self.assertIsNone(room_state["seats"][0]["hero_code"])
+        self.assertIsNone(room_state["seats"][1]["hero_code"])
+        self.assertTrue(room_state["can_start"])
+
+    def test_random_mode_does_not_allow_manual_hero_selection(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice", mode="random")
+
+        with self.assertRaises(RoomError):
+            room.select_hero(host_token, "ellie")
+
+    def test_random_mode_start_assigns_random_heroes_and_uses_larger_board(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice", mode="random")
+        room.join("Bob")
+
+        with mock.patch("wujiang.web.multiplayer.random_room_hero_codes", return_value=("bard", "dark_human")):
+            room.start_battle(host_token)
+
+        self.assertEqual(room.status, "battle")
+        self.assertEqual(room.seats[1].hero_code, "bard")
+        self.assertEqual(room.seats[2].hero_code, "dark_human")
+        self.assertEqual(room.battle.width, 10)
+        self.assertEqual(room.battle.height, 10)
+        player1 = room.battle.player_units(1)[0]
+        player2 = room.battle.player_units(2)[0]
+        self.assertIn(player1.position.x, {1, 2})
+        self.assertIn(player2.position.x, {7, 8})
+        self.assertEqual(room.battle.active_player, 2)
+
+    def test_random_mode_opening_player_uses_tiebreaker_stats(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice", mode="random")
+        room.join("Bob")
+
+        with mock.patch("wujiang.web.multiplayer.random_room_hero_codes", return_value=("fire_funeral", "elite_soldier")):
+            room.start_battle(host_token)
+
+        self.assertEqual(room.battle.active_player, 1)
+
     def test_only_current_input_player_can_submit_actions(self) -> None:
         room, _, host_token = self.registry.create_room("Alice")
         _, guest_token = room.join("Bob")
@@ -108,6 +157,27 @@ class MultiplayerRoomTests(unittest.TestCase):
         self.assertEqual(len(host_view["battle"]["units"]), 2)
         self.assertEqual(len(guest_view["battle"]["units"]), 1)
         self.assertEqual(guest_view["battle"]["units"][0]["player_id"], 2)
+
+    def test_clone_label_is_only_visible_to_owner_view(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        _, guest_token = room.join("Bob")
+        room.select_hero(host_token, "element_hunter")
+        room.select_hero(guest_token, "bard")
+        room.start_battle(host_token)
+        hunter = room.battle.player_units(1)[0]
+
+        room.perform_action(host_token, {"type": "skill", "unit_id": hunter.unit_id, "skill_code": "earth_walker", "x": 2, "y": 4})
+
+        clone = next(unit for unit in room.battle.all_units() if unit.is_clone)
+        host_view = room.serialize_state(host_token)
+        guest_view = room.serialize_state(guest_token)
+        host_units = {unit["id"]: unit["name"] for unit in host_view["battle"]["units"]}
+        guest_units = {unit["id"]: unit["name"] for unit in guest_view["battle"]["units"]}
+        host_active_units = {unit["unit_id"]: unit["name"] for unit in host_view["battle"]["active_units"]}
+
+        self.assertEqual(host_units[clone.unit_id], "元素猎人（分身）")
+        self.assertEqual(host_active_units[clone.unit_id], "元素猎人（分身）")
+        self.assertEqual(guest_units[clone.unit_id], "元素猎人")
 
     def test_finished_room_can_restart_lobby_and_clear_hero_choices(self) -> None:
         room, _, host_token = self.registry.create_room("Alice")

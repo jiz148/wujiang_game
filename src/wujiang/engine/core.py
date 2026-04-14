@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections import deque
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
+import heapq
 from itertools import count
 from typing import Any, Iterable, Literal, Optional
 
@@ -110,6 +112,16 @@ class BattleComponent(ABC):
     def modify_normal_move_distance(self, value: int) -> int:
         return value
 
+    def normal_movement_step_cost(
+        self,
+        battle: "Battle",
+        unit: "Unit",
+        start: "Position",
+        end: "Position",
+        current_cost: int,
+    ) -> int:
+        return current_cost
+
     def on_owner_turn_start(self, battle: "Battle") -> None:
         return None
 
@@ -149,6 +161,9 @@ class BattleComponent(ABC):
         return None
 
     def on_owner_removed(self, battle: "Battle") -> None:
+        return None
+
+    def on_enter_battle(self, battle: "Battle") -> None:
         return None
 
     def on_removed(self, battle: "Battle") -> None:
@@ -224,6 +239,13 @@ class BattleFieldEffect(BattleComponent):
         super().__init__(name=name, description=description)
         self.duration = duration
 
+    def merge_into_existing(
+        self,
+        battle: "Battle",
+        existing_effects: list["BattleFieldEffect"],
+    ) -> bool:
+        return False
+
     def on_any_turn_end(self, battle: "Battle", ended_player_id: int) -> None:
         if self.duration is None:
             return
@@ -245,6 +267,9 @@ class BattleFieldEffect(BattleComponent):
         data["duration"] = self.duration
         data["cells"] = [cell.to_dict() for cell in self.affected_cells(battle)]
         data["board_marker"] = self.board_marker(battle)
+        weather_name = getattr(self, "weather_name", None)
+        if weather_name is not None:
+            data["weather_name"] = weather_name
         return data
 
 
@@ -338,14 +363,19 @@ class Skill(BattleComponent, ABC):
             return False, "还没有轮到这个单位行动。"
         if actor.banished:
             return False, "该单位暂时不在战场上。"
+        if actor.cannot_use_skills:
+            return False, "这个单位当前不能使用技能。"
         if self.cooldown_remaining > 0:
             return False, f"还需冷却 {self.cooldown_remaining} 个回合。"
         if self.max_uses_per_turn is not None and self.uses_this_turn >= self.max_uses_per_turn:
             return False, "本回合使用次数已满。"
         if self.max_uses_per_battle is not None and self.uses_this_battle >= self.max_uses_per_battle:
             return False, "本场战斗使用次数已满。"
-        if actor.current_mana + 1e-9 < self.mana_cost:
+        if actor.current_mana + 1e-9 < self.mana_cost_for_payload(battle, actor, payload):
             return False, "魔力不足。"
+        block_reason = battle.shared_stealth_action_block_reason(actor)
+        if block_reason:
+            return False, block_reason
         return True, ""
 
     def on_owner_turn_start(self, battle: "Battle") -> None:
@@ -355,8 +385,24 @@ class Skill(BattleComponent, ABC):
         if self.cooldown_remaining > 0:
             self.cooldown_remaining -= 1
 
-    def prepay_resources(self, battle: "Battle", actor: "Unit") -> None:
-        actor.spend_mana(self.mana_cost)
+    def mana_cost_for_payload(
+        self,
+        battle: "Battle",
+        actor: "Unit",
+        payload: Optional[dict[str, Any]] = None,
+    ) -> float:
+        return self.mana_cost
+
+    def mana_cost_text(self) -> Optional[str]:
+        return None
+
+    def prepay_resources(
+        self,
+        battle: "Battle",
+        actor: "Unit",
+        payload: Optional[dict[str, Any]] = None,
+    ) -> None:
+        actor.spend_mana(self.mana_cost_for_payload(battle, actor, payload))
         self.uses_this_turn += 1
         self.uses_this_battle += 1
         if self.cooldown_turns:
@@ -366,8 +412,13 @@ class Skill(BattleComponent, ABC):
         if self.timing == "active":
             actor.performed_active_skill = True
 
-    def spend_resources(self, battle: "Battle", actor: "Unit") -> None:
-        self.prepay_resources(battle, actor)
+    def spend_resources(
+        self,
+        battle: "Battle",
+        actor: "Unit",
+        payload: Optional[dict[str, Any]] = None,
+    ) -> None:
+        self.prepay_resources(battle, actor, payload)
         self.finalize_use(battle, actor)
 
     @abstractmethod
@@ -384,6 +435,8 @@ class Skill(BattleComponent, ABC):
             return False, "不是连锁技能。"
         if actor.banished or not actor.alive:
             return False, "单位不在战场上。"
+        if actor.cannot_use_skills:
+            return False, "这个单位当前不能使用技能。"
         if queued_action.speed >= self.chain_speed:
             return False, "连锁速度不够快。"
         if self.cooldown_remaining > 0:
@@ -393,6 +446,23 @@ class Skill(BattleComponent, ABC):
         if self.max_uses_per_battle is not None and self.uses_this_battle >= self.max_uses_per_battle:
             return False, "本场战斗使用次数已满。"
         if actor.current_mana + 1e-9 < self.mana_cost:
+            return False, "魔力不足。"
+        block_reason = battle.shared_stealth_action_block_reason(actor)
+        if block_reason:
+            return False, block_reason
+        return True, ""
+
+    def can_react_with_payload(
+        self,
+        battle: "Battle",
+        actor: "Unit",
+        queued_action: "QueuedAction",
+        payload: Optional[dict[str, Any]] = None,
+    ) -> tuple[bool, str]:
+        ok, reason = self.can_react_to(battle, actor, queued_action)
+        if not ok:
+            return ok, reason
+        if actor.current_mana + 1e-9 < self.mana_cost_for_payload(battle, actor, payload):
             return False, "魔力不足。"
         return True, ""
 
@@ -448,14 +518,22 @@ class Skill(BattleComponent, ABC):
     ) -> list["Position"]:
         if self.target_mode in {"ally", "enemy", "unit"} and payload.get("target_unit_id"):
             target = battle.get_unit(payload["target_unit_id"])
-            return [target.position] if target.position is not None else []
+            return battle.unit_cells(target)
         if self.target_mode == "cell" and payload.get("x") is not None and payload.get("y") is not None:
             return [Position(int(payload["x"]), int(payload["y"]))]
         if self.target_mode == "self" and actor.position is not None:
-            return [actor.position]
+            return battle.unit_cells(actor)
         return []
 
     def ignores_shield_for_payload(
+        self,
+        battle: "Battle",
+        actor: "Unit",
+        payload: dict[str, Any],
+    ) -> bool:
+        return False
+
+    def half_ignores_shield_for_payload(
         self,
         battle: "Battle",
         actor: "Unit",
@@ -477,6 +555,7 @@ class Skill(BattleComponent, ABC):
             {
                 "code": self.code,
                 "mana_cost": self.mana_cost,
+                "mana_cost_text": self.mana_cost_text(),
                 "cooldown_turns": self.cooldown_turns,
                 "cooldown_remaining": self.cooldown_remaining,
                 "max_uses_per_turn": self.max_uses_per_turn,
@@ -512,6 +591,7 @@ class TargetContext:
     is_skill: bool
     is_hostile: bool
     ignore_shield: bool = False
+    half_ignore_shield: bool = False
     ignore_magic_immunity: bool = False
     from_field_effect: bool = False
     cannot_evade: bool = False
@@ -529,9 +609,11 @@ class DamageContext:
     is_skill: bool
     action_name: str
     ignore_shield: bool = False
+    half_ignore_shield: bool = False
     ignore_magic_immunity: bool = False
     from_field_effect: bool = False
     cannot_evade: bool = False
+    area_cell_hits: int = 1
     raw_damage: Optional[float] = None
     shield_consumed: bool = False
     cancelled: bool = False
@@ -573,6 +655,7 @@ class QueuedAction:
     source_player_id: Optional[int] = None
     hostile: bool = False
     reaction_source_id: Optional[str] = None
+    suppress_logs: bool = False
 
     def to_public_dict(self) -> dict[str, Any]:
         return {
@@ -697,6 +780,19 @@ class Unit(ABC):
         self.current_mana = base_stats.mana
         self.mana_points = 0.0
         self.position: Optional[Position] = None
+        self.footprint_width = max(1, int(getattr(self, "footprint_width", 1)))
+        self.footprint_height = max(1, int(getattr(self, "footprint_height", 1)))
+        base_offsets = getattr(self, "base_footprint_offsets", None)
+        if base_offsets is None:
+            base_offsets = [
+                (dx, dy)
+                for dx in range(self.footprint_width)
+                for dy in range(self.footprint_height)
+            ]
+        self.base_footprint_offsets = self._normalize_footprint_offsets(base_offsets)
+        current_offsets = getattr(self, "footprint_offsets", None)
+        self.footprint_offsets = self._normalize_footprint_offsets(current_offsets or self.base_footprint_offsets)
+        self._refresh_footprint_bounds()
         self.alive = True
         self.banished = False
         self.banish_return_position: Optional[Position] = None
@@ -709,6 +805,8 @@ class Unit(ABC):
         self.cannot_move = False
         self.cannot_normal_move = False
         self.cannot_heal = False
+        self.cannot_attack = is_clone
+        self.cannot_use_skills = is_clone
         self.ignore_units_while_moving = False
         self.has_flying = False
         self.has_block_counter = False
@@ -770,6 +868,54 @@ class Unit(ABC):
             if status.name == name:
                 return status
         return None
+
+    def is_stealthed(self) -> bool:
+        return self.has_status("隐身")
+
+    @staticmethod
+    def _normalize_footprint_offsets(offsets: Iterable[tuple[int, int] | Position]) -> list[tuple[int, int]]:
+        normalized: list[tuple[int, int]] = []
+        seen: set[tuple[int, int]] = set()
+        for offset in offsets:
+            if isinstance(offset, Position):
+                pair = (int(offset.x), int(offset.y))
+            else:
+                pair = (int(offset[0]), int(offset[1]))
+            if pair in seen:
+                continue
+            seen.add(pair)
+            normalized.append(pair)
+        return normalized or [(0, 0)]
+
+    def _refresh_footprint_bounds(self) -> None:
+        xs = [dx for dx, _ in self.footprint_offsets]
+        ys = [dy for _, dy in self.footprint_offsets]
+        self.footprint_min_dx = min(xs)
+        self.footprint_min_dy = min(ys)
+        self.footprint_max_dx = max(xs)
+        self.footprint_max_dy = max(ys)
+        self.footprint_width = max(1, self.footprint_max_dx - self.footprint_min_dx + 1)
+        self.footprint_height = max(1, self.footprint_max_dy - self.footprint_min_dy + 1)
+
+    def set_footprint_offsets(self, offsets: Iterable[tuple[int, int] | Position]) -> None:
+        self.footprint_offsets = self._normalize_footprint_offsets(offsets)
+        self._refresh_footprint_bounds()
+
+    def set_footprint_cells(self, cells: Iterable[Position]) -> None:
+        if self.position is None:
+            raise ActionError("单位不在战场上。")
+        self.set_footprint_offsets((cell.x - self.position.x, cell.y - self.position.y) for cell in cells)
+
+    def reset_footprint_to_base(self) -> None:
+        self.set_footprint_offsets(self.base_footprint_offsets)
+
+    def footprint_cells_at(self, position: Position) -> list[Position]:
+        return [position.offset(dx, dy) for dx, dy in self.footprint_offsets]
+
+    def footprint_cells(self) -> list[Position]:
+        if self.position is None or not self.alive or self.banished:
+            return []
+        return self.footprint_cells_at(self.position)
 
     def notify_action_declared(
         self,
@@ -849,9 +995,7 @@ class Unit(ABC):
         value = float(base_value)
         for component in self.iter_components():
             value = component.modify_stat(stat_name, value)
-        if stat_name == "speed":
-            return max(0.0, value)
-        if stat_name == "attack_range":
+        if stat_name in {"attack", "defense", "speed", "attack_range"}:
             return max(1.0, value)
         return value
 
@@ -916,6 +1060,16 @@ class Unit(ABC):
             "is_clone": self.is_clone,
             "turn_ready": self.turn_ready,
             "position": self.position.to_dict() if self.position else None,
+            "footprint": {
+                "width": self.footprint_width,
+                "height": self.footprint_height,
+                "min_dx": self.footprint_min_dx,
+                "min_dy": self.footprint_min_dy,
+                "max_dx": self.footprint_max_dx,
+                "max_dy": self.footprint_max_dy,
+                "offsets": [{"x": dx, "y": dy} for dx, dy in self.footprint_offsets],
+            },
+            "occupied_cells": [cell.to_dict() for cell in battle.unit_cells(self)],
             "hp": self.current_hp,
             "max_hp": self.max_health,
             "mana": self.current_mana,
@@ -945,6 +1099,8 @@ class Unit(ABC):
             "cannot_move": self.cannot_move,
             "cannot_normal_move": self.cannot_normal_move,
             "cannot_heal": self.cannot_heal,
+            "cannot_attack": self.cannot_attack,
+            "cannot_use_skills": self.cannot_use_skills,
             "raw_skill_text": self.raw_skill_text,
             "raw_trait_text": self.raw_trait_text,
             "skills": [skill.to_public_dict(battle) for skill in self.skills],
@@ -977,17 +1133,62 @@ class Battle:
         self.logs: list[str] = []
         self.pending_chain: Optional[ReactionWindow] = None
         self.pending_respawn_unit_ids: list[str] = []
+        self._log_suppression_depth = 0
 
     def log(self, message: str) -> None:
+        if self._log_suppression_depth > 0:
+            return
         self.logs.append(message)
         self.logs = self.logs[-120:]
 
+    def log_public_event(
+        self,
+        message: str,
+        *,
+        source: Unit | None = None,
+        target: Unit | None = None,
+    ) -> None:
+        if target is not None and target.is_stealthed():
+            return
+        public_message = message
+        if source is not None and source.is_stealthed():
+            public_message = public_message.replace(source.name, "有单位")
+        self.logs.append(public_message)
+        self.logs = self.logs[-120:]
+
+    @contextmanager
+    def suppress_logs(self) -> Iterable[None]:
+        self._log_suppression_depth += 1
+        try:
+            yield
+        finally:
+            self._log_suppression_depth = max(0, self._log_suppression_depth - 1)
+
+    def suppress_logs_for_stealth(self, *units: Unit | None):
+        if any(unit is not None and unit.is_stealthed() for unit in units):
+            return self.suppress_logs()
+        return nullcontext()
+
+    def queued_action_hides_logs(self, queued_action: QueuedAction) -> bool:
+        if queued_action.suppress_logs:
+            return True
+        actor = self.units.get(queued_action.actor_id)
+        if actor is not None and actor.is_stealthed():
+            return True
+        for unit_id in queued_action.target_unit_ids:
+            target = self.units.get(unit_id)
+            if target is not None and target.is_stealthed():
+                return True
+        return False
+
     def add_unit(self, unit: Unit, position: Position) -> None:
-        if self.is_occupied(position):
+        if not self.can_place_unit(unit, position, ignore=unit, mover=unit):
             raise ActionError("目标位置已被占用。")
         unit.position = position
         self.units[unit.unit_id] = unit
         self.log(f"{unit.name} 进入战场。")
+        for component in list(unit.iter_components()):
+            component.on_enter_battle(self)
 
     def remove_unit(self, unit: Unit) -> None:
         for component in list(unit.iter_components()):
@@ -996,6 +1197,8 @@ class Battle:
             del self.units[unit.unit_id]
 
     def add_field_effect(self, effect: BattleFieldEffect) -> None:
+        if effect.merge_into_existing(self, self.field_effects):
+            return
         self.field_effects.append(effect)
         self.log(f"场地效果【{effect.name}】生效。")
 
@@ -1003,6 +1206,25 @@ class Battle:
         if effect in self.field_effects:
             self.field_effects.remove(effect)
             self.log(f"场地效果【{effect.name}】结束。")
+
+    def has_weather(self, name: str) -> bool:
+        return any(getattr(effect, "weather_name", None) == name for effect in self.field_effects)
+
+    def cell_has_weather(self, name: str, cell: Position) -> bool:
+        for effect in self.field_effects:
+            if getattr(effect, "weather_name", None) != name:
+                continue
+            affected = effect.affected_cells(self)
+            if not affected:
+                if getattr(effect, "global_weather", False):
+                    return True
+                continue
+            if any(target.x == cell.x and target.y == cell.y for target in affected):
+                return True
+        return False
+
+    def unit_in_weather(self, name: str, unit: Unit) -> bool:
+        return any(self.cell_has_weather(name, cell) for cell in self.unit_cells(unit))
 
     def start_battle(self) -> None:
         self.start_player_turn(self.active_player)
@@ -1065,19 +1287,139 @@ class Battle:
     def in_bounds(self, position: Position) -> bool:
         return 0 <= position.x < self.width and 0 <= position.y < self.height
 
-    def is_occupied(self, position: Position, *, ignore: Optional[Unit] = None) -> bool:
+    def unit_cells_at(self, unit: Unit, position: Position) -> list[Position]:
+        return unit.footprint_cells_at(position)
+
+    def unit_cells(self, unit: Unit) -> list[Position]:
+        if unit.position is None or not unit.alive or unit.banished:
+            return []
+        return self.unit_cells_at(unit, unit.position)
+
+    def unit_occupies(self, unit: Unit, position: Position) -> bool:
+        return position in self.unit_cells(unit)
+
+    def can_place_unit(
+        self,
+        unit: Unit,
+        position: Position,
+        *,
+        ignore: Optional[Unit] = None,
+        mover: Optional[Unit] = None,
+        ignore_units: bool = False,
+    ) -> bool:
+        for cell in self.unit_cells_at(unit, position):
+            if not self.in_bounds(cell):
+                return False
+            if not ignore_units and self.is_occupied(cell, ignore=ignore, mover=mover or unit):
+                return False
+        return True
+
+    def unit_distance_to_cell(self, unit: Unit, cell: Position) -> int:
+        cells = self.unit_cells(unit)
+        if not cells:
+            if unit.position is None:
+                return 10**9
+            cells = self.unit_cells_at(unit, unit.position)
+        return min(origin.distance_to(cell) for origin in cells)
+
+    def distance_between_units(self, left: Unit, right: Unit) -> int:
+        left_cells = self.unit_cells(left)
+        right_cells = self.unit_cells(right)
+        if not left_cells or not right_cells:
+            return 10**9
+        return min(left_cell.distance_to(right_cell) for left_cell in left_cells for right_cell in right_cells)
+
+    def unit_hit_count_for_cells(self, unit: Unit, cells: Iterable[Position]) -> int:
+        cell_keys = {(cell.x, cell.y) for cell in cells}
+        return sum(1 for cell in self.unit_cells(unit) if (cell.x, cell.y) in cell_keys)
+
+    def units_at(self, position: Position, *, ignore: Optional[Unit] = None) -> list[Unit]:
+        units: list[Unit] = []
         for unit in self.units.values():
             if ignore is not None and unit.unit_id == ignore.unit_id:
                 continue
-            if unit.alive and not unit.banished and unit.position == position:
-                return True
-        return False
+            if unit.alive and not unit.banished and self.unit_occupies(unit, position):
+                units.append(unit)
+        return units
+
+    def blocks_position_for(self, occupant: Unit, *, mover: Optional[Unit] = None) -> bool:
+        if occupant.is_stealthed():
+            return False
+        if mover is not None and mover.is_stealthed():
+            return False
+        return True
+
+    def is_occupied(
+        self,
+        position: Position,
+        *,
+        ignore: Optional[Unit] = None,
+        mover: Optional[Unit] = None,
+    ) -> bool:
+        return any(self.blocks_position_for(unit, mover=mover) for unit in self.units_at(position, ignore=ignore))
 
     def unit_at(self, position: Position) -> Optional[Unit]:
-        for unit in self.units.values():
-            if unit.alive and not unit.banished and unit.position == position:
+        occupants = self.units_at(position)
+        if not occupants:
+            return None
+        visible = [unit for unit in occupants if not unit.is_stealthed()]
+        return visible[0] if visible else occupants[0]
+
+    def selectable_unit_at(
+        self,
+        position: Position,
+        *,
+        actor: Optional[Unit] = None,
+        ignore_stealth: bool = False,
+        preferred_unit_id: Optional[str] = None,
+    ) -> Optional[Unit]:
+        occupants = self.units_at(position)
+        if preferred_unit_id:
+            preferred = next((unit for unit in occupants if unit.unit_id == preferred_unit_id), None)
+            if preferred is not None:
+                ok, _ = self.unit_can_be_selected(preferred, actor=actor, ignore_stealth=ignore_stealth)
+                if ok:
+                    return preferred
+        for unit in occupants:
+            ok, _ = self.unit_can_be_selected(unit, actor=actor, ignore_stealth=ignore_stealth)
+            if ok:
                 return unit
         return None
+
+    def targetable_units_at(
+        self,
+        position: Position,
+        *,
+        actor: Optional[Unit] = None,
+        ignore_stealth: bool = False,
+    ) -> list[Unit]:
+        targets: list[Unit] = []
+        for unit in self.units_at(position):
+            ok, _ = self.unit_can_be_selected(unit, actor=actor, ignore_stealth=ignore_stealth)
+            if ok:
+                targets.append(unit)
+        return targets
+
+    def units_sharing_position(self, unit: Unit) -> list[Unit]:
+        if unit.position is None:
+            return []
+        shared: list[Unit] = []
+        seen: set[str] = set()
+        for cell in self.unit_cells(unit):
+            for other in self.units_at(cell, ignore=unit):
+                if other.unit_id in seen:
+                    continue
+                seen.add(other.unit_id)
+                if other.alive and not other.banished:
+                    shared.append(other)
+        return shared
+
+    def shared_stealth_action_block_reason(self, unit: Unit) -> str:
+        if unit.position is None or not unit.is_stealthed():
+            return ""
+        if not self.units_sharing_position(unit):
+            return ""
+        return f"{unit.name} 隐身时若与其他单位同格，不能攻击或使用技能。"
 
     def controllable_hero_units(self, player_id: int) -> list[Unit]:
         return [
@@ -1116,14 +1458,14 @@ class Battle:
         origin = unit.banish_return_position or unit.position
         if origin is None:
             return []
-        if not self.is_occupied(origin, ignore=unit):
+        if self.can_place_unit(unit, origin, ignore=unit, mover=unit):
             return [origin]
         best_distance: Optional[int] = None
         options: list[Position] = []
         for y in range(self.height):
             for x in range(self.width):
                 cell = Position(x, y)
-                if self.is_occupied(cell, ignore=unit):
+                if not self.can_place_unit(unit, cell, ignore=unit, mover=unit):
                     continue
                 distance = origin.distance_to(cell)
                 if best_distance is None or distance < best_distance:
@@ -1192,11 +1534,11 @@ class Battle:
         units: list[Unit] = []
         seen: set[str] = set()
         for cell in cells:
-            unit = self.unit_at(cell)
-            if unit is None or unit.unit_id in seen:
-                continue
-            seen.add(unit.unit_id)
-            units.append(unit)
+            for unit in self.units_at(cell):
+                if unit.unit_id in seen:
+                    continue
+                seen.add(unit.unit_id)
+                units.append(unit)
         return units
 
     def get_unit(self, unit_id: str) -> Unit:
@@ -1230,6 +1572,61 @@ class Battle:
             result.append(current)
         return result
 
+    def explicit_path(
+        self,
+        unit: Unit,
+        steps: list[Position],
+        *,
+        max_distance: int,
+        exact_distance: Optional[int] = None,
+        straight_only: bool = False,
+        ignore_units: bool = False,
+        allow_anywhere: bool = False,
+        use_movement_cost: bool = False,
+    ) -> list[Position]:
+        ignore_units = ignore_units or unit.ignore_units_while_moving
+        if unit.position is None:
+            raise ActionError("单位不在战场上。")
+        if not steps:
+            raise ActionError("缺少移动路径。")
+        path = [unit.position]
+        visited = {unit.position}
+        direction: Optional[tuple[int, int]] = None
+        distance_cost = 0
+        for step in steps:
+            if not self.in_bounds(step):
+                raise ActionError("移动路径超出战场边界。")
+            previous = path[-1]
+            if allow_anywhere:
+                path.append(step)
+                distance_cost += 1
+                continue
+            dx = step.x - previous.x
+            dy = step.y - previous.y
+            if max(abs(dx), abs(dy)) != 1:
+                raise ActionError("移动路径必须逐格相邻。")
+            if straight_only:
+                current_direction = (
+                    0 if dx == 0 else dx // abs(dx),
+                    0 if dy == 0 else dy // abs(dy),
+                )
+                if direction is None:
+                    direction = current_direction
+                elif current_direction != direction:
+                    raise ActionError("该移动必须沿同一直线前进。")
+            if step in visited:
+                raise ActionError("移动路径不能重复经过同一个格子。")
+            if not self.can_place_unit(unit, step, ignore=unit, mover=unit, ignore_units=ignore_units):
+                raise ActionError("移动路径被阻挡。")
+            visited.add(step)
+            distance_cost += self.normal_movement_step_cost(unit, previous, step) if use_movement_cost else 1
+            path.append(step)
+        if distance_cost > max_distance:
+            raise ActionError("超出位移距离。")
+        if exact_distance is not None and len(path) - 1 != exact_distance:
+            raise ActionError(f"必须恰好位移 {exact_distance} 格。")
+        return path
+
     def reachable_positions(
         self,
         unit: Unit,
@@ -1239,6 +1636,7 @@ class Battle:
         straight_only: bool = False,
         ignore_units: bool = False,
         allow_anywhere: bool = False,
+        use_movement_cost: bool = False,
     ) -> list[Position]:
         ignore_units = ignore_units or unit.ignore_units_while_moving
         if unit.position is None:
@@ -1248,7 +1646,7 @@ class Battle:
                 Position(x, y)
                 for x in range(self.width)
                 for y in range(self.height)
-                if not self.is_occupied(Position(x, y), ignore=unit)
+                if self.can_place_unit(unit, Position(x, y), ignore=unit, mover=unit, ignore_units=ignore_units)
             ]
         if straight_only:
             result: list[Position] = []
@@ -1262,12 +1660,42 @@ class Battle:
                 (1, 0),
                 (1, 1),
             ):
+                previous = unit.position
+                spent = 0
                 for step, candidate in enumerate(self.line_positions(unit.position, direction, max_distance), start=1):
-                    if self.is_occupied(candidate, ignore=unit) and not ignore_units:
+                    if not self.can_place_unit(unit, candidate, ignore=unit, mover=unit, ignore_units=ignore_units):
                         break
-                    if exact_distance is None or step == exact_distance:
+                    spent += self.normal_movement_step_cost(unit, previous, candidate) if use_movement_cost else 1
+                    previous = candidate
+                    if spent > max_distance:
+                        break
+                    distance_value = spent if use_movement_cost else step
+                    if exact_distance is None or distance_value == exact_distance:
                         result.append(candidate)
             return result
+        if use_movement_cost:
+            distances: dict[Position, int] = {unit.position: 0}
+            queue_counter = count()
+            heap: list[tuple[int, int, Position]] = [(0, next(queue_counter), unit.position)]
+            while heap:
+                dist, _, pos = heapq.heappop(heap)
+                if dist != distances.get(pos):
+                    continue
+                for nxt in self.neighbors(pos):
+                    if not self.can_place_unit(unit, nxt, ignore=unit, mover=unit, ignore_units=ignore_units):
+                        continue
+                    next_dist = dist + self.normal_movement_step_cost(unit, pos, nxt)
+                    if next_dist > max_distance:
+                        continue
+                    if next_dist >= distances.get(nxt, 10**9):
+                        continue
+                    distances[nxt] = next_dist
+                    heapq.heappush(heap, (next_dist, next(queue_counter), nxt))
+            return [
+                pos
+                for pos, dist in distances.items()
+                if pos != unit.position and (exact_distance is None or dist == exact_distance)
+            ]
         visited = {unit.position}
         queue: deque[tuple[Position, int]] = deque([(unit.position, 0)])
         result: list[Position] = []
@@ -1278,7 +1706,7 @@ class Battle:
             for nxt in self.neighbors(pos):
                 if nxt in visited:
                     continue
-                if self.is_occupied(nxt, ignore=unit) and not ignore_units:
+                if not self.can_place_unit(unit, nxt, ignore=unit, mover=unit, ignore_units=ignore_units):
                     continue
                 visited.add(nxt)
                 if exact_distance is None or dist + 1 == exact_distance:
@@ -1296,6 +1724,7 @@ class Battle:
         straight_only: bool = False,
         ignore_units: bool = False,
         allow_anywhere: bool = False,
+        use_movement_cost: bool = False,
     ) -> list[Position]:
         ignore_units = ignore_units or unit.ignore_units_while_moving
         if unit.position is None:
@@ -1315,11 +1744,49 @@ class Battle:
                 dy = dy // abs(dy)
             current = unit.position
             path = [current]
+            spent = 0
             while current != destination:
+                previous = current
                 current = current.offset(dx, dy)
-                if self.is_occupied(current, ignore=unit) and not ignore_units:
+                if not self.can_place_unit(unit, current, ignore=unit, mover=unit, ignore_units=ignore_units):
                     raise ActionError("移动路径被阻挡。")
+                spent += self.normal_movement_step_cost(unit, previous, current) if use_movement_cost else 1
+                if spent > max_distance:
+                    raise ActionError("超出位移距离。")
                 path.append(current)
+            if exact_distance is not None and len(path) - 1 != exact_distance:
+                raise ActionError(f"必须恰好位移 {exact_distance} 格。")
+            return path
+        if use_movement_cost:
+            queue_counter = count()
+            heap: list[tuple[int, int, Position]] = [(0, next(queue_counter), unit.position)]
+            parents: dict[Position, Optional[Position]] = {unit.position: None}
+            distances: dict[Position, int] = {unit.position: 0}
+            while heap:
+                dist, _, pos = heapq.heappop(heap)
+                if dist != distances.get(pos):
+                    continue
+                if pos == destination:
+                    break
+                for nxt in self.neighbors(pos):
+                    if not self.can_place_unit(unit, nxt, ignore=unit, mover=unit, ignore_units=ignore_units):
+                        continue
+                    next_dist = dist + self.normal_movement_step_cost(unit, pos, nxt)
+                    if next_dist > max_distance:
+                        continue
+                    if next_dist >= distances.get(nxt, 10**9):
+                        continue
+                    parents[nxt] = pos
+                    distances[nxt] = next_dist
+                    heapq.heappush(heap, (next_dist, next(queue_counter), nxt))
+            if destination not in parents:
+                raise ActionError("找不到可行的移动路径。")
+            path: list[Position] = []
+            current: Optional[Position] = destination
+            while current is not None:
+                path.append(current)
+                current = parents[current]
+            path.reverse()
             if exact_distance is not None and len(path) - 1 != exact_distance:
                 raise ActionError(f"必须恰好位移 {exact_distance} 格。")
             return path
@@ -1334,7 +1801,7 @@ class Battle:
                 next_dist = distances[pos] + 1
                 if next_dist > max_distance or nxt in parents:
                     continue
-                if self.is_occupied(nxt, ignore=unit) and not ignore_units:
+                if not self.can_place_unit(unit, nxt, ignore=unit, mover=unit, ignore_units=ignore_units):
                     continue
                 parents[nxt] = pos
                 distances[nxt] = next_dist
@@ -1362,6 +1829,7 @@ class Battle:
         allow_anywhere: bool = False,
         max_distance: Optional[int] = None,
         exact_distance: Optional[int] = None,
+        path: Optional[list[Position]] = None,
         triggered_by_reaction: bool = False,
         tags: Optional[set[str]] = None,
         forced: bool = False,
@@ -1373,7 +1841,7 @@ class Battle:
             raise ActionError("目标位置不能与当前位置相同。")
         if not self.in_bounds(destination):
             raise ActionError("目标位置超出战场边界。")
-        if self.is_occupied(destination, ignore=unit):
+        if not self.can_place_unit(unit, destination, ignore=unit, mover=unit, ignore_units=ignore_units):
             raise ActionError("目标位置已被占用。")
         if unit.cannot_move and not forced:
             raise ActionError(f"{unit.name} 当前无法移动。")
@@ -1381,15 +1849,31 @@ class Battle:
             raise ActionError(f"{unit.name} 当前不能进行常规移动。")
         if max_distance is None:
             max_distance = unit.normal_move_distance() if not via_skill and not forced else int(unit.stat("speed"))
-        path = self.find_path(
-            unit,
-            destination,
-            max_distance=max_distance,
-            exact_distance=exact_distance,
-            straight_only=straight_only,
-            ignore_units=ignore_units,
-            allow_anywhere=allow_anywhere,
+        use_movement_cost = not via_skill and not forced
+        path = (
+            self.explicit_path(
+                unit,
+                path,
+                max_distance=max_distance,
+                exact_distance=exact_distance,
+                straight_only=straight_only,
+                ignore_units=ignore_units,
+                allow_anywhere=allow_anywhere,
+                use_movement_cost=use_movement_cost,
+            )
+            if path is not None
+            else self.find_path(
+                unit,
+                destination,
+                max_distance=max_distance,
+                exact_distance=exact_distance,
+                straight_only=straight_only,
+                ignore_units=ignore_units,
+                allow_anywhere=allow_anywhere,
+                use_movement_cost=use_movement_cost,
+            )
         )
+        destination = path[-1]
         ctx = MoveContext(
             unit=unit,
             start=unit.position,
@@ -1404,7 +1888,7 @@ class Battle:
             unit.moved_this_turn = True
             if not via_skill:
                 unit.move_used = True
-        self.log(f"{unit.name} 移动到 ({destination.x}, {destination.y})。")
+        self.log(f"{unit.name} 移动了。")
         for effect in list(self.field_effects):
             effect.on_unit_moved(self, ctx)
         for other in self.all_units():
@@ -1422,6 +1906,7 @@ class Battle:
         is_skill: bool,
         is_hostile: bool,
         ignore_shield: bool = False,
+        half_ignore_shield: bool = False,
         ignore_magic_immunity: bool = False,
         from_field_effect: bool = False,
         cannot_evade: bool = False,
@@ -1435,6 +1920,7 @@ class Battle:
             is_skill=is_skill,
             is_hostile=is_hostile,
             ignore_shield=ignore_shield,
+            half_ignore_shield=half_ignore_shield,
             ignore_magic_immunity=ignore_magic_immunity,
             from_field_effect=from_field_effect,
             cannot_evade=cannot_evade,
@@ -1469,7 +1955,7 @@ class Battle:
         if not resolve_defenses:
             return ctx
         if is_hostile and target.total_shields() > 0:
-            if ctx.ignore_shield:
+            if ctx.ignore_shield or ctx.half_ignore_shield:
                 return ctx
             target.consume_one_shield()
             ctx.shield_consumed = True
@@ -1484,70 +1970,110 @@ class Battle:
         return ctx
 
     def resolve_damage(self, ctx: DamageContext) -> DamageContext:
-        if ctx.target.banished:
-            ctx.cancelled = True
-            ctx.reason = "目标不在战场上。"
-            self.log(ctx.reason)
-            return ctx
+        with self.suppress_logs_for_stealth(ctx.target):
+            if ctx.target.banished:
+                ctx.cancelled = True
+                ctx.reason = "目标不在战场上。"
+                self.log_public_event(ctx.reason, source=ctx.source, target=ctx.target)
+                return ctx
 
-        def notify_cancelled() -> None:
+            def notify_cancelled() -> None:
+                for effect in list(self.field_effects):
+                    effect.on_damage_cancelled(self, ctx)
+                if ctx.source is not None:
+                    for component in list(ctx.source.iter_components()):
+                        component.on_damage_cancelled(self, ctx)
+                for component in list(ctx.target.iter_components()):
+                    component.on_damage_cancelled(self, ctx)
+
             for effect in list(self.field_effects):
-                effect.on_damage_cancelled(self, ctx)
+                effect.on_before_damage(self, ctx)
             if ctx.source is not None:
                 for component in list(ctx.source.iter_components()):
-                    component.on_damage_cancelled(self, ctx)
+                    component.on_before_damage(self, ctx)
             for component in list(ctx.target.iter_components()):
-                component.on_damage_cancelled(self, ctx)
-
-        for effect in list(self.field_effects):
-            effect.on_before_damage(self, ctx)
-        if ctx.source is not None:
-            for component in list(ctx.source.iter_components()):
                 component.on_before_damage(self, ctx)
-        for component in list(ctx.target.iter_components()):
-            component.on_before_damage(self, ctx)
-        if ctx.cancelled:
-            if ctx.reason:
-                self.log(ctx.reason)
-            notify_cancelled()
-            return ctx
-        if (
-            ctx.is_skill
-            and not ctx.from_field_effect
-            and ctx.target.magic_immunity
-            and not ctx.ignore_magic_immunity
-        ):
-            ctx.cancelled = True
-            ctx.reason = f"{ctx.target.name} 处于魔免状态。"
-            self.log(ctx.reason)
-            notify_cancelled()
-            return ctx
-        if ctx.target.total_shields() > 0:
-            if ctx.ignore_shield:
-                ctx.target.consume_one_shield()
-                ctx.shield_consumed = True
-                self.log(f"{ctx.target.name} 的 1 层护盾被【{ctx.action_name}】贯穿并打碎。")
-            else:
-                ctx.target.consume_one_shield()
-                ctx.shield_consumed = True
-                ctx.cancelled = True
-                ctx.reason = f"{ctx.target.name} 的护盾挡下了伤害。"
-                self.log(ctx.reason)
+            if ctx.cancelled:
+                if ctx.reason:
+                    self.log_public_event(ctx.reason, source=ctx.source, target=ctx.target)
                 notify_cancelled()
                 return ctx
-        if ctx.target.dodge_charges > 0 and not ctx.cannot_evade:
-            ctx.target.dodge_charges -= 1
-            ctx.cancelled = True
-            ctx.reason = f"{ctx.target.name} 闪避了伤害。"
-            self.log(ctx.reason)
-            notify_cancelled()
-            return ctx
-        if ctx.target.is_clone:
-            ctx.destroyed_as_clone = True
-            ctx.raw_damage = 0.0
-            ctx.target.current_hp = 0.0
-            ctx.target.alive = False
-            self.log(f"{ctx.target.name} 是分身，只要受到伤害就会直接破坏。")
+            if ctx.raw_damage is None and ctx.area_cell_hits > 1:
+                ctx.attack_power += max(0, int(ctx.area_cell_hits) - 1)
+            if (
+                ctx.is_skill
+                and not ctx.from_field_effect
+                and ctx.target.magic_immunity
+                and not ctx.ignore_magic_immunity
+            ):
+                ctx.cancelled = True
+                ctx.reason = f"{ctx.target.name} 处于魔免状态。"
+                self.log_public_event(ctx.reason, source=ctx.source, target=ctx.target)
+                notify_cancelled()
+                return ctx
+            if ctx.target.total_shields() > 0:
+                if ctx.ignore_shield:
+                    ctx.target.consume_one_shield()
+                    ctx.shield_consumed = True
+                    self.log_public_event(
+                        f"{ctx.target.name} 的 1 层护盾被【{ctx.action_name}】贯穿并打碎。",
+                        source=ctx.source,
+                        target=ctx.target,
+                    )
+                elif ctx.half_ignore_shield:
+                    ctx.target.consume_one_shield()
+                    ctx.shield_consumed = True
+                    if ctx.raw_damage is None:
+                        ctx.attack_power = max(0.0, ctx.attack_power - 1)
+                    self.log_public_event(
+                        f"{ctx.target.name} 的 1 层护盾被【{ctx.action_name}】半破魔打碎。",
+                        source=ctx.source,
+                        target=ctx.target,
+                    )
+                else:
+                    ctx.target.consume_one_shield()
+                    ctx.shield_consumed = True
+                    ctx.cancelled = True
+                    ctx.reason = f"{ctx.target.name} 的护盾挡下了伤害。"
+                    self.log_public_event(ctx.reason, source=ctx.source, target=ctx.target)
+                    notify_cancelled()
+                    return ctx
+            if ctx.target.dodge_charges > 0 and not ctx.cannot_evade:
+                ctx.target.dodge_charges -= 1
+                ctx.cancelled = True
+                ctx.reason = f"{ctx.target.name} 闪避了伤害。"
+                self.log_public_event(ctx.reason, source=ctx.source, target=ctx.target)
+                notify_cancelled()
+                return ctx
+            if ctx.target.is_clone:
+                ctx.destroyed_as_clone = True
+                ctx.raw_damage = 0.0
+                ctx.target.current_hp = 0.0
+                ctx.target.alive = False
+                self.log_public_event(
+                    f"{ctx.target.name} 是分身，只要受到伤害就会直接破坏。",
+                    source=ctx.source,
+                    target=ctx.target,
+                )
+                for effect in list(self.field_effects):
+                    effect.on_after_damage(self, ctx)
+                if ctx.source is not None:
+                    for component in list(ctx.source.iter_components()):
+                        component.on_after_damage(self, ctx)
+                for component in list(ctx.target.iter_components()):
+                    component.on_after_damage(self, ctx)
+                self.cleanup_dead_units()
+                return ctx
+            damage_amount = self.damage_rule.calculate_damage(ctx.attack_power, ctx.target.stat("defense"))
+            if ctx.raw_damage is not None:
+                damage_amount = ctx.raw_damage
+            ctx.raw_damage = round(float(damage_amount), 4)
+            ctx.target.take_damage_fraction(ctx.raw_damage)
+            self.log_public_event(
+                f"{ctx.target.name} 受到 {ctx.raw_damage} 点伤害。",
+                source=ctx.source,
+                target=ctx.target,
+            )
             for effect in list(self.field_effects):
                 effect.on_after_damage(self, ctx)
             if ctx.source is not None:
@@ -1557,54 +2083,45 @@ class Battle:
                 component.on_after_damage(self, ctx)
             self.cleanup_dead_units()
             return ctx
-        damage_amount = self.damage_rule.calculate_damage(ctx.attack_power, ctx.target.stat("defense"))
-        if ctx.raw_damage is not None:
-            damage_amount = ctx.raw_damage
-        ctx.raw_damage = round(float(damage_amount), 4)
-        ctx.target.take_damage_fraction(ctx.raw_damage)
-        self.log(f"{ctx.target.name} 受到 {ctx.raw_damage} 点伤害。")
-        for effect in list(self.field_effects):
-            effect.on_after_damage(self, ctx)
-        if ctx.source is not None:
-            for component in list(ctx.source.iter_components()):
-                component.on_after_damage(self, ctx)
-        for component in list(ctx.target.iter_components()):
-            component.on_after_damage(self, ctx)
-        self.cleanup_dead_units()
-        return ctx
 
     def expire_chain_temporary_statuses(self) -> None:
         for unit in self.all_units():
+            unit.temporary_shields = 0
             for status in list(unit.statuses):
                 if isinstance(status, TemporaryDefenseStatus) and status.expire_with_chain:
                     unit.remove_status(status, self)
 
     def heal(self, ctx: HealContext) -> HealContext:
-        for effect in list(self.field_effects):
-            effect.on_before_heal(self, ctx)
-        if ctx.source is not None:
-            for component in list(ctx.source.iter_components()):
+        with self.suppress_logs_for_stealth(ctx.target):
+            for effect in list(self.field_effects):
+                effect.on_before_heal(self, ctx)
+            if ctx.source is not None:
+                for component in list(ctx.source.iter_components()):
+                    component.on_before_heal(self, ctx)
+            for component in list(ctx.target.iter_components()):
                 component.on_before_heal(self, ctx)
-        for component in list(ctx.target.iter_components()):
-            component.on_before_heal(self, ctx)
-        if ctx.cancelled:
-            return ctx
-        if ctx.target.cannot_heal:
-            ctx.cancelled = True
-            ctx.reason = f"{ctx.target.name} 当前无法回复。"
-            return ctx
-        old_hp = ctx.target.current_hp
-        ctx.target.heal_fraction(ctx.amount)
-        gained = round(ctx.target.current_hp - old_hp, 4)
-        self.log(f"{ctx.target.name} 回复了 {gained} 点生命。")
-        for effect in list(self.field_effects):
-            effect.on_after_heal(self, ctx)
-        if ctx.source is not None:
-            for component in list(ctx.source.iter_components()):
+            if ctx.cancelled:
+                return ctx
+            if ctx.target.cannot_heal:
+                ctx.cancelled = True
+                ctx.reason = f"{ctx.target.name} 当前无法回复。"
+                return ctx
+            old_hp = ctx.target.current_hp
+            ctx.target.heal_fraction(ctx.amount)
+            gained = round(ctx.target.current_hp - old_hp, 4)
+            self.log_public_event(
+                f"{ctx.target.name} 回复了 {gained} 点生命。",
+                source=ctx.source,
+                target=ctx.target,
+            )
+            for effect in list(self.field_effects):
+                effect.on_after_heal(self, ctx)
+            if ctx.source is not None:
+                for component in list(ctx.source.iter_components()):
+                    component.on_after_heal(self, ctx)
+            for component in list(ctx.target.iter_components()):
                 component.on_after_heal(self, ctx)
-        for component in list(ctx.target.iter_components()):
-            component.on_after_heal(self, ctx)
-        return ctx
+            return ctx
 
     def basic_attack(self, actor: Unit, target: Unit) -> None:
         if not actor.can_take_turn_actions(self):
@@ -1621,6 +2138,10 @@ class Battle:
         self.check_win_condition()
 
     def attack_ignores_shield(self, actor: Unit, target: Unit) -> bool:
+        ignore_shield, _ = self.attack_shield_flags(actor, target)
+        return ignore_shield
+
+    def attack_shield_flags(self, actor: Unit, target: Unit) -> tuple[bool, bool]:
         ctx = TargetContext(
             actor=actor,
             target=target,
@@ -1631,7 +2152,7 @@ class Battle:
         )
         for component in list(actor.iter_components()):
             component.on_targeted(self, ctx)
-        return ctx.ignore_shield
+        return ctx.ignore_shield, ctx.half_ignore_shield
 
     def attack_ignores_stealth(self, actor: Unit, target: Unit) -> bool:
         return False
@@ -1643,9 +2164,14 @@ class Battle:
         *,
         ignore_stealth: bool = False,
     ) -> tuple[bool, str]:
+        block_reason = self.shared_stealth_action_block_reason(actor)
+        if block_reason:
+            return False, block_reason
+        if actor.cannot_attack:
+            return False, f"{actor.name} 当前不能攻击。"
         if actor.position is None or target.position is None:
             return False, "攻击对象不在战场上。"
-        if actor.position.distance_to(target.position) > actor.targeting_range():
+        if self.distance_between_units(actor, target) > actor.targeting_range():
             return False, "目标超出普攻范围。"
         ok, reason = self.unit_can_be_selected(target, actor=actor, ignore_stealth=ignore_stealth)
         if not ok:
@@ -1664,35 +2190,37 @@ class Battle:
         action_name: str,
         tags: Optional[set[str]] = None,
     ) -> Optional[DamageContext]:
-        attack_tags = {"attack"}
-        if tags:
-            attack_tags.update(tags)
-        target_ctx = self.validate_target(
-            actor,
-            target,
-            action_name=action_name,
-            is_skill=False,
-            is_hostile=True,
-            resolve_defenses=False,
-            tags=attack_tags,
-        )
-        if target_ctx.cancelled:
-            self.log(target_ctx.reason)
-            actor.consume_attack_attempt_buffs(self)
-            return None
-        damage_ctx = DamageContext(
-            source=actor,
-            target=target,
-            attack_power=actor.stat("attack"),
-            is_skill=False,
-            action_name=action_name,
-            ignore_shield=target_ctx.ignore_shield,
-            ignore_magic_immunity=target_ctx.ignore_magic_immunity,
-            cannot_evade=target_ctx.cannot_evade,
-            tags=set(target_ctx.tags),
-        )
-        self.resolve_damage(damage_ctx)
-        return damage_ctx
+        with self.suppress_logs_for_stealth(target):
+            attack_tags = {"attack"}
+            if tags:
+                attack_tags.update(tags)
+            target_ctx = self.validate_target(
+                actor,
+                target,
+                action_name=action_name,
+                is_skill=False,
+                is_hostile=True,
+                resolve_defenses=False,
+                tags=attack_tags,
+            )
+            if target_ctx.cancelled:
+                self.log_public_event(target_ctx.reason, source=actor, target=target)
+                actor.consume_attack_attempt_buffs(self)
+                return None
+            damage_ctx = DamageContext(
+                source=actor,
+                target=target,
+                attack_power=actor.stat("attack"),
+                is_skill=False,
+                action_name=action_name,
+                ignore_shield=target_ctx.ignore_shield,
+                half_ignore_shield=target_ctx.half_ignore_shield,
+                ignore_magic_immunity=target_ctx.ignore_magic_immunity,
+                cannot_evade=target_ctx.cannot_evade,
+                tags=set(target_ctx.tags),
+            )
+            self.resolve_damage(damage_ctx)
+            return damage_ctx
 
     def unit_can_be_selected(
         self,
@@ -1748,7 +2276,7 @@ class Battle:
             if not ok:
                 continue
             target_ids.append(unit.unit_id)
-            target_cells.append(unit.position.to_dict())
+            target_cells.extend(cell.to_dict() for cell in self.unit_cells(unit))
         sanitized["target_unit_ids"] = target_ids
         if replace_cells:
             sanitized["cells"] = target_cells
@@ -1757,10 +2285,78 @@ class Battle:
     def is_forced_movement_blocked(self, position: Position) -> bool:
         return any(effect.blocks_forced_movement(self, position) for effect in self.field_effects)
 
+    def normal_movement_step_cost(self, unit: Unit, start: Position, end: Position) -> int:
+        cost = 1
+        for effect in list(self.field_effects):
+            cost = effect.normal_movement_step_cost(self, unit, start, end, cost)
+        for component in list(unit.iter_components()):
+            cost = component.normal_movement_step_cost(self, unit, start, end, cost)
+        return max(1, int(cost))
+
     def declared_source_position(self, payload: dict[str, Any]) -> Optional[Position]:
         if payload.get("declared_source_x") is None or payload.get("declared_source_y") is None:
             return None
         return Position(int(payload["declared_source_x"]), int(payload["declared_source_y"]))
+
+    def declared_target_position(self, payload: dict[str, Any]) -> Optional[Position]:
+        if payload.get("declared_target_x") is None or payload.get("declared_target_y") is None:
+            return None
+        return Position(int(payload["declared_target_x"]), int(payload["declared_target_y"]))
+
+    def payload_positions(self, payload: dict[str, Any], key: str) -> list[Position]:
+        cells = payload.get(key)
+        if not isinstance(cells, list):
+            return []
+        result: list[Position] = []
+        for cell in cells:
+            if not isinstance(cell, dict) or cell.get("x") is None or cell.get("y") is None:
+                raise ActionError("坐标格式不正确。")
+            result.append(Position(int(cell["x"]), int(cell["y"])))
+        return result
+
+    def payload_target_unit_ids(self, payload: dict[str, Any]) -> list[str]:
+        target_ids = payload.get("target_unit_ids")
+        if isinstance(target_ids, list):
+            result: list[str] = []
+            seen: set[str] = set()
+            for unit_id in target_ids:
+                unit_key = str(unit_id or "").strip()
+                if not unit_key or unit_key in seen:
+                    continue
+                seen.add(unit_key)
+                result.append(unit_key)
+            return result
+        target_id = payload.get("target_unit_id")
+        if target_id:
+            return [str(target_id)]
+        return []
+
+    def resolve_declared_target_unit(
+        self,
+        actor: Unit,
+        payload: dict[str, Any],
+        *,
+        ignore_stealth: bool = False,
+    ) -> Optional[Unit]:
+        preferred_ids = self.payload_target_unit_ids(payload)
+        declared = self.declared_target_position(payload)
+        if declared is not None:
+            for unit_id in preferred_ids:
+                preferred = self.selectable_unit_at(
+                    declared,
+                    actor=actor,
+                    ignore_stealth=ignore_stealth,
+                    preferred_unit_id=unit_id,
+                )
+                if preferred is not None:
+                    return preferred
+            return self.selectable_unit_at(declared, actor=actor, ignore_stealth=ignore_stealth)
+        for unit_id in preferred_ids:
+            unit = self.get_unit(unit_id)
+            ok, _ = self.unit_can_be_selected(unit, actor=actor, ignore_stealth=ignore_stealth)
+            if ok:
+                return unit
+        return None
 
     def resolve_from_declared_origin(
         self,
@@ -1791,7 +2387,7 @@ class Battle:
             ok, reason = skill.can_use(self, actor, payload)
             if not ok:
                 raise ActionError(reason)
-            skill.prepay_resources(self, actor)
+            skill.prepay_resources(self, actor, payload)
         target_id = payload.get("resolved_target_unit_id") or payload.get("target_unit_id")
         if target_id:
             target = self.get_unit(target_id)
@@ -1831,6 +2427,19 @@ class Battle:
                 raise ActionError(f"{actor.name} 当前无法移动。")
             if actor.cannot_normal_move:
                 raise ActionError(f"{actor.name} 当前不能进行常规移动。")
+            explicit_steps = self.payload_positions(payload, "path")
+            if explicit_steps:
+                path = self.explicit_path(
+                    actor,
+                    explicit_steps,
+                    max_distance=actor.normal_move_distance(),
+                    use_movement_cost=True,
+                )
+                queued_payload["path"] = [step.to_dict() for step in path[1:]]
+                queued_payload["x"] = path[-1].x
+                queued_payload["y"] = path[-1].y
+            elif payload.get("x") is None or payload.get("y") is None:
+                raise ActionError("移动需要指定目标位置。")
             return QueuedAction(
                 action_type="move",
                 actor_id=actor.unit_id,
@@ -1842,6 +2451,7 @@ class Battle:
                 target_cells=[],
                 source_player_id=actor.player_id,
                 hostile=False,
+                suppress_logs=actor.is_stealthed(),
             )
         if action_type == "attack":
             target = self.get_unit(payload["target_unit_id"])
@@ -1857,7 +2467,9 @@ class Battle:
             queued_payload["declared_source_y"] = actor.position.y
             queued_payload["declared_target_x"] = target.position.x
             queued_payload["declared_target_y"] = target.position.y
-            queued_payload["ignore_shield"] = self.attack_ignores_shield(actor, target)
+            ignore_shield, half_ignore_shield = self.attack_shield_flags(actor, target)
+            queued_payload["ignore_shield"] = ignore_shield
+            queued_payload["half_ignore_shield"] = half_ignore_shield
             queued_payload["ignore_stealth"] = ignore_stealth
             return QueuedAction(
                 action_type="attack",
@@ -1866,9 +2478,10 @@ class Battle:
                 speed=1,
                 payload=queued_payload,
                 target_unit_ids=[target.unit_id],
-                target_cells=[target.position],
+                target_cells=self.unit_cells(target),
                 source_player_id=actor.player_id,
                 hostile=target.player_id != actor.player_id,
+                suppress_logs=actor.is_stealthed() or target.is_stealthed(),
             )
         if action_type == "skill":
             skill = actor.get_skill(payload["skill_code"])
@@ -1879,6 +2492,7 @@ class Battle:
                 queued_payload["declared_source_x"] = actor.position.x
                 queued_payload["declared_source_y"] = actor.position.y
             queued_payload["ignore_shield"] = skill.ignores_shield_for_payload(self, actor, payload)
+            queued_payload["half_ignore_shield"] = skill.half_ignores_shield_for_payload(self, actor, payload)
             queued_payload["ignore_stealth"] = skill.ignores_stealth_for_payload(self, actor, payload)
             if payload.get("target_unit_id"):
                 target = self.get_unit(payload["target_unit_id"])
@@ -1898,8 +2512,9 @@ class Battle:
             for unit in [*target_units, *self.units_at_cells(target_cells)]:
                 if unit.unit_id not in targets:
                     targets.append(unit.unit_id)
-            if payload.get("target_unit_id"):
-                target = self.get_unit(payload["target_unit_id"])
+            declared_targets = self.payload_target_unit_ids(payload)
+            if declared_targets:
+                target = self.get_unit(declared_targets[0])
                 if target.position is not None:
                     queued_payload["declared_target_x"] = target.position.x
                     queued_payload["declared_target_y"] = target.position.y
@@ -1914,6 +2529,7 @@ class Battle:
                 target_cells=target_cells,
                 source_player_id=actor.player_id,
                 hostile=hostile,
+                suppress_logs=actor.is_stealthed() or any(self.get_unit(unit_id).is_stealthed() for unit_id in targets),
             )
         raise ActionError("未知动作类型。")
 
@@ -1994,6 +2610,8 @@ class Battle:
 
         if payload.get("ignore_shield"):
             parts.append("破魔")
+        if payload.get("half_ignore_shield"):
+            parts.append("半破魔")
         if payload.get("ignore_magic_immunity"):
             parts.append("无视魔免")
         if payload.get("cannot_evade"):
@@ -2019,6 +2637,8 @@ class Battle:
         return " ".join(ordered)
 
     def available_reaction_options(self, unit: Unit, queued_action: QueuedAction) -> list[ReactionOption]:
+        if unit.total_shields() > 0:
+            return []
         options: list[ReactionOption] = []
         for skill in unit.skills:
             ok, _ = skill.can_react_to(self, unit, queued_action)
@@ -2046,7 +2666,7 @@ class Battle:
                     timing="reaction",
                     chain_speed=2,
                     description="下一次伤害结算时守 +1，只持续到这次连锁结算结束。",
-                    preview={"cells": [unit.position.to_dict()] if unit.position else [], "target_unit_ids": [], "requires_target": False},
+                    preview={"cells": [cell.to_dict() for cell in self.unit_cells(unit)], "target_unit_ids": [], "requires_target": False},
                 )
             )
             attacker = self.units.get(queued_action.actor_id)
@@ -2063,7 +2683,7 @@ class Battle:
                         timing="reaction",
                         chain_speed=2,
                         description="对你所连锁的攻击或技能使用者进行一次普攻式反击，需在自身攻击范围内。",
-                        preview={"cells": [attacker.position.to_dict()], "target_unit_ids": [attacker.unit_id], "requires_target": False},
+                        preview={"cells": [cell.to_dict() for cell in self.unit_cells(attacker)], "target_unit_ids": [attacker.unit_id], "requires_target": False},
                     )
                 )
         return options
@@ -2074,19 +2694,14 @@ class Battle:
             and queued_action.speed == 1
             and unit.total_shields() > 0
             and not bool(queued_action.payload.get("ignore_shield"))
+            and not bool(queued_action.payload.get("half_ignore_shield"))
         )
 
     def action_ignores_stealth(self, queued_action: QueuedAction) -> bool:
         return bool(queued_action.payload.get("ignore_stealth"))
 
     def target_can_chain_against(self, unit: Unit, queued_action: QueuedAction) -> bool:
-        actor = self.units.get(queued_action.actor_id)
-        ok, _ = self.unit_can_be_selected(
-            unit,
-            actor=actor,
-            ignore_stealth=self.action_ignores_stealth(queued_action),
-        )
-        return ok
+        return unit.alive and unit.position is not None and not unit.banished
 
     def reaction_affected_units(self, queued_action: QueuedAction) -> list[Unit]:
         actor = self.get_unit(queued_action.actor_id)
@@ -2134,18 +2749,19 @@ class Battle:
         )
 
     def present_reaction_window_or_resolve(self, queued_action: QueuedAction) -> None:
-        window = self.create_reaction_window(queued_action)
-        if window is None:
-            if queued_action.speed < 3 and queued_action.hostile and queued_action.target_unit_ids:
-                target_names = "、".join(self.get_unit(unit_id).name for unit_id in queued_action.target_unit_ids)
-                self.log(f"{target_names} 没有可用的更快连锁，【{queued_action.display_name}】直接结算。")
-            self.resolve_queued_action(queued_action)
-            return
-        self.pending_chain = window
-        reactor = self.pending_chain.current_unit_id()
-        self.log(f"等待玩家 {window.reactive_player_id} 的连锁响应。")
-        if reactor is not None:
-            self.log(f"{self.get_unit(reactor).name} 可以进行连锁。")
+        with self.suppress_logs() if self.queued_action_hides_logs(queued_action) else nullcontext():
+            window = self.create_reaction_window(queued_action)
+            if window is None:
+                if queued_action.speed < 3 and queued_action.hostile and queued_action.target_unit_ids:
+                    target_names = "、".join(self.get_unit(unit_id).name for unit_id in queued_action.target_unit_ids)
+                    self.log(f"{target_names} 没有可用的更快连锁，【{queued_action.display_name}】直接结算。")
+                self.resolve_queued_action(queued_action)
+                return
+            self.pending_chain = window
+            reactor = self.pending_chain.current_unit_id()
+            self.log(f"等待玩家 {window.reactive_player_id} 的连锁响应。")
+            if reactor is not None:
+                self.log(f"{self.get_unit(reactor).name} 可以进行连锁。")
 
     def execute_reaction_option(
         self,
@@ -2189,15 +2805,13 @@ class Battle:
     def resolve_skill_effect(self, actor: Unit, queued_action: QueuedAction) -> None:
         payload = queued_action.payload
         effect_code = payload.get("effect_code")
-        target: Optional[Unit] = None
-        if payload.get("declared_target_x") is not None and payload.get("declared_target_y") is not None:
-            declared = Position(int(payload["declared_target_x"]), int(payload["declared_target_y"]))
-            target = self.unit_at(declared)
-            if target is None or target.player_id == actor.player_id:
-                self.log(f"【{queued_action.display_name}】落在原定格上，没有命中有效目标。")
-                return
-        elif payload.get("target_unit_id"):
-            target = self.get_unit(payload["target_unit_id"])
+        target = self.resolve_declared_target_unit(
+            actor,
+            payload,
+            ignore_stealth=bool(payload.get("ignore_stealth")),
+        )
+        if target is not None and target.player_id == actor.player_id:
+            target = None
         if target is None:
             self.log(f"【{queued_action.display_name}】没有命中有效目标。")
             return
@@ -2209,6 +2823,7 @@ class Battle:
                 is_skill=True,
                 is_hostile=True,
                 ignore_shield=bool(payload.get("ignore_shield")),
+                half_ignore_shield=bool(payload.get("half_ignore_shield")),
                 ignore_magic_immunity=bool(payload.get("ignore_magic_immunity")),
                 cannot_evade=bool(payload.get("cannot_evade")),
                 tags=set(payload.get("tags", [])),
@@ -2226,63 +2841,73 @@ class Battle:
         raise ActionError("未知技能后续效果。")
 
     def resolve_queued_action(self, queued_action: QueuedAction) -> None:
-        actor = self.units.get(queued_action.actor_id)
-        if actor is None or not actor.alive or actor.banished:
-            self.log(f"【{queued_action.display_name}】未能结算，因为行动者已不在战场。")
-            return
-        payload = queued_action.payload
-        if queued_action.action_type == "move":
-            destination = Position(int(payload["x"]), int(payload["y"]))
-            self.move_unit(actor, destination)
-            actor.actions_taken_this_turn.append("move")
-            return
-        if queued_action.action_type == "attack":
-            target: Optional[Unit]
-            if payload.get("declared_target_x") is not None and payload.get("declared_target_y") is not None:
-                declared = Position(int(payload["declared_target_x"]), int(payload["declared_target_y"]))
-                target = self.unit_at(declared)
-                if target is None or target.player_id == actor.player_id:
-                    actor.attacks_used += 1
-                    actor.actions_taken_this_turn.append("attack")
-                    actor.consume_attack_attempt_buffs(self)
-                    self.log(f"{actor.name} 的【普攻】打在 ({declared.x}, {declared.y})，没有命中有效目标。")
-                    return
-            else:
-                target = self.get_unit(payload["target_unit_id"])
-            self.resolve_from_declared_origin(actor, payload, lambda: self.basic_attack(actor, target))
-            return
-        if queued_action.action_type == "skill":
-            resolved_payload = dict(payload)
-            if payload.get("declared_target_x") is not None and payload.get("declared_target_y") is not None:
-                declared = Position(int(payload["declared_target_x"]), int(payload["declared_target_y"]))
-                occupant = self.unit_at(declared)
-                resolved_payload["resolved_target_unit_id"] = occupant.unit_id if occupant is not None else None
-            self.resolve_from_declared_origin(actor, payload, lambda: self.use_skill(actor, payload["skill_code"], resolved_payload))
-            return
-        if queued_action.action_type == "skill_effect":
-            self.resolve_skill_effect(actor, queued_action)
-            return
-        if queued_action.action_type == "reaction_skill":
-            source_action = self.source_action_for_reaction(queued_action)
-            reaction_payload = dict(payload)
-            if payload.get("declared_target_x") is not None and payload.get("declared_target_y") is not None:
-                declared = Position(int(payload["declared_target_x"]), int(payload["declared_target_y"]))
-                occupant = self.unit_at(declared)
-                reaction_payload["resolved_target_unit_id"] = occupant.unit_id if occupant is not None else None
-            option = ReactionOption(
-                unit_id=actor.unit_id,
-                action_code=payload["action_code"],
-                action_name=payload["action_name"],
-                action_type="skill",
-                timing="reaction",
-                chain_speed=queued_action.speed,
-                description=payload.get("description", ""),
-            )
-            self.execute_reaction_option(option, source_action, reaction_payload)
-            return
-        if queued_action.action_type == "reaction_action":
-            self.resolve_reaction_action(actor, payload["action_code"], self.source_action_for_reaction(queued_action))
-            return
+        with self.suppress_logs() if self.queued_action_hides_logs(queued_action) else nullcontext():
+            actor = self.units.get(queued_action.actor_id)
+            if actor is None or not actor.alive or actor.banished:
+                self.log(f"【{queued_action.display_name}】未能结算，因为行动者已不在战场。")
+                return
+            payload = queued_action.payload
+            if queued_action.action_type == "move":
+                destination = Position(int(payload["x"]), int(payload["y"]))
+                path = self.payload_positions(payload, "path")
+                self.move_unit(actor, destination, path=path or None)
+                actor.actions_taken_this_turn.append("move")
+                return
+            if queued_action.action_type == "attack":
+                target: Optional[Unit]
+                declared = self.declared_target_position(payload)
+                if declared is not None:
+                    target = self.resolve_declared_target_unit(
+                        actor,
+                        payload,
+                        ignore_stealth=bool(payload.get("ignore_stealth")),
+                    )
+                    if target is None or target.player_id == actor.player_id:
+                        actor.attacks_used += 1
+                        actor.actions_taken_this_turn.append("attack")
+                        actor.consume_attack_attempt_buffs(self)
+                        self.log(f"{actor.name} 的【普攻】打在 ({declared.x}, {declared.y})，没有命中有效目标。")
+                        return
+                else:
+                    target = self.get_unit(payload["target_unit_id"])
+                self.resolve_from_declared_origin(actor, payload, lambda: self.basic_attack(actor, target))
+                return
+            if queued_action.action_type == "skill":
+                resolved_payload = dict(payload)
+                resolved_target = self.resolve_declared_target_unit(
+                    actor,
+                    payload,
+                    ignore_stealth=bool(payload.get("ignore_stealth")),
+                )
+                resolved_payload["resolved_target_unit_id"] = resolved_target.unit_id if resolved_target is not None else None
+                self.resolve_from_declared_origin(actor, payload, lambda: self.use_skill(actor, payload["skill_code"], resolved_payload))
+                return
+            if queued_action.action_type == "skill_effect":
+                self.resolve_skill_effect(actor, queued_action)
+                return
+            if queued_action.action_type == "reaction_skill":
+                source_action = self.source_action_for_reaction(queued_action)
+                reaction_payload = dict(payload)
+                resolved_target = self.resolve_declared_target_unit(
+                    actor,
+                    payload,
+                    ignore_stealth=bool(payload.get("ignore_stealth")),
+                )
+                reaction_payload["resolved_target_unit_id"] = resolved_target.unit_id if resolved_target is not None else None
+                option = ReactionOption(
+                    unit_id=actor.unit_id,
+                    action_code=payload["action_code"],
+                    action_name=payload["action_name"],
+                    action_type="skill",
+                    timing="reaction",
+                    chain_speed=queued_action.speed,
+                    description=payload.get("description", ""),
+                )
+                self.execute_reaction_option(option, source_action, reaction_payload)
+                return
+            if queued_action.action_type == "reaction_action":
+                self.resolve_reaction_action(actor, payload["action_code"], self.source_action_for_reaction(queued_action))
+                return
 
     def finalize_reaction_window(self) -> None:
         if self.pending_chain is None:
@@ -2310,18 +2935,19 @@ class Battle:
     def start_action_or_chain(self, payload: dict[str, Any]) -> None:
         queued_action = self.build_queued_action(payload)
         actor = self.get_unit(queued_action.actor_id)
-        reaction_window_timing = "before"
-        if queued_action.action_type == "skill":
-            skill = actor.get_skill(queued_action.payload["skill_code"])
-            skill.prepay_resources(self, actor)
-            queued_action.payload["resources_prepaid"] = True
-            reaction_window_timing = skill.reaction_window_timing(self, actor, queued_action.payload)
-        if queued_action.action_type in {"attack", "skill"}:
-            actor.notify_action_declared(self, queued_action.action_type, queued_action.payload)
-        if queued_action.action_type == "skill" and reaction_window_timing == "after":
-            self.resolve_queued_action(queued_action)
-            return
-        self.present_reaction_window_or_resolve(queued_action)
+        with self.suppress_logs() if self.queued_action_hides_logs(queued_action) else nullcontext():
+            reaction_window_timing = "before"
+            if queued_action.action_type == "skill":
+                skill = actor.get_skill(queued_action.payload["skill_code"])
+                skill.prepay_resources(self, actor, queued_action.payload)
+                queued_action.payload["resources_prepaid"] = True
+                reaction_window_timing = skill.reaction_window_timing(self, actor, queued_action.payload)
+            if queued_action.action_type in {"attack", "skill"}:
+                actor.notify_action_declared(self, queued_action.action_type, queued_action.payload)
+            if queued_action.action_type == "skill" and reaction_window_timing == "after":
+                self.resolve_queued_action(queued_action)
+                return
+            self.present_reaction_window_or_resolve(queued_action)
 
     def pass_turn(self, actor: Unit) -> None:
         actor.turn_ready = False
@@ -2388,7 +3014,7 @@ class Battle:
             unit = self.get_unit(prompt.unit_id)
             if destination not in self.respawn_options_for(unit):
                 raise ActionError("该位置不能作为重新出现的落点。")
-            if self.is_occupied(destination, ignore=unit):
+            if not self.can_place_unit(unit, destination, ignore=unit, mover=unit):
                 raise ActionError("该位置已被占用，无法重新出现。")
             self.pending_respawn_unit_ids.pop(0)
             self.restore_banished_unit(unit, destination)
@@ -2401,8 +3027,11 @@ class Battle:
                     self.finalize_reaction_window()
                     return
                 unit = self.get_unit(current_unit_id)
-                self.pending_chain.decision_log.append(f"{unit.name} 放弃连锁。")
-                self.log(f"{unit.name} 放弃了连锁。")
+                if unit.is_stealthed():
+                    self.pending_chain.decision_log.append("有单位放弃了连锁。")
+                else:
+                    self.pending_chain.decision_log.append(f"{unit.name} 放弃连锁。")
+                    self.log(f"{unit.name} 放弃了连锁。")
                 self.pending_chain.pending_reactor_ids.pop(0)
                 self.advance_reaction_window()
                 return
@@ -2425,10 +3054,19 @@ class Battle:
                 }
                 if chosen.action_type == "skill":
                     skill = reactor.get_skill(chosen.action_code)
-                    skill.prepay_resources(self, reactor)
+                    ok, reason = skill.can_react_with_payload(
+                        self,
+                        reactor,
+                        self.pending_chain.queued_action,
+                        reaction_payload,
+                    )
+                    if not ok:
+                        raise ActionError(reason)
+                    skill.prepay_resources(self, reactor, reaction_payload)
                     reaction_payload["resources_prepaid"] = True
-                    if reaction_payload.get("target_unit_id"):
-                        target = self.get_unit(reaction_payload["target_unit_id"])
+                    target_ids = self.payload_target_unit_ids(reaction_payload)
+                    if target_ids:
+                        target = self.get_unit(target_ids[0])
                         if target.position is not None:
                             reaction_payload["declared_target_x"] = target.position.x
                             reaction_payload["declared_target_y"] = target.position.y
@@ -2466,9 +3104,13 @@ class Battle:
                     source_player_id=self.get_unit(current_unit_id).player_id,
                     hostile=True,
                     reaction_source_id=self.pending_chain.queued_action.actor_id,
+                    suppress_logs=reactor.is_stealthed() or self.pending_chain.queued_action.suppress_logs,
                 )
                 self.pending_chain.chosen_reactions.append(queued)
-                self.pending_chain.decision_log.append(f"{self.get_unit(current_unit_id).name} 选择了 {chosen.action_name}。")
+                if reactor.is_stealthed():
+                    self.pending_chain.decision_log.append("有单位进行了连锁选择。")
+                else:
+                    self.pending_chain.decision_log.append(f"{self.get_unit(current_unit_id).name} 选择了 {chosen.action_name}。")
                 self.pending_chain.pending_reactor_ids.pop(0)
                 self.advance_reaction_window()
                 return
@@ -2486,15 +3128,21 @@ class Battle:
         raise ActionError("未知动作类型。")
 
     def action_snapshot_for(self, unit: Unit) -> dict[str, Any]:
-        move_targets = [pos.to_dict() for pos in self.reachable_positions(unit, max_distance=unit.normal_move_distance())]
+        move_targets = [
+            pos.to_dict()
+            for pos in self.reachable_positions(
+                unit,
+                max_distance=unit.normal_move_distance(),
+                use_movement_cost=True,
+            )
+        ]
         attack_targets = []
         attack_cells = []
         for enemy in self.enemy_units(unit.player_id):
             ignore_stealth = self.attack_ignores_stealth(unit, enemy)
             if self.attack_target_allowed(unit, enemy, ignore_stealth=ignore_stealth)[0]:
                 attack_targets.append(enemy.unit_id)
-                if enemy.position is not None:
-                    attack_cells.append(enemy.position.to_dict())
+                attack_cells.extend(cell.to_dict() for cell in self.unit_cells(enemy))
         actions = []
         actions.append(
             {
@@ -2505,8 +3153,22 @@ class Battle:
                 "chain_speed": 1,
                 "description": "普通移动。",
                 "available": unit.can_take_turn_actions(self) and not unit.move_used and not unit.cannot_move and not unit.cannot_normal_move,
-                "preview": {"cells": move_targets, "target_unit_ids": [], "requires_target": True},
+                "preview": {
+                    "cells": move_targets,
+                    "target_unit_ids": [],
+                    "requires_target": True,
+                    "selection": {
+                        "mode": "move_path",
+                        "max_steps": unit.normal_move_distance(),
+                    },
+                },
             }
+        )
+        attack_available = (
+            unit.can_take_turn_actions(self)
+            and unit.attacks_used < unit.attack_actions_per_turn()
+            and not unit.cannot_attack
+            and not self.shared_stealth_action_block_reason(unit)
         )
         actions.append(
             {
@@ -2516,7 +3178,7 @@ class Battle:
                 "timing": "active",
                 "chain_speed": 1,
                 "description": "普通攻击。",
-                "available": unit.can_take_turn_actions(self) and unit.attacks_used < unit.attack_actions_per_turn(),
+                "available": attack_available,
                 "preview": {"cells": attack_cells, "target_unit_ids": attack_targets, "requires_target": True},
             }
         )

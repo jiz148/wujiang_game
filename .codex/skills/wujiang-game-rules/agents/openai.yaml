@@ -1,0 +1,4 @@
+interface:
+  display_name: "Wujiang Game Rules"
+  short_description: "Hero rules and code workflow for wujiang_game"
+  default_prompt: "Use $wujiang-game-rules to implement or update a wujiang_game hero rule, mechanic, document, or test."

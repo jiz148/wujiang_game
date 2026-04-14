@@ -48,6 +48,7 @@ from wujiang.heroes.common import (
     StatModifierStatus,
     StationaryRecoveryTrait,
     StealthSkill,
+    dedupe_positions,
     payload_position,
     payload_target_unit,
     ensure_ally,
@@ -113,6 +114,21 @@ class ManaPullSkill(Skill):
         if payload.get("target_unit_id"):
             return [payload_target_unit(battle, payload)]
         return []
+
+    def get_target_cells_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
+        if not payload.get("target_unit_id"):
+            return []
+        target = payload_target_unit(battle, payload)
+        if target.position is None:
+            return []
+        try:
+            destination = payload_position(payload, "dest_x", "dest_y")
+            direction = straight_direction(target.position, destination)
+        except ActionError:
+            return [target.position]
+        steps = target.position.distance_to(destination)
+        path = [target.position.offset(direction[0] * step, direction[1] * step) for step in range(steps + 1)]
+        return dedupe_positions(path)
 
 
 class CurseSkill(Skill):
@@ -399,7 +415,23 @@ class GreatFireFuneralField(BattleFieldEffect):
     def __init__(self, owner_unit_id: str, cells: set[tuple[int, int]]) -> None:
         super().__init__("大火葬余烬", "烈焰区域会以攻 5 灼伤停留单位，并灼烧穿行单位。", duration=None)
         self.owner_unit_id = owner_unit_id
-        self.cells = cells
+        self.cells = set(cells)
+
+    def merge_into_existing(self, battle: Battle, existing_effects: list[BattleFieldEffect]) -> bool:
+        new_cells = set(self.cells)
+        for effect in existing_effects:
+            if isinstance(effect, GreatFireFuneralField):
+                new_cells -= effect.cells
+        if not new_cells:
+            battle.log("大火葬余烬已覆盖该区域，区域效果不叠加。")
+            return True
+        for effect in existing_effects:
+            if isinstance(effect, GreatFireFuneralField) and effect.owner_unit_id == self.owner_unit_id:
+                effect.cells.update(new_cells)
+                battle.log("大火葬余烬范围扩大；已存在的火区不叠加。")
+                return True
+        self.cells = new_cells
+        return False
 
     def in_area(self, position: Position) -> bool:
         return (position.x, position.y) in self.cells
@@ -423,7 +455,7 @@ class GreatFireFuneralField(BattleFieldEffect):
         owner = self.get_owner_unit(battle)
         if owner is None or ctx.unit.unit_id == self.owner_unit_id:
             return
-        if any(self.in_area(step) for step in ctx.path[1:]):
+        if any(self.in_area(step) for step in ctx.path[1:-1]):
             damage = round(ctx.unit.current_hp / 2, 4)
             if damage <= 0:
                 return
@@ -607,7 +639,7 @@ class Ellie(AbstractHero):
     raw_skill_text = "魔墙 吸魔【1魔力牵引（每回合最多使用一次；可以对对方或者己方使用，被击中单位向指定方向移动1-3格，若是对方单位，则其下次行动时不能移动）￥诅咒（将自己的血下降0.5，场上一单位每1轮血*1/2）￥美杜莎（攻3守无限范1，每回合一次瞬移，攻4次）￥实验（己方一单位全能力+2，3轮后死亡） ￥水晶球（4轮内可攻击和技能场上任何单位）"
     raw_trait_text = "使用结束过主动技能单位当回合无法对此单位造成伤害"
 
-    raw_skill_text = "\u9b54\u5899\uff08\u88ab\u52a8\u6280\u80fd\uff1b1\u9b54\uff1b\u53ef\u5bf9\u5df1\u65b9\u4f7f\u7528\uff1b\u52a0 1 \u76fe\uff09 \u5438\u9b54 \u30101\u9b54\u529b\u7275\u5f15\uff08\u6bcf\u56de\u5408\u6700\u591a\u4f7f\u7528\u4e00\u6b21\uff1b\u53ef\u4ee5\u5bf9\u654c\u65b9\u6216\u8005\u5df1\u65b9\u4f7f\u7528\uff0c\u88ab\u51fb\u4e2d\u5355\u4f4d\u5411\u6307\u5b9a\u65b9\u5411\u79fb\u52a81-3\u683c\uff0c\u82e5\u662f\u654c\u65b9\u5355\u4f4d\uff0c\u5219\u5176\u4e0b\u6b21\u884c\u52a8\u65f6\u4e0d\u80fd\u79fb\u52a8\uff09\uffe5\u8bc5\u5492\uff08\u5c06\u81ea\u5df1\u7684\u8840\u4e0b\u964d0.5\uff0c\u573a\u4e0a\u4e00\u5355\u4f4d\u5728\u6bcf\u4e2a\u5df1\u65b9\u56de\u5408\u5f00\u59cb\u65f6\u8840*1/2\uff09\uffe5\u7f8e\u675c\u838e\uff08\u653b3\u5b88\u65e0\u9650\u83031\uff0c\u6bcf\u56de\u5408\u4e00\u6b21\u77ac\u79fb\uff0c\u653b4\u6b21\uff0c\u767b\u573a\u5f53\u56de\u5408\u4e0d\u80fd\u884c\u52a8\uff09\uffe5\u5b9e\u9a8c\uff08\u5df1\u65b9\u4e00\u5355\u4f4d\u5168\u80fd\u529b+2\uff0c3\u8f6e\u540e\u6b7b\u4ea1\uff09 \uffe5\u6c34\u6676\u7403\uff084\u8f6e\u5185\u53ef\u653b\u51fb\u548c\u6280\u80fd\u573a\u4e0a\u4efb\u4f55\u5355\u4f4d\uff09"
+    raw_skill_text = "魔墙（被动技能；1魔；可选择多个当前受影响的己方目标；各获得1层临时护盾，只持续到这次连锁结束） 吸魔 【1魔力牵引（每回合最多使用一次；可以对敌方或者己方使用，被击中单位向指定方向移动1-3格，若是敌方单位，则其下次行动时不能移动）￥诅咒（将自己的血下降0.5，场上一单位在每个己方回合开始时血*1/2）￥美杜莎（攻3守无限范1，每回合一次瞬移，攻4次，登场当回合不能行动）￥实验（己方一单位全能力+2，3轮后死亡） ￥水晶球（4轮内可攻击和技能场上任何单位）"
     raw_trait_text = "\u4f7f\u7528\u7ed3\u675f\u8fc7\u4e3b\u52a8\u6280\u80fd\u5355\u4f4d\u5f53\u56de\u5408\u65e0\u6cd5\u5bf9\u6b64\u5355\u4f4d\u9020\u6210\u4f24\u5bb3"
 
     def build_skills(self) -> list[Skill]:
@@ -628,7 +660,7 @@ class DarkHuman(AbstractHero):
     raw_skill_text = "飞跃 保护 回避（被动技能；每回合最多2次；移动2格） 【1.5隐身（仅己方可见；敌方不能直接点人，但点地技能仍可能命中；直到自己下次普攻或使用技能前解除） ￥麻痹手套（破魔；伤4；被击中以后3轮不能移动）命运飞踢（2轮一次；直线移动至多4个以后向移动的方向造成以下效果：被击中的单位投硬币，如果正面，则自己消失1轮；若是反面则被击中单位消失1轮） 遁入黑暗（4轮一次；持续2轮；无法被选中且无法回复，此效果结束后的第一次攻击伤害+1并且破魔）"
     raw_trait_text = "攻击三次；飞行；使用隐身后重置“麻痹手套”;当回合没有移动的武将的主动技能对此单位无效"
 
-    raw_skill_text = "飞跃（1魔；必须直线穿人移动3格） 保护 回避（被动技能；每回合最多2次；移动1格） 【1.5隐身（仅己方可见；敌方不能直接点人，但点地技能仍可能命中；直到自己第一次普攻或使用技能后解除） ￥麻痹手套（破魔；伤4；被击中以后3轮不能移动） 命运飞踢（2轮一次；直线移动至多4个以后向移动的方向造成以下效果：被击中的单位投硬币，如果正面，则自己消失1轮；若是反面则被击中单位消失1轮） 遁入黑暗（4轮一次；持续2轮；隐身且无法回复；若以普攻现身，则那次普攻伤害+1并破魔）"
+    raw_skill_text = "飞跃（1魔；必须直线穿人移动3格） 保护（被动技能；1魔；只保护自己；获得2层临时护盾，只持续到这次连锁结束） 回避（被动技能；每回合最多2次；移动1格） 【1.5隐身（仅己方可见；敌方不能直接点人，但点地技能仍可能命中；直到自己第一次普攻或使用技能后解除） ￥麻痹手套（破魔；伤4；被击中以后3轮不能移动） 命运飞踢（2轮一次；直线移动至多4个以后向移动的方向造成以下效果：被击中的单位投硬币，如果正面，则自己消失1轮；若是反面则被击中单位消失1轮） 遁入黑暗（4轮一次；持续2轮；隐身且无法回复；若以普攻现身，则那次普攻伤害+1并破魔）"
     raw_trait_text = "\u653b\u51fb\u4e09\u6b21\uff1b\u98de\u884c\uff1b\u4f7f\u7528\u9690\u8eab\u540e\u91cd\u7f6e\u201c\u9ebb\u75f9\u624b\u5957\u201d"
 
     def build_skills(self) -> list[Skill]:
@@ -664,7 +696,7 @@ class FireFuneral(AbstractHero):
     race = "恶魔"
     level = 5
     base_stats = Stats(attack=4, defense=3, speed=2, attack_range=2, mana=4)
-    raw_skill_text = "神速（1魔；此回合内下一次普通移动格数+3） 变硬 穿刺 震开 大火葬（2轮一次；横竖全中，伤5，使用以后攻-1；之后被攻击的区域每个玩家的己方回合结束时都会受到5的伤害；且穿过被此技能击中的区域的单位血*1/2；此技能的效果无视魔免；此技能不会对此单位造成伤害） ￥审判日之火（仅在攻击为1时才能使用；给与全场除了能力值最低的单位以外6的伤害；无视魔免；无法回避；3轮不能回血）"
+    raw_skill_text = "神速（1魔；此回合内下一次普通移动格数+3） 变硬 穿刺（1.5魔；每回合最多2次；逐格选择一段连续直线2格；只要整段里至少有一格紧贴自己就算合法；贴边时按实际存在格子结算） 震开 大火葬（2轮一次；横竖全中，伤5，使用以后攻-1；之后被攻击的区域每个玩家的己方回合结束时都会受到5的伤害；且真正穿过被此技能击中的区域的单位血*1/2；此技能的效果无视魔免；此技能不会对此单位造成伤害） ￥审判日之火（仅在攻击为1时才能使用；给与全场除了能力值最低的单位以外6的伤害；无视魔免；无法回避；3轮不能回血）"
     raw_trait_text = "此单为攻击为1时魔免；可格挡，反击"
 
     def build_skills(self) -> list[Skill]:
@@ -689,7 +721,7 @@ class EliteSoldier(AbstractHero):
     race = "人类"
     level = 4
     base_stats = Stats(attack=3, defense=2, speed=2, attack_range=14, mana=3)
-    raw_skill_text = "机枪（每回合一次；逐格选择一条直线区域；通常三格，贴边时按实际存在格子结算） 神速（1魔；此回合内下一次普通移动格数+3） 爆头（一回合一次；本回合内失去周围方形普攻特性；本回合内下一次攻击伤害+2并破魔） 【0.5撤步射击（被动技能；先选直线穿人的两格撤步落点，再选一个可反击的敌方目标；一回合最多使用2次）"
+    raw_skill_text = "机枪（每回合一次；逐格选择一段连续直线3格；只要整段里至少有一格紧贴自己就算合法；贴边时按实际存在格子结算） 神速（1魔；此回合内下一次普通移动格数+3） 爆头（一回合一次；本回合内失去周围方形普攻特性；本回合内下一次普攻伤害+2并破魔） 【0.5撤步射击（被动技能；受到敌方普攻或技能影响时先选直线穿人的两格撤步落点，随后只反击连锁来源的对象；一回合最多使用2次）"
     raw_trait_text = "普攻范围是周围（范*2+1）*（范*2+1）；普攻带有以下破魔效果：1/3几率使被攻击单位下次行动时速-2，最低到1"
 
     def build_skills(self) -> list[Skill]:
@@ -712,7 +744,7 @@ class Bard(AbstractHero):
     race = "人类"
     level = 3
     base_stats = Stats(attack=2, defense=4, speed=2, attack_range=4, mana=5)
-    raw_skill_text = "守*2（1魔；每回合一次；可对己方单位或自己使用；目标守+1，来自同一武将的不叠加） 【1回血（每回合一次；可对包括自己在内的己方单位使用；目标血+1/4） 保护 【2洗礼（仅可对‘人类’使用；被使用的单位获得魔免；2轮） ￥大圣光（持续2.5轮；以自己为中心形成范围会变化的圣光场；敌方单位进行普通移动后受到4伤害；己方单位在己方回合结束时若仍在范围内则守+1） 吟唱（每回合一次；点一个范内目标；目标魔力点+2）"
+    raw_skill_text = "守*2（1魔；每回合一次；可对己方单位或自己使用；目标守+1，来自同一武将的不叠加） 【1回血（每回合一次；可对包括自己在内的己方单位使用；目标血+1/4） 保护（被动技能；1魔；只保护自己；获得2层护盾，持续到回合结束） 【2洗礼（仅可对‘人类’使用；被使用的单位获得魔免；2轮） ￥大圣光（持续2.5轮；以自己为中心形成范围会变化的圣光场；敌方单位进行普通移动且移动后仍在范围内时受到4伤害；己方单位在己方回合结束时若仍在范围内则守+1直到下次己方回合开始前） 吟唱（每回合一次；点一个范内目标；目标魔力点+2）"
     raw_trait_text = "原地回魔 原地回血"
 
     def build_skills(self) -> list[Skill]:

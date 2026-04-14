@@ -5,6 +5,7 @@ const state = {
   battle: null,
   selectedUnitId: "",
   selectedActionCode: "",
+  selectedActionSnapshot: null,
   hoveredActionCode: "",
   hoveredUnitId: "",
   hoverPointer: null,
@@ -118,15 +119,94 @@ function toggleSidebarPanel(panel) {
 }
 
 function activeOccupantAt(x, y) {
-  return allUnits().find(
-    (unit) => !unit.banished && unit.position && unit.position.x === x && unit.position.y === y,
-  ) || null;
+  const occupants = unitsAtCell(x, y);
+  return occupants.find((unit) => !unitIsStealthed(unit)) || occupants[0] || null;
 }
 
 function visibleUnitAt(x, y) {
-  return allUnits().find(
-    (unit) => unit.position && unit.position.x === x && unit.position.y === y,
-  ) || null;
+  const occupants = unitsAtCell(x, y);
+  return occupants.find((unit) => !unitIsStealthed(unit)) || occupants[0] || null;
+}
+
+function unitsAtCell(x, y) {
+  return allUnits().filter(
+    (unit) => !unit.banished && unitOccupiedCells(unit).some((cell) => cell.x === x && cell.y === y),
+  );
+}
+
+function unitFootprintSize(unit) {
+  const occupied = unitOccupiedCells(unit);
+  if (occupied.length) return unitFootprintBounds(unit);
+  const footprint = unit?.footprint || {};
+  if (Number(footprint.width) > 0 && Number(footprint.height) > 0) return { width: Number(footprint.width), height: Number(footprint.height) };
+  return { width: 1, height: 1 };
+}
+
+function unitFootprintOffsets(unit) {
+  const footprint = unit?.footprint || {};
+  if (Array.isArray(footprint.offsets) && footprint.offsets.length) {
+    return footprint.offsets
+      .filter((cell) => cell && cell.x != null && cell.y != null)
+      .map((cell) => ({ x: Number(cell.x), y: Number(cell.y) }));
+  }
+  const occupied = unitOccupiedCells(unit);
+  if (unit?.position && occupied.length) {
+    return occupied.map((cell) => ({
+      x: Number(cell.x) - Number(unit.position.x),
+      y: Number(cell.y) - Number(unit.position.y),
+    }));
+  }
+  const width = Number(footprint.width || 1);
+  const height = Number(footprint.height || 1);
+  const offsets = [];
+  for (let dx = 0; dx < width; dx += 1) {
+    for (let dy = 0; dy < height; dy += 1) {
+      offsets.push({ x: dx, y: dy });
+    }
+  }
+  return offsets;
+}
+
+function unitFootprintCellsAt(unit, anchor) {
+  if (!unit || !anchor) return [];
+  return unitFootprintOffsets(unit).map((offset) => ({
+    x: Number(anchor.x) + Number(offset.x),
+    y: Number(anchor.y) + Number(offset.y),
+  }));
+}
+
+function unitHasLargeFootprint(unit) {
+  const occupied = unitOccupiedCells(unit);
+  const { width, height } = unitFootprintSize(unit);
+  return occupied.length > 1 || width > 1 || height > 1;
+}
+
+function unitOccupiedCells(unit) {
+  if (!unit?.position) return [];
+  if (Array.isArray(unit.occupied_cells) && unit.occupied_cells.length) {
+    return unit.occupied_cells.filter((cell) => cell && cell.x != null && cell.y != null);
+  }
+  return [unit.position];
+}
+
+function unitFootprintBounds(unit) {
+  const occupied = unitOccupiedCells(unit);
+  if (!occupied.length) {
+    const x = Number(unit?.position?.x || 0);
+    const y = Number(unit?.position?.y || 0);
+    return { minX: x, minY: y, maxX: x, maxY: y, width: 1, height: 1 };
+  }
+  const xs = occupied.map((cell) => Number(cell.x));
+  const ys = occupied.map((cell) => Number(cell.y));
+  const minX = Math.min(...xs);
+  const minY = Math.min(...ys);
+  const maxX = Math.max(...xs);
+  const maxY = Math.max(...ys);
+  return { minX, minY, maxX, maxY, width: maxX - minX + 1, height: maxY - minY + 1 };
+}
+
+function unitIsStealthed(unit) {
+  return Boolean(unit?.statuses?.some((status) => status.name === "隐身"));
 }
 
 function selectedUnit() {
@@ -142,7 +222,7 @@ function normalizedCell(cell) {
   return { x: Number(cell.x), y: Number(cell.y) };
 }
 
-function stagedBackstepRetreatCell(action = actionByCode(state.selectedActionCode)) {
+function stagedBackstepRetreatCell(action = selectedAction()) {
   if (!action || action.code !== "backstep_shot" || !isChainMode() || state.selectedActionCode !== action.code) {
     return null;
   }
@@ -154,6 +234,26 @@ function setStagedBackstepRetreatCell(cell) {
   state.stagedPayload = normalized ? { retreatCell: normalized } : null;
 }
 
+function stagedBackstepTargetId(action = selectedAction()) {
+  if (!action || action.code !== "backstep_shot" || !isChainMode() || state.selectedActionCode !== action.code) {
+    return "";
+  }
+  return String(state.stagedPayload?.targetUnitId || "").trim();
+}
+
+function setStagedBackstepTargetId(targetUnitId) {
+  const retreatCell = stagedBackstepRetreatCell();
+  const nextTargetUnitId = String(targetUnitId || "").trim();
+  if (!retreatCell && !nextTargetUnitId) {
+    state.stagedPayload = null;
+    return;
+  }
+  state.stagedPayload = {
+    ...(retreatCell ? { retreatCell } : {}),
+    ...(nextTargetUnitId ? { targetUnitId: nextTargetUnitId } : {}),
+  };
+}
+
 function backstepFollowUpTargetIds(action, retreatCell = stagedBackstepRetreatCell(action)) {
   if (!action || action.code !== "backstep_shot" || !retreatCell) return [];
   const mapping = action.preview?.follow_up_target_ids_by_cell || {};
@@ -162,7 +262,7 @@ function backstepFollowUpTargetIds(action, retreatCell = stagedBackstepRetreatCe
 }
 
 function backstepSelectionCanComplete(action, retreatCell = stagedBackstepRetreatCell(action)) {
-  return Boolean(retreatCell) && backstepFollowUpTargetIds(action, retreatCell).length === 0;
+  return Boolean(retreatCell);
 }
 
 function roomQueryId() {
@@ -302,6 +402,15 @@ function ensureDraftSelection() {
 }
 
 function ensureSelectedUnit() {
+  const action = selectedAction();
+  if (!state.battle && isRandomRoomMode()) {
+    pill.textContent = `æˆ¿é—´ ${state.room.room_id} Â· ${state.room.status === "lobby" ? "å¤§åŽ…ä¸­" : "ç­‰å¾…å¼€å±€"}`;
+    topbarSubline.textContent = state.room.viewer_player_id
+      ? `ä½ å½“å‰æ˜¯çŽ©å®¶ ${state.room.viewer_player_id}ã€‚å½“å‰æˆ¿é—´ä½¿ç”¨ã€Œ${modeMeta.name}ã€ï¼Œå¼€å±€åŽä¼šéšæœºåˆ†é…æ­¦å°†ã€‚`
+      : "ä½ å½“å‰è¿˜æ²¡æœ‰å ç”¨å¸­ä½ã€‚è‹¥æˆ¿é—´ä»æœ‰ç©ºä½ï¼Œè¾“å…¥æ˜µç§°åŽå³å¯åŠ å…¥ã€‚";
+    caption.textContent = "å¯¹å±€å°šæœªå¼€å§‹ï¼Œéšæœºé€‰äººæ¨¡å¼ä¸‹æ— éœ€æ‰‹åŠ¨é€‰å°†ã€‚";
+    return;
+  }
   if (!state.battle) {
     state.selectedUnitId = "";
     return;
@@ -310,7 +419,7 @@ function ensureSelectedUnit() {
     state.selectedUnitId = currentRespawnPrompt()?.unit_id || "";
     return;
   }
-  if (isChainMode()) {
+  if (isChainMode() && !action) {
     state.selectedUnitId = state.battle.pending_chain?.current_unit_id || "";
     return;
   }
@@ -355,13 +464,14 @@ function syncSelectedUnitAfterStateChange() {
     ensureSelectedUnit();
     return;
   }
-  if (!controllable.includes(state.selectedUnitId)) {
-    state.selectedUnitId = controllable[0];
+  if (!unitById(state.selectedUnitId)) {
+    state.selectedUnitId = controllable[0] || allUnits()[0]?.id || "";
   }
 }
 
 function clearActionSelection() {
   state.selectedActionCode = "";
+  state.selectedActionSnapshot = null;
   state.hoveredActionCode = "";
   state.hoveredUnitId = "";
   state.hoverPointer = null;
@@ -535,8 +645,21 @@ function actionByCode(code) {
   return displayActions().find((action) => action.code === code) || null;
 }
 
+function selectedAction() {
+  if (!state.selectedActionCode) return null;
+  const live = actionByCode(state.selectedActionCode);
+  if (live) {
+    state.selectedActionSnapshot = live;
+    return live;
+  }
+  if (state.selectedActionSnapshot?.code === state.selectedActionCode) {
+    return state.selectedActionSnapshot;
+  }
+  return null;
+}
+
 function hoveredAction() {
-  return actionByCode(state.selectedActionCode) || actionByCode(state.hoveredActionCode);
+  return selectedAction() || actionByCode(state.hoveredActionCode);
 }
 
 function positionKey(pos) {
@@ -572,7 +695,7 @@ function previewCellsForTargetIds(targetIds = []) {
   return targetIds
     .map((id) => unitById(id))
     .filter((unit) => unit?.position && !unit.banished)
-    .map((unit) => unit.position)
+    .flatMap((unit) => unitOccupiedCells(unit))
     .filter(Boolean);
 }
 
@@ -587,7 +710,7 @@ function cellInBounds(cell) {
 function unitIdsAtCells(cells = []) {
   const keys = positionsToSet(cells);
   return allUnits()
-    .filter((unit) => unit.position && !unit.banished && keys.has(positionKey(unit.position)))
+    .filter((unit) => unit.position && !unit.banished && unitOccupiedCells(unit).some((cell) => keys.has(positionKey(cell))))
     .map((unit) => unit.id);
 }
 
@@ -597,6 +720,26 @@ function sameCell(left, right) {
 
 function patternSelection(action) {
   return action?.preview?.selection?.mode === "pattern_cells" ? action.preview.selection : null;
+}
+
+function patternSelectionIsOrdered(action) {
+  return Boolean(patternSelection(action)?.ordered);
+}
+
+function movePathSelection(action) {
+  return action?.preview?.selection?.mode === "move_path" ? action.preview.selection : null;
+}
+
+function multiUnitSelection(action) {
+  return action?.preview?.selection?.mode === "multi_unit" ? action.preview.selection : null;
+}
+
+function statCellSelection(action) {
+  return action?.preview?.selection?.mode === "stat_cells" ? action.preview.selection : null;
+}
+
+function bodyDirectionSelection(action) {
+  return action?.preview?.selection?.mode === "body_direction" ? action.preview.selection : null;
 }
 
 function normalizedPatternCells(cells = []) {
@@ -621,7 +764,7 @@ function selectionPatterns(action) {
     .filter((pattern) => pattern.length);
 }
 
-function stagedPatternCells(action = actionByCode(state.selectedActionCode)) {
+function stagedPatternCells(action = selectedAction()) {
   if (!action || state.selectedActionCode !== action.code || !patternSelection(action)) return [];
   return normalizedPatternCells(Array.isArray(state.stagedPayload?.cells) ? state.stagedPayload.cells : []);
 }
@@ -629,6 +772,178 @@ function stagedPatternCells(action = actionByCode(state.selectedActionCode)) {
 function setStagedPatternCells(cells) {
   const normalized = normalizedPatternCells(cells);
   state.stagedPayload = normalized.length ? { cells: normalized } : null;
+}
+
+function stagedMovePath(action = selectedAction()) {
+  if (!action || state.selectedActionCode !== action.code || !movePathSelection(action)) return [];
+  return normalizedPatternCells(Array.isArray(state.stagedPayload?.path) ? state.stagedPayload.path : []);
+}
+
+function setStagedMovePath(path) {
+  const normalized = normalizedPatternCells(path);
+  state.stagedPayload = normalized.length ? { path: normalized } : null;
+}
+
+function normalizedTargetIds(ids = []) {
+  const normalized = [];
+  const seen = new Set();
+  ids.forEach((id) => {
+    const next = String(id || "").trim();
+    if (!next || seen.has(next)) return;
+    seen.add(next);
+    normalized.push(next);
+  });
+  return normalized;
+}
+
+function stagedMultiTargetIds(action = selectedAction()) {
+  if (!action || state.selectedActionCode !== action.code || !multiUnitSelection(action)) return [];
+  const explicit = Array.isArray(state.stagedPayload?.targetUnitIds) ? state.stagedPayload.targetUnitIds : [];
+  return normalizedTargetIds(explicit);
+}
+
+function setStagedMultiTargetIds(ids) {
+  const normalized = normalizedTargetIds(ids);
+  state.stagedPayload = normalized.length ? { targetUnitIds: normalized } : null;
+}
+
+function stagedStatName(action = selectedAction()) {
+  if (!action || state.selectedActionCode !== action.code || !statCellSelection(action)) return "";
+  return String(state.stagedPayload?.statName || "").trim();
+}
+
+function setStagedStatName(statName) {
+  const cells = stagedStatCells();
+  const next = String(statName || "").trim();
+  state.stagedPayload = next || cells.length ? { statName: next, cells } : null;
+}
+
+function stagedStatCells(action = selectedAction()) {
+  if (!action || state.selectedActionCode !== action.code || !statCellSelection(action)) return [];
+  return normalizedPatternCells(Array.isArray(state.stagedPayload?.cells) ? state.stagedPayload.cells : []);
+}
+
+function setStagedStatCells(cells) {
+  const statName = stagedStatName();
+  const normalized = normalizedPatternCells(cells);
+  state.stagedPayload = statName || normalized.length ? { statName, cells: normalized } : null;
+}
+
+function statCellRequired(action) {
+  return Number(statCellSelection(action)?.required_cells || 0);
+}
+
+function statCellSelectionCanComplete(action, chosen = stagedStatCells(action)) {
+  const selection = statCellSelection(action);
+  if (!selection) return false;
+  const statName = stagedStatName(action);
+  const validStats = new Set((selection.stats || []).map((entry) => String(entry.code || "")));
+  return Boolean(statName && validStats.has(statName) && chosen.length === statCellRequired(action));
+}
+
+function stagedBodyCells(action = selectedAction()) {
+  if (!action || state.selectedActionCode !== action.code || !bodyDirectionSelection(action)) return [];
+  return normalizedPatternCells(Array.isArray(state.stagedPayload?.cells) ? state.stagedPayload.cells : []);
+}
+
+function setStagedBodyCells(cells) {
+  const direction = stagedBodyDirection();
+  const normalized = normalizedPatternCells(cells);
+  state.stagedPayload = normalized.length || direction ? { cells: normalized, ...(direction ? { direction } : {}) } : null;
+}
+
+function stagedBodyDirection(action = selectedAction()) {
+  if (!action || state.selectedActionCode !== action.code || !bodyDirectionSelection(action)) return null;
+  const direction = state.stagedPayload?.direction;
+  if (!direction || direction.dx == null || direction.dy == null) return null;
+  return { dx: Number(direction.dx), dy: Number(direction.dy) };
+}
+
+function setStagedBodyDirection(direction) {
+  const cells = stagedBodyCells();
+  const normalized = direction && direction.dx != null && direction.dy != null
+    ? { dx: Number(direction.dx), dy: Number(direction.dy) }
+    : null;
+  state.stagedPayload = cells.length || normalized ? { cells, ...(normalized ? { direction: normalized } : {}) } : null;
+}
+
+function bodyDirectionSelectionCanComplete(action, chosen = stagedBodyCells(action)) {
+  const direction = stagedBodyDirection(action);
+  return Boolean(bodyDirectionSelection(action) && chosen.length && direction);
+}
+
+function movePathMaxSteps(action) {
+  return Number(movePathSelection(action)?.max_steps || 0);
+}
+
+function movePathHead(action, chosen = stagedMovePath(action)) {
+  if (chosen.length) return chosen[chosen.length - 1];
+  return selectedUnit()?.position || null;
+}
+
+function cellBlockedForMover(unit, cell) {
+  if (!unit) return true;
+  const footprintCells = unitFootprintCellsAt(unit, cell);
+  if (!footprintCells.every(cellInBounds)) return true;
+  const occupants = footprintCells.flatMap((footprintCell) => unitsAtCell(footprintCell.x, footprintCell.y))
+    .filter((other, index, list) => other.id !== unit.id && list.findIndex((entry) => entry.id === other.id) === index);
+  if (!occupants.length) return false;
+  if (unitIsStealthed(unit)) return false;
+  return occupants.some((other) => !unitIsStealthed(other));
+}
+
+function moveFootprintCellsForAnchors(action, anchors = []) {
+  const unit = selectedUnit();
+  if (!movePathSelection(action) || !unit) return [];
+  return anchors.flatMap((anchor) => unitFootprintCellsAt(unit, anchor));
+}
+
+function movePathAnchorForClickedCell(action, clickedCell, chosen = stagedMovePath(action)) {
+  if (!movePathSelection(action)) return null;
+  const candidates = nextMovePathCells(action, chosen);
+  const direct = candidates.find((anchor) => sameCell(anchor, clickedCell));
+  if (direct) return direct;
+  return candidates.find((anchor) => unitFootprintCellsAt(selectedUnit(), anchor).some((cell) => sameCell(cell, clickedCell))) || null;
+}
+
+function movePathIndexForClickedCell(action, clickedCell, chosen = stagedMovePath(action)) {
+  if (!movePathSelection(action)) return -1;
+  return chosen.findIndex((anchor) => (
+    sameCell(anchor, clickedCell)
+    || unitFootprintCellsAt(selectedUnit(), anchor).some((cell) => sameCell(cell, clickedCell))
+  ));
+}
+
+function nextMovePathCells(action, chosen = stagedMovePath(action)) {
+  const unit = selectedUnit();
+  const head = movePathHead(action, chosen);
+  const maxSteps = movePathMaxSteps(action);
+  if (!unit?.position || !head || !state.battle || chosen.length >= maxSteps) return [];
+  const next = [];
+  const chosenKeys = positionsToSet(chosen);
+  for (let dx = -1; dx <= 1; dx += 1) {
+    for (let dy = -1; dy <= 1; dy += 1) {
+      if (dx === 0 && dy === 0) continue;
+      const candidate = { x: head.x + dx, y: head.y + dy };
+      if (!cellInBounds(candidate)) continue;
+      if (chosenKeys.has(positionKey(candidate))) continue;
+      if (cellBlockedForMover(unit, candidate)) continue;
+      next.push(candidate);
+    }
+  }
+  return next;
+}
+
+function movePathCanComplete(action, chosen = stagedMovePath(action)) {
+  return Boolean(movePathSelection(action) && chosen.length);
+}
+
+function multiUnitSelectionCanComplete(action, chosen = stagedMultiTargetIds(action)) {
+  const selection = multiUnitSelection(action);
+  if (!selection) return false;
+  const minTargets = Number(selection.min_targets || 1);
+  const maxTargets = Number(selection.max_targets || chosen.length || minTargets);
+  return chosen.length >= minTargets && chosen.length <= maxTargets;
 }
 
 function cellsMatchExactly(left = [], right = []) {
@@ -640,6 +955,10 @@ function cellsMatchExactly(left = [], right = []) {
 function matchingSelectionPatterns(action, chosen = stagedPatternCells(action)) {
   const patterns = selectionPatterns(action);
   if (!chosen.length) return patterns;
+  if (patternSelectionIsOrdered(action)) {
+    return patterns.filter((pattern) => chosen.length <= pattern.length
+      && chosen.every((cell, index) => sameCell(cell, pattern[index])));
+  }
   return patterns.filter((pattern) => {
     const patternKeys = positionsToSet(pattern);
     return chosen.every((cell) => patternKeys.has(positionKey(cell)));
@@ -647,6 +966,19 @@ function matchingSelectionPatterns(action, chosen = stagedPatternCells(action)) 
 }
 
 function nextPatternSelectionCells(action, chosen = stagedPatternCells(action)) {
+  if (patternSelectionIsOrdered(action)) {
+    const next = [];
+    const seen = new Set();
+    matchingSelectionPatterns(action, chosen).forEach((pattern) => {
+      const cell = pattern[chosen.length];
+      if (!cell) return;
+      const key = positionKey(cell);
+      if (seen.has(key)) return;
+      seen.add(key);
+      next.push(cell);
+    });
+    return next;
+  }
   const chosenKeys = positionsToSet(chosen);
   const next = [];
   const seen = new Set();
@@ -663,6 +995,10 @@ function nextPatternSelectionCells(action, chosen = stagedPatternCells(action)) 
 
 function patternSelectionCanComplete(action, chosen = stagedPatternCells(action)) {
   if (!chosen.length) return false;
+  if (patternSelectionIsOrdered(action)) {
+    return selectionPatterns(action).some((pattern) => pattern.length === chosen.length
+      && chosen.every((cell, index) => sameCell(cell, pattern[index])));
+  }
   return matchingSelectionPatterns(action, chosen).some((pattern) => cellsMatchExactly(pattern, chosen));
 }
 
@@ -687,6 +1023,7 @@ function fieldEffectMarker(effect) {
 
 function actionManaLabel(action) {
   if (action.kind !== "skill") return "";
+  if (action.mana_cost_text) return action.mana_cost_text;
   return action.mana_cost > 0 ? `费 ${trimNumber(action.mana_cost)} 魔` : "不费魔";
 }
 
@@ -708,18 +1045,29 @@ function actionLimitLabel(action) {
 
 function currentPreview() {
   if (isGameOver()) {
-    return { cellKeys: new Set(), targetIds: new Set(), secondaryCellKeys: new Set() };
+    return { cellKeys: new Set(), targetIds: new Set(), secondaryCellKeys: new Set(), destinationCellKeys: new Set() };
   }
   if (isRespawnMode()) {
     return {
       cellKeys: positionsToSet(currentRespawnPrompt()?.options || []),
       targetIds: new Set(),
       secondaryCellKeys: positionsToSet(currentRespawnPrompt()?.origin ? [currentRespawnPrompt().origin] : []),
+      destinationCellKeys: new Set(),
     };
   }
   const action = hoveredAction();
   if (!action) {
-    return { cellKeys: new Set(), targetIds: new Set(), secondaryCellKeys: new Set() };
+    if (isChainMode()) {
+      const queued = state.battle?.pending_chain?.queued_action;
+      const targetIds = (queued?.target_unit_ids || []).filter((id) => unitIsSelectableTarget(unitById(id)));
+      return {
+        cellKeys: positionsToSet(queued?.target_cells || []),
+        targetIds: targetIdsToSet(targetIds),
+        secondaryCellKeys: new Set(),
+        destinationCellKeys: new Set(),
+      };
+    }
+    return { cellKeys: new Set(), targetIds: new Set(), secondaryCellKeys: new Set(), destinationCellKeys: new Set() };
   }
 
   if (state.selectedActionCode === "mana_pull" && state.stagedPayload?.targetUnitId) {
@@ -728,36 +1076,85 @@ function currentPreview() {
       cellKeys: positionsToSet(manaPullDestinations(target)),
       targetIds: new Set(target ? [target.id] : []),
       secondaryCellKeys: positionsToSet(target?.position ? [target.position] : []),
+      destinationCellKeys: new Set(),
     };
   }
 
-  if (isChainMode() && action?.code === "backstep_shot") {
+  const filteredTargetIds = (action.preview?.target_unit_ids || []).filter((id) => unitIsSelectableTarget(unitById(id)));
+  if (action.code === "backstep_shot" && isChainMode()) {
     const retreatCell = stagedBackstepRetreatCell(action);
     if (!retreatCell) {
       return {
         cellKeys: positionsToSet(action.preview?.cells || []),
         targetIds: new Set(),
         secondaryCellKeys: positionsToSet(action.preview?.secondary_cells || []),
+        destinationCellKeys: new Set(),
       };
     }
-    const targetIds = backstepFollowUpTargetIds(action, retreatCell)
+    const followUpTargetIds = backstepFollowUpTargetIds(action, retreatCell)
       .filter((id) => unitIsSelectableTarget(unitById(id)));
     return {
-      cellKeys: positionsToSet(previewCellsForTargetIds(targetIds)),
-      targetIds: targetIdsToSet(targetIds),
+      cellKeys: new Set(),
+      targetIds: targetIdsToSet(followUpTargetIds),
       secondaryCellKeys: positionsToSet([...(action.preview?.secondary_cells || []), retreatCell]),
+      destinationCellKeys: new Set(),
     };
   }
-
-  const filteredTargetIds = (action.preview?.target_unit_ids || []).filter((id) => unitIsSelectableTarget(unitById(id)));
+  if (movePathSelection(action)) {
+    const chosenCells = stagedMovePath(action);
+    const activeCells = nextMovePathCells(action, chosenCells);
+    const secondaryCells = chosenCells.length
+      ? chosenCells
+      : (selectedUnit()?.position ? [selectedUnit().position] : []);
+    const finalAnchors = chosenCells.length ? [chosenCells[chosenCells.length - 1]] : activeCells;
+    return {
+      cellKeys: positionsToSet(activeCells),
+      targetIds: new Set(),
+      secondaryCellKeys: positionsToSet(secondaryCells),
+      destinationCellKeys: positionsToSet(moveFootprintCellsForAnchors(action, finalAnchors)),
+    };
+  }
   if (patternSelection(action)) {
     const chosenCells = stagedPatternCells(action);
-    const activeCells = chosenCells.length ? nextPatternSelectionCells(action, chosenCells) : (action.preview?.cells || []);
+    const activeCells = nextPatternSelectionCells(action, chosenCells);
     const focusCells = [...chosenCells, ...activeCells];
     return {
       cellKeys: positionsToSet(activeCells),
       targetIds: targetIdsToSet(unitIdsAtCells(focusCells)),
       secondaryCellKeys: positionsToSet(chosenCells),
+      destinationCellKeys: new Set(),
+    };
+  }
+  if (multiUnitSelection(action)) {
+    const chosenIds = stagedMultiTargetIds(action);
+    return {
+      cellKeys: positionsToSet(previewCellsForTargetIds(filteredTargetIds)),
+      targetIds: targetIdsToSet(filteredTargetIds),
+      secondaryCellKeys: positionsToSet(previewCellsForTargetIds(chosenIds)),
+      destinationCellKeys: new Set(),
+    };
+  }
+  if (statCellSelection(action)) {
+    const chosenCells = stagedStatCells(action);
+    const required = statCellRequired(action);
+    const chosenKeys = positionsToSet(chosenCells);
+    const activeCells = required > chosenCells.length
+      ? (action.preview?.cells || []).filter((cell) => !chosenKeys.has(positionKey(cell)))
+      : [];
+    return {
+      cellKeys: positionsToSet(activeCells),
+      targetIds: targetIdsToSet(filteredTargetIds),
+      secondaryCellKeys: positionsToSet([...(action.preview?.secondary_cells || []), ...chosenCells]),
+      destinationCellKeys: new Set(),
+    };
+  }
+  if (bodyDirectionSelection(action)) {
+    const chosenCells = stagedBodyCells(action);
+    return {
+      cellKeys: positionsToSet(action.preview?.cells || []),
+      targetIds: new Set(),
+      secondaryCellKeys: positionsToSet(chosenCells),
+      destinationCellKeys: new Set(),
     };
   }
   const useDirectTargetCells = action.kind === "attack"
@@ -770,6 +1167,7 @@ function currentPreview() {
     cellKeys: positionsToSet(previewCells),
     targetIds: targetIdsToSet(filteredTargetIds),
     secondaryCellKeys: positionsToSet(action.preview?.secondary_cells || []),
+    destinationCellKeys: new Set(),
   };
 }
 
@@ -794,7 +1192,7 @@ function manaPullDestinations(target) {
         break;
       }
       const occupied = allUnits().some(
-        (unit) => !unit.banished && unit.position && unit.id !== target.id && unit.position.x === current.x && unit.position.y === current.y,
+        (unit) => !unit.banished && unit.position && unit.id !== target.id && unitOccupiedCells(unit).some((cell) => cell.x === current.x && cell.y === current.y),
       );
       if (occupied) break;
       results.push(current);
@@ -812,17 +1210,21 @@ function actionNeedsTarget(action) {
 
 function hasCancelableTargetSelection() {
   if (!canInteract() || isRespawnMode()) return false;
-  const action = state.selectedActionCode ? actionByCode(state.selectedActionCode) : null;
+  const action = selectedAction();
   return Boolean(action && actionNeedsTarget(action));
 }
 
 function canCompleteTargetSelection() {
   if (!canInteract() || isRespawnMode()) return false;
-  const action = state.selectedActionCode ? actionByCode(state.selectedActionCode) : null;
-  if (action?.code === "backstep_shot" && isChainMode()) {
-    return backstepSelectionCanComplete(action);
-  }
-  return Boolean(action && patternSelection(action) && patternSelectionCanComplete(action));
+  const action = selectedAction();
+  if (!action) return false;
+  if (action.code === "backstep_shot" && isChainMode()) return backstepSelectionCanComplete(action);
+  if (movePathSelection(action)) return movePathCanComplete(action);
+  if (patternSelection(action)) return patternSelectionCanComplete(action);
+  if (multiUnitSelection(action)) return multiUnitSelectionCanComplete(action);
+  if (statCellSelection(action)) return statCellSelectionCanComplete(action);
+  if (bodyDirectionSelection(action)) return bodyDirectionSelectionCanComplete(action);
+  return false;
 }
 
 function actionLabel(action) {
@@ -963,6 +1365,33 @@ function roomHeroSelectionSummary(heroCode) {
   return pickers.length ? pickers.join(" / ") : "";
 }
 
+function fallbackRoomModes() {
+  return [
+    {
+      code: "classic",
+      name: "标准选将",
+      description: "双方先各自选好武将，再在 8x8 战场固定出生开局。",
+    },
+    {
+      code: "random",
+      name: "随机选人",
+      description: "无需手动选将，开局后随机分配武将，使用更大的战场与随机出生，并按能力值决定先手。",
+    },
+  ];
+}
+
+function availableRoomModes() {
+  return state.room?.available_modes?.length ? state.room.available_modes : fallbackRoomModes();
+}
+
+function roomModeMeta(modeCode = state.room?.mode) {
+  return availableRoomModes().find((mode) => mode.code === modeCode) || fallbackRoomModes()[0];
+}
+
+function isRandomRoomMode() {
+  return state.room?.mode === "random";
+}
+
 function renderScreens() {
   $("draft-screen").classList.toggle("hidden", state.screen !== "draft");
   $("battle-screen").classList.toggle("hidden", state.screen !== "battle");
@@ -982,7 +1411,8 @@ function renderHeroCards() {
   const lobbyCards = $("hero-cards");
   const viewerSeat = currentRoomSeat();
   const selectedHeroCode = viewerSeat?.hero_code || "";
-  const canSelect = Boolean(hasRoom() && state.room?.status === "lobby" && viewerSeat);
+  const randomMode = isRandomRoomMode();
+  const canSelect = Boolean(hasRoom() && state.room?.status === "lobby" && viewerSeat && !randomMode);
 
   homeCards.innerHTML = "";
   lobbyCards.innerHTML = "";
@@ -1002,6 +1432,7 @@ function renderHeroCards() {
     const lobbyCard = document.createElement("article");
     lobbyCard.className = `hero-card ${selectedHeroCode === hero.code ? "is-selected" : ""}`;
     const selectedBy = roomHeroSelectionSummary(hero.code);
+    const selectionText = selectedBy || (randomMode ? "本模式开局后随机分配" : "尚无人选择");
     lobbyCard.innerHTML = `
       <h3>${hero.name}</h3>
       <div class="meta">${hero.role} / ${hero.attribute} / ${hero.race} / 等级 ${hero.level}</div>
@@ -1010,11 +1441,20 @@ function renderHeroCards() {
       <div class="text"><strong>特性:</strong>${hero.raw_trait_text}</div>
       <div class="text"><strong>当前选择:</strong>${selectedBy || "尚无人选择"}</div>
     `;
+    const selectionSummary = lobbyCard.querySelector(".text:last-of-type");
+    if (selectionSummary) {
+      selectionSummary.innerHTML = `<strong>当前选择:</strong>${selectionText}`;
+    }
     const pickBtn = document.createElement("button");
     pickBtn.className = selectedHeroCode === hero.code ? "ghost" : "primary";
     pickBtn.textContent = selectedHeroCode === hero.code ? "已选此武将" : "选择该武将";
     pickBtn.disabled = !canSelect;
     pickBtn.addEventListener("click", () => selectRoomHero(hero.code));
+    if (randomMode) {
+      pickBtn.className = "ghost";
+      pickBtn.textContent = "本模式随机分配";
+      pickBtn.disabled = true;
+    }
     lobbyCard.append(pickBtn);
     lobbyCards.append(lobbyCard);
   });
@@ -1024,6 +1464,7 @@ function renderHeader() {
   const pill = $("turn-pill");
   const topbarSubline = $("topbar-subline");
   const caption = $("board-caption");
+  const modeMeta = roomModeMeta();
   if (!hasRoom()) {
     pill.textContent = "尚未进入房间";
     topbarSubline.textContent = "创建房间、复制邀请链接、让两位玩家分别进入同一房间后在线对战。";
@@ -1074,36 +1515,9 @@ function renderBoardAlert() {
     return;
   }
 
-  const action = actionByCode(state.selectedActionCode);
+  const action = selectedAction();
 
-  if (isChainMode() && action?.code === "backstep_shot") {
-    const retreatCell = stagedBackstepRetreatCell(action);
-    const targetIds = backstepFollowUpTargetIds(action, retreatCell)
-      .map((id) => unitById(id))
-      .filter((unit) => unitIsSelectableTarget(unit));
-    node.className = "board-alert is-step";
-    if (!retreatCell) {
-      node.innerHTML = `
-        <strong>撤步射击</strong>
-        <span>先点击一个直线 2 格的撤步落点；落点确认后，再从可攻击到的敌方目标里选择这次反击对象。</span>
-      `;
-      return;
-    }
-    if (!targetIds.length) {
-      node.innerHTML = `
-        <strong>撤步射击</strong>
-        <span>已选定撤步落点。这个位置当前没有可反击的敌人，可以点击“完成选择”只执行撤步，或重新选择落点。</span>
-      `;
-      return;
-    }
-    node.innerHTML = `
-      <strong>撤步射击</strong>
-      <span>已选定撤步落点。请点击蓝色高亮的敌方单位，决定撤步后的反击对象。</span>
-    `;
-    return;
-  }
-
-  if (isChainMode()) {
+  if (isChainMode() && !action) {
     const chain = state.battle.pending_chain;
     const reactor = unitById(chain?.current_unit_id || "");
     const source = unitById(chain?.queued_action?.actor_id || "");
@@ -1128,6 +1542,16 @@ function renderBoardAlert() {
     return;
   }
 
+  if (action && movePathSelection(action)) {
+    const chosenCells = stagedMovePath(action);
+    node.className = "board-alert is-step";
+    node.innerHTML = `
+      <strong>${actionTitle(action)}</strong>
+      <span>${chosenCells.length ? `已选择 ${chosenCells.length} 格移动路径。` : "请逐格点出这次移动的路径。"} 绿色高亮表示单位最后会占据的格子；多格单位可以点击绿色占据区域来选择落点。可以提前点击“完成选择”，也可以点击已选格子回退路径。</span>
+    `;
+    return;
+  }
+
   if (action?.code === "mana_pull" && !state.stagedPayload?.targetUnitId) {
     node.className = "board-alert is-step";
     node.innerHTML = `
@@ -1143,6 +1567,68 @@ function renderBoardAlert() {
     node.innerHTML = `
       <strong>魔力牵引</strong>
       <span>已选中 ${target?.name || "目标"},请点击其 1 到 3 格的直线落点。</span>
+    `;
+    return;
+  }
+
+  if (action?.code === "backstep_shot" && isChainMode()) {
+    const retreatCell = stagedBackstepRetreatCell(action);
+    const source = unitById(state.battle?.pending_chain?.queued_action?.actor_id || "");
+    const targetIds = retreatCell ? backstepFollowUpTargetIds(action, retreatCell) : [];
+    const canCounter = targetIds.some((id) => unitIsSelectableTarget(unitById(id)));
+    node.className = "board-alert is-step";
+    if (!retreatCell) {
+      node.innerHTML = `
+        <strong>${actionTitle(action)}</strong>
+        <span>先点击一个直线 2 格的撤步落点。撤步完成后，你可以选择只反击 ${source?.name || "原连锁来源"}，也可以直接点“完成选择”放弃反击。</span>
+      `;
+      return;
+    }
+    node.innerHTML = `
+      <strong>${actionTitle(action)}</strong>
+      <span>${canCounter ? `撤步落点已确定。现在先决定是否反击：点击 ${source?.name || "原连锁来源"} 就会立刻反击；点击“完成选择”则表示不反击。` : "撤步落点已确定，但撤步后已无法攻击原连锁来源。请直接点“完成选择”结算。"} 再点一次已选落点可回到第一步。</span>
+    `;
+    return;
+  }
+
+  if (action && multiUnitSelection(action)) {
+    const chosenIds = stagedMultiTargetIds(action);
+    node.className = "board-alert is-step";
+    node.innerHTML = `
+      <strong>${actionTitle(action)}</strong>
+      <span>${chosenIds.length ? `已选择 ${chosenIds.length} 个目标。` : "请点击高亮单位来选择目标。"} 选好后可以点击“完成选择”，再次点击同一目标可取消。</span>
+    `;
+    return;
+  }
+
+  if (action && statCellSelection(action)) {
+    const chosenCells = stagedStatCells(action);
+    const required = statCellRequired(action);
+    const statName = stagedStatName(action);
+    const statButtons = (statCellSelection(action).stats || []).map((entry) => `
+      <button type="button" class="board-alert-choice ${statName === entry.code ? "is-selected" : ""}" data-stat-choice="${entry.code}">${entry.label}</button>
+    `).join("");
+    node.className = "board-alert is-step";
+    node.innerHTML = `
+      <strong>${actionTitle(action)}</strong>
+      <span>先选择要吸取的能力值，再选择 ${required} 个新增占格。当前已选 ${chosenCells.length} 个新增格。</span>
+      <div class="board-alert-actions">${statButtons}</div>
+    `;
+    return;
+  }
+
+  if (action && bodyDirectionSelection(action)) {
+    const chosenCells = stagedBodyCells(action);
+    const direction = stagedBodyDirection(action);
+    const directionButtons = (bodyDirectionSelection(action).directions || []).map((entry) => {
+      const selected = direction && Number(entry.dx) === direction.dx && Number(entry.dy) === direction.dy;
+      return `<button type="button" class="board-alert-choice ${selected ? "is-selected" : ""}" data-direction-dx="${entry.dx}" data-direction-dy="${entry.dy}">${entry.label}</button>`;
+    }).join("");
+    node.className = "board-alert is-step";
+    node.innerHTML = `
+      <strong>${actionTitle(action)}</strong>
+      <span>点击岩神身体格选择要发射的部分，然后选择方向。当前已选 ${chosenCells.length} 格；再次点击已选身体格可取消。</span>
+      <div class="board-alert-actions">${directionButtons}</div>
     `;
     return;
   }
@@ -1208,7 +1694,14 @@ function renderBoard() {
   const preview = currentPreview();
   const selected = selectedUnit();
 
-  if (!state.battle) return;
+  if (!state.battle) {
+    board.classList.remove("is-large-board");
+    return;
+  }
+  const isLargeBoard = state.battle.board.width > 8 || state.battle.board.height > 8;
+  board.classList.toggle("is-large-board", isLargeBoard);
+  board.style.gridTemplateColumns = `repeat(${state.battle.board.width}, minmax(0, 1fr))`;
+  board.style.aspectRatio = `${state.battle.board.width} / ${state.battle.board.height}`;
   const chain = state.battle.pending_chain;
   const chainSource = unitById(chain?.queued_action?.actor_id || "");
   const chainReactor = unitById(chain?.current_unit_id || "");
@@ -1221,10 +1714,12 @@ function renderBoard() {
       cell.type = "button";
       cell.dataset.x = x;
       cell.dataset.y = y;
+      cell.style.gridColumn = String(x + 1);
+      cell.style.gridRow = String(y + 1);
       cell.disabled = false;
 
       const unitsHere = allUnits().filter(
-        (unit) => unit.position && unit.position.x === x && unit.position.y === y,
+        (unit) => unit.position && unitOccupiedCells(unit).some((cellPosition) => cellPosition.x === x && cellPosition.y === y),
       );
       const occupant = unitsHere.find((unit) => !unit.banished) || unitsHere[0] || null;
       const ghostUnits = unitsHere.filter((unit) => unit.banished);
@@ -1233,10 +1728,11 @@ function renderBoard() {
       const cellEffects = fieldCellMap.get(key) || [];
       if (preview.cellKeys.has(key)) cell.classList.add("is-preview");
       if (preview.secondaryCellKeys.has(key)) cell.classList.add("is-secondary");
+      if (preview.destinationCellKeys?.has(key)) cell.classList.add("is-footprint-destination");
       if (occupant && preview.targetIds.has(occupant.id)) cell.classList.add("is-target");
-      if (selected?.position?.x === x && selected?.position?.y === y) cell.classList.add("is-selected");
-      if (chainSource?.position?.x === x && chainSource?.position?.y === y) cell.classList.add("is-chain-source");
-      if (chainReactor?.position?.x === x && chainReactor?.position?.y === y) cell.classList.add("is-chain-reactor");
+      if (unitOccupiedCells(selected).some((cellPosition) => cellPosition.x === x && cellPosition.y === y)) cell.classList.add("is-selected");
+      if (unitOccupiedCells(chainSource).some((cellPosition) => cellPosition.x === x && cellPosition.y === y)) cell.classList.add("is-chain-source");
+      if (unitOccupiedCells(chainReactor).some((cellPosition) => cellPosition.x === x && cellPosition.y === y)) cell.classList.add("is-chain-reactor");
       if (cellEffects.length) cell.classList.add("has-field-effect");
 
       if (cellEffects.length) {
@@ -1250,24 +1746,6 @@ function renderBoard() {
           markerStack.append(marker);
         });
         cell.append(markerStack);
-      }
-
-      if (occupant && !occupant.banished) {
-        const isStealthed = occupant.statuses.some((status) => status.name === "隐身");
-        const piece = document.createElement("div");
-        piece.className = `piece player-${occupant.player_id} ${isStealthed ? "is-stealthed" : ""}`;
-        piece.style.setProperty("--hp-angle", `${hpRatio(occupant) * 360}deg`);
-        piece.innerHTML = `
-          <div class="piece-ring ${isStealthed ? "is-stealthed" : ""}">
-            <div class="piece-core">
-              <div class="piece-name">${occupant.name}</div>
-            </div>
-          </div>
-          <div class="${manaDisplayClass(occupant)}" aria-label="魔力 ${trimNumber(occupant.mana)} / ${trimNumber(occupant.max_mana || occupant.base_stats?.mana || occupant.stats?.max_mana || occupant.stats?.mana || occupant.mana)}">
-            ${manaPipsMarkup(occupant)}
-          </div>
-        `;
-        cell.append(piece);
       }
 
       if (ghostUnits.length) {
@@ -1286,6 +1764,41 @@ function renderBoard() {
       board.append(cell);
     }
   }
+
+  allUnits()
+    .filter((unit) => unit.position && !unit.banished)
+    .forEach((unit) => {
+      const isStealthed = unit.statuses.some((status) => status.name === "隐身");
+      const bounds = unitFootprintBounds(unit);
+      const occupied = unitOccupiedCells(unit);
+      const largeFootprint = unitHasLargeFootprint(unit);
+      const footprintCellsMarkup = largeFootprint
+        ? `
+          <div class="piece-footprint-cells" style="grid-template-columns: repeat(${bounds.width}, minmax(0, 1fr)); grid-template-rows: repeat(${bounds.height}, minmax(0, 1fr));">
+            ${occupied.map((cell) => `
+              <span class="piece-footprint-cell" style="grid-column: ${Number(cell.x) - bounds.minX + 1}; grid-row: ${Number(cell.y) - bounds.minY + 1};"></span>
+            `).join("")}
+          </div>
+        `
+        : "";
+      const piece = document.createElement("div");
+      piece.className = `piece board-piece player-${unit.player_id} ${largeFootprint ? "is-footprint" : ""} ${isStealthed ? "is-stealthed" : ""}`;
+      piece.style.gridColumn = `${bounds.minX + 1} / span ${bounds.width}`;
+      piece.style.gridRow = `${bounds.minY + 1} / span ${bounds.height}`;
+      piece.style.setProperty("--hp-angle", `${hpRatio(unit) * 360}deg`);
+      piece.innerHTML = `
+        ${footprintCellsMarkup}
+        <div class="piece-ring ${isStealthed ? "is-stealthed" : ""}">
+          <div class="piece-core">
+            <div class="piece-name">${unit.name}</div>
+          </div>
+        </div>
+        <div class="${manaDisplayClass(unit)}" aria-label="魔力 ${trimNumber(unit.mana)} / ${trimNumber(unit.max_mana || unit.base_stats?.mana || unit.stats?.max_mana || unit.stats?.mana || unit.mana)}">
+          ${manaPipsMarkup(unit)}
+        </div>
+      `;
+      board.append(piece);
+    });
 }
 
 function renderActionWheel() {
@@ -1301,12 +1814,22 @@ function renderActionWheel() {
   if (isChainMode() && state.battle.pending_chain?.current_unit_id !== unit.id) return;
   if (!isChainMode() && unit.player_id !== inputPlayer()) return;
 
-  const selectedCell = [...document.querySelectorAll(".cell")].find(
-    (cell) => Number(cell.dataset.x) === unit.position.x && Number(cell.dataset.y) === unit.position.y,
-  );
+  const selectedCells = [...document.querySelectorAll(".cell")].filter((cell) => (
+    unitOccupiedCells(unit).some((occupiedCell) => (
+      Number(cell.dataset.x) === occupiedCell.x && Number(cell.dataset.y) === occupiedCell.y
+    ))
+  ));
   const stageRect = $("board-stage").getBoundingClientRect();
-  const cellRect = selectedCell?.getBoundingClientRect();
-  if (!selectedCell || !cellRect) return;
+  if (!selectedCells.length) return;
+  const rects = selectedCells.map((cell) => cell.getBoundingClientRect());
+  const cellRect = {
+    left: Math.min(...rects.map((rect) => rect.left)),
+    right: Math.max(...rects.map((rect) => rect.right)),
+    top: Math.min(...rects.map((rect) => rect.top)),
+    bottom: Math.max(...rects.map((rect) => rect.bottom)),
+  };
+  cellRect.width = cellRect.right - cellRect.left;
+  cellRect.height = cellRect.bottom - cellRect.top;
 
   const centerX = cellRect.left - stageRect.left + cellRect.width / 2;
   const centerY = cellRect.top - stageRect.top + cellRect.height / 2;
@@ -1531,6 +2054,29 @@ function renderRoomPanels() {
     `;
     seatCards.append(card);
   });
+
+  if (isRandomRoomMode() && !hasBattle()) {
+    if (state.room.viewer_player_id === null) {
+      roomMessage.textContent = state.room.is_full
+        ? "\u8fd9\u4e2a\u623f\u95f4\u5df2\u7ecf\u6ee1\u5458ã€‚ä½ å½“å‰å¯ä»¥è§‚æˆ˜ï¼Œä½†ä¸èƒ½ä»£æ›¿å…¶ä¸­ä»»æ„ä¸€ä½çŽ©å®¶æ“ä½œã€‚"
+        : `\u8fd9\u4e2a\u623f\u95f4\u8fd8\u6709\u7a7aä½ã€‚ç‚¹å‡»â€œåŠ å…¥æˆ¿é—´â€åŽï¼Œå°±å¯ä»¥ä»¥â€œ${effectiveProfileName()}â€ä½œä¸ºå¦ä¸€ä½çŽ©å®¶è¿›å…¥ã€‚`;
+    } else if (state.room.status === "finished") {
+      roomMessage.textContent = "\u672c\u5c40\u5bf9\u6218\u5df2\u7ed3\u675fã€‚å¯ä»¥ç›´æŽ¥é‡æ–°å¼€å§‹é€‰å°†ï¼Œå†æ¥ä¸€å±€éšæœºå¯¹å±€ã€‚";
+    } else if (!state.room.can_start) {
+      roomMessage.textContent = "\u5f53\u524dä½¿ç”¨éšæœºé€‰äººæ¨¡å¼ã€‚æ— éœ€æ‰‹åŠ¨é€‰å°†ï¼Œæ­£åœ¨ç­‰å¾…å¦ä¸€ä½çŽ©å®¶åŠ å…¥ã€‚";
+    } else {
+      roomMessage.textContent = "\u53cc\u65b9\u90fdå·²å°±ç»ªã€‚å¼€å±€åŽä¼šéšæœºåˆ†é…æ­¦å°†ï¼Œå¹¶åœ¨æ›´å¤§æˆ˜åœºä¸Šéšæœºå‡ºç”Ÿã€‚";
+    }
+  }
+
+  if (isRandomRoomMode()) {
+    [...seatCards.querySelectorAll(".seat-hero")].forEach((node, index) => {
+      const seat = (state.room.seats || [])[index];
+      if (!seat) return;
+      const heroLabel = seat.hero_name || (seat.occupied ? "\u5f00\u5c40\u540e\u968f\u673a\u5206\u914d" : "\u672a\u9009\u62e9");
+      node.innerHTML = `<strong>\u5f53\u524d\u6b66\u5c06\uff1a</strong>${heroLabel}`;
+    });
+  }
 }
 
 function renderRoomList() {
@@ -1548,7 +2094,7 @@ function renderRoomList() {
   roomSummaries().forEach((room) => {
     const remembered = loadStoredIdentity(room.room_id);
     const seatSummary = (room.seats || [])
-      .map((seat) => `\u73a9\u5bb6 ${seat.player_id}\uff1a${seat.name || "\u7a7a\u4f4d"}${seat.hero_name ? ` \u00b7 ${seat.hero_name}` : ""}`)
+      .map((seat) => `\u73a9\u5bb6 ${seat.player_id}\uff1a${seat.name || "\u7a7a\u4f4d"}${seat.hero_name ? ` \u00b7 ${seat.hero_name}` : (room.mode === "random" && seat.occupied ? " \u00b7 \u5f00\u5c40\u540e\u968f\u673a\u5206\u914d" : "")}`)
       .join(" / ");
     const card = document.createElement("article");
     card.className = "room-list-card";
@@ -1557,7 +2103,7 @@ function renderRoomList() {
         <strong>\u623f\u95f4 ${room.room_id}</strong>
         <span class="room-list-state ${roomStateClass(room)}">${roomStateLabel(room)}</span>
       </div>
-      <div class="room-list-meta">\u5e2d\u4f4d ${room.occupied_seat_count}/${room.seat_count} \u00b7 ${room.status === "lobby" ? "\u7b49\u5f85\u73a9\u5bb6\u5c31\u7eea" : "\u6b63\u5728\u8fdb\u884c\u6216\u5df2\u7ed3\u675f"}</div>
+      <div class="room-list-meta">\u5e2d\u4f4d ${room.occupied_seat_count}/${room.seat_count} \u00b7 ${room.mode_name || roomModeMeta(room.mode).name} \u00b7 ${room.status === "lobby" ? "\u7b49\u5f85\u73a9\u5bb6\u5c31\u7eea" : "\u6b63\u5728\u8fdb\u884c\u6216\u5df2\u7ed3\u675f"}</div>
       <div class="room-list-seats">${seatSummary}</div>
       <div class="room-list-note">${remembered.token ? "\u8fd9\u4e2a\u6d4f\u89c8\u5668\u4e4b\u524d\u8fdb\u5165\u8fc7\u8be5\u623f\u95f4\u3002\u4f60\u53ef\u4ee5\u7ee7\u7eed\u539f\u6765\u7684\u5e2d\u4f4d\uff0c\u4e5f\u53ef\u4ee5\u76f4\u63a5\u7528\u5f53\u524d\u6635\u79f0\u201c${effectiveProfileName()}\u201d\u4f5c\u4e3a\u65b0\u73a9\u5bb6\u52a0\u5165\u3002" : `\u73b0\u5728\u53ef\u4ee5\u76f4\u63a5\u7528\u5f53\u524d\u6635\u79f0\u201c${effectiveProfileName()}\u201d\u52a0\u5165\u3002`} </div>
     `;
@@ -1629,6 +2175,9 @@ function renderRoomPanels() {
   const leaveRoomBtn = $("leave-room");
   const deleteRoomBtn = $("delete-room");
   const joinRoomButton = $("join-room");
+  const modeLabel = $("room-mode-label");
+  const modeNote = $("room-mode-note");
+  const modeSelect = $("room-mode-select");
 
   if (!hasRoom()) {
     title.textContent = "\u5728\u7ebf\u623f\u95f4";
@@ -1642,9 +2191,31 @@ function renderRoomPanels() {
     return;
   }
 
+  const modeMeta = roomModeMeta();
+  if (modeLabel) modeLabel.textContent = modeMeta.name;
+  if (modeNote) {
+    const hostHint = state.room.viewer_is_host && state.room.status === "lobby"
+      ? "房主可在开局前切换模式，切换后会清空当前选将。"
+      : "仅房主可在大厅里切换模式。";
+    modeNote.textContent = `${modeMeta.description} ${hostHint}`;
+  }
+  if (modeSelect) {
+    modeSelect.innerHTML = "";
+    availableRoomModes().forEach((mode) => {
+      const option = document.createElement("option");
+      option.value = mode.code;
+      option.textContent = mode.name;
+      if (mode.code === state.room.mode) option.selected = true;
+      modeSelect.append(option);
+    });
+    modeSelect.disabled = !(state.room.viewer_is_host && state.room.status === "lobby");
+  }
+
   if (!showLobby) {
     title.textContent = `\u52a0\u5165\u623f\u95f4 ${state.room.room_id}`;
-    caption.textContent = `\u8fd9\u4e2a\u623f\u95f4\u4ecd\u5728\u7b49\u5f85\u73a9\u5bb6\u5360\u4f4d\u3002\u70b9\u51fb\u201c\u52a0\u5165\u623f\u95f4\u201d\u540e\uff0c\u5c31\u4f1a\u4ee5\u5f53\u524d\u6635\u79f0\u201c${effectiveProfileName()}\u201d\u8fdb\u5165\u623f\u95f4\u5927\u5385\u5f00\u59cb\u9009\u5c06\u3002`;
+    caption.textContent = isRandomRoomMode()
+      ? `\u8fd9\u4e2a\u623f\u95f4\u5f53\u524dæ˜¯ã€Œ${modeMeta.name}ã€ã€‚ç‚¹å‡»â€œåŠ å…¥æˆ¿é—´â€åŽï¼Œå°±ä¼šä»¥å½“å‰æ˜µç§°â€œ${effectiveProfileName()}â€è¿›å…¥æˆ¿é—´å¤§åŽ…ç­‰å¾…å¼€å±€ã€‚`
+      : `\u8fd9\u4e2a\u623f\u95f4\u4ecd\u5728\u7b49\u5f85\u73a9\u5bb6\u5360\u4f4d\u3002\u70b9\u51fb\u201c\u52a0\u5165\u623f\u95f4\u201d\u540e\uff0c\u5c31\u4f1a\u4ee5\u5f53\u524d\u6635\u79f0\u201c${effectiveProfileName()}\u201d\u8fdb\u5165\u623f\u95f4\u5927\u5385\u5f00\u59cb\u9009\u5c06\u3002`;
     leaveRoomBtn.classList.remove("hidden");
     leaveRoomBtn.disabled = false;
     deleteRoomBtn.classList.toggle("hidden", !state.room.viewer_is_host);
@@ -1659,7 +2230,9 @@ function renderRoomPanels() {
   title.textContent = `\u623f\u95f4 ${state.room.room_id}`;
   caption.textContent = hasBattle()
     ? "\u5bf9\u5c40\u5df2\u7ecf\u5f00\u59cb\u3002\u4f60\u53ef\u4ee5\u8fd4\u56de\u6218\u573a\u7ee7\u7eed\u6d4b\u8bd5\uff0c\u6216\u7559\u5728\u8fd9\u91cc\u67e5\u770b\u623f\u95f4\u4fe1\u606f\u3002"
-    : "\u53cc\u65b9\u73a9\u5bb6\u5728\u8fd9\u91cc\u5404\u81ea\u9009\u62e9\u81ea\u5df1\u7684\u6b66\u5c06\uff0c\u51c6\u5907\u5b8c\u6210\u540e\u5f00\u59cb\u5bf9\u5c40\u3002";
+    : (isRandomRoomMode()
+      ? "\u5f53\u524dä½¿ç”¨éšæœºé€‰äººæ¨¡å¼ï¼ŒåŒæ–¹å…¥åœºåŽæ— éœ€æ‰‹åŠ¨é€‰å°†ï¼Œå¼€å±€æ—¶ä¼šè‡ªåŠ¨éšæœºåˆ†é…æ­¦å°†ã€‚"
+      : "\u53cc\u65b9\u73a9\u5bb6\u5728\u8fd9\u91cc\u5404\u81ea\u9009\u62e9\u81ea\u5df1\u7684\u6b66\u5c06\uff0c\u51c6\u5907\u5b8c\u6210\u540e\u5f00\u59cb\u5bf9\u5c40\u3002");
 
   $("room-code-label").textContent = state.room.room_id;
   $("room-status-label").textContent = state.room.status === "lobby"
@@ -1681,7 +2254,9 @@ function renderRoomPanels() {
   roomBattle.textContent = "\u8fdb\u5165\u6218\u573a";
   startRoom.classList.toggle("hidden", !(state.room.viewer_player_id !== null && ["lobby", "finished"].includes(state.room.status)));
   startRoom.disabled = state.room.status === "lobby" ? !state.room.can_start : !state.room.can_rematch;
-  startRoom.textContent = state.room.status === "finished" ? "\u91cd\u65b0\u5f00\u59cb\u9009\u5c06" : "\u5f00\u59cb\u5bf9\u5c40";
+  startRoom.textContent = state.room.status === "finished"
+    ? "\u91cd\u65b0\u5f00\u59cb\u9009\u5c06"
+    : (isRandomRoomMode() ? "\u5f00\u59cb\u968f\u673a\u5bf9\u5c40" : "\u5f00\u59cb\u5bf9\u5c40");
 
   const roomMessage = $("room-message");
   if (hasBattle()) {
@@ -1901,7 +2476,7 @@ function renderMessage() {
     node.textContent = `${current?.name || "当前单位"} 可以对 ${source?.name || "对方单位"} 的【${actionName}】进行连锁,点击其周围动作按钮或放弃连锁。`;
     return;
   }
-  const action = actionByCode(state.selectedActionCode);
+  const action = selectedAction();
   if (action) {
     node.textContent = `已选择【${actionTitle(action)}】。${actionNeedsTarget(action) ? "请在棋盘上点击蓝色高亮目标。" : "再次点击会立即结算。"} `;
     return;
@@ -1919,6 +2494,15 @@ function renderTargetCancelButton() {
 function renderTargetCompleteButton() {
   const btn = $("complete-targeting");
   if (!btn) return;
+  const action = selectedAction();
+  if (action?.code === "backstep_shot" && isChainMode()) {
+    const retreatCell = stagedBackstepRetreatCell(action);
+    const targetIds = retreatCell ? backstepFollowUpTargetIds(action, retreatCell) : [];
+    const canCounter = targetIds.some((id) => unitIsSelectableTarget(unitById(id)));
+    btn.textContent = retreatCell ? (canCounter ? "不反击并完成" : "完成撤步") : "完成选择";
+  } else {
+    btn.textContent = "完成选择";
+  }
   const visible = canCompleteTargetSelection();
   btn.classList.toggle("hidden", !visible);
   btn.disabled = !visible;
@@ -1988,23 +2572,8 @@ async function refreshState({ preserveScreen = true } = {}) {
     } else if (!roomQueryId()) {
       $("lobby-caption").textContent = error.error || "加载英雄列表失败。";
     } else {
-      const staleRoomId = roomQueryId();
-      clearStoredIdentity(staleRoomId);
-      state.playerToken = "";
-      state.room = null;
-      state.battle = null;
-      state.roomForm.joinRoomCode = "";
-      syncLocation("draft", "");
-      try {
-        const payload = await fetchJson("/api/heroes");
-        state.heroes = payload.heroes;
-        state.rooms = payload.rooms || [];
-      } catch {
-        state.rooms = [];
-      }
-      syncScreen({ preferBattle: false });
       render();
-      $("lobby-caption").textContent = error.error || "加载房间状态失败。";
+      $("message").textContent = error.error || "连接中断，正在保留当前房间身份等待重新同步。";
     }
   } finally {
     refreshInFlight = false;
@@ -2208,6 +2777,30 @@ async function surrenderBattle() {
   }
 }
 
+async function setRoomMode(modeCode) {
+  if (!hasRoom() || !state.playerToken || !state.room?.viewer_is_host) return;
+  if (!modeCode || modeCode === state.room.mode) return;
+  try {
+    const payload = await fetchJson("/api/rooms/set-mode", {
+      method: "POST",
+      body: JSON.stringify({
+        room_id: state.room.room_id,
+        player_token: state.playerToken,
+        mode: modeCode,
+      }),
+    });
+    applyRoomPayload(payload, { preserveScreen: true });
+    render();
+  } catch (error) {
+    const payload = error.state || null;
+    if (payload) {
+      applyRoomPayload(payload, { preserveScreen: true });
+      render();
+    }
+    $("room-message").textContent = error.error || "切换房间模式失败。";
+  }
+}
+
 async function selectRoomHero(heroCode) {
   if (!hasRoom() || !state.playerToken) return;
   try {
@@ -2280,9 +2873,6 @@ async function performAction(payload) {
     });
     applyRoomPayload(response);
     clearActionSelection();
-    if (state.battle?.active_units?.length) {
-      state.selectedUnitId = state.battle.active_units[0].unit_id;
-    }
     render();
   } catch (error) {
     if (error.state) {
@@ -2306,6 +2896,7 @@ function onActionClick(action) {
         clearActionSelection();
       } else {
         state.selectedActionCode = action.code;
+        state.selectedActionSnapshot = action;
         state.hoveredActionCode = "";
         state.hoveredBoardCell = null;
         state.stagedPayload = null;
@@ -2337,6 +2928,7 @@ function onActionClick(action) {
     clearActionSelection();
   } else {
     state.selectedActionCode = action.code;
+    state.selectedActionSnapshot = action;
     state.hoveredActionCode = "";
     state.hoveredBoardCell = null;
     state.stagedPayload = null;
@@ -2347,12 +2939,22 @@ function onActionClick(action) {
 function onBoardClick(x, y, occupant) {
   if (!canInteract()) return;
   const preview = currentPreview();
-  const action = state.selectedActionCode ? actionByCode(state.selectedActionCode) : null;
+  const action = selectedAction();
   const key = positionKey({ x, y });
   let canUseCell = preview.cellKeys.has(key);
   let canUseUnit = occupant ? preview.targetIds.has(occupant.id) : false;
+  const usesStructuredSelection = Boolean(
+    action && (
+      movePathSelection(action)
+      || patternSelection(action)
+      || multiUnitSelection(action)
+      || statCellSelection(action)
+      || bodyDirectionSelection(action)
+      || (isChainMode() && action.code === "backstep_shot")
+    ),
+  );
 
-  if (action && !canUseCell && !canUseUnit) {
+  if (action && !canUseCell && !canUseUnit && !usesStructuredSelection) {
     const rawCellKeys = positionsToSet(action.preview?.cells || []);
     const rawTargetIds = targetIdsToSet(action.preview?.target_unit_ids || []);
     canUseCell = rawCellKeys.has(key);
@@ -2379,34 +2981,118 @@ function onBoardClick(x, y, occupant) {
     return;
   }
 
-  if (isChainMode()) {
-    const action = actionByCode(state.selectedActionCode);
-    if (!action || !actionNeedsTarget(action)) return;
-    if (action.code === "backstep_shot") {
-      const retreatKeys = positionsToSet(action.preview?.cells || []);
-      const stagedRetreat = stagedBackstepRetreatCell(action);
-      if (retreatKeys.has(key)) {
-        if (stagedRetreat && sameCell(stagedRetreat, { x, y })) {
-          setStagedBackstepRetreatCell(null);
-        } else {
-          setStagedBackstepRetreatCell({ x, y });
-        }
-        render();
-        return;
-      }
-      if (!stagedRetreat) return;
-      const followUpTargetIds = targetIdsToSet(backstepFollowUpTargetIds(action, stagedRetreat));
-      if (!(occupant && followUpTargetIds.has(occupant.id))) return;
-      performAction({
-        type: "chain_react",
-        unit_id: state.selectedUnitId,
-        action_code: action.code,
-        x: stagedRetreat.x,
-        y: stagedRetreat.y,
-        target_unit_id: occupant.id,
-      });
+  if (!action) {
+    clearActionSelection();
+    render();
+    return;
+  }
+
+  if (action.code === "backstep_shot" && isChainMode()) {
+    const retreatCell = stagedBackstepRetreatCell(action);
+    if (!retreatCell) {
+      if (!canUseCell) return;
+      setStagedBackstepRetreatCell({ x, y });
+      render();
       return;
     }
+    if (sameCell(retreatCell, { x, y })) {
+      setStagedBackstepRetreatCell(null);
+      render();
+      return;
+    }
+    const followUpTargetIds = backstepFollowUpTargetIds(action, retreatCell)
+      .filter((id) => unitIsSelectableTarget(unitById(id)));
+    if (!(occupant && followUpTargetIds.includes(occupant.id) && canUseUnit)) return;
+    performAction({
+      type: "chain_react",
+      unit_id: state.selectedUnitId,
+      action_code: action.code,
+      x: retreatCell.x,
+      y: retreatCell.y,
+      target_unit_id: occupant.id,
+    });
+    return;
+  }
+
+  if (movePathSelection(action)) {
+    const chosenPath = stagedMovePath(action);
+    const clickedCell = { x, y };
+    const existingIndex = movePathIndexForClickedCell(action, clickedCell, chosenPath);
+    if (existingIndex >= 0) {
+      setStagedMovePath(chosenPath.slice(0, existingIndex));
+      render();
+      return;
+    }
+    const nextAnchor = movePathAnchorForClickedCell(action, clickedCell, chosenPath);
+    if (!nextAnchor) return;
+    setStagedMovePath([...chosenPath, nextAnchor]);
+    render();
+    return;
+  }
+
+  if (patternSelection(action)) {
+    const chosenCells = stagedPatternCells(action);
+    const existingIndex = chosenCells.findIndex((cell) => sameCell(cell, { x, y }));
+    if (existingIndex >= 0) {
+      setStagedPatternCells(
+        patternSelectionIsOrdered(action)
+          ? chosenCells.slice(0, existingIndex)
+          : chosenCells.filter((cell) => !sameCell(cell, { x, y })),
+      );
+      render();
+      return;
+    }
+    if (!canUseCell) return;
+    setStagedPatternCells([...chosenCells, { x, y }]);
+    render();
+    return;
+  }
+
+  if (multiUnitSelection(action)) {
+    if (!(occupant && canUseUnit)) return;
+    const chosenIds = stagedMultiTargetIds(action);
+    const maxTargets = Number(multiUnitSelection(action)?.max_targets || chosenIds.length + 1);
+    if (chosenIds.includes(occupant.id)) {
+      setStagedMultiTargetIds(chosenIds.filter((id) => id !== occupant.id));
+    } else {
+      if (chosenIds.length >= maxTargets) return;
+      setStagedMultiTargetIds([...chosenIds, occupant.id]);
+    }
+    render();
+    return;
+  }
+
+  if (statCellSelection(action)) {
+    const chosenCells = stagedStatCells(action);
+    const existingIndex = chosenCells.findIndex((cell) => sameCell(cell, { x, y }));
+    if (existingIndex >= 0) {
+      setStagedStatCells(chosenCells.filter((cell) => !sameCell(cell, { x, y })));
+      render();
+      return;
+    }
+    if (!canUseCell) return;
+    if (chosenCells.length >= statCellRequired(action)) return;
+    setStagedStatCells([...chosenCells, { x, y }]);
+    render();
+    return;
+  }
+
+  if (bodyDirectionSelection(action)) {
+    const bodyKeys = positionsToSet(action.preview?.cells || []);
+    if (!bodyKeys.has(key)) return;
+    const chosenCells = stagedBodyCells(action);
+    const existingIndex = chosenCells.findIndex((cell) => sameCell(cell, { x, y }));
+    if (existingIndex >= 0) {
+      setStagedBodyCells(chosenCells.filter((cell) => !sameCell(cell, { x, y })));
+    } else {
+      setStagedBodyCells([...chosenCells, { x, y }]);
+    }
+    render();
+    return;
+  }
+
+  if (isChainMode()) {
+    if (!actionNeedsTarget(action)) return;
     if (!canUseCell && !canUseUnit) return;
     const payload = {
       type: "chain_react",
@@ -2420,25 +3106,6 @@ function onBoardClick(x, y, occupant) {
       payload.y = y;
     }
     performAction(payload);
-    return;
-  }
-
-  if (!action) {
-    clearActionSelection();
-    render();
-    return;
-  }
-
-  if (patternSelection(action)) {
-    const chosenCells = stagedPatternCells(action);
-    if (chosenCells.some((cell) => sameCell(cell, { x, y }))) {
-      setStagedPatternCells(chosenCells.filter((cell) => !sameCell(cell, { x, y })));
-      render();
-      return;
-    }
-    if (!canUseCell) return;
-    setStagedPatternCells([...chosenCells, { x, y }]);
-    render();
     return;
   }
 
@@ -2520,6 +3187,12 @@ function bindEvents() {
     state.roomForm.joinRoomCode = event.target.value;
     renderProfilePanel();
   });
+  const roomModeSelect = $("room-mode-select");
+  if (roomModeSelect) {
+    roomModeSelect.addEventListener("change", (event) => {
+      setRoomMode(event.target.value);
+    });
+  }
   $("profile-save").addEventListener("click", confirmProfile);
   $("edit-profile").addEventListener("click", () => {
     openProfileModal();
@@ -2557,28 +3230,96 @@ function bindEvents() {
       render();
     });
   });
+  document.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const statButton = target?.closest("[data-stat-choice]");
+    if (statButton) {
+      const action = selectedAction();
+      if (!action || !statCellSelection(action)) return;
+      setStagedStatName(statButton.dataset.statChoice || "");
+      render();
+      return;
+    }
+    const directionButton = target?.closest("[data-direction-dx][data-direction-dy]");
+    if (directionButton) {
+      const action = selectedAction();
+      if (!action || !bodyDirectionSelection(action)) return;
+      setStagedBodyDirection({
+        dx: Number(directionButton.dataset.directionDx),
+        dy: Number(directionButton.dataset.directionDy),
+      });
+      render();
+    }
+  });
   $("complete-targeting").addEventListener("click", () => {
     if (!canCompleteTargetSelection()) return;
-    const action = state.selectedActionCode ? actionByCode(state.selectedActionCode) : null;
+    const action = selectedAction();
     if (!action) return;
-    if (isChainMode() && action.code === "backstep_shot") {
-      const retreatCell = stagedBackstepRetreatCell(action);
-      if (!retreatCell) return;
+    if (movePathSelection(action)) {
+      const path = stagedMovePath(action);
+      const destination = path[path.length - 1];
+      if (!destination) return;
       performAction({
-        type: "chain_react",
+        type: "move",
         unit_id: state.selectedUnitId,
-        action_code: action.code,
-        x: retreatCell.x,
-        y: retreatCell.y,
+        x: destination.x,
+        y: destination.y,
+        path,
       });
       return;
     }
-    performAction({
+    if (isChainMode()) {
+      if (action.code === "backstep_shot") {
+        const retreatCell = stagedBackstepRetreatCell(action);
+        if (!retreatCell) return;
+        const payload = {
+          type: "chain_react",
+          unit_id: state.selectedUnitId,
+          action_code: action.code,
+          x: retreatCell.x,
+          y: retreatCell.y,
+        };
+        const targetUnitId = stagedBackstepTargetId(action);
+        if (targetUnitId) payload.target_unit_id = targetUnitId;
+        performAction(payload);
+        return;
+      }
+      const payload = {
+        type: "chain_react",
+        unit_id: state.selectedUnitId,
+        action_code: action.code,
+      };
+      if (patternSelection(action)) {
+        payload.cells = stagedPatternCells(action);
+      } else if (multiUnitSelection(action)) {
+        payload.target_unit_ids = stagedMultiTargetIds(action);
+      } else if (statCellSelection(action)) {
+        payload.stat_name = stagedStatName(action);
+        payload.cells = stagedStatCells(action);
+      } else if (bodyDirectionSelection(action)) {
+        payload.cells = stagedBodyCells(action);
+        payload.direction = stagedBodyDirection(action);
+      }
+      performAction(payload);
+      return;
+    }
+    const payload = {
       type: "skill",
       unit_id: state.selectedUnitId,
       skill_code: action.code,
-      cells: stagedPatternCells(action),
-    });
+    };
+    if (patternSelection(action)) {
+      payload.cells = stagedPatternCells(action);
+    } else if (multiUnitSelection(action)) {
+      payload.target_unit_ids = stagedMultiTargetIds(action);
+    } else if (statCellSelection(action)) {
+      payload.stat_name = stagedStatName(action);
+      payload.cells = stagedStatCells(action);
+    } else if (bodyDirectionSelection(action)) {
+      payload.cells = stagedBodyCells(action);
+      payload.direction = stagedBodyDirection(action);
+    }
+    performAction(payload);
   });
   $("cancel-targeting").addEventListener("click", () => {
     if (!hasCancelableTargetSelection()) return;
@@ -2619,6 +3360,258 @@ function bindEvents() {
   window.addEventListener("hashchange", () => {
     syncScreen({ preferBattle: Boolean(state.battle) });
     render();
+  });
+}
+
+// Override legacy definitions above so the random-room lobby flow uses a single clean state path.
+function ensureSelectedUnit() {
+  if (!state.battle) {
+    state.selectedUnitId = "";
+    return;
+  }
+  const action = selectedAction();
+  if (isRespawnMode()) {
+    state.selectedUnitId = currentRespawnPrompt()?.unit_id || "";
+    return;
+  }
+  if (isChainMode() && !action) {
+    state.selectedUnitId = state.battle.pending_chain?.current_unit_id || "";
+    return;
+  }
+  if (isGameOver()) {
+    if (unitById(state.selectedUnitId)) return;
+    state.selectedUnitId = allUnits()[0]?.id || "";
+    return;
+  }
+  if (!state.selectedUnitId) {
+    const controllable = activeBundles().map((entry) => entry.unit_id);
+    state.selectedUnitId = controllable[0] || allUnits()[0]?.id || "";
+    return;
+  }
+  if (unitById(state.selectedUnitId)) {
+    return;
+  }
+  const controllable = activeBundles().map((entry) => entry.unit_id);
+  state.selectedUnitId = controllable[0] || allUnits()[0]?.id || "";
+}
+
+function renderHeader() {
+  const pill = $("turn-pill");
+  const topbarSubline = $("topbar-subline");
+  const caption = $("board-caption");
+  const modeMeta = roomModeMeta();
+  if (!hasRoom()) {
+    pill.textContent = "\u5c1a\u672a\u8fdb\u5165\u623f\u95f4";
+    topbarSubline.textContent = "\u521b\u5efa\u623f\u95f4\u3001\u590d\u5236\u9080\u8bf7\u94fe\u63a5\u3001\u8ba9\u4e24\u4f4d\u73a9\u5bb6\u5206\u522b\u8fdb\u5165\u540c\u4e00\u623f\u95f4\u540e\u5728\u7ebf\u5bf9\u6218\u3002";
+    caption.textContent = "\u8bf7\u5148\u521b\u5efa\u623f\u95f4\u6216\u52a0\u5165\u623f\u95f4\u3002";
+    return;
+  }
+  if (!state.battle) {
+    pill.textContent = `\u623f\u95f4 ${state.room.room_id} \u00b7 ${state.room.status === "lobby" ? "\u5927\u5385\u4e2d" : "\u7b49\u5f85\u5f00\u5c40"}`;
+    if (isRandomRoomMode()) {
+      topbarSubline.textContent = state.room.viewer_player_id
+        ? `\u4f60\u5f53\u524d\u662f\u73a9\u5bb6 ${state.room.viewer_player_id}\u3002\u5f53\u524d\u623f\u95f4\u4f7f\u7528\u300c${modeMeta.name}\u300d\uff0c\u5f00\u5c40\u540e\u4f1a\u968f\u673a\u5206\u914d\u6b66\u5c06\uff0c\u5e76\u5728\u66f4\u5927\u7684\u6218\u573a\u4e0a\u968f\u673a\u51fa\u751f\u3002`
+        : "\u4f60\u5f53\u524d\u8fd8\u6ca1\u6709\u5360\u7528\u5e2d\u4f4d\u3002\u82e5\u623f\u95f4\u4ecd\u6709\u7a7a\u4f4d\uff0c\u8f93\u5165\u6635\u79f0\u540e\u5373\u53ef\u52a0\u5165\u3002";
+      caption.textContent = "\u5bf9\u5c40\u5c1a\u672a\u5f00\u59cb\uff0c\u968f\u673a\u9009\u4eba\u6a21\u5f0f\u4e0b\u65e0\u9700\u624b\u52a8\u9009\u5c06\u3002";
+      return;
+    }
+    topbarSubline.textContent = state.room.viewer_player_id
+      ? `\u4f60\u5f53\u524d\u662f\u73a9\u5bb6 ${state.room.viewer_player_id}\u3002\u5728\u5927\u5385\u91cc\u4e3a\u81ea\u5df1\u9009\u62e9\u6b66\u5c06\uff0c\u53cc\u65b9\u90fd\u9009\u597d\u540e\u5f00\u59cb\u5bf9\u5c40\u3002`
+      : "\u4f60\u5f53\u524d\u8fd8\u6ca1\u6709\u5360\u7528\u5e2d\u4f4d\u3002\u82e5\u623f\u95f4\u4ecd\u6709\u7a7a\u4f4d\uff0c\u8f93\u5165\u6635\u79f0\u540e\u5373\u53ef\u52a0\u5165\u3002";
+    caption.textContent = "\u5bf9\u5c40\u5c1a\u672a\u5f00\u59cb\uff0c\u8bf7\u5148\u5728\u623f\u95f4\u5927\u5385\u5b8c\u6210\u9009\u5c06\u3002";
+    return;
+  }
+  topbarSubline.textContent = state.room.viewer_player_id
+    ? `\u623f\u95f4 ${state.room.room_id} \u5728\u7ebf\u5bf9\u6218\u4e2d\u3002\u4f60\u5f53\u524d\u662f\u73a9\u5bb6 ${state.room.viewer_player_id}\u3002`
+    : `\u623f\u95f4 ${state.room.room_id} \u5728\u7ebf\u5bf9\u6218\u4e2d\u3002\u4f60\u5f53\u524d\u4ee5\u89c2\u6218\u89c6\u89d2\u67e5\u770b\u6b64\u623f\u95f4\u3002`;
+  if (isGameOver()) {
+    pill.textContent = `\u623f\u95f4 ${state.room.room_id} \u00b7 \u73a9\u5bb6 ${state.battle.winner} \u83b7\u80dc`;
+    caption.textContent = `\u73a9\u5bb6 ${state.battle.winner} \u5df2\u83b7\u80dc\uff0c\u6218\u573a\u5df2\u9501\u5b9a\u3002`;
+    return;
+  }
+  if (isRespawnMode()) {
+    const prompt = currentRespawnPrompt();
+    const unit = unitById(prompt?.unit_id || "");
+    pill.textContent = `\u623f\u95f4 ${state.room.room_id} \u00b7 \u73a9\u5bb6 ${inputPlayer()} \u91cd\u65b0\u51fa\u73b0\u4e2d`;
+    caption.textContent = `\u8bf7\u9009\u62e9 ${unit?.name || "\u6d88\u5931\u5355\u4f4d"} \u7684\u91cd\u65b0\u51fa\u73b0\u4f4d\u7f6e\u3002`;
+    return;
+  }
+  if (isChainMode()) {
+    const current = state.battle.pending_chain?.current_unit_id
+      ? unitById(state.battle.pending_chain.current_unit_id)?.name
+      : "\u54cd\u5e94\u65b9";
+    const sourceSummary = chainQueuedActionPrompt(state.battle.pending_chain);
+    pill.textContent = `\u623f\u95f4 ${state.room.room_id} \u00b7 \u73a9\u5bb6 ${inputPlayer()} \u8fde\u9501\u4e2d`;
+    caption.textContent = `\u7b49\u5f85 ${current} \u54cd\u5e94 ${sourceSummary}`;
+    return;
+  }
+  pill.textContent = `\u623f\u95f4 ${state.room.room_id} \u00b7 \u7b2c ${state.battle.round_number} \u8f6e \u00b7 \u73a9\u5bb6 ${inputPlayer()} \u884c\u52a8`;
+  caption.textContent = "\u70b9\u51fb\u5df1\u65b9\u68cb\u5b50\uff0c\u5728\u68cb\u5b50\u5468\u56f4\u9009\u62e9\u52a8\u4f5c\u3002";
+}
+
+function renderRoomPanels() {
+  const showLobby = shouldShowLobbyPanel();
+  const roomId = roomQueryId();
+  $("room-home").classList.toggle("hidden", showLobby);
+  $("room-lobby").classList.toggle("hidden", !showLobby);
+  if ($("create-name")) $("create-name").value = state.roomForm.createName;
+  if ($("join-name")) $("join-name").value = state.roomForm.joinName;
+  $("join-room-code").value = roomId || state.roomForm.joinRoomCode;
+
+  const title = $("lobby-title");
+  const caption = $("lobby-caption");
+  const copyInvite = $("copy-invite");
+  const roomBattle = $("room-battle");
+  const startRoom = $("start-room");
+  const leaveRoomBtn = $("leave-room");
+  const deleteRoomBtn = $("delete-room");
+  const joinRoomButton = $("join-room");
+  const modeLabel = $("room-mode-label");
+  const modeNote = $("room-mode-note");
+  const modeSelect = $("room-mode-select");
+
+  if (!hasRoom()) {
+    title.textContent = "\u5728\u7ebf\u623f\u95f4";
+    caption.textContent = "\u5148\u786e\u8ba4\u4f60\u8981\u4f7f\u7528\u7684\u6635\u79f0\uff0c\u7136\u540e\u521b\u5efa\u623f\u95f4\u6216\u8f93\u5165\u623f\u95f4\u7801\u52a0\u5165\u3002\u8fdb\u5165\u623f\u95f4\u540e\uff0c\u6bcf\u4f4d\u73a9\u5bb6\u5404\u81ea\u9009\u62e9\u81ea\u5df1\u7684\u6b66\u5c06\uff0c\u518d\u5f00\u59cb\u5bf9\u5c40\u3002";
+    if (modeLabel) modeLabel.textContent = fallbackRoomModes()[0].name;
+    if (modeNote) modeNote.textContent = "\u8fdb\u5165\u623f\u95f4\u540e\u53ef\u7531\u623f\u4e3b\u9009\u62e9\u6218\u6597\u6a21\u5f0f\u3002";
+    if (modeSelect) {
+      modeSelect.innerHTML = "";
+      availableRoomModes().forEach((mode) => {
+        const option = document.createElement("option");
+        option.value = mode.code;
+        option.textContent = mode.name;
+        modeSelect.append(option);
+      });
+      modeSelect.disabled = true;
+    }
+    leaveRoomBtn.classList.add("hidden");
+    deleteRoomBtn.classList.add("hidden");
+    copyInvite.classList.add("hidden");
+    roomBattle.classList.add("hidden");
+    startRoom.classList.add("hidden");
+    joinRoomButton.disabled = !state.profileReady || !String($("join-room-code").value || "").trim();
+    return;
+  }
+
+  const modeMeta = roomModeMeta();
+  if (modeLabel) modeLabel.textContent = modeMeta.name;
+  if (modeNote) {
+    const hostHint = state.room.viewer_is_host && state.room.status === "lobby"
+      ? "\u623f\u4e3b\u53ef\u5728\u5f00\u5c40\u524d\u5207\u6362\u6a21\u5f0f\uff0c\u5207\u6362\u540e\u4f1a\u6e05\u7a7a\u5f53\u524d\u9009\u5c06\u3002"
+      : "\u4ec5\u623f\u4e3b\u53ef\u5728\u5927\u5385\u91cc\u5207\u6362\u6a21\u5f0f\u3002";
+    modeNote.textContent = `${modeMeta.description} ${hostHint}`;
+  }
+  if (modeSelect) {
+    modeSelect.innerHTML = "";
+    availableRoomModes().forEach((mode) => {
+      const option = document.createElement("option");
+      option.value = mode.code;
+      option.textContent = mode.name;
+      if (mode.code === state.room.mode) option.selected = true;
+      modeSelect.append(option);
+    });
+    modeSelect.disabled = !(state.room.viewer_is_host && state.room.status === "lobby");
+  }
+
+  if (!showLobby) {
+    title.textContent = `\u52a0\u5165\u623f\u95f4 ${state.room.room_id}`;
+    caption.textContent = isRandomRoomMode()
+      ? `\u8fd9\u4e2a\u623f\u95f4\u5f53\u524d\u4f7f\u7528\u300c${modeMeta.name}\u300d\u3002\u70b9\u51fb\u201c\u52a0\u5165\u623f\u95f4\u201d\u540e\uff0c\u5c31\u4f1a\u4ee5\u5f53\u524d\u6635\u79f0\u201c${effectiveProfileName()}\u201d\u8fdb\u5165\u623f\u95f4\u5927\u5385\u7b49\u5f85\u5f00\u5c40\u3002`
+      : `\u8fd9\u4e2a\u623f\u95f4\u4ecd\u5728\u7b49\u5f85\u73a9\u5bb6\u5360\u4f4d\u3002\u70b9\u51fb\u201c\u52a0\u5165\u623f\u95f4\u201d\u540e\uff0c\u5c31\u4f1a\u4ee5\u5f53\u524d\u6635\u79f0\u201c${effectiveProfileName()}\u201d\u8fdb\u5165\u623f\u95f4\u5927\u5385\u5f00\u59cb\u9009\u5c06\u3002`;
+    leaveRoomBtn.classList.remove("hidden");
+    leaveRoomBtn.disabled = false;
+    deleteRoomBtn.classList.toggle("hidden", !state.room.viewer_is_host);
+    deleteRoomBtn.disabled = !state.room.viewer_is_host;
+    copyInvite.classList.remove("hidden");
+    roomBattle.classList.toggle("hidden", !hasBattle());
+    startRoom.classList.add("hidden");
+    joinRoomButton.disabled = !state.profileReady || !String($("join-room-code").value || "").trim();
+    return;
+  }
+
+  title.textContent = `\u623f\u95f4 ${state.room.room_id}`;
+  caption.textContent = hasBattle()
+    ? "\u5bf9\u5c40\u5df2\u7ecf\u5f00\u59cb\u3002\u4f60\u53ef\u4ee5\u8fd4\u56de\u6218\u573a\u7ee7\u7eed\u6d4b\u8bd5\uff0c\u6216\u7559\u5728\u8fd9\u91cc\u67e5\u770b\u623f\u95f4\u4fe1\u606f\u3002"
+    : (isRandomRoomMode()
+      ? "\u5f53\u524d\u4f7f\u7528\u968f\u673a\u9009\u4eba\u6a21\u5f0f\uff0c\u53cc\u65b9\u5165\u573a\u540e\u65e0\u9700\u624b\u52a8\u9009\u5c06\uff0c\u5f00\u5c40\u65f6\u4f1a\u81ea\u52a8\u968f\u673a\u5206\u914d\u6b66\u5c06\u3002"
+      : "\u53cc\u65b9\u73a9\u5bb6\u5728\u8fd9\u91cc\u5404\u81ea\u9009\u62e9\u81ea\u5df1\u7684\u6b66\u5c06\uff0c\u51c6\u5907\u5b8c\u6210\u540e\u5f00\u59cb\u5bf9\u5c40\u3002");
+
+  $("room-code-label").textContent = state.room.room_id;
+  $("room-status-label").textContent = state.room.status === "lobby"
+    ? "\u7b49\u5f85\u53cc\u65b9\u5c31\u7eea"
+    : (isGameOver() ? "\u5bf9\u5c40\u7ed3\u675f" : "\u5bf9\u5c40\u8fdb\u884c\u4e2d");
+  $("viewer-seat-label").textContent = state.room.viewer_player_id ? `\u73a9\u5bb6 ${state.room.viewer_player_id}` : "\u89c2\u6218 / \u672a\u5360\u4f4d";
+  $("viewer-seat-note").textContent = state.room.viewer_name
+    ? `${state.room.viewer_name}${state.room.viewer_is_host ? " \u00b7 \u623f\u4e3b" : ""}`
+    : "\u5f53\u524d\u6d4f\u89c8\u5668\u8fd8\u6ca1\u6709\u5360\u7528\u5e2d\u4f4d";
+  $("invite-path-label").textContent = state.room.invite_url || state.room.invite_path;
+
+  leaveRoomBtn.classList.remove("hidden");
+  leaveRoomBtn.disabled = false;
+  deleteRoomBtn.classList.toggle("hidden", !state.room.viewer_is_host);
+  deleteRoomBtn.disabled = !state.room.viewer_is_host;
+  copyInvite.classList.toggle("hidden", !state.room.invite_url);
+  roomBattle.classList.toggle("hidden", !hasBattle());
+  roomBattle.disabled = !hasBattle();
+  roomBattle.textContent = "\u8fdb\u5165\u6218\u573a";
+  startRoom.classList.toggle("hidden", !(state.room.viewer_player_id !== null && ["lobby", "finished"].includes(state.room.status)));
+  startRoom.disabled = state.room.status === "lobby" ? !state.room.can_start : !state.room.can_rematch;
+  startRoom.textContent = state.room.status === "finished"
+    ? "\u91cd\u65b0\u5f00\u59cb\u9009\u5c06"
+    : (isRandomRoomMode() ? "\u5f00\u59cb\u968f\u673a\u5bf9\u5c40" : "\u5f00\u59cb\u5bf9\u5c40");
+
+  const roomMessage = $("room-message");
+  if (hasBattle()) {
+    roomMessage.textContent = isGameOver()
+      ? `\u623f\u95f4 ${state.room.room_id} \u7684\u672c\u5c40\u5bf9\u6218\u5df2\u7ecf\u7ed3\u675f\u3002\u4f60\u53ef\u4ee5\u8fdb\u5165\u6218\u573a\u67e5\u770b\u7ec8\u5c40\u76d8\u9762\uff0c\u6216\u76f4\u63a5\u91cd\u65b0\u5f00\u59cb\u9009\u5c06\u518d\u6765\u4e00\u5c40\u3002`
+      : `\u623f\u95f4 ${state.room.room_id} \u7684\u5bf9\u5c40\u6b63\u5728\u8fdb\u884c\u4e2d\u3002\u70b9\u51fb\u201c\u8fdb\u5165\u6218\u573a\u201d\u5373\u53ef\u67e5\u770b\u5e76\u7ee7\u7eed\u64cd\u4f5c\u3002`;
+  } else if (isRandomRoomMode()) {
+    if (state.room.viewer_player_id === null) {
+      roomMessage.textContent = state.room.is_full
+        ? "\u8fd9\u4e2a\u623f\u95f4\u5df2\u7ecf\u6ee1\u5458\u3002\u4f60\u5f53\u524d\u53ef\u4ee5\u89c2\u6218\uff0c\u4f46\u4e0d\u80fd\u4ee3\u66ff\u5176\u4e2d\u4efb\u610f\u4e00\u4f4d\u73a9\u5bb6\u64cd\u4f5c\u3002"
+        : `\u8fd9\u4e2a\u623f\u95f4\u8fd8\u6709\u7a7a\u4f4d\u3002\u70b9\u51fb\u201c\u52a0\u5165\u623f\u95f4\u201d\u540e\uff0c\u5373\u53ef\u4ee5\u201c${effectiveProfileName()}\u201d\u4f5c\u4e3a\u53e6\u4e00\u4f4d\u73a9\u5bb6\u8fdb\u5165\u3002`;
+    } else if (state.room.status === "finished") {
+      roomMessage.textContent = "\u672c\u5c40\u5bf9\u6218\u5df2\u7ed3\u675f\u3002\u53ef\u4ee5\u76f4\u63a5\u91cd\u65b0\u5f00\u59cb\u9009\u5c06\uff0c\u518d\u6765\u4e00\u5c40\u968f\u673a\u5bf9\u5c40\u3002";
+    } else if (!state.room.can_start) {
+      roomMessage.textContent = "\u5f53\u524d\u4f7f\u7528\u968f\u673a\u9009\u4eba\u6a21\u5f0f\uff0c\u65e0\u9700\u624b\u52a8\u9009\u5c06\uff0c\u6b63\u5728\u7b49\u5f85\u53e6\u4e00\u4f4d\u73a9\u5bb6\u52a0\u5165\u3002";
+    } else {
+      roomMessage.textContent = "\u53cc\u65b9\u90fd\u5df2\u5c31\u7eea\uff0c\u5f00\u5c40\u540e\u4f1a\u968f\u673a\u5206\u914d\u6b66\u5c06\uff0c\u5e76\u5728\u66f4\u5927\u7684\u6218\u573a\u4e0a\u968f\u673a\u51fa\u751f\u3002";
+    }
+  } else if (state.room.viewer_player_id === null) {
+    roomMessage.textContent = state.room.is_full
+      ? "\u8fd9\u4e2a\u623f\u95f4\u5df2\u7ecf\u6ee1\u5458\u3002\u4f60\u5f53\u524d\u53ef\u4ee5\u89c2\u6218\uff0c\u4f46\u4e0d\u80fd\u4ee3\u66ff\u5176\u4e2d\u4efb\u610f\u4e00\u4f4d\u73a9\u5bb6\u64cd\u4f5c\u3002"
+      : `\u8fd9\u4e2a\u623f\u95f4\u8fd8\u6709\u7a7a\u4f4d\u3002\u70b9\u51fb\u201c\u52a0\u5165\u623f\u95f4\u201d\u540e\uff0c\u5373\u53ef\u4ee5\u201c${effectiveProfileName()}\u201d\u4f5c\u4e3a\u53e6\u4e00\u4f4d\u73a9\u5bb6\u8fdb\u5165\u3002`;
+  } else if (!currentRoomSeat()?.hero_code) {
+    roomMessage.textContent = `\u4f60\u5f53\u524d\u662f\u73a9\u5bb6 ${state.room.viewer_player_id}\uff0c\u8bf7\u4ece\u4e0b\u65b9\u9009\u62e9\u81ea\u5df1\u7684\u6b66\u5c06\u3002`;
+  } else if (state.room.status === "finished") {
+    roomMessage.textContent = "\u672c\u5c40\u5bf9\u6218\u5df2\u7ed3\u675f\u3002\u53ef\u4ee5\u76f4\u63a5\u91cd\u65b0\u5f00\u59cb\u9009\u5c06\uff0c\u4e24\u4f4d\u73a9\u5bb6\u5728\u540c\u4e00\u623f\u95f4\u518d\u6765\u4e00\u5c40\u3002";
+  } else if (!state.room.can_start) {
+    roomMessage.textContent = "\u4f60\u5df2\u7ecf\u9009\u597d\u4e86\u6b66\u5c06\uff0c\u6b63\u5728\u7b49\u5f85\u53e6\u4e00\u4f4d\u73a9\u5bb6\u52a0\u5165\u6216\u5b8c\u6210\u9009\u5c06\u3002";
+  } else {
+    roomMessage.textContent = "\u53cc\u65b9\u90fd\u5df2\u5c31\u7eea\uff0c\u53ef\u4ee5\u5f00\u59cb\u8fd9\u573a\u8054\u673a\u6d4b\u8bd5\u5bf9\u5c40\u3002";
+  }
+
+  const seatCards = $("seat-cards");
+  seatCards.innerHTML = "";
+  (state.room.seats || []).forEach((seat) => {
+    const heroLabel = isRandomRoomMode()
+      ? (seat.hero_name || (seat.occupied ? "\u5f00\u5c40\u540e\u968f\u673a\u5206\u914d" : "\u672a\u9009\u62e9"))
+      : (seat.hero_name || "\u672a\u9009\u62e9");
+    const card = document.createElement("article");
+    card.className = `seat-card ${seat.player_id === state.room.viewer_player_id ? "is-viewer" : ""} ${seat.occupied ? "" : "is-empty"}`;
+    card.innerHTML = `
+      <div class="seat-head">
+        <div>
+          <div class="seat-name">\u73a9\u5bb6 ${seat.player_id}</div>
+          <div class="seat-note">${seat.name || "\u5c1a\u672a\u52a0\u5165"}</div>
+        </div>
+        <span class="seat-badge">${seat.is_host ? "\u623f\u4e3b" : "\u5e2d\u4f4d"}</span>
+      </div>
+      <div class="seat-hero"><strong>\u5f53\u524d\u6b66\u5c06\uff1a</strong>${heroLabel}</div>
+      <div class="seat-note">${seat.occupied ? "\u5df2\u8fdb\u5165\u623f\u95f4" : "\u7b49\u5f85\u670b\u53cb\u52a0\u5165\u8be5\u5e2d\u4f4d"}</div>
+    `;
+    seatCards.append(card);
   });
 }
 

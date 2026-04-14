@@ -65,6 +65,25 @@ def payload_target_unit(battle: Battle, payload: dict[str, Any], key: str = "tar
     return battle.get_unit(payload[key])  # type: ignore[return-value]
 
 
+def payload_target_units(battle: Battle, payload: dict[str, Any], key: str = "target_unit_ids") -> list[HeroUnit]:
+    raw_ids = payload.get(key)
+    if not isinstance(raw_ids, list) or not raw_ids:
+        if payload.get("target_unit_id"):
+            return [payload_target_unit(battle, payload)]
+        raise ActionError("缺少目标单位。")
+    targets: list[HeroUnit] = []
+    seen: set[str] = set()
+    for unit_id in raw_ids:
+        unit_key = str(unit_id or "").strip()
+        if not unit_key or unit_key in seen:
+            continue
+        seen.add(unit_key)
+        targets.append(battle.get_unit(unit_key))  # type: ignore[arg-type]
+    if not targets:
+        raise ActionError("缺少目标单位。")
+    return targets
+
+
 def ensure_distance(actor: HeroUnit, target: HeroUnit | Position, max_distance: int) -> None:
     origin = actor.position
     other = target.position if isinstance(target, HeroUnit) else target
@@ -133,6 +152,7 @@ def localized_line_patterns(
     length: int,
     *,
     max_distance: Optional[int] = None,
+    touch_distance: Optional[int] = None,
 ) -> list[list[Position]]:
     if origin is None or length <= 0:
         return []
@@ -153,6 +173,8 @@ def localized_line_patterns(
                     continue
                 if any(origin.distance_to(cell) > radius for cell in in_bounds):
                     continue
+                if touch_distance is not None and not any(origin.distance_to(cell) <= touch_distance for cell in in_bounds):
+                    continue
                 key = pattern_signature(in_bounds)
                 if key in seen:
                     continue
@@ -162,8 +184,21 @@ def localized_line_patterns(
     return patterns
 
 
-def match_payload_pattern(payload: dict[str, Any], patterns: list[list[Position]]) -> list[Position]:
+def match_payload_pattern(
+    payload: dict[str, Any],
+    patterns: list[list[Position]],
+    *,
+    require_order: bool = False,
+) -> list[Position]:
     chosen = payload_cells(payload)
+    if require_order:
+        for pattern in patterns:
+            deduped = dedupe_positions(pattern)
+            if len(deduped) != len(chosen):
+                continue
+            if all(left == right for left, right in zip(deduped, chosen)):
+                return deduped
+        raise ActionError("所选格子必须从贴身位置开始按顺序连成该技能的直线。")
     chosen_key = pattern_signature(chosen)
     for pattern in patterns:
         if pattern_signature(pattern) == chosen_key:
@@ -171,7 +206,7 @@ def match_payload_pattern(payload: dict[str, Any], patterns: list[list[Position]
     raise ActionError("所选格子不符合该技能的形状要求。")
 
 
-def pattern_selection_preview(patterns: list[list[Position]]) -> dict[str, Any]:
+def pattern_selection_preview(patterns: list[list[Position]], *, ordered: bool = False) -> dict[str, Any]:
     unique_cells: list[Position] = []
     seen_cells: set[tuple[int, int]] = set()
     preview_patterns: list[list[dict[str, int]]] = []
@@ -191,6 +226,27 @@ def pattern_selection_preview(patterns: list[list[Position]]) -> dict[str, Any]:
         "selection": {
             "mode": "pattern_cells",
             "patterns": preview_patterns,
+            "ordered": ordered,
+        },
+    }
+
+
+def multi_unit_selection_preview(
+    units: list[HeroUnit],
+    *,
+    min_targets: int = 1,
+    max_targets: Optional[int] = None,
+) -> dict[str, Any]:
+    targets = [unit for unit in units if unit.position is not None]
+    return {
+        "cells": positions_to_dict([unit.position for unit in targets if unit.position is not None]),
+        "target_unit_ids": [unit.unit_id for unit in targets],
+        "secondary_cells": [],
+        "requires_target": True,
+        "selection": {
+            "mode": "multi_unit",
+            "min_targets": min_targets,
+            "max_targets": len(targets) if max_targets is None else min(len(targets), max_targets),
         },
     }
 
@@ -227,7 +283,13 @@ class FlagStatus(StatusEffect):
 
     def on_removed(self, battle: Battle) -> None:
         if self.owner is not None:
-            setattr(self.owner, self.flag_name, False)
+            still_active = any(
+                isinstance(status, FlagStatus)
+                and status.flag_name == self.flag_name
+                and status.value == self.value
+                for status in self.owner.statuses
+            )
+            setattr(self.owner, self.flag_name, self.value if still_active else False)
 
 
 class StatModifierStatus(StatusEffect):
@@ -371,16 +433,20 @@ class NextAttackBuffStatus(StatusEffect):
         duration: Optional[int] = None,
         tick_scope: str = "owner_turn_end",
         consume_on_attack_attempt: bool = False,
+        normal_attack_only: bool = False,
     ) -> None:
         super().__init__(name, description, duration=duration, tick_scope=tick_scope)
         self.bonus_attack = bonus_attack
         self.ignore_shield = ignore_shield
         self.consume_on_attack_attempt = consume_on_attack_attempt
+        self.normal_attack_only = normal_attack_only
 
     def on_before_damage(self, battle: Battle, ctx: DamageContext) -> None:
         if self.owner is None or ctx.source is None:
             return
         if ctx.source.unit_id != self.owner.unit_id or "attack" not in ctx.tags:
+            return
+        if self.normal_attack_only and ctx.is_skill:
             return
         ctx.attack_power += self.bonus_attack
         if self.ignore_shield:
@@ -391,6 +457,8 @@ class NextAttackBuffStatus(StatusEffect):
         if self.owner is None:
             return
         if ctx.actor.unit_id != self.owner.unit_id or "attack" not in ctx.tags:
+            return
+        if self.normal_attack_only and ctx.is_skill:
             return
         if self.ignore_shield:
             ctx.ignore_shield = True
@@ -762,49 +830,8 @@ class DashMoveSkill(Skill):
         return {"cells": positions_to_dict(cells), "target_unit_ids": [], "secondary_cells": [], "requires_target": True}
 
 
-class MagicWallSkill(Skill):
-    def __init__(self) -> None:
-        super().__init__("magic_wall", "魔墙", "为己方单位增加 1 点护盾。", mana_cost=0, target_mode="unit")
-
-    def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        target = payload_target_unit(battle, payload)
-        ensure_ally(actor, target)
-        ensure_distance(actor, target, actor.targeting_range())
-        target.shields += 1
-        battle.log(f"{target.name} 获得了 1 层护盾。")
-
-    def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
-        targets = [unit for unit in battle.player_units(actor.player_id) if unit.position and actor.position and actor.position.distance_to(unit.position) <= actor.targeting_range()]
-        return {"cells": positions_to_dict([unit.position for unit in targets if unit.position]), "target_unit_ids": [unit.unit_id for unit in targets], "secondary_cells": [], "requires_target": True}
-
-
-class MagicWallSkill(Skill):
-    def __init__(self) -> None:
-        super().__init__(
-            "magic_wall",
-            "\u9b54\u5899",
-            "\u88ab\u52a8\uff1a\u8fde\u9501\u901f\u5ea6 2\uff0c\u5bf9\u4e00\u4e2a\u5df1\u65b9\u76ee\u6807\u52a0 1 \u5c42\u62a4\u76fe\u3002",
-            mana_cost=1,
-            target_mode="ally",
-            timing="passive",
-        )
-
-    def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        raise ActionError("\u9b54\u5899\u53ea\u80fd\u901a\u8fc7\u8fde\u9501\u4f7f\u7528\u3002")
-
-    def can_react_to(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> tuple[bool, str]:
-        ok, reason = super().can_react_to(battle, actor, queued_action)
-        if not ok:
-            return ok, reason
-        if queued_action.source_player_id == actor.player_id:
-            return False, "\u53ea\u80fd\u5bf9\u654c\u65b9\u52a8\u4f5c\u8fde\u9501\u3002"
-        threatened = self.threatened_allies(battle, actor, queued_action)
-        if not threatened:
-            return False, "\u5f53\u524d\u52a8\u4f5c\u6ca1\u6709\u5f71\u54cd\u5230\u53ef\u4fdd\u62a4\u7684\u5df1\u65b9\u5355\u4f4d\u3002"
-        threatened_ids = {unit.unit_id for unit in threatened}
-        if not [unit for unit in self.ally_targets(battle, actor) if unit.unit_id in threatened_ids]:
-            return False, "\u6ca1\u6709\u53ef\u4ee5\u65bd\u653e\u9b54\u5899\u7684\u5df1\u65b9\u76ee\u6807\u3002"
-        return True, ""
+class MultiTargetChainShieldSkill(Skill):
+    shield_amount = 1
 
     def ally_targets(self, battle: Battle, actor: HeroUnit) -> list[HeroUnit]:
         return [
@@ -818,7 +845,6 @@ class MagicWallSkill(Skill):
     def threatened_allies(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> list[HeroUnit]:
         threatened: list[HeroUnit] = []
         seen: set[str] = set()
-        source = battle.units.get(queued_action.actor_id)
         for unit_id in queued_action.target_unit_ids:
             if unit_id in seen:
                 continue
@@ -826,48 +852,137 @@ class MagicWallSkill(Skill):
             unit = battle.units.get(unit_id)
             if unit is None or unit.player_id != actor.player_id or unit.position is None or unit.banished or not unit.alive:
                 continue
-            ok, _ = battle.unit_can_be_selected(
-                unit,
-                actor=source,
-                ignore_stealth=battle.action_ignores_stealth(queued_action),
-            )
-            if not ok or battle.shield_auto_blocks_chain(unit, queued_action):
+            if battle.shield_auto_blocks_chain(unit, queued_action):
                 continue
             threatened.append(unit)  # type: ignore[arg-type]
         return threatened
 
-    def apply_shield(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        target = payload_target_unit(battle, payload)
-        ensure_ally(actor, target)
-        ensure_distance(actor, target, actor.targeting_range())
-        target.shields += 1
-        battle.log(f"{target.name} \u83b7\u5f97\u4e86 1 \u5c42\u62a4\u76fe\u3002")
+    def selectable_targets(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> list[HeroUnit]:
+        threatened_ids = {unit.unit_id for unit in self.threatened_allies(battle, actor, queued_action)}
+        return [unit for unit in self.ally_targets(battle, actor) if unit.unit_id in threatened_ids]
+
+    def affordable_target_limit(self, actor: HeroUnit) -> int:
+        if self.mana_cost <= 0:
+            return 99
+        return int((actor.current_mana + 1e-9) // self.mana_cost)
+
+    def mana_cost_for_payload(
+        self,
+        battle: Battle,
+        actor: HeroUnit,
+        payload: Optional[dict[str, Any]] = None,
+    ) -> float:
+        if payload is None or (not payload.get("target_unit_id") and not payload.get("target_unit_ids")):
+            return self.mana_cost
+        target_count = len(payload_target_units(battle, payload))
+        return round(target_count * self.mana_cost, 2)
+
+    def mana_cost_text(self) -> Optional[str]:
+        return f"费 {int(self.mana_cost) if float(self.mana_cost).is_integer() else self.mana_cost} 魔/目标"
+
+    def chosen_targets(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[HeroUnit]:
+        targets = payload_target_units(battle, payload)
+        valid_targets: list[HeroUnit] = []
+        seen: set[str] = set()
+        for target in targets:
+            ensure_ally(actor, target)
+            ensure_distance(actor, target, actor.targeting_range())
+            if target.unit_id in seen:
+                continue
+            seen.add(target.unit_id)
+            valid_targets.append(target)
+        return valid_targets
+
+    def apply_shields(self, battle: Battle, actor: HeroUnit, targets: list[HeroUnit]) -> None:
+        for target in targets:
+            target.add_temporary_shields(self.shield_amount)
+            battle.log(f"{target.name} 获得了 {self.shield_amount} 层临时护盾。")
 
     def react(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any], queued_action: QueuedAction) -> None:
+        selectable_units = self.selectable_targets(battle, actor, queued_action)
+        selectable = {unit.unit_id for unit in selectable_units}
         reaction_payload = dict(payload)
-        if not reaction_payload.get("target_unit_id"):
-            reaction_payload["target_unit_id"] = actor.unit_id
-            reaction_payload["resolved_target_unit_id"] = actor.unit_id
-        self.apply_shield(battle, actor, reaction_payload)
+        if not reaction_payload.get("target_unit_id") and not reaction_payload.get("target_unit_ids"):
+            if actor.unit_id in selectable:
+                reaction_payload["target_unit_id"] = actor.unit_id
+            elif len(selectable) == 1:
+                reaction_payload["target_unit_id"] = next(iter(selectable))
+        if reaction_payload.get("target_unit_id"):
+            reaction_payload.pop("resolved_target_unit_id", None)
+        targets = self.chosen_targets(battle, actor, reaction_payload)
+        if not targets:
+            raise ActionError("需要选择至少一个目标。")
+        if any(target.unit_id not in selectable for target in targets):
+            raise ActionError("存在不能被当前护盾保护的目标。")
+        if len(targets) > self.affordable_target_limit(actor):
+            raise ActionError("魔力不足，无法同时保护这么多目标。")
+        self.apply_shields(battle, actor, targets)
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
-        targets = self.ally_targets(battle, actor)
-        return {
-            "cells": positions_to_dict([unit.position for unit in targets if unit.position]),
-            "target_unit_ids": [unit.unit_id for unit in targets],
-            "secondary_cells": [],
-            "requires_target": True,
-        }
+        return multi_unit_selection_preview(
+            self.ally_targets(battle, actor),
+            max_targets=self.affordable_target_limit(actor),
+        )
 
     def reaction_preview(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> dict[str, Any]:
-        threatened_ids = {unit.unit_id for unit in self.threatened_allies(battle, actor, queued_action)}
-        targets = [unit for unit in self.ally_targets(battle, actor) if unit.unit_id in threatened_ids]
-        return {
-            "cells": positions_to_dict([unit.position for unit in targets if unit.position]),
-            "target_unit_ids": [unit.unit_id for unit in targets],
-            "secondary_cells": [],
-            "requires_target": True,
-        }
+        return multi_unit_selection_preview(
+            self.selectable_targets(battle, actor, queued_action),
+            max_targets=self.affordable_target_limit(actor),
+        )
+
+
+class MagicWallSkill(MultiTargetChainShieldSkill):
+    shield_amount = 1
+
+    def __init__(self) -> None:
+        super().__init__(
+            "magic_wall",
+            "魔墙",
+            "被动技能：连锁速度 2，可选择多个当前受影响的己方目标；每个目标费 1 魔，各获得 1 层临时护盾，只持续到这次连锁结束。",
+            mana_cost=1,
+            target_mode="ally",
+            timing="passive",
+        )
+
+    def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
+        raise ActionError("魔墙只能通过连锁使用。")
+
+    def can_react_to(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> tuple[bool, str]:
+        ok, reason = super().can_react_to(battle, actor, queued_action)
+        if not ok:
+            return ok, reason
+        if queued_action.source_player_id == actor.player_id:
+            return False, "只能对敌方动作连锁。"
+        if not self.selectable_targets(battle, actor, queued_action):
+            return False, "当前动作没有影响到可施放魔墙的己方目标。"
+        return True, ""
+
+
+class LightWallSkill(MultiTargetChainShieldSkill):
+    shield_amount = 1
+
+    def __init__(self) -> None:
+        super().__init__(
+            "light_wall",
+            "光墙",
+            "被动技能：连锁速度 2，可选择多个当前受影响的己方目标；每个目标费 1 魔，各获得 1 层临时护盾，只持续到这次连锁结束。",
+            mana_cost=1,
+            target_mode="ally",
+            timing="passive",
+        )
+
+    def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
+        raise ActionError("光墙只能通过连锁使用。")
+
+    def can_react_to(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> tuple[bool, str]:
+        ok, reason = super().can_react_to(battle, actor, queued_action)
+        if not ok:
+            return ok, reason
+        if queued_action.source_player_id == actor.player_id:
+            return False, "只能对敌方动作连锁。"
+        if not self.selectable_targets(battle, actor, queued_action):
+            return False, "当前动作没有影响到可施放光墙的己方目标。"
+        return True, ""
 
 
 class DrainManaSkill(Skill):
@@ -922,7 +1037,7 @@ class PierceSkill(Skill):
         super().__init__(
             "pierce",
             "穿刺",
-            "主动：1.5 魔，每回合最多 2 次，逐格选择一片直线区域；通常需要点满 2 格，贴边时按实际存在的格子结算。",
+            "主动技能：费 1.5 魔，每回合最多 2 次，逐格选择一段连续直线 2 格；只要整段里至少有一格紧贴自己就算合法，贴边时按实际存在的格子结算。",
             mana_cost=1.5,
             max_uses_per_turn=2,
             target_mode="cell",
@@ -944,13 +1059,34 @@ class PierceSkill(Skill):
         return dedupe_positions([cell for pattern in self.patterns(battle, actor) for cell in pattern])
 
     def patterns(self, battle: Battle, actor: HeroUnit) -> list[list[Position]]:
-        return localized_line_patterns(battle, actor.position, self.directions(), 2, max_distance=2)
+        patterns: list[list[Position]] = []
+        seen: set[tuple[tuple[int, int], ...]] = set()
+        actor_cells = {(cell.x, cell.y) for cell in battle.unit_cells(actor)}
+        origins = battle.unit_cells(actor) or ([actor.position] if actor.position else [])
+        for origin in origins:
+            for pattern in localized_line_patterns(
+                battle,
+                origin,
+                self.directions(),
+                2,
+                max_distance=2,
+                touch_distance=1,
+            ):
+                if any((cell.x, cell.y) in actor_cells for cell in pattern):
+                    continue
+                key = pattern_signature(pattern)
+                if key in seen:
+                    continue
+                seen.add(key)
+                patterns.append(pattern)
+        return patterns
 
     def chosen_cells(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
         return match_payload_pattern(payload, self.patterns(battle, actor))
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        for unit in battle.units_at_cells(self.chosen_cells(battle, actor, payload)):
+        cells = self.chosen_cells(battle, actor, payload)
+        for unit in battle.units_at_cells(cells):
             battle.resolve_damage(
                 DamageContext(
                     source=actor,
@@ -958,6 +1094,7 @@ class PierceSkill(Skill):
                     attack_power=actor.stat("attack"),
                     is_skill=True,
                     action_name="穿刺",
+                    area_cell_hits=battle.unit_hit_count_for_cells(unit, cells),
                     tags={"skill", "attack", "pierce"},
                 )
             )
@@ -980,6 +1117,7 @@ class KnockbackSkill(Skill):
             "knockback",
             "震开",
             "被动：连锁速度 2，被敌方攻击或主动技能影响时，先获得 1 层护盾，再将周围单位尽量向外推开 1 格。",
+            mana_cost=1,
             timing="passive",
         )
 
@@ -999,14 +1137,16 @@ class KnockbackSkill(Skill):
     def outward_destination(self, battle: Battle, actor: HeroUnit, unit: HeroUnit) -> Position | None:
         if actor.position is None or unit.position is None:
             return None
-        dx = unit.position.x - actor.position.x
-        dy = unit.position.y - actor.position.y
+        actor_cells = battle.unit_cells(actor)
+        origin = min(actor_cells, key=lambda cell: cell.distance_to(unit.position)) if actor_cells else actor.position
+        dx = unit.position.x - origin.x
+        dy = unit.position.y - origin.y
         step_x = 0 if dx == 0 else dx // abs(dx)
         step_y = 0 if dy == 0 else dy // abs(dy)
         destination = unit.position.offset(step_x, step_y)
         if not battle.in_bounds(destination):
             return None
-        if battle.is_occupied(destination, ignore=unit):
+        if not battle.can_place_unit(unit, destination, ignore=unit):
             return None
         if battle.is_forced_movement_blocked(destination):
             return None
@@ -1017,11 +1157,17 @@ class KnockbackSkill(Skill):
         battle.log(f"{actor.name} 通过震开获得了 1 层护盾。")
         if actor.position is None:
             return
-        neighbors = [
-            unit
-            for unit in battle.units_at_cells(battle.neighbors(actor.position))
-            if unit.unit_id != actor.unit_id
-        ]
+        actor_cells = battle.unit_cells(actor)
+        actor_cell_keys = {(cell.x, cell.y) for cell in actor_cells}
+        adjacent_cells = dedupe_positions(
+            [
+                neighbor
+                for cell in actor_cells
+                for neighbor in battle.neighbors(cell)
+                if (neighbor.x, neighbor.y) not in actor_cell_keys
+            ]
+        )
+        neighbors = [unit for unit in battle.units_at_cells(adjacent_cells) if unit.unit_id != actor.unit_id]
         for unit in neighbors:
             destination = self.outward_destination(battle, actor, unit)  # type: ignore[arg-type]
             if destination is None:
@@ -1040,7 +1186,16 @@ class KnockbackSkill(Skill):
         return {
             "cells": [actor.position.to_dict()] if actor.position else [],
             "target_unit_ids": [actor.unit_id],
-            "secondary_cells": positions_to_dict(battle.neighbors(actor.position)) if actor.position else [],
+            "secondary_cells": positions_to_dict(
+                dedupe_positions(
+                    [
+                        neighbor
+                        for cell in battle.unit_cells(actor)
+                        for neighbor in battle.neighbors(cell)
+                        if neighbor not in battle.unit_cells(actor)
+                    ]
+                )
+            ) if actor.position else [],
             "requires_target": False,
         }
 
@@ -1053,7 +1208,7 @@ class MachineGunSkill(Skill):
         super().__init__(
             "machine_gun",
             "机枪",
-            "普通技能：每回合最多 1 次，逐格选择一片直线区域；通常需要点满 3 格，贴边时按实际存在的格子结算，对其中敌方单位分别结算伤害。",
+            "普通技能：每回合最多 1 次，逐格选择一段连续直线 3 格；只要整段里至少有一格紧贴自己就算合法，贴边时按实际存在的格子结算，对其中敌方单位分别结算伤害。",
             max_uses_per_turn=1,
             target_mode="cell",
         )
@@ -1065,13 +1220,34 @@ class MachineGunSkill(Skill):
         return [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
 
     def patterns(self, battle: Battle, actor: HeroUnit) -> list[list[Position]]:
-        return localized_line_patterns(battle, actor.position, self.directions(), 3, max_distance=3)
+        patterns: list[list[Position]] = []
+        seen: set[tuple[tuple[int, int], ...]] = set()
+        actor_cells = {(cell.x, cell.y) for cell in battle.unit_cells(actor)}
+        origins = battle.unit_cells(actor) or ([actor.position] if actor.position else [])
+        for origin in origins:
+            for pattern in localized_line_patterns(
+                battle,
+                origin,
+                self.directions(),
+                3,
+                max_distance=3,
+                touch_distance=1,
+            ):
+                if any((cell.x, cell.y) in actor_cells for cell in pattern):
+                    continue
+                key = pattern_signature(pattern)
+                if key in seen:
+                    continue
+                seen.add(key)
+                patterns.append(pattern)
+        return patterns
 
     def chosen_line(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
         return match_payload_pattern(payload, self.patterns(battle, actor))
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        for unit in battle.units_at_cells(self.chosen_line(battle, actor, payload)):
+        cells = self.chosen_line(battle, actor, payload)
+        for unit in battle.units_at_cells(cells):
             if unit.player_id == actor.player_id:
                 continue
             battle.resolve_damage(
@@ -1081,6 +1257,7 @@ class MachineGunSkill(Skill):
                     attack_power=actor.stat("attack"),
                     is_skill=True,
                     action_name="机枪",
+                    area_cell_hits=battle.unit_hit_count_for_cells(unit, cells),
                     tags={"skill", "attack"},
                 )
             )
@@ -1091,7 +1268,7 @@ class MachineGunSkill(Skill):
         targets = [
             unit.unit_id
             for unit in battle.enemy_units(actor.player_id)
-            if unit.position is not None and (unit.position.x, unit.position.y) in cell_keys
+            if any((cell.x, cell.y) in cell_keys for cell in battle.unit_cells(unit))
         ]
         preview = pattern_selection_preview(self.patterns(battle, actor))
         preview.update({"target_unit_ids": targets, "secondary_cells": [], "requires_target": True})
@@ -1127,6 +1304,7 @@ class HeadshotSkill(SelfBuffSkill):
                 description="本回合内下一次攻击伤害 +2 且破魔。",
                 duration=1,
                 consume_on_attack_attempt=True,
+                normal_attack_only=True,
             )
         )
         battle.log(f"{actor.name} 进入爆头准备状态。")
@@ -1308,7 +1486,7 @@ class GreatHolyLightField(BattleFieldEffect):
                         StatModifierStatus(
                             "大圣光守备",
                             defense_delta=1,
-                            duration=1,
+                            duration=2,
                             tick_scope="any_turn_end",
                             description="直到下次己方回合开始前守 +1。",
                         )
@@ -1325,14 +1503,17 @@ class GreatHolyLightSkill(SelfBuffSkill):
         battle.add_field_effect(GreatHolyLightField(actor.unit_id, duration=5))
 
 
-class PassiveProtectionSkill(Skill):
+class PassiveProtectionSkill(MultiTargetChainShieldSkill):
+    shield_amount = 2
+
     def __init__(self) -> None:
         super().__init__(
             "protection",
             "保护",
-            "被动：连锁速度 2，在敌方动作前为自身增加 2 层临时护盾。",
+            "被动技能：连锁速度 2，费 1 魔，只保护自己并获得 2 层护盾，持续到回合结束。",
             mana_cost=1,
             max_uses_per_turn=1,
+            target_mode="ally",
             timing="passive",
         )
 
@@ -1345,16 +1526,30 @@ class PassiveProtectionSkill(Skill):
             return ok, reason
         if queued_action.source_player_id == actor.player_id:
             return False, "只能对敌方动作连锁。"
-        if actor.unit_id not in queued_action.target_unit_ids:
+        if actor.unit_id not in {unit.unit_id for unit in self.selectable_targets(battle, actor, queued_action)}:
             return False, "当前动作没有影响到自己。"
         return True, ""
 
+    def apply_shields(self, battle: Battle, actor: HeroUnit, targets: list[HeroUnit]) -> None:
+        for target in targets:
+            target.shields += self.shield_amount
+            battle.log(f"{target.name} 获得了 {self.shield_amount} 层护盾，持续到回合结束。")
+
     def react(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any], queued_action: QueuedAction) -> None:
-        actor.add_temporary_shields(2)
-        battle.log(f"{actor.name} 通过保护获得了 2 层临时护盾。")
+        if actor.unit_id not in {unit.unit_id for unit in self.selectable_targets(battle, actor, queued_action)}:
+            raise ActionError("当前动作没有影响到自己。")
+        self.apply_shields(battle, actor, [actor])
+
+    def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
+        return {
+            "cells": [actor.position.to_dict()] if actor.position else [],
+            "target_unit_ids": [actor.unit_id],
+            "secondary_cells": [],
+            "requires_target": False,
+        }
 
     def reaction_preview(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> dict[str, Any]:
-        return {"cells": [actor.position.to_dict()] if actor.position else [], "target_unit_ids": [actor.unit_id], "secondary_cells": [], "requires_target": False}
+        return self.preview(battle, actor)
 
 
 class PassiveEvasionSkill(Skill):
@@ -1374,6 +1569,8 @@ class PassiveEvasionSkill(Skill):
     def evade_cells(self, battle: Battle, actor: HeroUnit) -> list[Position]:
         if actor.position is None or actor.cannot_move:
             return []
+        if battle.unit_in_weather("沙尘", actor):
+            return []
         cells: list[Position] = []
         for dx, dy in (
             (-1, -1),
@@ -1388,7 +1585,7 @@ class PassiveEvasionSkill(Skill):
             destination = actor.position.offset(dx, dy)
             if not battle.in_bounds(destination):
                 continue
-            if battle.is_occupied(destination, ignore=actor):
+            if battle.is_occupied(destination, ignore=actor, mover=actor):
                 continue
             cells.append(destination)
         return sorted(cells, key=lambda cell: (cell.y, cell.x))
@@ -1436,7 +1633,7 @@ class BackstepShotSkill(Skill):
         super().__init__(
             "backstep_shot",
             "撤步射击",
-            "被动：连锁速度 2，被普攻时先由玩家选择一个直线穿人的 2 格撤步落点；随后再选择一个仍在普攻范围内的敌方目标反击。",
+            "被动技能：费 0.5 魔，连锁速度 2，被敌方普攻或技能影响时先由玩家选择一个直线穿人的 2 格撤步落点；随后可选择是否只反击连锁来源的对象。",
             mana_cost=0.5,
             max_uses_per_turn=2,
             timing="passive",
@@ -1449,10 +1646,10 @@ class BackstepShotSkill(Skill):
         ok, reason = super().can_react_to(battle, actor, queued_action)
         if not ok:
             return ok, reason
-        if queued_action.action_type != "attack":
-            return False, "撤步射击只能响应普攻。"
+        if queued_action.source_player_id == actor.player_id or queued_action.action_type not in {"attack", "skill"}:
+            return False, "撤步射击只能响应敌方普攻或技能。"
         if actor.unit_id not in queued_action.target_unit_ids:
-            return False, "当前动作没有攻击到自己。"
+            return False, "当前动作没有影响到自己。"
         if not self.retreat_cells(battle, actor):
             return False, "没有可用于撤步射击的落点。"
         return True, ""
@@ -1474,55 +1671,54 @@ class BackstepShotSkill(Skill):
             destination = actor.position.offset(dx * 2, dy * 2)
             if not battle.in_bounds(destination):
                 continue
-            if battle.is_occupied(destination, ignore=actor):
+            if battle.is_occupied(destination, ignore=actor, mover=actor):
                 continue
             cells.append(destination)
         return sorted(cells, key=lambda cell: (cell.y, cell.x))
 
-    def attack_targets_after_retreat(
+    def counter_target_after_retreat(
         self,
         battle: Battle,
         actor: HeroUnit,
         destination: Position,
-    ) -> list[HeroUnit]:
+        queued_action: QueuedAction,
+    ) -> HeroUnit | None:
+        source = battle.units.get(queued_action.actor_id)
+        if source is None or source.player_id == actor.player_id:
+            return None
         if actor.position is None:
-            return []
+            return None
         actual_position = actor.position
         actor.position = destination
         try:
-            targets = [
-                unit
-                for unit in battle.enemy_units(actor.player_id)
-                if battle.attack_target_allowed(
-                    actor,
-                    unit,
-                    ignore_stealth=battle.attack_ignores_stealth(actor, unit),
-                )[0]
-            ]
+            ok, _ = battle.attack_target_allowed(
+                actor,
+                source,
+                ignore_stealth=battle.attack_ignores_stealth(actor, source),
+            )
+            return source if ok else None
         finally:
             actor.position = actual_position
-        return sorted(
-            targets,
-            key=lambda unit: (
-                unit.position.y if unit.position is not None else 99,
-                unit.position.x if unit.position is not None else 99,
-                unit.unit_id,
-            ),
-        )
 
-    def preview_targets_by_retreat_cell(
+    def available_retreat_cells(
         self,
         battle: Battle,
         actor: HeroUnit,
-    ) -> dict[str, list[HeroUnit]]:
-        targets_by_cell: dict[str, list[HeroUnit]] = {}
-        for destination in self.retreat_cells(battle, actor):
-            targets_by_cell[f"{destination.x},{destination.y}"] = self.attack_targets_after_retreat(
-                battle,
-                actor,
-                destination,
-            )
-        return targets_by_cell
+        queued_action: QueuedAction,
+    ) -> list[Position]:
+        return self.retreat_cells(battle, actor)
+
+    def follow_up_target_ids_by_retreat(
+        self,
+        battle: Battle,
+        actor: HeroUnit,
+        queued_action: QueuedAction,
+    ) -> dict[str, list[str]]:
+        mapping: dict[str, list[str]] = {}
+        for cell in self.retreat_cells(battle, actor):
+            target = self.counter_target_after_retreat(battle, actor, cell, queued_action)
+            mapping[f"{cell.x},{cell.y}"] = [target.unit_id] if target is not None else []
+        return mapping
 
     def react(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any], queued_action: QueuedAction) -> None:
         if payload.get("x") is None or payload.get("y") is None:
@@ -1542,46 +1738,42 @@ class BackstepShotSkill(Skill):
             tags={"backstep"},
         )
         battle.log(f"{actor.name} 触发撤步射击。")
-        valid_targets = self.attack_targets_after_retreat(battle, actor, destination)
-        if not valid_targets:
-            battle.log(f"{actor.name} 撤步后没有可反击的敌方目标。")
+        if not payload.get("target_unit_id"):
+            battle.log(f"{actor.name} 撤步后放弃了反击。")
             return
-        target = payload_target_unit(battle, payload)
-        valid_target_ids = {unit.unit_id for unit in valid_targets}
-        if target.unit_id not in valid_target_ids:
-            raise ActionError("该目标不在撤步射击后的反击范围内。")
+        target = self.counter_target_after_retreat(battle, actor, destination, queued_action)
+        if target is None:
+            raise ActionError("撤步后无法攻击原连锁来源。")
+        if payload.get("target_unit_id") != target.unit_id:
+            raise ActionError("撤步射击只能反击原连锁来源。")
         battle.resolve_attack_damage(actor, target, action_name="撤步反击", tags={"counter"})
 
     def reaction_preview(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> dict[str, Any]:
-        retreat_cells = self.retreat_cells(battle, actor)
-        targets_by_cell = self.preview_targets_by_retreat_cell(battle, actor)
-        target_unit_ids: list[str] = []
-        seen_target_ids: set[str] = set()
-        for targets in targets_by_cell.values():
-            for unit in targets:
-                if unit.unit_id in seen_target_ids:
-                    continue
-                seen_target_ids.add(unit.unit_id)
-                target_unit_ids.append(unit.unit_id)
         return {
-            "cells": positions_to_dict(retreat_cells),
-            "target_unit_ids": target_unit_ids,
+            "cells": positions_to_dict(self.retreat_cells(battle, actor)),
+            "target_unit_ids": [],
             "secondary_cells": [actor.position.to_dict()] if actor.position else [],
+            "follow_up_target_ids_by_cell": self.follow_up_target_ids_by_retreat(battle, actor, queued_action),
             "requires_target": True,
-            "follow_up_target_ids_by_cell": {
-                key: [unit.unit_id for unit in targets]
-                for key, targets in targets_by_cell.items()
-            },
-            "follow_up_target_cells_by_cell": {
-                key: positions_to_dict([unit.position for unit in targets if unit.position is not None])
-                for key, targets in targets_by_cell.items()
-            },
         }
 
 
 class StealthSkill(SelfBuffSkill):
     def __init__(self) -> None:
         super().__init__("stealth", "隐身", "普通技能：费 1.5 魔，仅己方可见，直到自己第一次普攻或使用技能后解除。", mana_cost=1.5)
+
+    def can_use(
+        self,
+        battle: Battle,
+        actor: HeroUnit,
+        payload: Optional[dict[str, Any]] = None,
+    ) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok:
+            return ok, reason
+        if battle.unit_in_weather("沙尘", actor):
+            return False, "沙尘天气中不能使用隐身。"
+        return True, ""
 
     def apply_to_self(self, battle: Battle, actor: HeroUnit) -> None:
         existing = actor.get_status("隐身")

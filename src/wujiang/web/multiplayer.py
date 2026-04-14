@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import random
 import secrets
-import string
 import threading
 import time
 from dataclasses import dataclass
@@ -13,6 +13,17 @@ from wujiang.heroes.registry import create_battle, list_heroes
 
 ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 ROOM_CODE_LENGTH = 6
+DEFAULT_ROOM_MODE = "classic"
+ROOM_MODES: dict[str, dict[str, str]] = {
+    "classic": {
+        "name": "标准选将",
+        "description": "双方先各自选将，在 8x8 战场固定出生后开始对局。",
+    },
+    "random": {
+        "name": "随机选人",
+        "description": "双方无需手动选将，开局后随机分配武将，使用更大的战场、随机出生，并按能力值决定先手。",
+    },
+}
 
 
 class RoomError(Exception):
@@ -38,6 +49,53 @@ def normalize_player_name(name: str) -> str:
     return cleaned[:20]
 
 
+def normalize_room_mode(mode: str) -> str:
+    normalized = str(mode or DEFAULT_ROOM_MODE).strip().lower()
+    if normalized not in ROOM_MODES:
+        raise RoomError("未知的房间模式。")
+    return normalized
+
+
+def room_mode_payload(mode: str) -> dict[str, str]:
+    normalized = normalize_room_mode(mode)
+    meta = ROOM_MODES[normalized]
+    return {
+        "code": normalized,
+        "name": meta["name"],
+        "description": meta["description"],
+    }
+
+
+def room_mode_list_payload() -> list[dict[str, str]]:
+    return [room_mode_payload(code) for code in ROOM_MODES]
+
+
+def random_room_hero_codes() -> tuple[str, str]:
+    hero_codes = tuple(hero_lookup().keys())
+    return random.choice(hero_codes), random.choice(hero_codes)
+
+
+def clone_visible_name(unit_payload: dict[str, Any], viewer_player_id: Optional[int]) -> str:
+    name = str(unit_payload.get("name") or "")
+    if not unit_payload.get("is_clone"):
+        return name
+    if viewer_player_id is None or unit_payload.get("player_id") != viewer_player_id:
+        return name.replace("（分身）", "")
+    return name if name.endswith("（分身）") else f"{name}（分身）"
+
+
+def apply_private_clone_labels(state: dict[str, Any], viewer_player_id: Optional[int]) -> None:
+    visible_names_by_id: dict[str, str] = {}
+    for unit_payload in state.get("units", []):
+        visible_name = clone_visible_name(unit_payload, viewer_player_id)
+        unit_payload["name"] = visible_name
+        visible_names_by_id[str(unit_payload.get("id"))] = visible_name
+    for active_unit in state.get("active_units", []):
+        unit_id = str(active_unit.get("unit_id") or "")
+        if unit_id in visible_names_by_id:
+            active_unit["name"] = visible_names_by_id[unit_id]
+
+
 def battle_state_for_viewer(battle: Battle, viewer_player_id: Optional[int]) -> dict[str, Any]:
     state = battle.to_public_dict()
     input_player = state["input_player"]
@@ -60,6 +118,7 @@ def battle_state_for_viewer(battle: Battle, viewer_player_id: Optional[int]) -> 
             }
             for unit in battle.player_units(input_player)
         ]
+    apply_private_clone_labels(state, viewer_player_id)
     return state
 
 
@@ -109,8 +168,9 @@ class PlayerSeat:
 
 
 class GameRoom:
-    def __init__(self, room_id: str) -> None:
+    def __init__(self, room_id: str, *, mode: str = DEFAULT_ROOM_MODE) -> None:
         self.room_id = normalize_room_id(room_id)
+        self.mode = normalize_room_mode(mode)
         self.host_player_id = 1
         self.seats = {
             1: PlayerSeat(player_id=1),
@@ -148,7 +208,7 @@ class GameRoom:
     def require_host(self, token: Optional[str]) -> PlayerSeat:
         seat = self.require_seat(token)
         if seat.player_id != self.host_player_id:
-            raise RoomError("只有房主可以删除房间。")
+            raise RoomError("只有房主可以执行这个操作。")
         return seat
 
     def open_seat(self) -> Optional[PlayerSeat]:
@@ -186,14 +246,35 @@ class GameRoom:
         with self._lock:
             if self.status != "lobby":
                 raise RoomError("对局已经开始，不能再更改武将。")
+            if self.mode == "random":
+                raise RoomError("随机选人模式下不需要手动选将。")
             seat = self.require_seat(token)
             if hero_code not in hero_lookup():
                 raise RoomError("所选武将不存在。")
             seat.hero_code = hero_code
             self.touch()
 
+    def set_mode(self, token: str, mode: str) -> None:
+        with self._lock:
+            self.require_host(token)
+            if self.status != "lobby":
+                raise RoomError("只有在大厅中才能切换房间模式。")
+            next_mode = normalize_room_mode(mode)
+            if next_mode == self.mode:
+                return
+            self.mode = next_mode
+            for seat in self.seats.values():
+                seat.hero_code = None
+            self.touch()
+
     def can_start(self) -> bool:
-        return all(seat.occupied and seat.hero_code for seat in self.seats.values()) and self.battle is None
+        if self.battle is not None:
+            return False
+        if not all(seat.occupied for seat in self.seats.values()):
+            return False
+        if self.mode == "random":
+            return True
+        return all(seat.hero_code for seat in self.seats.values())
 
     def start_battle(self, token: str) -> None:
         with self._lock:
@@ -201,10 +282,14 @@ class GameRoom:
             if self.status != "lobby":
                 raise RoomError("当前房间已经在对局中。")
             if not self.can_start():
-                raise RoomError("需要双方都加入房间并各自选好武将后，才能开始对局。")
+                raise RoomError("需要双方都加入房间并各自准备完成后，才能开始对局。")
             player1_code = self.seats[1].hero_code
             player2_code = self.seats[2].hero_code
-            self.battle = create_battle(str(player1_code), str(player2_code))
+            if self.mode == "random":
+                player1_code, player2_code = random_room_hero_codes()
+                self.seats[1].hero_code = player1_code
+                self.seats[2].hero_code = player2_code
+            self.battle = create_battle(str(player1_code), str(player2_code), mode=self.mode)
             self.status = "battle"
             self.touch()
 
@@ -223,7 +308,7 @@ class GameRoom:
         with self._lock:
             seat = self.require_seat(token)
             if self.status == "battle":
-                raise RoomError("å¯¹å±€è¿›è¡Œä¸­ä¸èƒ½ç›´æŽ¥ç¦»å¼€æˆ¿é—´ï¼Œè¯·å…ˆæŠ•é™æˆ–ç­‰å¾…å¯¹å±€ç»“æŸã€‚")
+                raise RoomError("对局进行中不能直接离开房间，请先投降或等待对局结束。")
             leaving_player_id = seat.player_id
             seat.release()
             if leaving_player_id == self.host_player_id:
@@ -283,9 +368,12 @@ class GameRoom:
             seats = [seat.to_public_dict(heroes_by_code, self.host_player_id) for seat in self.seats.values()]
             occupied_count = sum(1 for seat in self.seats.values() if seat.occupied)
             is_full = occupied_count == len(self.seats)
+            mode_meta = room_mode_payload(self.mode)
             return {
                 "room_id": self.room_id,
                 "status": self.status,
+                "mode": mode_meta["code"],
+                "mode_name": mode_meta["name"],
                 "created_at": self.created_at,
                 "updated_at": self.updated_at,
                 "invite_path": self.invite_path(),
@@ -306,9 +394,14 @@ class GameRoom:
             viewer_player_id = viewer.player_id if viewer else None
             viewer_name = viewer.name if viewer else None
             heroes_by_code = hero_lookup()
+            mode_meta = room_mode_payload(self.mode)
             room_state = {
                 "room_id": self.room_id,
                 "status": self.status,
+                "mode": mode_meta["code"],
+                "mode_name": mode_meta["name"],
+                "mode_description": mode_meta["description"],
+                "available_modes": room_mode_list_payload(),
                 "version": self.version,
                 "created_at": self.created_at,
                 "updated_at": self.updated_at,
@@ -342,9 +435,9 @@ class RoomRegistry:
             if room_id not in self._rooms:
                 return room_id
 
-    def create_room(self, player_name: str) -> tuple[GameRoom, int, str]:
+    def create_room(self, player_name: str, mode: str = DEFAULT_ROOM_MODE) -> tuple[GameRoom, int, str]:
         with self._lock:
-            room = GameRoom(self._generate_room_id())
+            room = GameRoom(self._generate_room_id(), mode=mode)
             player_id, token = room.create_host(player_name)
             self._rooms[room.room_id] = room
             return room, player_id, token
@@ -366,13 +459,12 @@ class RoomRegistry:
             room.require_host(token)
             del self._rooms[normalized]
 
-
     def leave_room(self, room_id: str, token: str) -> tuple[bool, int]:
         normalized = normalize_room_id(room_id)
         with self._lock:
             room = self._rooms.get(normalized)
             if room is None:
-                raise RoomError("æˆ¿é—´ä¸å­˜åœ¨ï¼Œå¯èƒ½æ˜¯æˆ¿é—´ç è¾“é”™äº†ã€‚")
+                raise RoomError("房间不存在，可能是房间码输错了。")
             leaving_player_id = room.leave(token)
             deleted = room.occupied_seat_count() == 0
             if deleted:
