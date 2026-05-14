@@ -34,6 +34,7 @@
             <div class="draft-head-actions">
               <button id="leave-room" class="ghost hidden">离开房间</button>
               <button id="delete-room" class="ghost hidden">删除房间</button>
+              <button id="recover-room" class="ghost hidden">恢复席位</button>
               <button id="copy-invite" class="ghost hidden">复制邀请链接</button>
               <button id="room-battle" class="ghost hidden">进入战场</button>
               <button id="start-room" class="primary hidden">开始对局</button>
@@ -118,6 +119,16 @@
                 <span>房主设置</span>
                 <select id="room-mode-select"></select>
               </label>
+              <label class="room-mode-control" for="room-seat-count-input">
+                <span>席位数</span>
+                <input id="room-seat-count-input" type="number" min="2" max="6" step="1" value="2" />
+                <span id="room-seat-count-note" class="meta-note">进入房间后可由房主调整到 2~6 席。</span>
+              </label>
+              <label id="random-roster-size-control" class="room-mode-control hidden" for="random-roster-size-input">
+                <span>随机模式 n</span>
+                <input id="random-roster-size-input" type="number" min="1" step="1" value="1" />
+                <span id="random-roster-size-note" class="meta-note">开局时双方各随机获得 1 个武将。</span>
+              </label>
             </section>
             <div id="seat-cards" class="seat-grid"></div>
 
@@ -150,6 +161,7 @@
             <div id="battle-stage-row" class="battle-stage-row">
               <div id="board-stage" class="board-stage">
                 <div id="board" class="board"></div>
+                <div id="battle-vfx" class="battle-vfx"></div>
                 <div id="action-wheel" class="action-wheel"></div>
                 <div id="board-alert" class="board-alert hidden"></div>
                 <div id="game-over-overlay" class="game-over-overlay hidden">

@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlparse
 
 from wujiang.engine.core import ActionError
 from wujiang.heroes.registry import create_battle, list_heroes
-from wujiang.web.multiplayer import DEFAULT_ROOM_MODE, ROOMS, RoomError, apply_private_clone_labels
+from wujiang.web.multiplayer import DEFAULT_ROOM_MODE, ROOMS, RoomError, battle_state_for_viewer
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -25,18 +25,8 @@ class GameSession:
     def serialize_state(self) -> dict[str, Any]:
         if self.battle is None:
             return {"battle": None, "heroes": list_heroes()}
-        state = self.battle.to_public_dict()
-        input_player = state["input_player"]
-        state["active_units"] = [
-            {
-                "unit_id": unit.unit_id,
-                "name": unit.name,
-                "actions": self.battle.action_snapshot_for(unit),
-                "reactions": self.battle.reaction_snapshot_for(unit),
-            }
-            for unit in self.battle.player_units(input_player)
-        ]
-        apply_private_clone_labels(state, input_player)
+        input_player = self.battle.to_public_dict()["input_player"]
+        state = battle_state_for_viewer(self.battle, input_player)
         return {"battle": state, "heroes": list_heroes()}
 
 
@@ -97,7 +87,11 @@ def extract_room_action(payload: dict[str, Any]) -> dict[str, Any]:
     nested = payload.get("action")
     if isinstance(nested, dict):
         return nested
-    return {key: value for key, value in payload.items() if key not in {"room_id", "player_token", "player_name", "hero_code"}}
+    return {
+        key: value
+        for key, value in payload.items()
+        if key not in {"room_id", "player_token", "player_name", "hero_code", "delta"}
+    }
 
 
 class WujiangHandler(BaseHTTPRequestHandler):
@@ -131,6 +125,24 @@ class WujiangHandler(BaseHTTPRequestHandler):
                 json_response(self, HTTPStatus.NOT_FOUND, {"error": "房间不存在，可能是房间码输错了。"})
                 return
             json_response(self, HTTPStatus.OK, room.serialize_state(player_token, base_url=request_base_url(self)))
+            return
+        if parsed.path == "/api/rooms/replay":
+            room_id = (query.get("room_id") or query.get("room") or [""])[0]
+            player_token = (query.get("player_token") or [""])[0] or None
+            step_index = (query.get("step_index") or ["0"])[0]
+            omniscient = (query.get("omniscient") or ["0"])[0] in {"1", "true", "yes", "on"}
+            try:
+                room = ROOMS.get_room(room_id)
+                payload = room.serialize_replay_step(player_token, step_index=step_index, omniscient=omniscient)
+            except RoomError as exc:
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            json_response(self, HTTPStatus.OK, payload)
+            return
+        if parsed.path == "/favicon.ico":
+            self.send_response(HTTPStatus.NO_CONTENT)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
             return
         self.serve_static(parsed.path)
 
@@ -212,9 +224,11 @@ class WujiangHandler(BaseHTTPRequestHandler):
             room_id = payload.get("room_id", "")
             player_token = payload.get("player_token")
             hero_code = payload.get("hero_code", "")
+            delta = payload.get("delta", 1)
+            seat_id = payload.get("seat_id")
             try:
                 room = ROOMS.get_room(str(room_id))
-                room.select_hero(str(player_token or ""), str(hero_code))
+                room.select_hero(str(player_token or ""), str(hero_code), delta, seat_id=seat_id)
             except RoomError as exc:
                 room = None
                 try:
@@ -222,6 +236,71 @@ class WujiangHandler(BaseHTTPRequestHandler):
                 except RoomError:
                     pass
                 error_payload: dict[str, Any] = {"error": str(exc)}
+                if room is not None:
+                    error_payload["state"] = room.serialize_state(str(player_token or ""), base_url=request_base_url(self))
+                json_response(self, HTTPStatus.BAD_REQUEST, error_payload)
+                return
+            json_response(self, HTTPStatus.OK, room.serialize_state(str(player_token or ""), base_url=request_base_url(self)))
+            return
+
+        if parsed.path == "/api/rooms/set-seat-count":
+            room_id = payload.get("room_id", "")
+            player_token = payload.get("player_token")
+            seat_count = payload.get("seat_count", 2)
+            try:
+                room = ROOMS.get_room(str(room_id))
+                room.set_seat_count(str(player_token or ""), seat_count)
+            except RoomError as exc:
+                room = None
+                try:
+                    room = ROOMS.get_room(str(room_id))
+                except RoomError:
+                    pass
+                error_payload = {"error": str(exc)}
+                if room is not None:
+                    error_payload["state"] = room.serialize_state(str(player_token or ""), base_url=request_base_url(self))
+                json_response(self, HTTPStatus.BAD_REQUEST, error_payload)
+                return
+            json_response(self, HTTPStatus.OK, room.serialize_state(str(player_token or ""), base_url=request_base_url(self)))
+            return
+
+        if parsed.path == "/api/rooms/set-seat-team":
+            room_id = payload.get("room_id", "")
+            player_token = payload.get("player_token")
+            seat_id = payload.get("seat_id")
+            team_id = payload.get("team_id")
+            try:
+                room = ROOMS.get_room(str(room_id))
+                room.set_seat_team(str(player_token or ""), seat_id, team_id)
+            except RoomError as exc:
+                room = None
+                try:
+                    room = ROOMS.get_room(str(room_id))
+                except RoomError:
+                    pass
+                error_payload = {"error": str(exc)}
+                if room is not None:
+                    error_payload["state"] = room.serialize_state(str(player_token or ""), base_url=request_base_url(self))
+                json_response(self, HTTPStatus.BAD_REQUEST, error_payload)
+                return
+            json_response(self, HTTPStatus.OK, room.serialize_state(str(player_token or ""), base_url=request_base_url(self)))
+            return
+
+        if parsed.path == "/api/rooms/set-seat-controller":
+            room_id = payload.get("room_id", "")
+            player_token = payload.get("player_token")
+            seat_id = payload.get("seat_id")
+            controller_type = payload.get("controller_type", "open")
+            try:
+                room = ROOMS.get_room(str(room_id))
+                room.set_seat_controller(str(player_token or ""), seat_id, str(controller_type or "open"))
+            except RoomError as exc:
+                room = None
+                try:
+                    room = ROOMS.get_room(str(room_id))
+                except RoomError:
+                    pass
+                error_payload = {"error": str(exc)}
                 if room is not None:
                     error_payload["state"] = room.serialize_state(str(player_token or ""), base_url=request_base_url(self))
                 json_response(self, HTTPStatus.BAD_REQUEST, error_payload)
@@ -270,12 +349,120 @@ class WujiangHandler(BaseHTTPRequestHandler):
             json_response(self, HTTPStatus.OK, room.serialize_state(str(player_token or ""), base_url=request_base_url(self)))
             return
 
+        if parsed.path == "/api/rooms/set-default-ai-difficulty":
+            room_id = payload.get("room_id", "")
+            player_token = payload.get("player_token")
+            difficulty = payload.get("difficulty", "standard")
+            try:
+                room = ROOMS.get_room(str(room_id))
+                room.set_default_ai_difficulty(str(player_token or ""), difficulty)
+            except RoomError as exc:
+                room = None
+                try:
+                    room = ROOMS.get_room(str(room_id))
+                except RoomError:
+                    pass
+                error_payload = {"error": str(exc)}
+                if room is not None:
+                    error_payload["state"] = room.serialize_state(str(player_token or ""), base_url=request_base_url(self))
+                json_response(self, HTTPStatus.BAD_REQUEST, error_payload)
+                return
+            json_response(self, HTTPStatus.OK, room.serialize_state(str(player_token or ""), base_url=request_base_url(self)))
+            return
+
+        if parsed.path == "/api/rooms/set-seat-ai-difficulty":
+            room_id = payload.get("room_id", "")
+            player_token = payload.get("player_token")
+            seat_id = payload.get("seat_id")
+            difficulty = payload.get("difficulty", "standard")
+            try:
+                room = ROOMS.get_room(str(room_id))
+                room.set_seat_ai_difficulty(str(player_token or ""), seat_id, difficulty)
+            except RoomError as exc:
+                room = None
+                try:
+                    room = ROOMS.get_room(str(room_id))
+                except RoomError:
+                    pass
+                error_payload = {"error": str(exc)}
+                if room is not None:
+                    error_payload["state"] = room.serialize_state(str(player_token or ""), base_url=request_base_url(self))
+                json_response(self, HTTPStatus.BAD_REQUEST, error_payload)
+                return
+            json_response(self, HTTPStatus.OK, room.serialize_state(str(player_token or ""), base_url=request_base_url(self)))
+            return
+
+        if parsed.path == "/api/rooms/set-random-roster-size":
+            room_id = payload.get("room_id", "")
+            player_token = payload.get("player_token")
+            roster_size = payload.get("random_roster_size", 1)
+            try:
+                room = ROOMS.get_room(str(room_id))
+                room.set_random_roster_size(str(player_token or ""), roster_size)
+            except RoomError as exc:
+                room = None
+                try:
+                    room = ROOMS.get_room(str(room_id))
+                except RoomError:
+                    pass
+                error_payload = {"error": str(exc)}
+                if room is not None:
+                    error_payload["state"] = room.serialize_state(str(player_token or ""), base_url=request_base_url(self))
+                json_response(self, HTTPStatus.BAD_REQUEST, error_payload)
+                return
+            json_response(self, HTTPStatus.OK, room.serialize_state(str(player_token or ""), base_url=request_base_url(self)))
+            return
+
+        if parsed.path == "/api/rooms/set-seat-random-quota":
+            room_id = payload.get("room_id", "")
+            player_token = payload.get("player_token")
+            seat_id = payload.get("seat_id")
+            quota = payload.get("quota", 0)
+            try:
+                room = ROOMS.get_room(str(room_id))
+                room.set_random_quota(str(player_token or ""), seat_id, quota)
+            except RoomError as exc:
+                room = None
+                try:
+                    room = ROOMS.get_room(str(room_id))
+                except RoomError:
+                    pass
+                error_payload = {"error": str(exc)}
+                if room is not None:
+                    error_payload["state"] = room.serialize_state(str(player_token or ""), base_url=request_base_url(self))
+                json_response(self, HTTPStatus.BAD_REQUEST, error_payload)
+                return
+            json_response(self, HTTPStatus.OK, room.serialize_state(str(player_token or ""), base_url=request_base_url(self)))
+            return
+
         if parsed.path == "/api/rooms/rematch":
             room_id = payload.get("room_id", "")
             player_token = payload.get("player_token")
             try:
                 room = ROOMS.get_room(str(room_id))
                 room.restart_lobby(str(player_token or ""))
+            except RoomError as exc:
+                room = None
+                try:
+                    room = ROOMS.get_room(str(room_id))
+                except RoomError:
+                    pass
+                error_payload = {"error": str(exc)}
+                if room is not None:
+                    error_payload["state"] = room.serialize_state(str(player_token or ""), base_url=request_base_url(self))
+                json_response(self, HTTPStatus.BAD_REQUEST, error_payload)
+                return
+            json_response(self, HTTPStatus.OK, room.serialize_state(str(player_token or ""), base_url=request_base_url(self)))
+            return
+
+        if parsed.path == "/api/rooms/simulation-control":
+            room_id = payload.get("room_id", "")
+            player_token = payload.get("player_token")
+            action = payload.get("action", "")
+            speed = payload.get("speed")
+            try:
+                room = ROOMS.get_room(str(room_id))
+                room.control_simulation(str(player_token or ""), str(action or ""), speed=speed)
             except RoomError as exc:
                 room = None
                 try:

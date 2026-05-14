@@ -345,12 +345,12 @@ class SourcedDefenseStatus(StatusEffect):
 
 
 class MagicImmunityStatus(StatusEffect):
-    def __init__(self, *, source_name: str = "洗礼", duration: int = 2) -> None:
+    def __init__(self, *, source_name: str = "洗礼", duration: int = 1) -> None:
         super().__init__(
             f"魔免（来自{source_name}）" if source_name else "魔免",
             "敌方主动技能造成的伤害与效果无效，但仍会受到场地效果影响。",
             duration=duration,
-            tick_scope="any_turn_end",
+            tick_scope="owner_turn_start",
         )
 
     def bind(self, owner: HeroUnit) -> "MagicImmunityStatus":
@@ -402,7 +402,7 @@ class SlowStatus(StatusEffect):
 
 class CrystalBallStatus(StatusEffect):
     def __init__(self, *, duration: int = 4) -> None:
-        super().__init__("水晶球", "目标范围改为全图。", duration=duration, tick_scope="any_turn_end")
+        super().__init__("水晶球", "目标范围改为全图。", duration=duration, tick_scope="owner_turn_start")
 
     def modify_targeting_range(self, value: int) -> int:
         return 99
@@ -487,7 +487,7 @@ class HeadshotStanceStatus(StatusEffect):
 
 class ExperimentCountdownStatus(StatusEffect):
     def __init__(self, *, duration: int = 3) -> None:
-        super().__init__("实验倒计时", "倒计时结束后直接死亡。", duration=duration, tick_scope="any_turn_end")
+        super().__init__("实验倒计时", "目标自己的 3 轮结束后直接死亡。", duration=duration, tick_scope="owner_turn_end")
 
     def on_removed(self, battle: Battle) -> None:
         if self.owner is not None and self.owner.alive:
@@ -548,13 +548,26 @@ class CurseStatus(StatusEffect):
 
 
 class DelayedDarknessStatus(StatusEffect):
-    def __init__(self, *, duration: int = 2) -> None:
+    def __init__(
+        self,
+        *,
+        duration: int = 2,
+        bonus_attack_on_attack: float = 0.0,
+        ignore_shield_on_attack: bool = False,
+        attack_buff_name: str = "黑暗突袭",
+        attack_buff_description: str = "",
+    ) -> None:
         super().__init__(
             "遁入黑暗",
             description="持续期间无法回复；若以普攻现身，则那次普攻伤害 +1 且破魔。",
             duration=duration,
-            tick_scope="any_turn_end",
+            tick_scope="owner_turn_start",
         )
+        self.bonus_attack_on_attack = bonus_attack_on_attack
+        self.ignore_shield_on_attack = ignore_shield_on_attack
+        self.attack_buff_name = attack_buff_name
+        self.attack_buff_description = attack_buff_description
+        self.attack_bonus_spent = False
 
     def bind(self, owner: HeroUnit) -> "DelayedDarknessStatus":
         super().bind(owner)
@@ -564,6 +577,31 @@ class DelayedDarknessStatus(StatusEffect):
     def on_removed(self, battle: Battle) -> None:
         if self.owner is not None:
             self.owner.cannot_heal = False
+
+    def on_targeted(self, battle: Battle, ctx: TargetContext) -> None:
+        if self.owner is None or self.attack_bonus_spent:
+            return
+        if ctx.actor.unit_id != self.owner.unit_id or "attack" not in ctx.tags:
+            return
+        if self.ignore_shield_on_attack:
+            ctx.ignore_shield = True
+
+    def on_owner_action_declared(self, battle: Battle, action_type: str, payload: dict[str, Any]) -> None:
+        if self.owner is None or self.attack_bonus_spent:
+            return
+        if action_type not in {"attack", "skill"}:
+            return
+        if action_type == "attack" and (self.bonus_attack_on_attack or self.ignore_shield_on_attack):
+            self.owner.add_status(
+                NextAttackBuffStatus(
+                    self.attack_buff_name,
+                    bonus_attack=self.bonus_attack_on_attack,
+                    ignore_shield=self.ignore_shield_on_attack,
+                    description=self.attack_buff_description,
+                )
+            )
+            battle.log(f"{self.owner.name} 发动黑暗突袭，这次普攻伤害 +1 且破魔。")
+        self.attack_bonus_spent = True
 
 
 class InvincibleUntilActionStatus(StatusEffect):
@@ -587,6 +625,7 @@ class InvincibleUntilActionStatus(StatusEffect):
         self.ignore_shield_on_attack_break = ignore_shield_on_attack_break
         self.attack_break_buff_name = attack_break_buff_name
         self.attack_break_buff_description = attack_break_buff_description
+        self.grants_stealth = True
 
     def on_owner_action_declared(self, battle: Battle, action_type: str, payload: dict[str, Any]) -> None:
         if self.owner is None:
@@ -625,6 +664,16 @@ class FlyingTrait(Trait):
         super().bind(owner)
         owner.ignore_units_while_moving = True
         owner.has_flying = True
+        return self
+
+
+class OverhealTrait(Trait):
+    def __init__(self) -> None:
+        super().__init__("超量生命", "回复时可以超过基础生命上限。")
+
+    def bind(self, owner: HeroUnit) -> "OverhealTrait":
+        super().bind(owner)
+        owner.allow_overheal = True
         return self
 
 
@@ -830,6 +879,150 @@ class DashMoveSkill(Skill):
         return {"cells": positions_to_dict(cells), "target_unit_ids": [], "secondary_cells": [], "requires_target": True}
 
 
+class WindowChargeSkill(Skill):
+    def __init__(
+        self,
+        code: str,
+        name: str,
+        description: str,
+        *,
+        window_rounds: int,
+        window_uses: int,
+        mana_cost: float = 0.0,
+        cooldown_turns: int = 0,
+        max_uses_per_turn: Optional[int] = None,
+        max_uses_per_battle: Optional[int] = None,
+        target_mode: str = "none",
+        passive: bool = False,
+        timing: str = "active",
+        direction_mode: str = "none",
+    ) -> None:
+        super().__init__(
+            code,
+            name,
+            description,
+            mana_cost=mana_cost,
+            cooldown_turns=cooldown_turns,
+            max_uses_per_turn=max_uses_per_turn,
+            max_uses_per_battle=max_uses_per_battle,
+            target_mode=target_mode,  # type: ignore[arg-type]
+            passive=passive,
+            timing=timing,  # type: ignore[arg-type]
+            direction_mode=direction_mode,  # type: ignore[arg-type]
+        )
+        self.window_rounds = max(1, int(window_rounds))
+        self.window_duration_turns = self.window_rounds * 2
+        self.base_window_uses = max(0, int(window_uses))
+        self.bonus_window_uses = 0
+        self.window_remaining_turns = 0
+        self.window_remaining_uses = 0
+
+    def total_window_uses(self) -> int:
+        return max(0, self.base_window_uses + self.bonus_window_uses)
+
+    def window_is_active(self) -> bool:
+        return self.window_remaining_turns > 0
+
+    def available_uses(self) -> int:
+        if self.window_is_active():
+            return max(0, self.window_remaining_uses)
+        return self.total_window_uses()
+
+    def use_cost(
+        self,
+        battle: Battle,
+        actor: HeroUnit,
+        payload: Optional[dict[str, Any]] = None,
+    ) -> int:
+        return 1
+
+    def can_use(
+        self,
+        battle: Battle,
+        actor: HeroUnit,
+        payload: Optional[dict[str, Any]] = None,
+    ) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok:
+            return ok, reason
+        cost = max(1, self.use_cost(battle, actor, payload))
+        if cost > self.available_uses():
+            return False, "当前窗口剩余次数不足。"
+        return True, ""
+
+    def can_react_to(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> tuple[bool, str]:
+        ok, reason = super().can_react_to(battle, actor, queued_action)
+        if not ok:
+            return ok, reason
+        if self.available_uses() <= 0:
+            return False, "当前窗口剩余次数已用完。"
+        return True, ""
+
+    def can_react_with_payload(
+        self,
+        battle: Battle,
+        actor: HeroUnit,
+        queued_action: QueuedAction,
+        payload: Optional[dict[str, Any]] = None,
+    ) -> tuple[bool, str]:
+        ok, reason = super().can_react_with_payload(battle, actor, queued_action, payload)
+        if not ok:
+            return ok, reason
+        cost = max(1, self.use_cost(battle, actor, payload))
+        if cost > self.available_uses():
+            return False, "当前窗口剩余次数不足。"
+        return True, ""
+
+    def prepay_resources(
+        self,
+        battle: Battle,
+        actor: HeroUnit,
+        payload: Optional[dict[str, Any]] = None,
+    ) -> None:
+        cost = max(1, self.use_cost(battle, actor, payload))
+        available = self.available_uses()
+        if cost > available:
+            raise ActionError("当前窗口剩余次数不足。")
+        actor.spend_mana(self.mana_cost_for_payload(battle, actor, payload))
+        if not self.window_is_active():
+            self.window_remaining_turns = self.window_duration_turns
+            self.window_remaining_uses = self.total_window_uses()
+        self.window_remaining_uses = max(0, self.window_remaining_uses - cost)
+        self.uses_this_turn += cost
+        self.uses_this_battle += cost
+        if self.cooldown_turns:
+            self.cooldown_remaining = self.cooldown_turns
+
+    def on_any_turn_end(self, battle: Battle, ended_player_id: int) -> None:
+        super().on_any_turn_end(battle, ended_player_id)
+        if not self.window_is_active():
+            return
+        self.window_remaining_turns = max(0, self.window_remaining_turns - 1)
+        if self.window_remaining_turns == 0:
+            self.window_remaining_uses = 0
+
+    def increase_window_uses(self, amount: int, *, apply_to_active_window: bool = True) -> None:
+        delta = max(0, int(amount))
+        if delta <= 0:
+            return
+        self.bonus_window_uses += delta
+        if apply_to_active_window and self.window_is_active():
+            self.window_remaining_uses += delta
+
+    def to_public_dict(self, battle: Battle) -> dict[str, Any]:
+        data = super().to_public_dict(battle)
+        data.update(
+            {
+                "window_rounds": self.window_rounds,
+                "window_total_uses": self.total_window_uses(),
+                "window_active": self.window_is_active(),
+                "window_remaining_uses": self.available_uses(),
+                "window_remaining_turns": self.window_remaining_turns,
+            }
+        )
+        return data
+
+
 class MultiTargetChainShieldSkill(Skill):
     shield_amount = 1
 
@@ -880,6 +1073,36 @@ class MultiTargetChainShieldSkill(Skill):
     def mana_cost_text(self) -> Optional[str]:
         return f"费 {int(self.mana_cost) if float(self.mana_cost).is_integer() else self.mana_cost} 魔/目标"
 
+    def can_react_with_payload(
+        self,
+        battle: Battle,
+        actor: HeroUnit,
+        queued_action: QueuedAction,
+        payload: Optional[dict[str, Any]] = None,
+    ) -> tuple[bool, str]:
+        ok, reason = super().can_react_with_payload(battle, actor, queued_action, payload)
+        if not ok:
+            return ok, reason
+        reaction_payload = dict(payload or {})
+        selectable_units = self.selectable_targets(battle, actor, queued_action)
+        selectable = {unit.unit_id for unit in selectable_units}
+        if not reaction_payload.get("target_unit_id") and not reaction_payload.get("target_unit_ids"):
+            if actor.unit_id in selectable:
+                reaction_payload["target_unit_id"] = actor.unit_id
+            elif len(selectable) == 1:
+                reaction_payload["target_unit_id"] = next(iter(selectable))
+        try:
+            targets = self.chosen_targets(battle, actor, reaction_payload)
+        except ActionError as exc:
+            return False, str(exc)
+        if not targets:
+            return False, "需要选择至少一个目标。"
+        if any(target.unit_id not in selectable for target in targets):
+            return False, "存在不能被当前护盾保护的目标。"
+        if len(targets) > self.affordable_target_limit(actor):
+            return False, "当前资源不足，无法同时保护这么多目标。"
+        return True, ""
+
     def chosen_targets(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[HeroUnit]:
         targets = payload_target_units(battle, payload)
         valid_targets: list[HeroUnit] = []
@@ -914,8 +1137,6 @@ class MultiTargetChainShieldSkill(Skill):
             raise ActionError("需要选择至少一个目标。")
         if any(target.unit_id not in selectable for target in targets):
             raise ActionError("存在不能被当前护盾保护的目标。")
-        if len(targets) > self.affordable_target_limit(actor):
-            raise ActionError("魔力不足，无法同时保护这么多目标。")
         self.apply_shields(battle, actor, targets)
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
@@ -985,6 +1206,33 @@ class LightWallSkill(MultiTargetChainShieldSkill):
         return True, ""
 
 
+class StoneWallSkill(MultiTargetChainShieldSkill):
+    shield_amount = 1
+
+    def __init__(self) -> None:
+        super().__init__(
+            "stone_wall",
+            "石墙",
+            "被动技能：连锁速度 2，可选择多个当前受影响的己方目标；每个目标费 1 魔，各获得 1 层临时护盾，只持续到这次连锁结束。",
+            mana_cost=1,
+            target_mode="ally",
+            timing="passive",
+        )
+
+    def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
+        raise ActionError("石墙只能通过连锁使用。")
+
+    def can_react_to(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> tuple[bool, str]:
+        ok, reason = super().can_react_to(battle, actor, queued_action)
+        if not ok:
+            return ok, reason
+        if queued_action.source_player_id == actor.player_id:
+            return False, "只能对敌方动作连锁。"
+        if not self.selectable_targets(battle, actor, queued_action):
+            return False, "当前动作没有影响到可施放石墙的己方目标。"
+        return True, ""
+
+
 class DrainManaSkill(Skill):
     def __init__(self) -> None:
         super().__init__("drain_mana", "吸魔", "命中后令目标魔力 -1，自身魔力 +1。", target_mode="enemy", max_uses_per_turn=1)
@@ -1024,8 +1272,8 @@ class HardenSkill(SelfBuffSkill):
             StatModifierStatus(
                 "变硬",
                 defense_delta=1,
-                duration=4,
-                tick_scope="any_turn_end",
+                duration=2,
+                tick_scope="owner_turn_start",
                 description="守 +1。",
             )
         )
@@ -1130,7 +1378,7 @@ class KnockbackSkill(Skill):
             return ok, reason
         if queued_action.source_player_id == actor.player_id:
             return False, "只能对敌方动作连锁。"
-        if actor.unit_id not in queued_action.target_unit_ids:
+        if battle.reaction_proxy_target(actor, queued_action) is None:
             return False, "当前动作没有影响到自己。"
         return True, ""
 
@@ -1138,26 +1386,40 @@ class KnockbackSkill(Skill):
         if actor.position is None or unit.position is None:
             return None
         actor_cells = battle.unit_cells(actor)
-        origin = min(actor_cells, key=lambda cell: cell.distance_to(unit.position)) if actor_cells else actor.position
-        dx = unit.position.x - origin.x
-        dy = unit.position.y - origin.y
-        step_x = 0 if dx == 0 else dx // abs(dx)
-        step_y = 0 if dy == 0 else dy // abs(dy)
-        destination = unit.position.offset(step_x, step_y)
-        if not battle.in_bounds(destination):
+        target_cells = battle.unit_cells(unit)
+        if not actor_cells or not target_cells:
             return None
-        if not battle.can_place_unit(unit, destination, ignore=unit):
-            return None
-        if battle.is_forced_movement_blocked(destination):
-            return None
-        return destination
+        pairs = sorted(
+            (
+                (origin.distance_to(target_cell), origin, target_cell)
+                for origin in actor_cells
+                for target_cell in target_cells
+                if origin != target_cell
+            ),
+            key=lambda item: (item[0], item[2].y, item[2].x, item[1].y, item[1].x),
+        )
+        for _, origin, target_cell in pairs:
+            dx = target_cell.x - origin.x
+            dy = target_cell.y - origin.y
+            step_x = 0 if dx == 0 else dx // abs(dx)
+            step_y = 0 if dy == 0 else dy // abs(dy)
+            destination = unit.position.offset(step_x, step_y)
+            if not battle.in_bounds(destination):
+                continue
+            if not battle.can_place_unit(unit, destination, ignore=unit):
+                continue
+            if battle.is_forced_movement_blocked(destination):
+                continue
+            return destination
+        return None
 
     def react(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any], queued_action: QueuedAction) -> None:
-        actor.shields += 1
-        battle.log(f"{actor.name} 通过震开获得了 1 层护盾。")
-        if actor.position is None:
+        center = battle.reaction_proxy_target(actor, queued_action) or actor
+        center.shields += 1
+        battle.log(f"{center.name} 通过震开获得了 1 层护盾。")
+        if center.position is None:
             return
-        actor_cells = battle.unit_cells(actor)
+        actor_cells = battle.unit_cells(center)
         actor_cell_keys = {(cell.x, cell.y) for cell in actor_cells}
         adjacent_cells = dedupe_positions(
             [
@@ -1167,9 +1429,9 @@ class KnockbackSkill(Skill):
                 if (neighbor.x, neighbor.y) not in actor_cell_keys
             ]
         )
-        neighbors = [unit for unit in battle.units_at_cells(adjacent_cells) if unit.unit_id != actor.unit_id]
+        neighbors = [unit for unit in battle.units_at_cells(adjacent_cells) if unit.unit_id != center.unit_id]
         for unit in neighbors:
-            destination = self.outward_destination(battle, actor, unit)  # type: ignore[arg-type]
+            destination = self.outward_destination(battle, center, unit)  # type: ignore[arg-type]
             if destination is None:
                 continue
             battle.move_unit(
@@ -1200,7 +1462,7 @@ class KnockbackSkill(Skill):
         }
 
     def reaction_preview(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> dict[str, Any]:
-        return self.preview(battle, actor)
+        return self.preview(battle, battle.reaction_proxy_target(actor, queued_action) or actor)
 
 
 class MachineGunSkill(Skill):
@@ -1342,8 +1604,8 @@ class DefendTwiceSkill(Skill):
                 "守*2",
                 source_unit_id=actor.unit_id,
                 defense_delta=1,
-                duration=2,
-                tick_scope="any_turn_end",
+                duration=1,
+                tick_scope="owner_turn_start",
                 description="守 +1。",
             )
         )
@@ -1398,7 +1660,7 @@ class BaptismSkill(Skill):
         ensure_distance(actor, target, actor.targeting_range())
         if target.race != "人类":
             raise ActionError("洗礼只能对人类使用。")
-        target.add_status(MagicImmunityStatus(source_name="洗礼", duration=2))
+        target.add_status(MagicImmunityStatus(source_name="洗礼", duration=1))
         battle.log(f"{target.name} 获得了魔免（来自洗礼）。")
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
@@ -1486,8 +1748,8 @@ class GreatHolyLightField(BattleFieldEffect):
                         StatModifierStatus(
                             "大圣光守备",
                             defense_delta=1,
-                            duration=2,
-                            tick_scope="any_turn_end",
+                            duration=1,
+                            tick_scope="owner_turn_start",
                             description="直到下次己方回合开始前守 +1。",
                         )
                     )
@@ -1526,7 +1788,7 @@ class PassiveProtectionSkill(MultiTargetChainShieldSkill):
             return ok, reason
         if queued_action.source_player_id == actor.player_id:
             return False, "只能对敌方动作连锁。"
-        if actor.unit_id not in {unit.unit_id for unit in self.selectable_targets(battle, actor, queued_action)}:
+        if battle.reaction_proxy_target(actor, queued_action) is None:
             return False, "当前动作没有影响到自己。"
         return True, ""
 
@@ -1536,9 +1798,10 @@ class PassiveProtectionSkill(MultiTargetChainShieldSkill):
             battle.log(f"{target.name} 获得了 {self.shield_amount} 层护盾，持续到回合结束。")
 
     def react(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any], queued_action: QueuedAction) -> None:
-        if actor.unit_id not in {unit.unit_id for unit in self.selectable_targets(battle, actor, queued_action)}:
+        proxy_target = battle.reaction_proxy_target(actor, queued_action)
+        if proxy_target is None:
             raise ActionError("当前动作没有影响到自己。")
-        self.apply_shields(battle, actor, [actor])
+        self.apply_shields(battle, actor, [proxy_target])  # type: ignore[list-item]
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
         return {
@@ -1549,7 +1812,7 @@ class PassiveProtectionSkill(MultiTargetChainShieldSkill):
         }
 
     def reaction_preview(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> dict[str, Any]:
-        return self.preview(battle, actor)
+        return self.preview(battle, battle.reaction_proxy_target(actor, queued_action) or actor)
 
 
 class PassiveEvasionSkill(Skill):
@@ -1720,12 +1983,8 @@ class BackstepShotSkill(Skill):
             mapping[f"{cell.x},{cell.y}"] = [target.unit_id] if target is not None else []
         return mapping
 
-    def react(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any], queued_action: QueuedAction) -> None:
-        if payload.get("x") is None or payload.get("y") is None:
-            raise ActionError("撤步射击需要选择落点。")
-        destination = Position(int(payload["x"]), int(payload["y"]))
-        if destination not in self.retreat_cells(battle, actor):
-            raise ActionError("该位置不能用于撤步射击。")
+    def resolve_retreat_effect(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> None:
+        destination = payload_position(queued_action.payload)
         battle.move_unit(
             actor,
             destination,
@@ -1738,6 +1997,34 @@ class BackstepShotSkill(Skill):
             tags={"backstep"},
         )
         battle.log(f"{actor.name} 触发撤步射击。")
+
+    def resolve_counter_effect(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> None:
+        target = battle.get_unit(queued_action.payload["target_unit_id"])
+        ok, _ = battle.attack_target_allowed(
+            actor,
+            target,
+            ignore_stealth=battle.attack_ignores_stealth(actor, target),
+        )
+        if not ok:
+            raise ActionError("撤步后无法攻击原连锁来源。")
+        battle.resolve_attack_damage(actor, target, action_name="撤步反击", tags={"counter"})
+
+    def react(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any], queued_action: QueuedAction) -> None:
+        if payload.get("x") is None or payload.get("y") is None:
+            raise ActionError("撤步射击需要选择落点。")
+        destination = Position(int(payload["x"]), int(payload["y"]))
+        if destination not in self.retreat_cells(battle, actor):
+            raise ActionError("该位置不能用于撤步射击。")
+        retreat_effect = battle.build_skill_effect_action(
+            actor=actor,
+            display_name="撤步射击",
+            effect_code="backstep_retreat",
+            payload={"x": destination.x, "y": destination.y},
+            include_cell_units=False,
+            hostile=False,
+            effect_resolver=self.resolve_retreat_effect,
+        )
+        battle.resolve_skill_effect(actor, retreat_effect)
         if not payload.get("target_unit_id"):
             battle.log(f"{actor.name} 撤步后放弃了反击。")
             return
@@ -1746,7 +2033,18 @@ class BackstepShotSkill(Skill):
             raise ActionError("撤步后无法攻击原连锁来源。")
         if payload.get("target_unit_id") != target.unit_id:
             raise ActionError("撤步射击只能反击原连锁来源。")
-        battle.resolve_attack_damage(actor, target, action_name="撤步反击", tags={"counter"})
+        counter_effect = battle.build_skill_effect_action(
+            actor=actor,
+            display_name="撤步反击",
+            effect_code="backstep_counter",
+            payload={"target_unit_id": target.unit_id},
+            target_units=[target],
+            target_cells=battle.unit_cells(target),
+            include_cell_units=False,
+            hostile=True,
+            effect_resolver=self.resolve_counter_effect,
+        )
+        battle.resolve_skill_effect(actor, counter_effect)
 
     def reaction_preview(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> dict[str, Any]:
         return {

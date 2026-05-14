@@ -155,7 +155,7 @@ class CurseSkill(Skill):
 
 class ExperimentSkill(Skill):
     def __init__(self) -> None:
-        super().__init__("experiment", "实验", "令一名己方单位全能力 +2，3 轮后死亡。", max_uses_per_battle=1, target_mode="ally")
+        super().__init__("experiment", "实验", "令一名己方单位全能力 +2，目标自己的 3 轮后死亡。", max_uses_per_battle=1, target_mode="ally")
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         target = payload_target_unit(battle, payload)
@@ -169,7 +169,7 @@ class ExperimentSkill(Skill):
                 speed_delta=2,
                 range_delta=2,
                 duration=3,
-                tick_scope="any_turn_end",
+                tick_scope="owner_turn_end",
                 description="全能力 +2。",
             )
         )
@@ -184,7 +184,7 @@ class ExperimentSkill(Skill):
 
 class CrystalBallSkill(Skill):
     def __init__(self) -> None:
-        super().__init__("crystal_ball", "水晶球", "接下来 2轮目标范围变为全图。", max_uses_per_battle=1, target_mode="self")
+        super().__init__("crystal_ball", "水晶球", "接下来 4轮目标范围变为全图。", max_uses_per_battle=1, target_mode="self")
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         actor.add_status(CrystalBallStatus(duration=4))
@@ -254,7 +254,7 @@ class ParalyzingGloveSkill(Skill):
         super().__init__(
             "paralyzing_glove",
             "麻痹手套",
-            "破魔，造成 4 点伤害，并使目标 1.5轮不能移动。",
+            "破魔，造成 4 点伤害，并使目标 1.5轮不能普通移动。",
             max_uses_per_battle=1,
             target_mode="enemy",
         )
@@ -288,8 +288,8 @@ class ParalyzingGloveSkill(Skill):
         target.add_status(
             FlagStatus(
                 "麻痹",
-                "cannot_move",
-                description="无法移动。",
+                "cannot_normal_move",
+                description="无法普通移动。",
                 duration=3,
                 tick_scope="owner_turn_end",
             )
@@ -312,13 +312,8 @@ class FateKickSkill(Skill):
     def reaction_window_timing(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> str:
         return "after"
 
-    def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        if actor.position is None:
-            raise ActionError("单位不在战场上。")
-        destination = payload_position(payload)
-        direction = straight_direction(actor.position, destination)
-        if actor.position.distance_to(destination) > 4:
-            raise ActionError("命运飞踢最多位移 4 格。")
+    def resolve_dash_effect(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> None:
+        destination = payload_position(queued_action.payload)
         battle.move_unit(
             actor,
             destination,
@@ -328,6 +323,24 @@ class FateKickSkill(Skill):
             max_distance=4,
             tags={"fate_kick"},
         )
+
+    def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
+        if actor.position is None:
+            raise ActionError("单位不在战场上。")
+        destination = payload_position(payload)
+        direction = straight_direction(actor.position, destination)
+        if actor.position.distance_to(destination) > 4:
+            raise ActionError("命运飞踢最多位移 4 格。")
+        dash_effect = battle.build_skill_effect_action(
+            actor=actor,
+            display_name="命运飞踢",
+            effect_code="fate_kick_dash",
+            payload={"x": destination.x, "y": destination.y},
+            include_cell_units=False,
+            hostile=False,
+            effect_resolver=self.resolve_dash_effect,
+        )
+        battle.resolve_skill_effect(actor, dash_effect)
         impact = destination.offset(*direction)
         if not battle.in_bounds(impact):
             return
@@ -340,21 +353,20 @@ class FateKickSkill(Skill):
         else:
             battle.log(f"{actor.name} 的命运飞踢判定为反面，{target.name} 将在此效果结算时消失 1轮。")
             battle.present_reaction_window_or_resolve(
-                QueuedAction(
-                    action_type="skill_effect",
-                    actor_id=actor.unit_id,
+                battle.build_skill_effect_action(
+                    actor=actor,
                     display_name="命运飞踢",
-                    speed=self.chain_speed,
+                    effect_code="banish",
                     payload={
-                        "effect_code": "banish",
                         "banish_turns": 2,
                         "declared_target_x": impact.x,
                         "declared_target_y": impact.y,
                         "success_log": "{actor} 的命运飞踢判定为反面，{target} 消失 1轮。",
                     },
-                    target_unit_ids=[target.unit_id],
+                    target_units=[target],
                     target_cells=[impact],
-                    source_player_id=actor.player_id,
+                    include_cell_units=False,
+                    speed=self.chain_speed,
                     hostile=True,
                 )
             )
@@ -393,18 +405,23 @@ class IntoDarknessSkill(Skill):
         existing_stealth = actor.get_status("隐身")
         if existing_stealth is not None:
             actor.remove_status(existing_stealth, battle)
-        actor.add_status(DelayedDarknessStatus(duration=2))
+        actor.add_status(
+            DelayedDarknessStatus(
+                duration=1,
+                bonus_attack_on_attack=1,
+                ignore_shield_on_attack=True,
+                attack_buff_name="黑暗突袭",
+                attack_buff_description="因遁入黑暗现身时，那次普攻伤害 +1 且破魔。",
+            )
+        )
         actor.add_status(
             InvincibleUntilActionStatus(
-                duration=2,
-                tick_scope="any_turn_end",
-                bonus_attack_on_attack_break=1,
-                ignore_shield_on_attack_break=True,
-                attack_break_buff_name="黑暗突袭",
-                attack_break_buff_description="因遁入黑暗现身时，那次普攻伤害 +1 且破魔。",
+                duration=1,
+                tick_scope="owner_turn_start",
             )
         )
         battle.log(f"{actor.name} 遁入了黑暗。")
+        battle.enforce_sandstorm_stealth_rules()
         battle.clear_all_stealth_if_all_heroes_stealthed()
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
