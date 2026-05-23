@@ -218,13 +218,13 @@ Update this file whenever a hero, skill, trait, or durable gameplay rule changes
 - File: `src/wujiang/heroes/next_five.py`, class `Jade`.
 - Skills:
   - `machine_gun` / `JadeMachineGunSkill`: standard once-per-turn Machine Gun line damage; if an enemy chains and at least one original enemy target ultimately takes no damage, Jade can permanently gain +1 future use for this skill from next own turn, once per turn.
-  - `missile` / `MissileSkill`: remote edge-truncated `2*2` area damage; first use opens a 2-round window with 3 total uses; leftover uses expire when the window ends.
+  - `missile` / `MissileSkill`: remote edge-truncated `2*2` area damage; first use opens a 2-round window counted on Jade's own turn starts, with 3 total uses; leftover uses expire when the window ends.
   - `ion_shield` / `IonShieldSkill`: passive chain speed 2; free wall; up to 2 casts in each opposing hero turn, and one cast may shield multiple currently threatened allies until chain end.
   - `laser` / `LaserSkill`: cooldown 3 rounds; remote edge-truncated `2*10` or `10*2` area damage.
   - `quantum_shield` / `QuantumShieldSkill`: passive chain speed 2; free wall; in a usable round, up to 3 casts in each opposing hero turn, and one cast may shield multiple currently threatened allies until chain end. If used anywhere in that round, the next full round is unavailable and the following round becomes usable again.
   - `mech_enhancement` / `MechEnhancementSkill`: cooldown 3 rounds; self defense +1 for 2 rounds and heal 1/2 hp.
   - `plasma_thruster` / `PlasmaThrusterSkill`: once per turn; straight flying move up to the 5th cell, or to the boundary-truncated last cell if the direction hits the edge first; final cell must be empty.
-  - `stance` / `StanceSkill`: cooldown 2 rounds; creates a visible dynamic local field that arms after Jade's current turn ends and, during the next enemy turn only, prevents damage to other allied units currently inside Jade's surrounding `7*7`.
+  - `stance` / `StanceSkill`: cooldown 2 rounds; creates a visible dynamic local field that arms after Jade's current turn ends and prevents damage to other allied units currently inside Jade's surrounding `7*7` until Jade's next own turn starts.
 - Traits:
   - `FlyingTrait`: movement ignores unit blockers.
   - `JadeReactiveOverclockTrait`: after an enemy chain, if a damaging skill leaves any original enemy target without damage, that skill gains +1 permanent future use from Jade's next own turn; once per turn per skill.
@@ -236,7 +236,7 @@ Update this file whenever a hero, skill, trait, or durable gameplay rule changes
 - Skills:
   - `protection` / `PassiveProtectionSkill`: standard self-only chain shield.
   - `pierce` / `PierceSkill`: standard 2-cell touching line pierce skill.
-  - `split` / `SplitSkill`: pay 1.5 mana; once per turn; summon a standard clone in range, swap with it, and end the caster's remaining actions for the turn. The clone cannot act on entry turn and, as a clone, cannot attack or use skills.
+  - `split` / `SplitSkill`: pay 1.5 mana; once per turn; choose 3 legal cells in range, summon 3 standard clones, randomly swap with one of them, and end the caster's remaining actions for the turn. The clones cannot act on entry turn and, as clones, cannot attack or use skills. Enemy-facing visible info for those clones must mirror the real hero so mana or text does not reveal the real body. Preview exposes legal single cells with `required_cells=3` instead of enumerating all 3-cell combinations.
   - `drain_mana` / `DrainManaSkill`: standard range mana drain.
   - `magnetic_wave` / `MagneticWaveSkill`: instant skill / chain speed 3; pay 2 mana points; once per turn; remote edge-truncated `3*3` area for current-attack damage; any currently acting hit unit loses the rest of that turn.
   - `n_skill` / `NSkill`: active self skill; pay 1 mana point; gain 1 mana.
@@ -281,7 +281,7 @@ Update this file whenever a hero, skill, trait, or durable gameplay rule changes
 - `remote_dragon_breath`: remote edge-truncated `2*2` range damage selected by range.
 - `rock_absorb`: custom `stat_cells` frontend selection; chosen stat plus selected growth cells; shield reactions can block the effect for their protected target.
 - `rock_cannon`: custom `body_direction` frontend selection; selected body cells plus direction, with visible selectable/selected body-cell highlight.
-- `missile`: remote edge-truncated `2*2` range damage with a first-use-started 2-round / 3-use window; leftover uses expire with the window.
+- `missile`: remote edge-truncated `2*2` range damage with a first-use-started 2-own-round / 3-use window; leftover uses expire with the window.
 - `ion_shield`: free passive multi-target wall; up to 2 casts in each opposing hero turn, and one cast may shield multiple threatened allies until chain end.
 - `laser`: remote edge-truncated `2*10` or `10*2` area damage selected by range.
 - `quantum_shield`: free passive multi-target wall; up to 3 casts in a usable round across opposing hero turns, and one cast may shield multiple threatened allies until chain end. If used anywhere in that round, the next full round is unavailable and the following round becomes usable again.

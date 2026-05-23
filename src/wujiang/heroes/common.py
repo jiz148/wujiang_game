@@ -484,6 +484,28 @@ class HeadshotStanceStatus(StatusEffect):
             return False, "爆头状态下只能攻击直线上的目标。"
         return True, ""
 
+    def can_attack_target_with_payload(
+        self,
+        battle: Battle,
+        actor: HeroUnit,
+        target: HeroUnit,
+        payload: dict[str, Any] | None = None,
+    ) -> tuple[bool, str]:
+        if self.owner is None or actor.unit_id != self.owner.unit_id:
+            return True, ""
+        if actor.position is None or target.position is None:
+            return True, ""
+        if not payload or payload.get("x") is None or payload.get("y") is None:
+            return self.can_attack_target(battle, actor, target)
+        declared = battle.declared_cell_for_target(actor, target, payload)
+        if declared is None:
+            return self.can_attack_target(battle, actor, target)
+        try:
+            straight_direction(actor.position, declared)
+        except ActionError:
+            return False, "爆头状态下只能点击直线上的目标格。"
+        return True, ""
+
 
 class ExperimentCountdownStatus(StatusEffect):
     def __init__(self, *, duration: int = 3) -> None:
@@ -911,7 +933,7 @@ class WindowChargeSkill(Skill):
             direction_mode=direction_mode,  # type: ignore[arg-type]
         )
         self.window_rounds = max(1, int(window_rounds))
-        self.window_duration_turns = self.window_rounds * 2
+        self.window_duration_turns = self.window_rounds
         self.base_window_uses = max(0, int(window_uses))
         self.bonus_window_uses = 0
         self.window_remaining_turns = 0
@@ -995,6 +1017,9 @@ class WindowChargeSkill(Skill):
 
     def on_any_turn_end(self, battle: Battle, ended_player_id: int) -> None:
         super().on_any_turn_end(battle, ended_player_id)
+
+    def on_owner_turn_start(self, battle: Battle) -> None:
+        super().on_owner_turn_start(battle)
         if not self.window_is_active():
             return
         self.window_remaining_turns = max(0, self.window_remaining_turns - 1)

@@ -484,7 +484,6 @@ class ThunderGodSkill(Skill):
         ]
         return {"cells": positions_to_dict(cells), "target_unit_ids": [], "secondary_cells": [], "requires_target": True}
 
-
 class WaterWaveSkill(Skill):
     def __init__(self) -> None:
         super().__init__("water_wave", "水之波动", "普通技能：冷却 4轮，只能对自己使用；全能力 +1，持续 2轮，不回复当前魔。", cooldown_turns=8, target_mode="self")
@@ -1836,7 +1835,7 @@ class ElementHunter(AbstractHero):
     race = "精灵"
     level = 7
     base_stats = Stats(attack=3, defense=3, speed=2, attack_range=2, mana=5)
-    raw_skill_text = "光墙 神速 完全燃烧（一回合一次；4*4，被击中后每回合魔-1；5轮）暴风雪（一回合一次；3*3，被击中后3轮不能移动）￥雷神（攻4守5速4范3，5轮；召唤的单位被对方的伤害破坏后此技能重置） 水之波动（4轮一次；全能力+1；2轮）土行者（一回合一次；制造一个分身，当回合可以行动；在下个回合结束时如果场上有分身则破坏所有分身） 植物生长（一回合一次；选择5*5的范围；那个范围直到下个回合结束时移动一格需要两个移动点数）"
+    raw_skill_text = "光墙 神速 完全燃烧（一回合一次；4*4；造成当前攻伤害；被击中后每回合魔-1；5轮）暴风雪（一回合一次；3*3，被击中后3轮不能移动）￥雷神（攻4守5速4范3，5轮；召唤的单位被对方的伤害破坏后此技能重置） 水之波动（4轮一次；全能力+1；2轮）土行者（一回合一次；制造一个分身，当回合可以行动；在下个回合结束时如果场上有分身则破坏所有分身） 植物生长（一回合一次；选择5*5的范围；那个范围直到下个回合结束时移动一格需要两个移动点数）"
     raw_trait_text = "所有技能的伤害以外效果破魔并且不会与同名技能的效果叠加"
 
     def build_skills(self) -> list[Skill]:
@@ -2824,7 +2823,7 @@ class PlasmaThrusterSkill(Skill):
 
 class StanceFieldEffect(BattleFieldEffect):
     def __init__(self, owner_unit_id: str, owner_player_id: int) -> None:
-        super().__init__("立场", "翡翠周围 7*7 内的己方单位在下个对方回合中不受到伤害。", duration=None)
+        super().__init__("立场", "翡翠周围 7*7 内的己方单位到翡翠下个回合开始前不受到伤害。", duration=None)
         self.owner_unit_id = owner_unit_id
         self.owner_player_id = owner_player_id
         self.armed = False
@@ -2856,6 +2855,12 @@ class StanceFieldEffect(BattleFieldEffect):
         ctx.cancelled = True
         ctx.reason = f"{ctx.target.name} 受到立场保护，这次伤害无效。"
 
+    def on_turn_start(self, battle: Battle, active_unit: Optional[HeroUnit]) -> None:
+        if not self.armed:
+            return
+        if active_unit is not None and active_unit.unit_id == self.owner_unit_id:
+            battle.remove_field_effect(self)
+
     def on_any_turn_end(self, battle: Battle, ended_player_id: int) -> None:
         owner = self.owner_unit(battle)
         if owner is None:
@@ -2863,9 +2868,6 @@ class StanceFieldEffect(BattleFieldEffect):
             return
         if not self.armed and ended_player_id == self.owner_player_id:
             self.armed = True
-            return
-        if self.armed and ended_player_id != self.owner_player_id:
-            battle.remove_field_effect(self)
 
 
 class StanceSkill(Skill):
@@ -2902,7 +2904,7 @@ class Jade(AbstractHero):
     race = "机甲"
     level = 8
     base_stats = Stats(attack=4, defense=4, speed=3, attack_range=3, mana=0)
-    raw_skill_text = "机枪（一回合一次） 导弹（每2轮可以使用3次） 离子盾（一回合可以使用两次，可以对队友使用） 激光（3轮一次，2*10） 量子盾（一回合可以使用3次，可以对队友使用；若本轮使用过则下一轮不能使用，再下一轮恢复） 机甲强化（3轮一次；守＋1，2轮；血＋1/2） 等离子喷射系统（1回合一次；移动直线5格） 立场（2轮一次；使用以后周围7*7内己方单位下回合内不受到伤害）"
+    raw_skill_text = "机枪（一回合一次） 导弹（每2轮可以使用3次） 离子盾（一回合可以使用两次，可以对队友使用） 激光（3轮一次，2*10） 量子盾（一回合可以使用3次，可以对队友使用；若本轮使用过则下一轮不能使用，再下一轮恢复） 机甲强化（3轮一次；守＋1，2轮；血＋1/2） 等离子喷射系统（1回合一次；移动直线5格） 立场（2轮一次；使用以后周围7*7内己方单位到翡翠下个回合开始前不受到伤害）"
     raw_trait_text = "飞行；在带有伤害的技能被对方的技能连锁，未能造成后，从下个己方回合开始那个技能的回合使用次数+1，每回合每个技能此效果只能触发一次"
 
     def build_skills(self) -> list[Skill]:
@@ -3024,6 +3026,8 @@ class StandardCloneSummon(AbstractHero):
         self.attribute = source.attribute
         self.race = source.race
         self.level = source.level
+        self.raw_skill_text = source.raw_skill_text
+        self.raw_trait_text = source.raw_trait_text
         self.base_stats = Stats(
             attack=int(source.stat("attack")),
             defense=int(source.stat("defense")),
@@ -3051,11 +3055,13 @@ class StandardCloneSummon(AbstractHero):
 
 
 class SplitSkill(Skill):
+    clone_count = 3
+
     def __init__(self) -> None:
         super().__init__(
             "split",
             "分身",
-            "普通技能：费 1.5 魔，每回合最多 1 次，在范内制造 1 个分身；本体本回合不能继续行动，分身登场当回合不能行动，并与新分身交换位置。",
+            "普通技能：费 1.5 魔，每回合最多 1 次，在范内制造 3 个分身；本体本回合不能继续行动，分身登场当回合不能行动，并与新分身中的一个随机交换位置。",
             mana_cost=1.5,
             max_uses_per_turn=1,
             target_mode="cell",
@@ -3064,32 +3070,76 @@ class SplitSkill(Skill):
     def _clone_probe(self, actor: HeroUnit) -> StandardCloneSummon:
         return StandardCloneSummon(actor.player_id, actor)
 
-    def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        destination = payload_position(payload)
-        ensure_distance(actor, destination, actor.targeting_range())
+    def legal_destinations(self, battle: Battle, actor: HeroUnit) -> list[Position]:
         if actor.position is None:
-            raise ActionError("单位不在战场上。")
-        clone = self._clone_probe(actor)
-        if not battle.can_place_unit(clone, destination):
-            raise ActionError("分身位置已被占用。")
-        original_position = actor.position
-        battle.summon_unit(clone, destination, summoner=actor)
-        actor.position, clone.position = clone.position, original_position
-        actor.turn_ready = False
-        battle.log(f"{actor.name} 使用分身制造了分身，并与新分身交换了位置。")
-
-    def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
-        if actor.position is None:
-            return {"cells": [], "target_unit_ids": [], "secondary_cells": [], "requires_target": True}
+            return []
         probe = self._clone_probe(actor)
-        cells = [
+        return [
             Position(x, y)
             for x in range(battle.width)
             for y in range(battle.height)
             if battle.unit_distance_to_cell(actor, Position(x, y)) <= actor.targeting_range()
             and battle.can_place_unit(probe, Position(x, y))
         ]
-        return {"cells": positions_to_dict(cells), "target_unit_ids": [], "secondary_cells": [], "requires_target": True}
+
+    def selected_destinations(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
+        raw_cells = payload.get("cells")
+        if not isinstance(raw_cells, list):
+            raise ActionError(f"需要选择 {self.clone_count} 个合法的分身位置。")
+        selected: list[Position] = []
+        seen: set[tuple[int, int]] = set()
+        legal_keys = {(cell.x, cell.y) for cell in self.legal_destinations(battle, actor)}
+        probe = self._clone_probe(actor)
+        occupied: set[tuple[int, int]] = set()
+        for raw in raw_cells:
+            if not isinstance(raw, dict) or raw.get("x") is None or raw.get("y") is None:
+                raise ActionError("分身位置不合法。")
+            cell = Position(int(raw["x"]), int(raw["y"]))
+            key = (cell.x, cell.y)
+            if key in seen:
+                raise ActionError("分身位置不能重复。")
+            if key not in legal_keys:
+                raise ActionError("分身位置不合法。")
+            footprint_keys = {(footprint.x, footprint.y) for footprint in battle.unit_cells_at(probe, cell)}
+            if occupied & footprint_keys:
+                raise ActionError("分身位置不能互相重叠。")
+            occupied.update(footprint_keys)
+            seen.add(key)
+            selected.append(cell)
+        if len(selected) != self.clone_count:
+            raise ActionError(f"需要选择 {self.clone_count} 个合法的分身位置。")
+        return selected
+
+    def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
+        if actor.position is None:
+            raise ActionError("单位不在战场上。")
+        destinations = self.selected_destinations(battle, actor, payload)
+        original_position = actor.position
+        clones: list[StandardCloneSummon] = []
+        for destination in destinations:
+            clone = self._clone_probe(actor)
+            if not battle.can_place_unit(clone, destination):
+                raise ActionError("分身位置已被占用。")
+            battle.summon_unit(clone, destination, summoner=actor)
+            clones.append(clone)
+        swap_clone = random.choice(clones)
+        actor.position, swap_clone.position = swap_clone.position, original_position
+        actor.turn_ready = False
+        battle.log(f"{actor.name} 使用分身制造了 {self.clone_count} 个分身，并与其中一个新分身交换了位置。")
+
+    def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
+        return {
+            "cells": positions_to_dict(self.legal_destinations(battle, actor)),
+            "target_unit_ids": [],
+            "secondary_cells": [],
+            "requires_target": True,
+            "selection": {
+                "mode": "pattern_cells",
+                "patterns": [],
+                "ordered": False,
+                "required_cells": self.clone_count,
+            },
+        }
 
 
 class MagneticWaveSkill(ManaPointCostSkill):
@@ -3097,7 +3147,7 @@ class MagneticWaveSkill(ManaPointCostSkill):
         super().__init__(
             "magnetic_wave",
             "磁力波",
-            "随时使用技能：费 2 魔力点，每回合最多 1 次，远程选择完整 3*3 区域；按当前攻造成伤害，被命中的单位本回合不能行动。",
+            "随时使用技能：费 2 魔力点，每回合最多 1 次，远程选择完整 3*3 区域；按当前攻击造成伤害，被命中的单位本回合不能行动。",
             mana_point_cost=2,
             max_uses_per_turn=1,
             target_mode="cell",
@@ -3142,7 +3192,6 @@ class MagneticWaveSkill(ManaPointCostSkill):
 
     def get_target_units_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[HeroUnit]:
         return battle.units_at_cells(self.chosen_cells(battle, actor, payload))  # type: ignore[return-value]
-
 
 class NSkill(ManaPointCostSkill):
     def __init__(self) -> None:

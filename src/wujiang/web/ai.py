@@ -225,8 +225,10 @@ def build_skill_candidates(
 ) -> list[AICandidate]:
     payloads = skill_payloads_for_action(battle, actor, action)
     candidates: list[AICandidate] = []
+    selection_mode = str((action.get("preview", {}) or {}).get("selection", {}).get("mode") or "")
     for payload in payloads:
-        if not payload_is_legal(battle, payload):
+        generated_from_preview = bool(payload.get("cells")) and selection_mode in {"pattern_cells", "choice_pattern"}
+        if not generated_from_preview and not payload_is_legal(battle, payload):
             continue
         score = score_skill_payload(battle, actor, action, payload, profile, instant_only=instant_only)
         candidates.append(AICandidate(payload=payload, score=score, summary=f"skill:{action.get('code')}"))
@@ -326,6 +328,8 @@ def skill_payloads_for_action(battle: Battle, actor: Unit, action: dict[str, Any
         return rock_absorb_payloads(battle, actor, action)
     if code == "rock_cannon":
         return rock_cannon_payloads(battle, actor)
+    if code == "split":
+        return split_payloads(battle, actor, action)
     if target_mode in {"none", "self"}:
         return [base_payload]
     if target_mode in {"ally", "enemy", "unit"}:
@@ -375,6 +379,37 @@ def skill_payloads_for_action(battle: Battle, actor: Unit, action: dict[str, Any
             payloads.append({"type": "skill", "unit_id": actor.unit_id, "skill_code": code, "x": cell.x, "y": cell.y})
         return dedupe_payloads(payloads)
     return []
+
+
+def split_payloads(battle: Battle, actor: Unit, action: dict[str, Any]) -> list[dict[str, Any]]:
+    skill = actor.get_skill("split")
+    preview = action.get("preview", {}) or {}
+    candidate_cells = preview_positions(preview.get("cells"))
+    required = int((preview.get("selection") or {}).get("required_cells") or getattr(skill, "clone_count", 3))
+    probe = skill._clone_probe(actor)  # type: ignore[attr-defined]
+    selected: list[Position] = []
+    occupied: set[tuple[int, int]] = set()
+    for cell in sorted(candidate_cells, key=lambda item: distance_to_position(battle, actor, item)):
+        footprint_keys = {(footprint.x, footprint.y) for footprint in battle.unit_cells_at(probe, cell)}
+        if occupied & footprint_keys:
+            continue
+        occupied.update(footprint_keys)
+        selected.append(cell)
+        if len(selected) >= required:
+            break
+    if len(selected) != required:
+        return []
+    payload = {
+        "type": "skill",
+        "unit_id": actor.unit_id,
+        "skill_code": "split",
+        "cells": positions_to_payload(selected),
+    }
+    try:
+        skill.selected_destinations(battle, actor, payload)
+    except Exception:
+        return []
+    return [payload]
 
 
 def rock_absorb_payloads(battle: Battle, actor: Unit, action: dict[str, Any]) -> list[dict[str, Any]]:
@@ -878,6 +913,10 @@ def reaction_payload_is_legal(
 
 def skill_effect_units(battle: Battle, actor: Unit, skill: Any, payload: dict[str, Any]) -> list[Unit]:
     units: list[Unit] = []
+    payload_cells = preview_positions(payload.get("cells"))
+    if payload_cells:
+        units.extend(battle.units_at_cells(payload_cells))
+        return battle.effect_units(units, ignore=None)
     try:
         units.extend(skill.get_target_units_for_payload(battle, actor, payload))
     except Exception:
@@ -890,6 +929,9 @@ def skill_effect_units(battle: Battle, actor: Unit, skill: Any, payload: dict[st
 
 
 def skill_effect_cells(battle: Battle, actor: Unit, skill: Any, payload: dict[str, Any]) -> list[Position]:
+    payload_cells = preview_positions(payload.get("cells"))
+    if payload_cells:
+        return payload_cells
     try:
         return list(skill.get_target_cells_for_payload(battle, actor, payload))
     except Exception:

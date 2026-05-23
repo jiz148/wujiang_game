@@ -33,6 +33,10 @@ const state = {
   replayOmniscient: false,
   randomRosterSizeDraft: "",
   roomEditSeatId: null,
+  rightRailCollapsed: false,
+  floatingToasts: [],
+  lastToastLogCount: 0,
+  aiPreview: null,
 };
 
 const ROOM_TOKEN_PREFIX = "wujiang-room-token:";
@@ -43,6 +47,9 @@ let pollHandle = null;
 let refreshInFlight = false;
 let boardOverlayRenderHandle = 0;
 let battleVfxCleanupHandle = 0;
+let boardDragState = null;
+let boardDragSuppressUntil = 0;
+let tooltipHideHandle = 0;
 
 const $ = (id) => document.getElementById(id);
 
@@ -150,11 +157,12 @@ function hoveredUnit() {
 }
 
 function effectiveSidebarPanel() {
-  return state.sidebarExpanded || (isChainMode() ? "command" : "");
+  return state.rightRailCollapsed ? "" : "logs";
 }
 
 function toggleSidebarPanel(panel) {
-  state.sidebarExpanded = state.sidebarExpanded === panel ? "" : panel;
+  if (panel !== "logs") return;
+  state.rightRailCollapsed = !state.rightRailCollapsed;
 }
 
 function activeOccupantAt(x, y) {
@@ -481,56 +489,6 @@ function ensureDraftSelection() {
   return;
 }
 
-function ensureSelectedUnit() {
-  const action = selectedAction();
-  if (!state.battle && isRandomRoomMode()) {
-    pill.textContent = `æˆ¿é—´ ${state.room.room_id} Â· ${state.room.status === "lobby" ? "å¤§åŽ…ä¸­" : "ç­‰å¾…å¼€å±€"}`;
-    topbarSubline.textContent = state.room.viewer_player_id
-      ? `ä½ å½“å‰æ˜¯çŽ©å®¶ ${state.room.viewer_player_id}ã€‚å½“å‰æˆ¿é—´ä½¿ç”¨ã€Œ${modeMeta.name}ã€ï¼Œå¼€å±€åŽä¼šéšæœºåˆ†é…æ­¦å°†ã€‚`
-      : "ä½ å½“å‰è¿˜æ²¡æœ‰å ç”¨å¸­ä½ã€‚è‹¥æˆ¿é—´ä»æœ‰ç©ºä½ï¼Œè¾“å…¥æ˜µç§°åŽå³å¯åŠ å…¥ã€‚";
-    caption.textContent = "å¯¹å±€å°šæœªå¼€å§‹ï¼Œéšæœºé€‰äººæ¨¡å¼ä¸‹æ— éœ€æ‰‹åŠ¨é€‰å°†ã€‚";
-    return;
-  }
-  if (!state.battle) {
-    state.selectedUnitId = "";
-    return;
-  }
-  if (isRespawnMode()) {
-    state.selectedUnitId = currentRespawnPrompt()?.unit_id || "";
-    return;
-  }
-  if (isChainMode() && !action) {
-    state.selectedUnitId = state.battle.pending_chain?.current_unit_id || "";
-    return;
-  }
-  if (isReplayMode()) {
-    node.textContent = `å½“å‰æ­£åœ¨æŸ¥çœ‹å›žæ”¾ç¬¬ ${state.replayStepIndex}/${replayMeta().last_step_index} æ­¥ã€‚`;
-    return;
-  }
-  if (isReplayMode()) {
-    pill.textContent = `æˆ¿é—´ ${state.room.room_id} Â· å›žæ”¾ ${state.replayStepIndex}/${replayMeta().last_step_index}`;
-    caption.textContent = state.replayOmniscient
-      ? "å½“å‰æ­£åœ¨ä»¥å…¨çŸ¥è§†è§’æŸ¥çœ‹å›žæ”¾ã€‚"
-      : "å½“å‰æ­£åœ¨æŸ¥çœ‹å›žæ”¾ã€‚";
-    return;
-  }
-  if (isGameOver()) {
-    if (unitById(state.selectedUnitId)) return;
-    state.selectedUnitId = allUnits()[0]?.id || "";
-    return;
-  }
-  if (!state.selectedUnitId) {
-    const controllable = activeBundles().map((entry) => entry.unit_id);
-    state.selectedUnitId = controllable[0] || allUnits()[0]?.id || "";
-    return;
-  }
-  const controllable = activeBundles().map((entry) => entry.unit_id);
-  if (unitById(state.selectedUnitId) && (!controllable.length || controllable.includes(state.selectedUnitId))) {
-    return;
-  }
-  state.selectedUnitId = controllable[0] || allUnits()[0]?.id || "";
-}
-
 function syncSelectedUnitAfterStateChange() {
   if (!state.battle) {
     state.selectedUnitId = "";
@@ -777,6 +735,21 @@ function battleVfxLayer() {
   return $("battle-vfx");
 }
 
+function actionWheelLayer() {
+  const stage = $("board-stage");
+  if (!stage) return null;
+  let layer = $("action-wheel");
+  if (!layer) {
+    layer = document.createElement("div");
+    layer.id = "action-wheel";
+    layer.className = "action-wheel";
+  }
+  if (layer.parentNode !== stage && typeof stage.appendChild === "function") {
+    stage.appendChild(layer);
+  }
+  return layer;
+}
+
 function clearBattleVfxCleanupTimer() {
   if (!battleVfxCleanupHandle || typeof window.clearTimeout !== "function") return;
   window.clearTimeout(battleVfxCleanupHandle);
@@ -843,6 +816,23 @@ function nodeCenterRelativeToStage(node) {
   };
 }
 
+function nodeRectRelativeToStage(node) {
+  if (!node || typeof node.getBoundingClientRect !== "function") return null;
+  const rect = node.getBoundingClientRect();
+  const stageRect = $("board-stage")?.getBoundingClientRect?.();
+  if (!rect || !stageRect) return null;
+  const left = rect.left - stageRect.left;
+  const top = rect.top - stageRect.top;
+  return {
+    left,
+    top,
+    width: rect.width,
+    height: rect.height,
+    right: left + rect.width,
+    bottom: top + rect.height,
+  };
+}
+
 function cellCenterPoint(cell) {
   const normalized = normalizedCell(cell);
   if (!normalized) return null;
@@ -856,6 +846,21 @@ function unitCenterPoint(unit) {
   if (!points.length) return null;
   const sum = points.reduce((acc, point) => ({ x: acc.x + point.x, y: acc.y + point.y }), { x: 0, y: 0 });
   return { x: sum.x / points.length, y: sum.y / points.length };
+}
+
+function unitBoundsRelativeToStage(unit) {
+  const cells = unitOccupiedCells(unit);
+  if (!cells.length) return null;
+  const rects = cells.map((cell) => nodeRectRelativeToStage(boardCellNodeAt(cell.x, cell.y))).filter(Boolean);
+  if (!rects.length) return null;
+  return {
+    left: Math.min(...rects.map((rect) => rect.left)),
+    top: Math.min(...rects.map((rect) => rect.top)),
+    right: Math.max(...rects.map((rect) => rect.right)),
+    bottom: Math.max(...rects.map((rect) => rect.bottom)),
+    width: Math.max(...rects.map((rect) => rect.right)) - Math.min(...rects.map((rect) => rect.left)),
+    height: Math.max(...rects.map((rect) => rect.bottom)) - Math.min(...rects.map((rect) => rect.top)),
+  };
 }
 
 function battleVfxSourcePoint(event) {
@@ -1109,6 +1114,9 @@ function normalizedPatternCells(cells = []) {
 function selectionPatterns(action) {
   const selection = patternSelection(action);
   if (!selection) return [];
+  if (Number(selection.required_cells || 0) > 0 && (!Array.isArray(selection.patterns) || !selection.patterns.length)) {
+    return [];
+  }
   const rawPatterns = choicePatternSelection(action)
     ? ((selection.choices || []).find((entry) => String(entry.code || "") === stagedPatternChoiceCode(action))?.patterns || [])
     : (Array.isArray(selection.patterns) ? selection.patterns : []);
@@ -1259,9 +1267,7 @@ function cellBlockedForMover(unit, cell) {
   const occupants = footprintCells.flatMap((footprintCell) => unitsAtCell(footprintCell.x, footprintCell.y))
     .filter((other, index, list) => other.id !== unit.id && list.findIndex((entry) => entry.id === other.id) === index);
   const blockingOccupants = occupants.filter((other) => !unitsCanOverlapOnBoard(unit, other));
-  if (!blockingOccupants.length) return false;
-  if (unitIsStealthed(unit)) return false;
-  return blockingOccupants.some((other) => !unitIsStealthed(other));
+  return blockingOccupants.length > 0;
 }
 
 function moveFootprintCellsForAnchors(action, anchors = []) {
@@ -1338,6 +1344,13 @@ function matchingSelectionPatterns(action, chosen = stagedPatternCells(action)) 
 }
 
 function nextPatternSelectionCells(action, chosen = stagedPatternCells(action)) {
+  const selection = patternSelection(action);
+  const required = Number(selection?.required_cells || 0);
+  if (required > 0 && (!Array.isArray(selection?.patterns) || !selection.patterns.length)) {
+    if (chosen.length >= required) return [];
+    const chosenKeys = positionsToSet(chosen);
+    return (action.preview?.cells || []).filter((cell) => !chosenKeys.has(positionKey(cell)));
+  }
   if (patternSelectionIsOrdered(action)) {
     const next = [];
     const seen = new Set();
@@ -1367,6 +1380,12 @@ function nextPatternSelectionCells(action, chosen = stagedPatternCells(action)) 
 
 function patternSelectionCanComplete(action, chosen = stagedPatternCells(action)) {
   if (!chosen.length) return false;
+  const selection = patternSelection(action);
+  const required = Number(selection?.required_cells || 0);
+  if (required > 0 && (!Array.isArray(selection?.patterns) || !selection.patterns.length)) {
+    const legalKeys = positionsToSet(action.preview?.cells || []);
+    return chosen.length === required && chosen.every((cell) => legalKeys.has(positionKey(cell)));
+  }
   if (patternSelectionIsOrdered(action)) {
     return selectionPatterns(action).some((pattern) => pattern.length === chosen.length
       && chosen.every((cell, index) => sameCell(cell, pattern[index])));
@@ -1496,10 +1515,9 @@ function currentPreview() {
   if (patternSelection(action)) {
     const chosenCells = stagedPatternCells(action);
     const activeCells = nextPatternSelectionCells(action, chosenCells);
-    const focusCells = [...chosenCells, ...activeCells];
     return {
       cellKeys: positionsToSet(activeCells),
-      targetIds: targetIdsToSet(unitIdsAtCells(focusCells)),
+      targetIds: new Set(),
       secondaryCellKeys: positionsToSet(chosenCells),
       destinationCellKeys: new Set(),
     };
@@ -1539,7 +1557,7 @@ function currentPreview() {
   const useDirectTargetCells = action.kind === "attack"
     || (action.preview?.requires_target && ["ally", "enemy", "unit"].includes(action.target_mode));
   const previewCells = useDirectTargetCells
-    ? previewCellsForTargetIds(filteredTargetIds)
+    ? (action.preview?.cells?.length ? action.preview.cells : previewCellsForTargetIds(filteredTargetIds))
     : (action.preview?.cells || []);
 
   return {
@@ -1589,6 +1607,13 @@ function actionNeedsTarget(action) {
 
 function hasCancelableTargetSelection() {
   if (!canInteract() || isRespawnMode()) return false;
+  const action = selectedAction();
+  return Boolean(action && actionNeedsTarget(action));
+}
+
+function isBoardTargetSelectionActive() {
+  if (!canInteract()) return false;
+  if (isRespawnMode()) return true;
   const action = selectedAction();
   return Boolean(action && actionNeedsTarget(action));
 }
@@ -1775,15 +1800,6 @@ function renderRecoveryButton() {
     : "\u7528\u5f53\u524d\u6635\u79f0\u6062\u590d\u5e2d\u4f4d";
 }
 
-function roomStateLabel(room) {
-  if (!room) return "";
-  if (room.status === "battle") return "对战中";
-  if (room.status === "finished") return "已结束";
-  if (room.can_join) return "可加入";
-  if (room.is_full) return "已满";
-  return "大厅中";
-}
-
 function roomStateClass(room) {
   if (!room) return "";
   if (room.status === "battle") return "is-battle";
@@ -1795,17 +1811,31 @@ function shouldShowLobbyPanel() {
   return hasRoom() && (viewerPlayerId() !== null || state.room?.is_full || hasBattle());
 }
 
+function isRoomConfigControlActive() {
+  const active = typeof document !== "undefined" ? document.activeElement : null;
+  if (!active || !hasRoom() || state.room?.status !== "lobby") return false;
+  if (active.id === "room-seat-count-input" || active.id === "random-roster-size-input") return true;
+  const data = active.dataset || {};
+  return Boolean(data.seatTeam || data.seatController || data.seatQuota);
+}
+
 function applyRoomPayload(payload, { preserveScreen = false } = {}) {
   const hadBattle = Boolean(state.liveBattle || state.battle);
   const previousScreen = state.screen;
   const previousBoardKey = state.battle ? `${state.battle.board.width}x${state.battle.board.height}` : "";
   const previousRoomId = state.room?.room_id || "";
+  const previousBattle = state.liveBattle;
   state.heroes = payload.heroes || [];
   if (payload.rooms) {
     state.rooms = payload.rooms;
   }
   state.room = payload.room || null;
   state.liveBattle = payload.battle || null;
+  if (!state.room || state.room.room_id !== previousRoomId) {
+    state.lastToastLogCount = 0;
+    state.floatingToasts = [];
+    state.aiPreview = null;
+  }
   if (!state.room || state.room.room_id !== previousRoomId || !state.room.replay?.available) {
     state.replayMode = false;
     state.replayStepIndex = 0;
@@ -1854,29 +1884,8 @@ function applyRoomPayload(payload, { preserveScreen = false } = {}) {
   syncScreen({ preferBattle: autoEnterBattle || (preserveScreen && previousScreen === "battle") });
   syncSelectedUnitAfterStateChange();
   syncBattleVfxState({ hadBattle, boardChanged: Boolean(state.liveBattle) && nextBoardKey !== previousBoardKey });
-}
-
-function roomHeroSelectionSummary(heroCode) {
-  if (!hasRoom() || !heroCode) return "";
-  const pickers = (state.room.seats || [])
-    .filter((seat) => seat.hero_code === heroCode)
-    .map((seat) => `玩家 ${seat.player_id}`);
-  return pickers.length ? pickers.join(" / ") : "";
-}
-
-function fallbackRoomModes() {
-  return [
-    {
-      code: "classic",
-      name: "标准选将",
-      description: "双方先各自选好武将，再在 8x8 战场固定出生开局。",
-    },
-    {
-      code: "random",
-      name: "随机选人",
-      description: "无需手动选将，开局后随机分配武将，使用更大的战场与随机出生，并按能力值决定先手。",
-    },
-  ];
+  syncFloatingToasts(previousBattle, state.liveBattle);
+  syncAiPreview(previousBattle, state.liveBattle);
 }
 
 function availableRoomModes() {
@@ -1903,113 +1912,6 @@ function renderNavigation() {
   $("copy-invite-top").classList.toggle("hidden", !state.room?.invite_url);
   $("edit-profile").classList.toggle("hidden", state.screen === "battle");
   $("nav-battle").textContent = isGameOver() ? "查看终局" : "返回战场";
-}
-
-function renderHeroCards() {
-  const homeCards = $("home-hero-cards");
-  const lobbyCards = $("hero-cards");
-  const viewerSeat = currentRoomSeat();
-  const selectedHeroCode = viewerSeat?.hero_code || "";
-  const randomMode = isRandomRoomMode();
-  const canSelect = Boolean(hasRoom() && state.room?.status === "lobby" && viewerSeat && !randomMode);
-
-  homeCards.innerHTML = "";
-  lobbyCards.innerHTML = "";
-
-  state.heroes.forEach((hero) => {
-    const homeCard = document.createElement("article");
-    homeCard.className = "hero-card";
-    homeCard.innerHTML = `
-      <h3>${hero.name}</h3>
-      <div class="meta">${hero.role} / ${hero.attribute} / ${hero.race} / 等级 ${hero.level}</div>
-      <div class="meta">攻 ${hero.stats.attack} · 守 ${hero.stats.defense} · 速 ${hero.stats.speed} · 范 ${hero.stats.attack_range} · 魔 ${hero.stats.mana}</div>
-      <div class="text"><strong>技能:</strong>${hero.raw_skill_text}</div>
-      <div class="text"><strong>特性:</strong>${hero.raw_trait_text}</div>
-    `;
-    homeCards.append(homeCard);
-
-    const lobbyCard = document.createElement("article");
-    lobbyCard.className = `hero-card ${selectedHeroCode === hero.code ? "is-selected" : ""}`;
-    const selectedBy = roomHeroSelectionSummary(hero.code);
-    const selectionText = selectedBy || (randomMode ? randomRoomFallbackSummary(state.room) : "尚无人选择");
-    lobbyCard.innerHTML = `
-      <h3>${hero.name}</h3>
-      <div class="meta">${hero.role} / ${hero.attribute} / ${hero.race} / 等级 ${hero.level}</div>
-      <div class="meta">攻 ${hero.stats.attack} · 守 ${hero.stats.defense} · 速 ${hero.stats.speed} · 范 ${hero.stats.attack_range} · 魔 ${hero.stats.mana}</div>
-      <div class="text"><strong>技能:</strong>${hero.raw_skill_text}</div>
-      <div class="text"><strong>特性:</strong>${hero.raw_trait_text}</div>
-      <div class="text"><strong>当前选择:</strong>${selectedBy || "尚无人选择"}</div>
-    `;
-    const selectionSummary = lobbyCard.querySelector(".text:last-of-type");
-    if (selectionSummary) {
-      selectionSummary.innerHTML = `<strong>当前选择:</strong>${selectionText}`;
-    }
-    const pickBtn = document.createElement("button");
-    pickBtn.className = selectedHeroCode === hero.code ? "ghost" : "primary";
-    pickBtn.textContent = selectedHeroCode === hero.code ? "已选此武将" : "选择该武将";
-    pickBtn.disabled = !canSelect;
-    pickBtn.addEventListener("click", () => selectRoomHero(hero.code));
-    if (randomMode) {
-      pickBtn.className = "ghost";
-      pickBtn.textContent = "本模式随机分配";
-      pickBtn.disabled = true;
-    }
-    lobbyCard.append(pickBtn);
-    lobbyCards.append(lobbyCard);
-  });
-}
-
-function renderHeader() {
-  const pill = $("turn-pill");
-  const topbarSubline = $("topbar-subline");
-  const caption = $("board-caption");
-  const modeMeta = roomModeMeta();
-  if (!hasRoom()) {
-    pill.textContent = "尚未进入房间";
-    topbarSubline.textContent = "创建房间、复制邀请链接、让两位玩家分别进入同一房间后在线对战。";
-    caption.textContent = "请先创建房间或加入房间。";
-    return;
-  }
-  if (!state.battle) {
-    pill.textContent = `房间 ${state.room.room_id} · ${state.room.status === "lobby" ? "大厅中" : "等待开局"}`;
-    topbarSubline.textContent = state.room.viewer_player_id
-      ? `你当前是玩家 ${state.room.viewer_player_id}。在大厅里为自己选择武将，双方都选好后开始对局。`
-      : "你当前还没有占用席位。若房间仍有空位，输入昵称后即可加入。";
-    caption.textContent = "对局尚未开始，请先在房间大厅完成选将。";
-    return;
-  }
-  const viewerSummary = state.room.viewer_player_id
-    ? `房间 ${state.room.room_id} 在线对战中。你当前是玩家 ${state.room.viewer_player_id}。`
-    : `房间 ${state.room.room_id} 在线对战中。你当前以观战视角查看此房间。`;
-  const nextTurnName = state.battle.next_turn_unit_name || "";
-  const nextTurnPlayerId = state.battle.next_turn_player_id;
-  const nextTurnSummary = nextTurnName && nextTurnPlayerId
-    ? `下回合：玩家 ${nextTurnPlayerId} 的 ${nextTurnName}。`
-    : "下回合待定。";
-  topbarSubline.textContent = `${viewerSummary} ${nextTurnSummary}`;
-  if (isGameOver()) {
-    pill.textContent = `房间 ${state.room.room_id} · 玩家 ${state.battle.winner} 获胜`;
-    caption.textContent = `玩家 ${state.battle.winner} 已获胜，战场已锁定。`;
-    return;
-  }
-  if (isRespawnMode()) {
-    const prompt = currentRespawnPrompt();
-    const unit = unitById(prompt?.unit_id || "");
-    pill.textContent = `房间 ${state.room.room_id} · 玩家 ${inputPlayer()} 重新出现中`;
-    caption.textContent = `请选择 ${unit?.name || "消失单位"} 的重新出现位置。`;
-    return;
-  }
-  if (isChainMode()) {
-    const current = state.battle.pending_chain?.current_unit_id
-      ? unitById(state.battle.pending_chain.current_unit_id)?.name
-      : "响应方";
-    const sourceSummary = chainQueuedActionPrompt(state.battle.pending_chain);
-    pill.textContent = `房间 ${state.room.room_id} · 玩家 ${inputPlayer()} 连锁中`;
-    caption.textContent = `等待 ${current} 响应 ${sourceSummary}`;
-    return;
-  }
-  pill.textContent = `房间 ${state.room.room_id} · 第 ${state.battle.round_number} 轮 · 玩家 ${inputPlayer()} 行动`;
-  caption.textContent = "点击己方棋子，在棋子周围选择动作。";
 }
 
 function renderBoardAlert() {
@@ -2273,6 +2175,11 @@ function renderBoard() {
   const fieldCellMap = fieldEffectsByCell();
   const activeAction = hoveredAction();
   const bodySelectionActive = Boolean(bodyDirectionSelection(activeAction));
+  const aiPreviewCells = Array.isArray(state.aiPreview?.cells)
+    ? state.aiPreview.cells.slice(0, Math.max(0, Number(state.aiPreview.visibleCount || 0)))
+    : [];
+  const aiPreviewKeys = positionsToSet(aiPreviewCells);
+  const aiCurrentKey = aiPreviewCells.length ? positionKey(aiPreviewCells[aiPreviewCells.length - 1]) : "";
 
   for (let y = 0; y < state.battle.board.height; y += 1) {
     for (let x = 0; x < state.battle.board.width; x += 1) {
@@ -2300,6 +2207,8 @@ function renderBoard() {
       if (unitOccupiedCells(selected).some((cellPosition) => cellPosition.x === x && cellPosition.y === y)) cell.classList.add("is-selected");
       if (unitOccupiedCells(chainSource).some((cellPosition) => cellPosition.x === x && cellPosition.y === y)) cell.classList.add("is-chain-source");
       if (unitOccupiedCells(chainReactor).some((cellPosition) => cellPosition.x === x && cellPosition.y === y)) cell.classList.add("is-chain-reactor");
+      if (aiPreviewKeys.has(key)) cell.classList.add("is-ai-preview");
+      if (aiCurrentKey && aiCurrentKey === key) cell.classList.add("is-ai-current");
       if (cellEffects.length) cell.classList.add("has-field-effect");
 
       if (cellEffects.length) {
@@ -2380,68 +2289,127 @@ function renderBoard() {
     });
 }
 
-function renderActionWheel() {
-  const wheel = $("action-wheel");
-  wheel.innerHTML = "";
-  if (!canInteract()) return;
-  if (!isChainMode() && state.selectedActionCode) return;
-  const unit = selectedUnit();
-  if (!unit?.position) return;
-
+function renderActionPanel() {
+  const panel = $("action-panel");
+  if (!panel) return;
+  panel.innerHTML = "";
+  const note = document.createElement("div");
+  note.className = "queue-item action-panel-note";
+  note.innerHTML = "<strong>行动提示</strong><p>真正的行动按钮会围绕战场中的当前选中单位显示；这里保留提示、可操作单位与连锁信息。</p>";
+  panel.append(note);
+  return;
   const actions = displayActions();
-  if (!actions.length) return;
-  if (isChainMode() && state.battle.pending_chain?.current_unit_id !== unit.id) return;
-  if (!isChainMode() && unit.player_id !== inputPlayer()) return;
+  if (!actions.length) {
+    const empty = document.createElement("div");
+    empty.className = "queue-item";
+    empty.innerHTML = `<strong>${isReplayMode() ? "回放中" : "暂无可用动作"}</strong><p>${isReplayMode() ? "回放状态下不可直接操作战场。" : "当前单位没有可执行的动作，或还没有轮到你操作。"}</p>`;
+    panel.append(empty);
+    return;
+  }
 
-  const selectedCells = [...document.querySelectorAll(".cell")].filter((cell) => (
-    unitOccupiedCells(unit).some((occupiedCell) => (
-      Number(cell.dataset.x) === occupiedCell.x && Number(cell.dataset.y) === occupiedCell.y
-    ))
-  ));
-  const stageRect = $("board-stage").getBoundingClientRect();
-  if (!selectedCells.length) return;
-  const rects = selectedCells.map((cell) => cell.getBoundingClientRect());
-  const cellRect = {
-    left: Math.min(...rects.map((rect) => rect.left)),
-    right: Math.max(...rects.map((rect) => rect.right)),
-    top: Math.min(...rects.map((rect) => rect.top)),
-    bottom: Math.max(...rects.map((rect) => rect.bottom)),
-  };
-  cellRect.width = cellRect.right - cellRect.left;
-  cellRect.height = cellRect.bottom - cellRect.top;
+  actions.forEach((action) => {
+    const btn = document.createElement("button");
+    const isSelected = state.selectedActionCode === action.code;
+    const disabled = !canInteract() && action.kind !== "chain_skip";
+    btn.className = `action-list-item ${isSelected ? "is-selected" : ""} ${disabled ? "is-disabled" : ""}`;
+    btn.disabled = disabled;
+    btn.innerHTML = `
+      <div class="action-title">
+        <span>${actionLabel(action)}</span>
+        <span>${actionTimingLabel(action)}</span>
+      </div>
+      <div class="action-meta">${actionTierLabel(action)} · ${actionManaLabel(action) || "不费魔"} · ${actionLimitLabel(action)}</div>
+      <div class="action-desc">${action.description || "无额外说明。"}</div>
+    `;
+    btn.addEventListener("pointerenter", (event) => {
+      state.hoveredActionCode = action.code;
+      state.hoverPointer = { x: event.clientX, y: event.clientY };
+      renderHoverCard();
+    });
+    btn.addEventListener("pointermove", (event) => {
+      state.hoveredActionCode = action.code;
+      state.hoverPointer = { x: event.clientX, y: event.clientY };
+      renderHoverCard();
+    });
+    btn.addEventListener("pointerleave", () => {
+      state.hoveredActionCode = "";
+      renderHoverCard();
+    });
+    btn.addEventListener("click", () => {
+      onActionClick(action);
+    });
+    panel.append(btn);
+  });
+}
 
-  const centerX = cellRect.left - stageRect.left + cellRect.width / 2;
-  const centerY = cellRect.top - stageRect.top + cellRect.height / 2;
-  const radius = 100;
-  const battleMode = document.body?.classList?.contains?.("battle-mode");
-  const buttonHalfWidth = battleMode ? 37 : 42;
-  const buttonHalfHeight = battleMode ? 20 : 23;
-  const stageWidth = stageRect.width || Math.max(0, stageRect.right - stageRect.left);
-  const stageHeight = stageRect.height || Math.max(0, stageRect.bottom - stageRect.top);
-  const overlayMargin = 12;
-  const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
-  const clampCenter = (value, stageSpan, buttonHalfSpan) => {
-    if (!Number.isFinite(stageSpan) || stageSpan <= 0) return value;
-    const minCenter = radius + buttonHalfSpan + overlayMargin;
-    const maxCenter = stageSpan - radius - buttonHalfSpan - overlayMargin;
-    if (minCenter > maxCenter) return stageSpan / 2;
-    return clamp(value, minCenter, maxCenter);
-  };
-  const clampedCenterX = clampCenter(centerX, stageWidth, buttonHalfWidth);
-  const clampedCenterY = clampCenter(centerY, stageHeight, buttonHalfHeight);
+function renderActionWheel() {
+  const layer = actionWheelLayer();
+  if (!layer) return;
+  layer.innerHTML = "";
+  const unit = selectedUnit();
+  const actions = displayActions();
+  if (!unit || !actions.length) return;
+  const action = selectedAction();
+  if (action && actionNeedsTarget(action)) return;
+  const stageRect = $("board-stage")?.getBoundingClientRect?.();
+  const bounds = unitBoundsRelativeToStage(unit);
+  if (!stageRect || !bounds) return;
+
+  const buttonWidth = document.body.classList.contains("battle-mode") ? 74 : 84;
+  const buttonHeight = document.body.classList.contains("battle-mode") ? 40 : 46;
+  const gap = 10;
+  const stagePadding = 12;
+  const actionCount = actions.length;
+  const columns = actionCount <= 3 ? 1 : actionCount <= 8 ? 2 : 3;
+  const rows = Math.ceil(actionCount / columns);
+  const clusterWidth = columns * buttonWidth + Math.max(0, columns - 1) * gap;
+  const clusterHeight = rows * buttonHeight + Math.max(0, rows - 1) * gap;
+  const centerX = bounds.left + bounds.width / 2;
+  const centerY = bounds.top + bounds.height / 2;
+  const placements = [
+    {
+      left: bounds.right + 16,
+      top: centerY - clusterHeight / 2,
+      score: stageRect.width - bounds.right,
+      required: clusterWidth + 16,
+    },
+    {
+      left: bounds.left - 16 - clusterWidth,
+      top: centerY - clusterHeight / 2,
+      score: bounds.left,
+      required: clusterWidth + 16,
+    },
+    {
+      left: centerX - clusterWidth / 2,
+      top: bounds.bottom + 16,
+      score: stageRect.height - bounds.bottom,
+      required: clusterHeight + 16,
+    },
+    {
+      left: centerX - clusterWidth / 2,
+      top: bounds.top - 16 - clusterHeight,
+      score: bounds.top,
+      required: clusterHeight + 16,
+    },
+  ];
+  const chosen = placements.find((placement) => placement.score >= placement.required)
+    || placements.sort((a, b) => b.score - a.score)[0];
+  const maxLeft = Math.max(stagePadding, stageRect.width - clusterWidth - stagePadding);
+  const maxTop = Math.max(stagePadding, stageRect.height - clusterHeight - stagePadding);
+  const anchorLeft = Math.max(stagePadding, Math.min(maxLeft, chosen.left));
+  const anchorTop = Math.max(stagePadding, Math.min(maxTop, chosen.top));
 
   actions.forEach((action, index) => {
-    const angle = (-90 + (360 / actions.length) * index) * (Math.PI / 180);
-    const targetLeft = clampedCenterX + Math.cos(angle) * radius - buttonHalfWidth;
-    const targetTop = clampedCenterY + Math.sin(angle) * radius - buttonHalfHeight;
-    const maxLeft = Math.max(overlayMargin, stageWidth - buttonHalfWidth * 2 - overlayMargin);
-    const maxTop = Math.max(overlayMargin, stageHeight - buttonHalfHeight * 2 - overlayMargin);
-    const left = clamp(targetLeft, overlayMargin, maxLeft);
-    const top = clamp(targetTop, overlayMargin, maxTop);
     const btn = document.createElement("button");
-    btn.className = `action-btn ${state.selectedActionCode === action.code ? "is-selected" : ""}`;
-    btn.style.left = `${left}px`;
-    btn.style.top = `${top}px`;
+    const isSelected = state.selectedActionCode === action.code;
+    const disabled = !canInteract() && action.kind !== "chain_skip";
+    const column = index % columns;
+    const row = Math.floor(index / columns);
+    btn.className = `action-btn ${isSelected ? "is-selected" : ""}`;
+    if (disabled) btn.classList.add("is-disabled");
+    btn.disabled = disabled;
+    btn.style.left = `${anchorLeft + column * (buttonWidth + gap)}px`;
+    btn.style.top = `${anchorTop + row * (buttonHeight + gap)}px`;
     btn.innerHTML = `${actionLabel(action)}<small>${actionTimingLabel(action)}</small>`;
     btn.addEventListener("pointerenter", (event) => {
       state.hoveredActionCode = action.code;
@@ -2457,11 +2425,10 @@ function renderActionWheel() {
       state.hoveredActionCode = "";
       renderHoverCard();
     });
-    btn.addEventListener("click", (event) => {
-      event.stopPropagation();
+    btn.addEventListener("click", () => {
       onActionClick(action);
     });
-    wheel.append(btn);
+    layer.append(btn);
   });
 }
 
@@ -2539,20 +2506,158 @@ function renderHoverCard() {
   card.innerHTML = unit ? renderUnitHoverCard(unit) : renderActionHoverCard(action);
 }
 
+function tooltipNode() {
+  return $("control-tooltip");
+}
+
+function hideTooltip() {
+  const node = tooltipNode();
+  if (!node) return;
+  node.classList.add("hidden");
+  node.textContent = "";
+}
+
+function showTooltip(text, pointer) {
+  const node = tooltipNode();
+  if (!node || !text || !pointer) return;
+  node.textContent = text;
+  node.classList.remove("hidden");
+  const x = Math.min(window.innerWidth - 16, pointer.x + 12);
+  const y = Math.min(window.innerHeight - 16, pointer.y + 12);
+  node.style.left = `${x}px`;
+  node.style.top = `${y}px`;
+}
+
+function pruneFloatingToasts() {
+  const now = Date.now();
+  state.floatingToasts = state.floatingToasts.filter((toast) => Number(toast.expiresAt || 0) > now);
+}
+
+function renderFloatingToasts() {
+  const stack = $("floating-toast-stack");
+  if (!stack) return;
+  pruneFloatingToasts();
+  stack.innerHTML = "";
+  state.floatingToasts.forEach((toast) => {
+    const item = document.createElement("div");
+    item.className = "floating-toast";
+    item.textContent = toast.text;
+    stack.append(item);
+  });
+  stack.classList.toggle("hidden", state.floatingToasts.length === 0);
+}
+
+function enqueueFloatingToast(text) {
+  const message = String(text || "").trim();
+  if (!message) return;
+  pruneFloatingToasts();
+  state.floatingToasts.push({
+    id: `${Date.now()}-${Math.random()}`,
+    text: message,
+    expiresAt: Date.now() + 5000,
+  });
+  renderFloatingToasts();
+  window.setTimeout(() => {
+    renderFloatingToasts();
+  }, 5100);
+}
+
+function syncFloatingToasts(previousBattle, nextBattle) {
+  if (!nextBattle) {
+    state.lastToastLogCount = 0;
+    state.floatingToasts = [];
+    return;
+  }
+  if (!previousBattle) {
+    state.lastToastLogCount = Array.isArray(nextBattle.logs) ? nextBattle.logs.length : 0;
+    return;
+  }
+  const previousCount = previousBattle?.logs?.length || 0;
+  const nextLogs = Array.isArray(nextBattle.logs) ? nextBattle.logs : [];
+  const startIndex = Math.max(previousCount, state.lastToastLogCount);
+  nextLogs.slice(startIndex).forEach((line) => {
+    enqueueFloatingToast(line);
+  });
+  state.lastToastLogCount = nextLogs.length;
+}
+
+function simulationPendingAction() {
+  return state.room?.simulation?.pending_action || null;
+}
+
+function clearAiPreview() {
+  state.aiPreview = null;
+}
+
+function actionPreviewCells(meta, battleState) {
+  const fromPath = normalizedPatternCells(Array.isArray(meta?.path) ? meta.path : []);
+  if (fromPath.length) return fromPath;
+  const fromCells = normalizedPatternCells(Array.isArray(meta?.cells) ? meta.cells : []);
+  if (fromCells.length) return fromCells;
+  const targetIds = Array.isArray(meta?.target_unit_ids) ? meta.target_unit_ids : [];
+  return targetIds
+    .map((id) => (battleState?.units || []).find((unit) => unit.id === id))
+    .filter((unit) => unit?.position)
+    .flatMap((unit) => unitOccupiedCells(unit));
+}
+
+function playAiPreview(meta, battleState) {
+  const previewCells = actionPreviewCells(meta, battleState);
+  const messages = Array.isArray(meta?.log_lines) ? meta.log_lines.filter(Boolean) : [];
+  if (!messages.length && meta?.actor_name && meta?.display_name) {
+    messages.push(`${meta.actor_name} 使用了【${meta.display_name}】`);
+  }
+  messages.forEach((line) => enqueueFloatingToast(line));
+  if (!previewCells.length) {
+    state.aiPreview = null;
+    return;
+  }
+  const previewId = Number(meta?.id || Date.now());
+  state.aiPreview = { id: previewId, cells: previewCells, visibleCount: 0 };
+  render();
+  window.setTimeout(() => {
+    if (!state.aiPreview || state.aiPreview.id !== previewId) return;
+    state.aiPreview = { ...state.aiPreview, visibleCount: 1 };
+    render();
+    previewCells.forEach((_, index) => {
+      window.setTimeout(() => {
+        if (!state.aiPreview || state.aiPreview.id !== previewId) return;
+        state.aiPreview = { ...state.aiPreview, visibleCount: Math.min(previewCells.length, index + 1) };
+        render();
+      }, index * 600);
+    });
+    window.setTimeout(() => {
+      if (!state.aiPreview || state.aiPreview.id !== previewId) return;
+      clearAiPreview();
+    }, Math.max(1800, previewCells.length * 600 + 1300));
+  }, 1300);
+}
+
+function syncAiPreview(previousBattle, nextBattle) {
+  const meta = simulationPendingAction();
+  if (!meta || !meta.actor_is_ai) {
+    state.aiPreview = null;
+    return;
+  }
+  const battleState = nextBattle || previousBattle || state.liveBattle || state.battle;
+  const previewCells = actionPreviewCells(meta, battleState);
+  state.aiPreview = {
+    id: Number(meta?.id || 0),
+    cells: previewCells,
+    visibleCount: Math.max(0, Math.min(previewCells.length, Number(meta?.visible_count || 0))),
+  };
+}
+
 function renderSidebarPanels() {
-  const expanded = effectiveSidebarPanel();
-  document.querySelectorAll(".sidebar-panel").forEach((panel) => {
-    const panelCode = panel.dataset.sidebarPanel || "";
-    const open = panelCode === expanded;
-    panel.classList.toggle("is-open", open);
-    panel.classList.toggle("is-collapsed", !open);
-  });
-  document.querySelectorAll(".sidebar-toggle").forEach((button) => {
-    const panelCode = button.dataset.sidebarPanel || "";
-    const open = panelCode === expanded;
-    button.setAttribute("aria-expanded", open ? "true" : "false");
-    button.textContent = open ? "收起" : "展开";
-  });
+  const rightRail = $("battle-right-rail");
+  const toggle = $("toggle-right-rail");
+  if (rightRail) {
+    rightRail.classList.toggle("is-collapsed", state.rightRailCollapsed);
+  }
+  if (toggle) {
+    toggle.setAttribute("aria-expanded", state.rightRailCollapsed ? "false" : "true");
+    toggle.textContent = state.rightRailCollapsed ? "展开" : "收起";
+  }
 }
 
 function renderSelectedCard() {
@@ -2580,374 +2685,6 @@ function renderSelectedCard() {
     <div class="statline"><strong>原始技能:</strong>${unit.raw_skill_text}</div>
     <div class="statline"><strong>原始特性:</strong>${unit.raw_trait_text}</div>
   `;
-}
-
-function renderRoomPanels() {
-  const showLobby = shouldShowLobbyPanel();
-  const roomId = roomQueryId();
-  $("room-home").classList.toggle("hidden", showLobby);
-  $("room-lobby").classList.toggle("hidden", !showLobby);
-  if ($("create-name")) $("create-name").value = state.roomForm.createName;
-  if ($("join-name")) $("join-name").value = state.roomForm.joinName;
-  $("join-room-code").value = roomId || state.roomForm.joinRoomCode;
-
-  const title = $("lobby-title");
-  const caption = $("lobby-caption");
-  const copyInvite = $("copy-invite");
-  const roomBattle = $("room-battle");
-  const startRoom = $("start-room");
-
-  if (!hasRoom()) {
-    title.textContent = "在线房间";
-    caption.textContent = "先创建房间或输入房间码加入。进入房间后,每位玩家各自选择自己的武将,再开始对局。";
-    copyInvite.classList.add("hidden");
-    roomBattle.classList.add("hidden");
-    startRoom.classList.add("hidden");
-    return;
-  }
-
-  if (!showLobby) {
-    title.textContent = `加入房间 ${state.room.room_id}`;
-    caption.textContent = "这个房间仍在等待玩家占位。输入昵称后点击加入房间,即可进入房间大厅开始选将。";
-    copyInvite.classList.remove("hidden");
-    roomBattle.classList.toggle("hidden", !hasBattle());
-    startRoom.classList.add("hidden");
-    return;
-  }
-
-  title.textContent = `房间 ${state.room.room_id}`;
-  caption.textContent = hasBattle()
-    ? "对局已经开始。你可以返回战场继续测试,或留在这里查看房间信息。"
-    : "双方玩家在这里各自选择自己的武将,准备完成后开始对局。";
-
-  if (!hasBattle() && isRandomRoomMode()) {
-    caption.textContent = `当前使用随机选人模式。房主设置后，开局时双方${randomModeSummary}。`;
-  }
-
-  $("room-code-label").textContent = state.room.room_id;
-  $("room-status-label").textContent = state.room.status === "lobby"
-    ? "等待双方就绪"
-    : (isGameOver() ? "对局结束" : "对局进行中");
-  $("viewer-seat-label").textContent = state.room.viewer_player_id ? `玩家 ${state.room.viewer_player_id}` : "观战 / 未占位";
-  $("viewer-seat-note").textContent = state.room.viewer_name
-    ? `${state.room.viewer_name}${state.room.viewer_is_host ? " · 房主" : ""}`
-    : "当前浏览器还没有占用席位";
-  $("invite-path-label").textContent = state.room.invite_url || state.room.invite_path;
-
-  copyInvite.classList.toggle("hidden", !state.room.invite_url);
-  deleteRoomBtn.classList.toggle("hidden", !state.room.viewer_is_host);
-  deleteRoomBtn.disabled = !state.room.viewer_is_host;
-  roomBattle.classList.toggle("hidden", !hasBattle());
-  roomBattle.disabled = !hasBattle();
-  startRoom.classList.toggle("hidden", !(state.room.status === "lobby" && state.room.viewer_player_id !== null));
-  startRoom.disabled = !state.room.can_start;
-
-  const roomMessage = $("room-message");
-  if (hasBattle()) {
-    roomMessage.textContent = isGameOver()
-      ? `房间 ${state.room.room_id} 的本局对战已经结束。你可以进入战场查看终局盘面。`
-      : `房间 ${state.room.room_id} 的对局正在进行中。点击"进入战场"即可查看并继续操作。`;
-  } else if (state.room.viewer_player_id === null) {
-    roomMessage.textContent = state.room.is_full
-      ? "这个房间已经满员。你当前可以观战,但不能代替其中任意一位玩家操作。"
-      : "这个房间还有空位。若你是受邀玩家,请在首页的加入房间区域输入昵称并加入。";
-  } else if (!currentRoomSeat()?.hero_code) {
-    roomMessage.textContent = `你当前是玩家 ${state.room.viewer_player_id},请从下方选择自己的武将。`;
-  } else if (!state.room.can_start) {
-    roomMessage.textContent = "你已经选好了武将,正在等待另一位玩家加入或完成选将。";
-  } else {
-    roomMessage.textContent = "双方都已就绪,可以开始这场联机测试对局。";
-  }
-
-  const seatCards = $("seat-cards");
-  seatCards.innerHTML = "";
-  (state.room.seats || []).forEach((seat) => {
-    const card = document.createElement("article");
-    card.className = `seat-card ${seat.player_id === state.room.viewer_player_id ? "is-viewer" : ""} ${seat.occupied ? "" : "is-empty"}`;
-    card.innerHTML = `
-      <div class="seat-head">
-        <div>
-          <div class="seat-name">玩家 ${seat.player_id}</div>
-          <div class="seat-note">${seat.name || "尚未加入"}</div>
-        </div>
-        <span class="seat-badge">${seat.is_host ? "房主" : "席位"}</span>
-      </div>
-      <div class="seat-hero"><strong>当前武将:</strong>${seat.hero_name || "未选择"}</div>
-      <div class="seat-note">${seat.occupied ? "已进入房间" : "等待朋友加入该席位"}</div>
-    `;
-    seatCards.append(card);
-  });
-
-  if (isRandomRoomMode() && !hasBattle()) {
-    if (state.room.viewer_player_id === null) {
-      roomMessage.textContent = state.room.is_full
-        ? "\u8fd9\u4e2a\u623f\u95f4\u5df2\u7ecf\u6ee1\u5458ã€‚ä½ å½“å‰å¯ä»¥è§‚æˆ˜ï¼Œä½†ä¸èƒ½ä»£æ›¿å…¶ä¸­ä»»æ„ä¸€ä½çŽ©å®¶æ“ä½œã€‚"
-        : `\u8fd9\u4e2a\u623f\u95f4\u8fd8\u6709\u7a7aä½ã€‚ç‚¹å‡»â€œåŠ å…¥æˆ¿é—´â€åŽï¼Œå°±å¯ä»¥ä»¥â€œ${effectiveProfileName()}â€ä½œä¸ºå¦ä¸€ä½çŽ©å®¶è¿›å…¥ã€‚`;
-    } else if (state.room.status === "finished") {
-      roomMessage.textContent = "\u672c\u5c40\u5bf9\u6218\u5df2\u7ed3\u675fã€‚å¯ä»¥ç›´æŽ¥é‡æ–°å¼€å§‹é€‰å°†ï¼Œå†æ¥ä¸€å±€éšæœºå¯¹å±€ã€‚";
-    } else if (!state.room.can_start) {
-      roomMessage.textContent = "\u5f53\u524dä½¿ç”¨éšæœºé€‰äººæ¨¡å¼ã€‚æ— éœ€æ‰‹åŠ¨é€‰å°†ï¼Œæ­£åœ¨ç­‰å¾…å¦ä¸€ä½çŽ©å®¶åŠ å…¥ã€‚";
-    } else {
-      roomMessage.textContent = "\u53cc\u65b9\u90fdå·²å°±ç»ªã€‚å¼€å±€åŽä¼šéšæœºåˆ†é…æ­¦å°†ï¼Œå¹¶åœ¨æ›´å¤§æˆ˜åœºä¸Šéšæœºå‡ºç”Ÿã€‚";
-    }
-  }
-
-  if (isRandomRoomMode()) {
-    [...seatCards.querySelectorAll(".seat-hero")].forEach((node, index) => {
-      const seat = (state.room.seats || [])[index];
-      if (!seat) return;
-      const heroLabel = seat.hero_name || (seat.occupied ? "\u5f00\u5c40\u540e\u968f\u673a\u5206\u914d" : "\u672a\u9009\u62e9");
-      node.innerHTML = `<strong>\u5f53\u524d\u6b66\u5c06\uff1a</strong>${heroLabel}`;
-    });
-  }
-}
-
-function renderRoomListActive() {
-  const list = $("room-list");
-  if (!list) return;
-  list.innerHTML = "";
-  if (!roomSummaries().length) {
-    const empty = document.createElement("div");
-    empty.className = "room-list-empty";
-    empty.textContent = "\u5f53\u524d\u8fd8\u6ca1\u6709\u516c\u5f00\u623f\u95f4\u3002\u4f60\u53ef\u4ee5\u5148\u521b\u5efa\u4e00\u95f4\uff0c\u6216\u8005\u7a0d\u540e\u7b49\u670b\u53cb\u5efa\u597d\u623f\u95f4\u540e\u76f4\u63a5\u5728\u8fd9\u91cc\u52a0\u5165\u3002";
-    list.append(empty);
-    return;
-  }
-
-  roomSummaries().forEach((room) => {
-    const remembered = loadStoredIdentity(room.room_id);
-    const seatSummary = (room.seats || [])
-      .map((seat) => {
-        const summary = seat.hero_summary || seat.hero_name || (room.mode === "random" && seat.occupied ? "开局后随机分配" : "");
-        return `席位 ${seat.player_id}：${seat.team_name || ""} · ${seat.name || controllerTypeLabel(seat)}${summary ? ` · ${summary}` : ""}`;
-      })
-      .join(" / ");
-    const card = document.createElement("article");
-    card.className = "room-list-card";
-    card.innerHTML = `
-      <div class="room-list-head">
-        <strong>\u623f\u95f4 ${room.room_id}</strong>
-        <span class="room-list-state ${roomStateClass(room)}">${roomStateLabel(room)}</span>
-      </div>
-      <div class="room-list-meta">\u5e2d\u4f4d ${room.occupied_seat_count}/${room.seat_count} \u00b7 ${room.mode_name || roomModeMeta(room.mode).name} \u00b7 ${room.status === "lobby" ? "\u7b49\u5f85\u73a9\u5bb6\u5c31\u7eea" : "\u6b63\u5728\u8fdb\u884c\u6216\u5df2\u7ed3\u675f"}</div>
-      <div class="room-list-seats">${seatSummary}</div>
-      <div class="room-list-note">${remembered.token ? "\u8fd9\u4e2a\u6d4f\u89c8\u5668\u4e4b\u524d\u8fdb\u5165\u8fc7\u8be5\u623f\u95f4\u3002\u4f60\u53ef\u4ee5\u7ee7\u7eed\u539f\u6765\u7684\u5e2d\u4f4d\uff0c\u4e5f\u53ef\u4ee5\u76f4\u63a5\u7528\u5f53\u524d\u6635\u79f0\u201c${effectiveProfileName()}\u201d\u4f5c\u4e3a\u65b0\u73a9\u5bb6\u52a0\u5165\u3002" : `\u73b0\u5728\u53ef\u4ee5\u76f4\u63a5\u7528\u5f53\u524d\u6635\u79f0\u201c${effectiveProfileName()}\u201d\u52a0\u5165\u3002`} </div>
-    `;
-
-    const actions = document.createElement("div");
-    actions.className = "room-list-actions";
-
-    const primary = document.createElement("button");
-    primary.className = room.can_join ? "primary" : "ghost";
-    primary.textContent = room.can_join ? "\u52a0\u5165\u623f\u95f4" : "\u67e5\u770b\u623f\u95f4";
-    primary.addEventListener("click", () => {
-      if (room.can_join) {
-        joinListedRoom(room.room_id);
-        return;
-      }
-      openListedRoom(room.room_id);
-    });
-    actions.append(primary);
-
-    if (remembered.token) {
-      const resumeBtn = document.createElement("button");
-      resumeBtn.className = "ghost";
-      resumeBtn.textContent = "\u7ee7\u7eed\u539f\u8eab\u4efd";
-      resumeBtn.addEventListener("click", () => resumeStoredSeat(room.room_id));
-      actions.append(resumeBtn);
-    }
-
-    if (!remembered.token && room.can_join) {
-      const fillBtn = document.createElement("button");
-      fillBtn.className = "ghost";
-      fillBtn.textContent = "\u586b\u5165\u623f\u95f4\u7801";
-      fillBtn.addEventListener("click", () => {
-        state.roomForm.joinRoomCode = room.room_id;
-        joinListedRoom(room.room_id);
-        $("lobby-caption").textContent = `\u5df2\u586b\u5165\u623f\u95f4 ${room.room_id}\u3002\u70b9\u51fb\u201c\u52a0\u5165\u623f\u95f4\u201d\u540e\uff0c\u5c31\u4f1a\u4ee5\u201c${effectiveProfileName()}\u201d\u52a0\u5165\u3002`;
-        renderProfilePanel();
-      });
-      actions.append(fillBtn);
-    }
-
-    card.append(actions);
-    list.append(card);
-  });
-}
-
-function renderResumePanel() {
-  const panel = $("resume-room-panel");
-  const text = $("resume-room-text");
-  const button = $("resume-room");
-  if (!panel || !text) return;
-  const identity = storedIdentityForCurrentRoom();
-  const canReclaim = canReclaimSeatByName();
-  const visible = Boolean(roomQueryId() && !viewerPlayerId() && !state.playerToken && (identity.token || canReclaim));
-  panel.classList.toggle("hidden", !visible);
-  if (!visible) return;
-  if (identity.token) {
-    text.textContent = `\u68c0\u6d4b\u5230\u8fd9\u4e2a\u6d4f\u89c8\u5668\u4e4b\u524d\u66fe\u4ee5\u201c${identity.name || "\u672a\u547d\u540d\u73a9\u5bb6"}\u201d\u8fdb\u5165\u5f53\u524d\u623f\u95f4\u3002\u4f60\u53ef\u4ee5\u76f4\u63a5\u7ee7\u7eed\u539f\u6765\u7684\u5e2d\u4f4d\u3002`;
-    if (button) button.textContent = "\u7ee7\u7eed\u539f\u8eab\u4efd";
-    return;
-  }
-  text.textContent = `\u5f53\u524d\u6635\u79f0\u201c${effectiveProfileName()}\u201d\u4e0e\u623f\u95f4\u91cc\u7684\u65e7\u5e2d\u4f4d\u5339\u914d\u3002\u5982\u679c\u4f60\u662f\u539f\u73a9\u5bb6\uff0c\u53ef\u4ee5\u7528\u8fd9\u4e2a\u6635\u79f0\u6062\u590d\u5e2d\u4f4d\u3002`;
-  if (button) button.textContent = "\u6062\u590d\u5e2d\u4f4d";
-}
-
-function renderRoomPanels() {
-  const showLobby = shouldShowLobbyPanel();
-  const roomId = roomQueryId();
-  $("room-home").classList.toggle("hidden", showLobby);
-  $("room-lobby").classList.toggle("hidden", !showLobby);
-  $("join-room-code").value = roomId || state.roomForm.joinRoomCode;
-
-  const title = $("lobby-title");
-  const caption = $("lobby-caption");
-  const copyInvite = $("copy-invite");
-  const roomBattle = $("room-battle");
-  const startRoom = $("start-room");
-  const leaveRoomBtn = $("leave-room");
-  const deleteRoomBtn = $("delete-room");
-  const joinRoomButton = $("join-room");
-  const modeLabel = $("room-mode-label");
-  const modeNote = $("room-mode-note");
-  const modeSelect = $("room-mode-select");
-  const randomRosterControl = $("random-roster-size-control");
-  const randomRosterInput = $("random-roster-size-input");
-  const randomRosterNote = $("random-roster-size-note");
-  renderRecoveryButton();
-
-  if (!hasRoom()) {
-    title.textContent = "\u5728\u7ebf\u623f\u95f4";
-    caption.textContent = "\u5148\u786e\u8ba4\u4f60\u8981\u4f7f\u7528\u7684\u6635\u79f0\uff0c\u7136\u540e\u521b\u5efa\u623f\u95f4\u6216\u8f93\u5165\u623f\u95f4\u7801\u52a0\u5165\u3002\u8fdb\u5165\u623f\u95f4\u540e\uff0c\u6bcf\u4f4d\u73a9\u5bb6\u5404\u81ea\u9009\u62e9\u81ea\u5df1\u7684\u6b66\u5c06\uff0c\u518d\u5f00\u59cb\u5bf9\u5c40\u3002";
-    leaveRoomBtn.classList.add("hidden");
-    deleteRoomBtn.classList.add("hidden");
-    copyInvite.classList.add("hidden");
-    roomBattle.classList.add("hidden");
-    startRoom.classList.add("hidden");
-    joinRoomButton.disabled = !state.profileReady || !String($("join-room-code").value || "").trim();
-    return;
-  }
-
-  const modeMeta = roomModeMeta();
-  const randomModeSummary = randomRoomFallbackSummary(state.room);
-  if (modeLabel) modeLabel.textContent = modeMeta.name;
-  if (modeNote) {
-    const hostHint = state.room.viewer_is_host && state.room.status === "lobby"
-      ? "房主可在开局前切换模式，切换后会清空当前选将。"
-      : "仅房主可在大厅里切换模式。";
-    modeNote.textContent = `${modeMeta.description} ${hostHint}`;
-  }
-  if (modeSelect) {
-    modeSelect.innerHTML = "";
-    availableRoomModes().forEach((mode) => {
-      const option = document.createElement("option");
-      option.value = mode.code;
-      option.textContent = mode.name;
-      if (mode.code === state.room.mode) option.selected = true;
-      modeSelect.append(option);
-    });
-    modeSelect.disabled = !(state.room.viewer_is_host && state.room.status === "lobby");
-  }
-  if (randomRosterControl) {
-    const enabled = isRandomRoomMode();
-    randomRosterControl.classList.toggle("hidden", !enabled);
-    if (randomRosterInput) {
-      randomRosterInput.value = String(randomRoomRosterSize());
-      randomRosterInput.disabled = !(enabled && state.room.viewer_is_host && state.room.status === "lobby");
-    }
-    if (randomRosterNote) {
-      randomRosterNote.textContent = `开局时双方各随机获得 ${randomRoomRosterSize()} 个不重复武将。`;
-    }
-  }
-
-  if (!showLobby) {
-    title.textContent = `\u52a0\u5165\u623f\u95f4 ${state.room.room_id}`;
-    caption.textContent = isRandomRoomMode()
-      ? `\u8fd9\u4e2a\u623f\u95f4\u5f53\u524dæ˜¯ã€Œ${modeMeta.name}ã€ã€‚ç‚¹å‡»â€œåŠ å…¥æˆ¿é—´â€åŽï¼Œå°±ä¼šä»¥å½“å‰æ˜µç§°â€œ${effectiveProfileName()}â€è¿›å…¥æˆ¿é—´å¤§åŽ…ç­‰å¾…å¼€å±€ã€‚`
-      : `\u8fd9\u4e2a\u623f\u95f4\u4ecd\u5728\u7b49\u5f85\u73a9\u5bb6\u5360\u4f4d\u3002\u70b9\u51fb\u201c\u52a0\u5165\u623f\u95f4\u201d\u540e\uff0c\u5c31\u4f1a\u4ee5\u5f53\u524d\u6635\u79f0\u201c${effectiveProfileName()}\u201d\u8fdb\u5165\u623f\u95f4\u5927\u5385\u5f00\u59cb\u9009\u5c06\u3002`;
-    if (isRandomRoomMode()) {
-      caption.textContent = `这个房间当前使用「${modeMeta.name}」。${randomModeSummary}，点击“加入房间”后会以当前昵称“${effectiveProfileName()}”进入大厅等待开局。`;
-    }
-    leaveRoomBtn.classList.remove("hidden");
-    leaveRoomBtn.disabled = false;
-    deleteRoomBtn.classList.toggle("hidden", !state.room.viewer_is_host);
-    deleteRoomBtn.disabled = !state.room.viewer_is_host;
-    copyInvite.classList.remove("hidden");
-    roomBattle.classList.toggle("hidden", !hasBattle());
-    startRoom.classList.add("hidden");
-    joinRoomButton.disabled = !state.profileReady || !String($("join-room-code").value || "").trim();
-    return;
-  }
-
-  title.textContent = `\u623f\u95f4 ${state.room.room_id}`;
-  caption.textContent = hasBattle()
-    ? "\u5bf9\u5c40\u5df2\u7ecf\u5f00\u59cb\u3002\u4f60\u53ef\u4ee5\u8fd4\u56de\u6218\u573a\u7ee7\u7eed\u6d4b\u8bd5\uff0c\u6216\u7559\u5728\u8fd9\u91cc\u67e5\u770b\u623f\u95f4\u4fe1\u606f\u3002"
-    : (isRandomRoomMode()
-      ? "\u5f53\u524dä½¿ç”¨éšæœºé€‰äººæ¨¡å¼ï¼ŒåŒæ–¹å…¥åœºåŽæ— éœ€æ‰‹åŠ¨é€‰å°†ï¼Œå¼€å±€æ—¶ä¼šè‡ªåŠ¨éšæœºåˆ†é…æ­¦å°†ã€‚"
-      : "\u53cc\u65b9\u73a9\u5bb6\u5728\u8fd9\u91cc\u5404\u81ea\u9009\u62e9\u81ea\u5df1\u7684\u6b66\u5c06\uff0c\u51c6\u5907\u5b8c\u6210\u540e\u5f00\u59cb\u5bf9\u5c40\u3002");
-
-  $("room-code-label").textContent = state.room.room_id;
-  $("room-status-label").textContent = state.room.status === "lobby"
-    ? "\u7b49\u5f85\u53cc\u65b9\u5c31\u7eea"
-    : (isGameOver() ? "\u5bf9\u5c40\u7ed3\u675f" : "\u5bf9\u5c40\u8fdb\u884c\u4e2d");
-  $("viewer-seat-label").textContent = state.room.viewer_player_id ? `\u73a9\u5bb6 ${state.room.viewer_player_id}` : "\u89c2\u6218 / \u672a\u5360\u4f4d";
-  $("viewer-seat-note").textContent = state.room.viewer_name
-    ? `${state.room.viewer_name}${state.room.viewer_is_host ? " \u00b7 \u623f\u4e3b" : ""}`
-    : "\u5f53\u524d\u6d4f\u89c8\u5668\u8fd8\u6ca1\u6709\u5360\u7528\u5e2d\u4f4d";
-  $("invite-path-label").textContent = state.room.invite_url || state.room.invite_path;
-
-  leaveRoomBtn.classList.remove("hidden");
-  leaveRoomBtn.disabled = false;
-  deleteRoomBtn.classList.toggle("hidden", !state.room.viewer_is_host);
-  deleteRoomBtn.disabled = !state.room.viewer_is_host;
-  copyInvite.classList.toggle("hidden", !state.room.invite_url);
-  roomBattle.classList.toggle("hidden", !hasBattle());
-  roomBattle.disabled = !hasBattle();
-  roomBattle.textContent = "\u8fdb\u5165\u6218\u573a";
-  startRoom.classList.toggle("hidden", !(state.room.viewer_player_id !== null && ["lobby", "finished"].includes(state.room.status)));
-  startRoom.disabled = state.room.status === "lobby" ? !state.room.can_start : !state.room.can_rematch;
-  startRoom.textContent = state.room.status === "finished"
-    ? "\u91cd\u65b0\u5f00\u59cb\u9009\u5c06"
-    : (isRandomRoomMode() ? "\u5f00\u59cb\u968f\u673a\u5bf9\u5c40" : "\u5f00\u59cb\u5bf9\u5c40");
-
-  const roomMessage = $("room-message");
-  if (hasBattle()) {
-    roomMessage.textContent = isGameOver()
-      ? `\u623f\u95f4 ${state.room.room_id} \u7684\u672c\u5c40\u5bf9\u6218\u5df2\u7ecf\u7ed3\u675f\u3002\u4f60\u53ef\u4ee5\u8fdb\u5165\u6218\u573a\u67e5\u770b\u7ec8\u5c40\u76d8\u9762\uff0c\u6216\u76f4\u63a5\u91cd\u65b0\u5f00\u59cb\u9009\u5c06\u518d\u6765\u4e00\u5c40\u3002`
-      : `\u623f\u95f4 ${state.room.room_id} \u7684\u5bf9\u5c40\u6b63\u5728\u8fdb\u884c\u4e2d\u3002\u70b9\u51fb\u201c\u8fdb\u5165\u6218\u573a\u201d\u5373\u53ef\u67e5\u770b\u5e76\u7ee7\u7eed\u64cd\u4f5c\u3002`;
-  } else if (state.room.viewer_player_id === null) {
-    roomMessage.textContent = state.room.is_full
-      ? "\u8fd9\u4e2a\u623f\u95f4\u5df2\u7ecf\u6ee1\u5458\u3002\u4f60\u5f53\u524d\u53ef\u4ee5\u89c2\u6218\uff0c\u4f46\u4e0d\u80fd\u4ee3\u66ff\u5176\u4e2d\u4efb\u610f\u4e00\u4f4d\u73a9\u5bb6\u64cd\u4f5c\u3002"
-      : `\u8fd9\u4e2a\u623f\u95f4\u8fd8\u6709\u7a7a\u4f4d\u3002\u70b9\u51fb\u201c\u52a0\u5165\u623f\u95f4\u201d\u540e\uff0c\u5373\u53ef\u4ee5\u201c${effectiveProfileName()}\u201d\u4f5c\u4e3a\u53e6\u4e00\u4f4d\u73a9\u5bb6\u8fdb\u5165\u3002`;
-  } else if (!currentRoomSeat()?.hero_code) {
-    roomMessage.textContent = `\u4f60\u5f53\u524d\u662f\u73a9\u5bb6 ${state.room.viewer_player_id}\uff0c\u8bf7\u4ece\u4e0b\u65b9\u9009\u62e9\u81ea\u5df1\u7684\u6b66\u5c06\u3002`;
-  } else if (state.room.status === "finished") {
-    roomMessage.textContent = "\u672c\u5c40\u5bf9\u6218\u5df2\u7ed3\u675f\u3002\u53ef\u4ee5\u76f4\u63a5\u91cd\u65b0\u5f00\u59cb\u9009\u5c06\uff0c\u4e24\u4f4d\u73a9\u5bb6\u5728\u540c\u4e00\u623f\u95f4\u518d\u6765\u4e00\u5c40\u3002";
-  } else if (!state.room.can_start) {
-    roomMessage.textContent = "\u4f60\u5df2\u7ecf\u9009\u597d\u4e86\u6b66\u5c06\uff0c\u6b63\u5728\u7b49\u5f85\u53e6\u4e00\u4f4d\u73a9\u5bb6\u52a0\u5165\u6216\u5b8c\u6210\u9009\u5c06\u3002";
-  } else {
-    roomMessage.textContent = "\u53cc\u65b9\u90fd\u5df2\u5c31\u7eea\uff0c\u53ef\u4ee5\u5f00\u59cb\u8fd9\u573a\u8054\u673a\u6d4b\u8bd5\u5bf9\u5c40\u3002";
-  }
-
-  const seatCards = $("seat-cards");
-  seatCards.innerHTML = "";
-  (state.room.seats || []).forEach((seat) => {
-    const card = document.createElement("article");
-    card.className = `seat-card ${seat.player_id === state.room.viewer_player_id ? "is-viewer" : ""} ${seat.occupied ? "" : "is-empty"}`;
-    card.innerHTML = `
-      <div class="seat-head">
-        <div>
-          <div class="seat-name">\u73a9\u5bb6 ${seat.player_id}</div>
-          <div class="seat-note">${seat.name || "\u5c1a\u672a\u52a0\u5165"}</div>
-        </div>
-        <span class="seat-badge">${seat.is_host ? "\u623f\u4e3b" : "\u5e2d\u4f4d"}</span>
-      </div>
-      <div class="seat-hero"><strong>\u5f53\u524d\u6b66\u5c06\uff1a</strong>${seat.hero_name || "\u672a\u9009\u62e9"}</div>
-      <div class="seat-note">${seat.occupied ? "\u5df2\u8fdb\u5165\u623f\u95f4" : "\u7b49\u5f85\u670b\u53cb\u52a0\u5165\u8be5\u5e2d\u4f4d"}</div>
-    `;
-    seatCards.append(card);
-  });
 }
 
 function roomStateLabel(room) {
@@ -3081,60 +2818,6 @@ function renderGameOverOverlay() {
   overlay.classList.remove("hidden");
 }
 
-function renderReplayToolbar() {
-  const toolbar = $("replay-toolbar");
-  if (!toolbar) return;
-  const replay = replayMeta();
-  const simulation = simulationMeta();
-  const visible = hasBattle() && replay.available;
-  toolbar.classList.toggle("hidden", !visible);
-  if (!visible) return;
-  const lastIndex = Number(replay.last_step_index || 0);
-  const liveIndex = Number(simulation.live_step_index || 0);
-  const currentIndex = isReplayMode()
-    ? Math.max(0, Math.min(lastIndex, Number(state.replayStepIndex || 0)))
-    : Math.max(0, Math.min(lastIndex, liveIndex));
-  const back = $("replay-step-back");
-  const pause = $("replay-pause");
-  const live = $("replay-live");
-  const forward = $("replay-step-forward");
-  const speed = $("replay-speed");
-  const omniscient = $("replay-omniscient");
-  const timeline = $("replay-timeline");
-  const status = $("replay-status");
-  if (speed) {
-    speed.value = String(simulation.speed || 1);
-    speed.disabled = !state.room?.viewer_is_host;
-  }
-  if (omniscient) {
-    omniscient.checked = Boolean(state.replayOmniscient);
-    omniscient.disabled = !replay.can_use_omniscient;
-  }
-  if (timeline) {
-    timeline.max = String(lastIndex);
-    timeline.value = String(currentIndex);
-    timeline.disabled = !replay.available;
-  }
-  if (back) back.disabled = currentIndex <= 0;
-  if (forward) forward.disabled = currentIndex >= lastIndex;
-  if (live) live.disabled = !isReplayMode();
-  if (pause) {
-    pause.textContent = simulation.paused ? "ç»§ç»­" : "æš‚åœ";
-    pause.disabled = !simulation.can_control;
-  }
-  if (status) {
-    if (isReplayMode()) {
-      status.textContent = `å›žæ”¾ ${currentIndex}/${lastIndex}`;
-    } else if (simulation.enabled) {
-      status.textContent = simulation.paused
-        ? `å·²æš‚åœ ${liveIndex}/${lastIndex}`
-        : `å®žæ—¶ ${liveIndex}/${lastIndex}`;
-    } else {
-      status.textContent = `æœ¬å±€ ${currentIndex}/${lastIndex}`;
-    }
-  }
-}
-
 function renderRoomActionButtons() {
   const surrenderBtn = $("surrender-battle");
   if (!surrenderBtn) return;
@@ -3147,49 +2830,6 @@ function renderRoomActionButtons() {
   );
   surrenderBtn.classList.toggle("hidden", !canSurrender);
   surrenderBtn.disabled = !canSurrender;
-}
-
-function renderMessage() {
-  const node = $("message");
-  if (!state.battle) {
-    node.textContent = hasRoom() ? "房间已建立,但对局还没开始。" : "尚未进入房间。";
-    return;
-  }
-  if (isGameOver()) {
-    node.textContent = `玩家 ${state.battle.winner} 已获胜。战场已锁定,可回到房间大厅查看本局房间。`;
-    return;
-  }
-  if (!canInteract()) {
-    node.textContent = `当前轮到玩家 ${inputPlayer()} 操作。你可以继续观察战场,等待对手行动完成。`;
-    return;
-  }
-  if (isRespawnMode()) {
-    const prompt = currentRespawnPrompt();
-    const unit = unitById(prompt?.unit_id || "");
-    node.textContent = `${unit?.name || "消失单位"} 需要先重新出现。请点击蓝色高亮的最近落点。`;
-    return;
-  }
-  if (state.selectedActionCode === "mana_pull" && !state.stagedPayload?.targetUnitId) {
-    node.textContent = "魔力牵引分两步:先选单位,再选落点。";
-    return;
-  }
-  if (state.stagedPayload?.targetUnitId && state.selectedActionCode === "mana_pull") {
-    node.textContent = `已选中 ${stagedTarget()?.name || "被牵引目标"},请点击蓝色高亮落点。`;
-    return;
-  }
-  if (isChainMode()) {
-    const current = unitById(state.battle.pending_chain?.current_unit_id || "");
-    const source = unitById(state.battle.pending_chain?.queued_action?.actor_id || "");
-    const actionName = state.battle.pending_chain?.queued_action?.display_name || "原动作";
-    node.textContent = `${current?.name || "当前单位"} 可以对 ${source?.name || "对方单位"} 的【${actionName}】进行连锁,点击其周围动作按钮或放弃连锁。`;
-    return;
-  }
-  const action = selectedAction();
-  if (action) {
-    node.textContent = `已选择【${actionTitle(action)}】。${actionNeedsTarget(action) ? "请在棋盘上点击蓝色高亮目标。" : "再次点击会立即结算。"} `;
-    return;
-  }
-  node.textContent = `当前由玩家 ${inputPlayer()} 操作。`;
 }
 
 function renderTargetCancelButton() {
@@ -3269,11 +2909,12 @@ function render() {
   document.body.classList.toggle("battle-mode", state.screen === "battle");
   ensureDraftSelection();
   ensureSelectedUnit();
+  const preserveRoomConfig = isRoomConfigControlActive();
   renderScreens();
   renderNavigation();
   renderProfilePanel();
   renderProfileModal();
-  renderRoomPanels();
+  if (!preserveRoomConfig) renderRoomPanels();
   applyRandomRoomPanelState();
   renderResumePanel();
   renderRoomListActive();
@@ -3287,9 +2928,11 @@ function render() {
   renderHoverCard();
   renderSidebarPanels();
   renderSelectedCard();
+  renderActionPanel();
   renderUnitStrip();
   renderChainPanel();
   renderLogs();
+  renderFloatingToasts();
   renderGameOverOverlay();
   renderReplayToolbar();
   renderRoomActionButtons();
@@ -3687,6 +3330,98 @@ async function setSeatRandomQuota(seatId, quota) {
   }
 }
 
+function renderRoomListActive() {
+  const list = $("room-list");
+  if (!list) return;
+  list.innerHTML = "";
+  if (!roomSummaries().length) {
+    const empty = document.createElement("div");
+    empty.className = "room-list-empty";
+    empty.textContent = "\u5f53\u524d\u8fd8\u6ca1\u6709\u516c\u5f00\u623f\u95f4\u3002\u4f60\u53ef\u4ee5\u5148\u521b\u5efa\u4e00\u95f4\uff0c\u6216\u8005\u7a0d\u540e\u7b49\u670b\u53cb\u5efa\u597d\u623f\u95f4\u540e\u76f4\u63a5\u5728\u8fd9\u91cc\u52a0\u5165\u3002";
+    list.append(empty);
+    return;
+  }
+
+  roomSummaries().forEach((room) => {
+    const remembered = loadStoredIdentity(room.room_id);
+    const seatSummary = (room.seats || [])
+      .map((seat) => {
+        const summary = seat.hero_summary || seat.hero_name || (room.mode === "random" && seat.occupied ? "\u5f00\u5c40\u540e\u968f\u673a\u5206\u914d" : "");
+        return `\u5e2d\u4f4d ${seat.player_id}\uff1a${seat.team_name || ""} \u00b7 ${seat.name || controllerTypeLabel(seat)}${summary ? ` \u00b7 ${summary}` : ""}`;
+      })
+      .join(" / ");
+    const card = document.createElement("article");
+    card.className = "room-list-card";
+    card.innerHTML = `
+      <div class="room-list-head">
+        <strong>\u623f\u95f4 ${room.room_id}</strong>
+        <span class="room-list-state ${roomStateClass(room)}">${roomStateLabel(room)}</span>
+      </div>
+      <div class="room-list-meta">\u5e2d\u4f4d ${room.occupied_seat_count}/${room.seat_count} \u00b7 ${room.mode_name || roomModeMeta(room.mode).name} \u00b7 ${room.status === "lobby" ? "\u7b49\u5f85\u73a9\u5bb6\u5c31\u7eea" : "\u6b63\u5728\u8fdb\u884c\u6216\u5df2\u7ed3\u675f"}</div>
+      <div class="room-list-seats">${seatSummary}</div>
+      <div class="room-list-note">${remembered.token ? "\u8fd9\u4e2a\u6d4f\u89c8\u5668\u4e4b\u524d\u8fdb\u5165\u8fc7\u8be5\u623f\u95f4\u3002\u4f60\u53ef\u4ee5\u7ee7\u7eed\u539f\u6765\u7684\u5e2d\u4f4d\uff0c\u4e5f\u53ef\u4ee5\u76f4\u63a5\u7528\u5f53\u524d\u6635\u79f0\u201c${effectiveProfileName()}\u201d\u4f5c\u4e3a\u65b0\u73a9\u5bb6\u52a0\u5165\u3002" : `\u73b0\u5728\u53ef\u4ee5\u76f4\u63a5\u7528\u5f53\u524d\u6635\u79f0\u201c${effectiveProfileName()}\u201d\u52a0\u5165\u3002`} </div>
+    `;
+
+    const actions = document.createElement("div");
+    actions.className = "room-list-actions";
+
+    const primary = document.createElement("button");
+    primary.className = room.can_join ? "primary" : "ghost";
+    primary.textContent = room.can_join ? "\u52a0\u5165\u623f\u95f4" : "\u67e5\u770b\u623f\u95f4";
+    primary.addEventListener("click", () => {
+      if (room.can_join) {
+        joinListedRoom(room.room_id);
+        return;
+      }
+      openListedRoom(room.room_id);
+    });
+    actions.append(primary);
+
+    if (remembered.token) {
+      const resumeBtn = document.createElement("button");
+      resumeBtn.className = "ghost";
+      resumeBtn.textContent = "\u7ee7\u7eed\u539f\u8eab\u4efd";
+      resumeBtn.addEventListener("click", () => resumeStoredSeat(room.room_id));
+      actions.append(resumeBtn);
+    }
+
+    if (!remembered.token && room.can_join) {
+      const fillBtn = document.createElement("button");
+      fillBtn.className = "ghost";
+      fillBtn.textContent = "\u586b\u5165\u623f\u95f4\u7801";
+      fillBtn.addEventListener("click", () => {
+        state.roomForm.joinRoomCode = room.room_id;
+        joinListedRoom(room.room_id);
+        $("lobby-caption").textContent = `\u5df2\u586b\u5165\u623f\u95f4 ${room.room_id}\u3002\u70b9\u51fb\u201c\u52a0\u5165\u623f\u95f4\u201d\u540e\uff0c\u5c31\u4f1a\u4ee5\u201c${effectiveProfileName()}\u201d\u52a0\u5165\u3002`;
+        renderProfilePanel();
+      });
+      actions.append(fillBtn);
+    }
+
+    card.append(actions);
+    list.append(card);
+  });
+}
+
+function renderResumePanel() {
+  const panel = $("resume-room-panel");
+  const text = $("resume-room-text");
+  const button = $("resume-room");
+  if (!panel || !text) return;
+  const identity = storedIdentityForCurrentRoom();
+  const canReclaim = canReclaimSeatByName();
+  const visible = Boolean(roomQueryId() && !viewerPlayerId() && !state.playerToken && (identity.token || canReclaim));
+  panel.classList.toggle("hidden", !visible);
+  if (!visible) return;
+  if (identity.token) {
+    text.textContent = `\u68c0\u6d4b\u5230\u8fd9\u4e2a\u6d4f\u89c8\u5668\u4e4b\u524d\u66fe\u4ee5\u201c${identity.name || "\u672a\u547d\u540d\u73a9\u5bb6"}\u201d\u8fdb\u5165\u5f53\u524d\u623f\u95f4\u3002\u4f60\u53ef\u4ee5\u76f4\u63a5\u7ee7\u7eed\u539f\u6765\u7684\u5e2d\u4f4d\u3002`;
+    if (button) button.textContent = "\u7ee7\u7eed\u539f\u8eab\u4efd";
+    return;
+  }
+  text.textContent = `\u5f53\u524d\u6635\u79f0\u201c${effectiveProfileName()}\u201d\u4e0e\u623f\u95f4\u91cc\u7684\u65e7\u5e2d\u4f4d\u5339\u914d\u3002\u5982\u679c\u4f60\u662f\u539f\u73a9\u5bb6\uff0c\u53ef\u4ee5\u7528\u8fd9\u4e2a\u6635\u79f0\u6062\u590d\u5e2d\u4f4d\u3002`;
+  if (button) button.textContent = "\u6062\u590d\u5e2d\u4f4d";
+}
+
 async function selectRoomHero(heroCode, delta = 1, seatId = null) {
   if (!hasRoom() || !state.playerToken) return;
   try {
@@ -3778,7 +3513,7 @@ async function loadReplayStep(stepIndex, { omniscient = state.replayOmniscient }
     syncSelectedUnitAfterStateChange();
     render();
   } catch (error) {
-    $("message").textContent = error.error || "åŠ è½½å›žæ”¾æ­¥æ•°å¤±è´¥ã€‚";
+    $("message").textContent = error.error || "\u52a0\u8f7d\u56de\u653e\u6b65\u6570\u5931\u8d25\u3002";
   }
 }
 
@@ -3804,7 +3539,7 @@ async function controlSimulation(action, speed = null) {
       applyRoomPayload(error.state, { preserveScreen: true });
       render();
     }
-    $("message").textContent = error.error || "æŽ§åˆ¶ AI æ¨¡æ‹Ÿå¤±è´¥ã€‚";
+    $("message").textContent = error.error || "\u63a7\u5236 AI \u6a21\u62df\u5931\u8d25\u3002";
   }
 }
 
@@ -3885,6 +3620,11 @@ function onActionClick(action) {
 
 function attackTargetIdAtCell(action, x, y, occupant) {
   const preview = currentPreview();
+  const key = positionKey({ x, y });
+  const previewRestrictsCells = preview.cellKeys.size > 0;
+  if (previewRestrictsCells && !preview.cellKeys.has(key)) {
+    return "";
+  }
   if (occupant && preview.targetIds.has(occupant.id) && unitIsSelectableTarget(occupant)) {
     return occupant.id;
   }
@@ -3894,7 +3634,13 @@ function attackTargetIdAtCell(action, x, y, occupant) {
 }
 
 function onBoardClick(x, y, occupant) {
-  if (!canInteract()) return;
+  if (!canInteract()) {
+    clearActionSelection();
+    state.selectedUnitId = occupant?.id || "";
+    if (occupant) state.sidebarExpanded = "info";
+    render();
+    return;
+  }
   const preview = currentPreview();
   const action = selectedAction();
   const key = positionKey({ x, y });
@@ -3916,6 +3662,17 @@ function onBoardClick(x, y, occupant) {
     const rawTargetIds = targetIdsToSet(action.preview?.target_unit_ids || []);
     canUseCell = rawCellKeys.has(key);
     canUseUnit = occupant ? rawTargetIds.has(occupant.id) : false;
+  }
+
+  if (
+    action
+    && occupant
+    && preview.cellKeys.size
+    && preview.targetIds.size
+    && action.preview?.requires_target
+    && action.target_mode !== "cell"
+  ) {
+    canUseUnit = canUseUnit && preview.cellKeys.has(key);
   }
 
   if (isRespawnMode()) {
@@ -4273,6 +4030,74 @@ function bindEvents() {
   $("board-stage").addEventListener("scroll", () => {
     scheduleBoardOverlayRender();
   });
+  $("board-stage").addEventListener("wheel", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest("input, select, textarea, label")) return;
+    if (typeof event.preventDefault === "function") event.preventDefault();
+    const delta = Number(event.deltaY || 0);
+    if (Math.abs(delta) < 0.5) return;
+    const step = delta < 0 ? 0.12 : -0.12;
+    setBoardZoom((state.boardZoom || 1) + step, {
+      clientX: event.clientX,
+      clientY: event.clientY,
+    });
+  }, { passive: false });
+  $("board-stage").addEventListener("pointerdown", (event) => {
+    const stage = $("board-stage");
+    const board = $("board");
+    const target = event.target instanceof Element ? event.target : null;
+    if (event.button !== 0) return;
+    if (!target || target.closest("input, select, textarea, label, .board-alert")) return;
+    if (isBoardTargetSelectionActive()) return;
+    const boardCell = target.closest(".cell");
+    const clickedBoardCell = Boolean(board && boardCell && board.contains(boardCell));
+    if (!clickedBoardCell && target.closest("button")) return;
+    boardDragState = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      scrollLeft: stage.scrollLeft,
+      scrollTop: stage.scrollTop,
+      dragging: false,
+    };
+    if (typeof stage.setPointerCapture === "function") {
+      try {
+        stage.setPointerCapture(event.pointerId);
+      } catch (error) {
+        // Ignore browsers that reject capture for synthetic or unsupported pointers.
+      }
+    }
+  });
+  $("board-stage").addEventListener("pointermove", (event) => {
+    if (!boardDragState || boardDragState.pointerId !== event.pointerId) return;
+    const dx = event.clientX - boardDragState.startX;
+    const dy = event.clientY - boardDragState.startY;
+    if (!boardDragState.dragging && Math.hypot(dx, dy) < 6) return;
+    boardDragState.dragging = true;
+    boardDragSuppressUntil = Date.now() + 160;
+    $("board-stage").classList.add("is-dragging");
+    $("board-stage").scrollLeft = boardDragState.scrollLeft - dx;
+    $("board-stage").scrollTop = boardDragState.scrollTop - dy;
+    scheduleBoardOverlayRender();
+  });
+  const endBoardDrag = (event) => {
+    if (!boardDragState || (event && boardDragState.pointerId !== event.pointerId)) return;
+    const stage = $("board-stage");
+    if (boardDragState.dragging) {
+      boardDragSuppressUntil = Date.now() + 160;
+    }
+    if (typeof stage.releasePointerCapture === "function") {
+      try {
+        stage.releasePointerCapture(boardDragState.pointerId);
+      } catch (error) {
+        // Ignore browsers that reject release for uncaptured pointers.
+      }
+    }
+    stage.classList.remove("is-dragging");
+    boardDragState = null;
+  };
+  $("board-stage").addEventListener("pointerup", endBoardDrag);
+  $("board-stage").addEventListener("pointercancel", endBoardDrag);
   window.addEventListener("resize", () => {
     scheduleBoardOverlayRender();
   });
@@ -4290,11 +4115,9 @@ function bindEvents() {
     if (!canInteract()) return;
     performAction({ type: "chain_skip" });
   });
-  document.querySelectorAll(".sidebar-toggle").forEach((button) => {
-    button.addEventListener("click", () => {
-      toggleSidebarPanel(button.dataset.sidebarPanel || "");
-      render();
-    });
+  $("toggle-right-rail")?.addEventListener("click", () => {
+    toggleSidebarPanel("logs");
+    render();
   });
   document.addEventListener("click", (event) => {
     const target = event.target instanceof Element ? event.target : null;
@@ -4324,6 +4147,24 @@ function bindEvents() {
       });
       render();
     }
+  });
+  document.addEventListener("pointerover", (event) => {
+    const target = event.target instanceof Element ? event.target.closest("[data-tooltip]") : null;
+    if (!target) return;
+    showTooltip(target.getAttribute("data-tooltip"), { x: event.clientX, y: event.clientY });
+  });
+  document.addEventListener("pointermove", (event) => {
+    const target = event.target instanceof Element ? event.target.closest("[data-tooltip]") : null;
+    if (!target) return;
+    showTooltip(target.getAttribute("data-tooltip"), { x: event.clientX, y: event.clientY });
+  });
+  document.addEventListener("pointerout", (event) => {
+    const target = event.target instanceof Element ? event.target.closest("[data-tooltip]") : null;
+    if (!target) return;
+    if (tooltipHideHandle) window.clearTimeout(tooltipHideHandle);
+    tooltipHideHandle = window.setTimeout(() => {
+      hideTooltip();
+    }, 40);
   });
   $("complete-targeting").addEventListener("click", () => {
     if (!canCompleteTargetSelection()) return;
@@ -4424,11 +4265,11 @@ function bindEvents() {
     state.hoverPointer = null;
     renderHoverCard();
   });
-  $("board").addEventListener("pointerdown", (event) => {
+  $("board").addEventListener("click", (event) => {
+    if (Date.now() < boardDragSuppressUntil) return;
     const target = event.target instanceof Element ? event.target : null;
     const cell = target?.closest(".cell");
     if (!cell || !$("board").contains(cell)) return;
-    event.preventDefault();
     const x = Number(cell.dataset.x);
     const y = Number(cell.dataset.y);
     onBoardClick(x, y, activeOccupantAt(x, y));
@@ -4440,265 +4281,6 @@ function bindEvents() {
 }
 
 // Override legacy definitions above so the random-room lobby flow uses a single clean state path.
-function ensureSelectedUnit() {
-  if (!state.battle) {
-    state.selectedUnitId = "";
-    return;
-  }
-  const action = selectedAction();
-  if (isRespawnMode()) {
-    state.selectedUnitId = currentRespawnPrompt()?.unit_id || "";
-    return;
-  }
-  if (isChainMode() && !action) {
-    state.selectedUnitId = state.battle.pending_chain?.current_unit_id || "";
-    return;
-  }
-  if (isGameOver()) {
-    if (unitById(state.selectedUnitId)) return;
-    state.selectedUnitId = allUnits()[0]?.id || "";
-    return;
-  }
-  if (!state.selectedUnitId) {
-    const controllable = activeBundles().map((entry) => entry.unit_id);
-    state.selectedUnitId = controllable[0] || allUnits()[0]?.id || "";
-    return;
-  }
-  if (unitById(state.selectedUnitId)) {
-    return;
-  }
-  const controllable = activeBundles().map((entry) => entry.unit_id);
-  state.selectedUnitId = controllable[0] || allUnits()[0]?.id || "";
-}
-
-function renderHeader() {
-  const pill = $("turn-pill");
-  const topbarSubline = $("topbar-subline");
-  const caption = $("board-caption");
-  const modeMeta = roomModeMeta();
-  if (!hasRoom()) {
-    pill.textContent = "\u5c1a\u672a\u8fdb\u5165\u623f\u95f4";
-    topbarSubline.textContent = "\u521b\u5efa\u623f\u95f4\u3001\u590d\u5236\u9080\u8bf7\u94fe\u63a5\u3001\u8ba9\u4e24\u4f4d\u73a9\u5bb6\u5206\u522b\u8fdb\u5165\u540c\u4e00\u623f\u95f4\u540e\u5728\u7ebf\u5bf9\u6218\u3002";
-    caption.textContent = "\u8bf7\u5148\u521b\u5efa\u623f\u95f4\u6216\u52a0\u5165\u623f\u95f4\u3002";
-    return;
-  }
-  if (!state.battle) {
-    pill.textContent = `\u623f\u95f4 ${state.room.room_id} \u00b7 ${state.room.status === "lobby" ? "\u5927\u5385\u4e2d" : "\u7b49\u5f85\u5f00\u5c40"}`;
-    if (isRandomRoomMode()) {
-      topbarSubline.textContent = state.room.viewer_player_id
-        ? `\u4f60\u5f53\u524d\u662f\u73a9\u5bb6 ${state.room.viewer_player_id}\u3002\u5f53\u524d\u623f\u95f4\u4f7f\u7528\u300c${modeMeta.name}\u300d\uff0c\u5f00\u5c40\u540e\u4f1a\u968f\u673a\u5206\u914d\u6b66\u5c06\uff0c\u5e76\u5728\u66f4\u5927\u7684\u6218\u573a\u4e0a\u968f\u673a\u51fa\u751f\u3002`
-        : "\u4f60\u5f53\u524d\u8fd8\u6ca1\u6709\u5360\u7528\u5e2d\u4f4d\u3002\u82e5\u623f\u95f4\u4ecd\u6709\u7a7a\u4f4d\uff0c\u8f93\u5165\u6635\u79f0\u540e\u5373\u53ef\u52a0\u5165\u3002";
-      caption.textContent = "\u5bf9\u5c40\u5c1a\u672a\u5f00\u59cb\uff0c\u968f\u673a\u9009\u4eba\u6a21\u5f0f\u4e0b\u65e0\u9700\u624b\u52a8\u9009\u5c06\u3002";
-      return;
-    }
-    topbarSubline.textContent = state.room.viewer_player_id
-      ? `\u4f60\u5f53\u524d\u662f\u73a9\u5bb6 ${state.room.viewer_player_id}\u3002\u5728\u5927\u5385\u91cc\u4e3a\u81ea\u5df1\u9009\u62e9\u6b66\u5c06\uff0c\u53cc\u65b9\u90fd\u9009\u597d\u540e\u5f00\u59cb\u5bf9\u5c40\u3002`
-      : "\u4f60\u5f53\u524d\u8fd8\u6ca1\u6709\u5360\u7528\u5e2d\u4f4d\u3002\u82e5\u623f\u95f4\u4ecd\u6709\u7a7a\u4f4d\uff0c\u8f93\u5165\u6635\u79f0\u540e\u5373\u53ef\u52a0\u5165\u3002";
-    caption.textContent = "\u5bf9\u5c40\u5c1a\u672a\u5f00\u59cb\uff0c\u8bf7\u5148\u5728\u623f\u95f4\u5927\u5385\u5b8c\u6210\u9009\u5c06\u3002";
-    return;
-  }
-  topbarSubline.textContent = state.room.viewer_player_id
-    ? `\u623f\u95f4 ${state.room.room_id} \u5728\u7ebf\u5bf9\u6218\u4e2d\u3002\u4f60\u5f53\u524d\u662f\u73a9\u5bb6 ${state.room.viewer_player_id}\u3002`
-    : `\u623f\u95f4 ${state.room.room_id} \u5728\u7ebf\u5bf9\u6218\u4e2d\u3002\u4f60\u5f53\u524d\u4ee5\u89c2\u6218\u89c6\u89d2\u67e5\u770b\u6b64\u623f\u95f4\u3002`;
-  if (isGameOver()) {
-    pill.textContent = `\u623f\u95f4 ${state.room.room_id} \u00b7 \u73a9\u5bb6 ${state.battle.winner} \u83b7\u80dc`;
-    caption.textContent = `\u73a9\u5bb6 ${state.battle.winner} \u5df2\u83b7\u80dc\uff0c\u6218\u573a\u5df2\u9501\u5b9a\u3002`;
-    return;
-  }
-  if (isRespawnMode()) {
-    const prompt = currentRespawnPrompt();
-    const unit = unitById(prompt?.unit_id || "");
-    pill.textContent = `\u623f\u95f4 ${state.room.room_id} \u00b7 \u73a9\u5bb6 ${inputPlayer()} \u91cd\u65b0\u51fa\u73b0\u4e2d`;
-    caption.textContent = `\u8bf7\u9009\u62e9 ${unit?.name || "\u6d88\u5931\u5355\u4f4d"} \u7684\u91cd\u65b0\u51fa\u73b0\u4f4d\u7f6e\u3002`;
-    return;
-  }
-  if (isChainMode()) {
-    const current = state.battle.pending_chain?.current_unit_id
-      ? unitById(state.battle.pending_chain.current_unit_id)?.name
-      : "\u54cd\u5e94\u65b9";
-    const sourceSummary = chainQueuedActionPrompt(state.battle.pending_chain);
-    pill.textContent = `\u623f\u95f4 ${state.room.room_id} \u00b7 \u73a9\u5bb6 ${inputPlayer()} \u8fde\u9501\u4e2d`;
-    caption.textContent = `\u7b49\u5f85 ${current} \u54cd\u5e94 ${sourceSummary}`;
-    return;
-  }
-  pill.textContent = `\u623f\u95f4 ${state.room.room_id} \u00b7 \u7b2c ${state.battle.round_number} \u8f6e \u00b7 \u73a9\u5bb6 ${inputPlayer()} \u884c\u52a8`;
-  caption.textContent = "\u70b9\u51fb\u5df1\u65b9\u68cb\u5b50\uff0c\u5728\u68cb\u5b50\u5468\u56f4\u9009\u62e9\u52a8\u4f5c\u3002";
-}
-
-function renderRoomPanels() {
-  const showLobby = shouldShowLobbyPanel();
-  const roomId = roomQueryId();
-  $("room-home").classList.toggle("hidden", showLobby);
-  $("room-lobby").classList.toggle("hidden", !showLobby);
-  if ($("create-name")) $("create-name").value = state.roomForm.createName;
-  if ($("join-name")) $("join-name").value = state.roomForm.joinName;
-  $("join-room-code").value = roomId || state.roomForm.joinRoomCode;
-
-  const title = $("lobby-title");
-  const caption = $("lobby-caption");
-  const copyInvite = $("copy-invite");
-  const roomBattle = $("room-battle");
-  const startRoom = $("start-room");
-  const leaveRoomBtn = $("leave-room");
-  const deleteRoomBtn = $("delete-room");
-  const joinRoomButton = $("join-room");
-  const modeLabel = $("room-mode-label");
-  const modeNote = $("room-mode-note");
-  const modeSelect = $("room-mode-select");
-  renderRecoveryButton();
-
-  if (!hasRoom()) {
-    title.textContent = "\u5728\u7ebf\u623f\u95f4";
-    caption.textContent = "\u5148\u786e\u8ba4\u4f60\u8981\u4f7f\u7528\u7684\u6635\u79f0\uff0c\u7136\u540e\u521b\u5efa\u623f\u95f4\u6216\u8f93\u5165\u623f\u95f4\u7801\u52a0\u5165\u3002\u8fdb\u5165\u623f\u95f4\u540e\uff0c\u6bcf\u4f4d\u73a9\u5bb6\u5404\u81ea\u9009\u62e9\u81ea\u5df1\u7684\u6b66\u5c06\uff0c\u518d\u5f00\u59cb\u5bf9\u5c40\u3002";
-    if (modeLabel) modeLabel.textContent = fallbackRoomModes()[0].name;
-    if (modeNote) modeNote.textContent = "\u8fdb\u5165\u623f\u95f4\u540e\u53ef\u7531\u623f\u4e3b\u9009\u62e9\u6218\u6597\u6a21\u5f0f\u3002";
-    if (modeSelect) {
-      modeSelect.innerHTML = "";
-      availableRoomModes().forEach((mode) => {
-        const option = document.createElement("option");
-        option.value = mode.code;
-        option.textContent = mode.name;
-        modeSelect.append(option);
-      });
-      modeSelect.disabled = true;
-    }
-    if (randomRosterControl) randomRosterControl.classList.add("hidden");
-    leaveRoomBtn.classList.add("hidden");
-    deleteRoomBtn.classList.add("hidden");
-    copyInvite.classList.add("hidden");
-    roomBattle.classList.add("hidden");
-    startRoom.classList.add("hidden");
-    joinRoomButton.disabled = !state.profileReady || !String($("join-room-code").value || "").trim();
-    return;
-  }
-
-  const modeMeta = roomModeMeta();
-  if (modeLabel) modeLabel.textContent = modeMeta.name;
-  if (modeNote) {
-    const hostHint = state.room.viewer_is_host && state.room.status === "lobby"
-      ? "\u623f\u4e3b\u53ef\u5728\u5f00\u5c40\u524d\u5207\u6362\u6a21\u5f0f\uff0c\u5207\u6362\u540e\u4f1a\u6e05\u7a7a\u5f53\u524d\u9009\u5c06\u3002"
-      : "\u4ec5\u623f\u4e3b\u53ef\u5728\u5927\u5385\u91cc\u5207\u6362\u6a21\u5f0f\u3002";
-    modeNote.textContent = `${modeMeta.description} ${hostHint}`;
-  }
-  if (modeSelect) {
-    modeSelect.innerHTML = "";
-    availableRoomModes().forEach((mode) => {
-      const option = document.createElement("option");
-      option.value = mode.code;
-      option.textContent = mode.name;
-      if (mode.code === state.room.mode) option.selected = true;
-      modeSelect.append(option);
-    });
-    modeSelect.disabled = !(state.room.viewer_is_host && state.room.status === "lobby");
-  }
-
-  if (!showLobby) {
-    title.textContent = `\u52a0\u5165\u623f\u95f4 ${state.room.room_id}`;
-    caption.textContent = isRandomRoomMode()
-      ? `\u8fd9\u4e2a\u623f\u95f4\u5f53\u524d\u4f7f\u7528\u300c${modeMeta.name}\u300d\u3002\u70b9\u51fb\u201c\u52a0\u5165\u623f\u95f4\u201d\u540e\uff0c\u5c31\u4f1a\u4ee5\u5f53\u524d\u6635\u79f0\u201c${effectiveProfileName()}\u201d\u8fdb\u5165\u623f\u95f4\u5927\u5385\u7b49\u5f85\u5f00\u5c40\u3002`
-      : `\u8fd9\u4e2a\u623f\u95f4\u4ecd\u5728\u7b49\u5f85\u73a9\u5bb6\u5360\u4f4d\u3002\u70b9\u51fb\u201c\u52a0\u5165\u623f\u95f4\u201d\u540e\uff0c\u5c31\u4f1a\u4ee5\u5f53\u524d\u6635\u79f0\u201c${effectiveProfileName()}\u201d\u8fdb\u5165\u623f\u95f4\u5927\u5385\u5f00\u59cb\u9009\u5c06\u3002`;
-    leaveRoomBtn.classList.remove("hidden");
-    leaveRoomBtn.disabled = false;
-    deleteRoomBtn.classList.toggle("hidden", !state.room.viewer_is_host);
-    deleteRoomBtn.disabled = !state.room.viewer_is_host;
-    copyInvite.classList.remove("hidden");
-    roomBattle.classList.toggle("hidden", !hasBattle());
-    startRoom.classList.add("hidden");
-    joinRoomButton.disabled = !state.profileReady || !String($("join-room-code").value || "").trim();
-    return;
-  }
-
-  title.textContent = `\u623f\u95f4 ${state.room.room_id}`;
-  caption.textContent = hasBattle()
-    ? "\u5bf9\u5c40\u5df2\u7ecf\u5f00\u59cb\u3002\u4f60\u53ef\u4ee5\u8fd4\u56de\u6218\u573a\u7ee7\u7eed\u6d4b\u8bd5\uff0c\u6216\u7559\u5728\u8fd9\u91cc\u67e5\u770b\u623f\u95f4\u4fe1\u606f\u3002"
-    : (isRandomRoomMode()
-      ? "\u5f53\u524d\u4f7f\u7528\u968f\u673a\u9009\u4eba\u6a21\u5f0f\uff0c\u53cc\u65b9\u5165\u573a\u540e\u65e0\u9700\u624b\u52a8\u9009\u5c06\uff0c\u5f00\u5c40\u65f6\u4f1a\u81ea\u52a8\u968f\u673a\u5206\u914d\u6b66\u5c06\u3002"
-      : "\u53cc\u65b9\u73a9\u5bb6\u5728\u8fd9\u91cc\u5404\u81ea\u9009\u62e9\u81ea\u5df1\u7684\u6b66\u5c06\uff0c\u51c6\u5907\u5b8c\u6210\u540e\u5f00\u59cb\u5bf9\u5c40\u3002");
-
-  $("room-code-label").textContent = state.room.room_id;
-  $("room-status-label").textContent = state.room.status === "lobby"
-    ? "\u7b49\u5f85\u53cc\u65b9\u5c31\u7eea"
-    : (isGameOver() ? "\u5bf9\u5c40\u7ed3\u675f" : "\u5bf9\u5c40\u8fdb\u884c\u4e2d");
-  $("viewer-seat-label").textContent = state.room.viewer_player_id ? `\u73a9\u5bb6 ${state.room.viewer_player_id}` : "\u89c2\u6218 / \u672a\u5360\u4f4d";
-  $("viewer-seat-note").textContent = state.room.viewer_name
-    ? `${state.room.viewer_name}${state.room.viewer_is_host ? " \u00b7 \u623f\u4e3b" : ""}`
-    : "\u5f53\u524d\u6d4f\u89c8\u5668\u8fd8\u6ca1\u6709\u5360\u7528\u5e2d\u4f4d";
-  $("invite-path-label").textContent = state.room.invite_url || state.room.invite_path;
-
-  leaveRoomBtn.classList.remove("hidden");
-  leaveRoomBtn.disabled = false;
-  deleteRoomBtn.classList.toggle("hidden", !state.room.viewer_is_host);
-  deleteRoomBtn.disabled = !state.room.viewer_is_host;
-  copyInvite.classList.toggle("hidden", !state.room.invite_url);
-  roomBattle.classList.toggle("hidden", !hasBattle());
-  roomBattle.disabled = !hasBattle();
-  roomBattle.textContent = "\u8fdb\u5165\u6218\u573a";
-  startRoom.classList.toggle("hidden", !(state.room.viewer_player_id !== null && ["lobby", "finished"].includes(state.room.status)));
-  startRoom.disabled = state.room.status === "lobby" ? !state.room.can_start : !state.room.can_rematch;
-  startRoom.textContent = state.room.status === "finished"
-    ? "\u91cd\u65b0\u5f00\u59cb\u9009\u5c06"
-    : (isRandomRoomMode() ? "\u5f00\u59cb\u968f\u673a\u5bf9\u5c40" : "\u5f00\u59cb\u5bf9\u5c40");
-
-  const roomMessage = $("room-message");
-  if (hasBattle()) {
-    if (state.room.viewer_player_id === null && !isGameOver()) {
-      roomMessage.textContent = canReclaimSeatByName()
-        ? `\u623f\u95f4 ${state.room.room_id} \u7684\u5bf9\u5c40\u6b63\u5728\u8fdb\u884c\u4e2d\u3002\u5f53\u524d\u6635\u79f0\u4e0e\u65e7\u5e2d\u4f4d\u5339\u914d\uff0c\u70b9\u51fb\u201c\u6062\u590d\u5e2d\u4f4d\u201d\u540e\u53ef\u7ee7\u7eed\u64cd\u4f5c\u3002`
-        : `\u623f\u95f4 ${state.room.room_id} \u7684\u5bf9\u5c40\u6b63\u5728\u8fdb\u884c\u4e2d\u3002\u4f60\u5f53\u524d\u662f\u89c2\u6218\u8eab\u4efd\uff1b\u5982\u679c\u4f60\u662f\u539f\u73a9\u5bb6\uff0c\u8bf7\u5148\u628a\u6635\u79f0\u6539\u56de\u539f\u6765\u7684\u540d\u5b57\u518d\u6062\u590d\u5e2d\u4f4d\u3002`;
-    } else {
-      roomMessage.textContent = isGameOver()
-        ? `\u623f\u95f4 ${state.room.room_id} \u7684\u672c\u5c40\u5bf9\u6218\u5df2\u7ecf\u7ed3\u675f\u3002\u4f60\u53ef\u4ee5\u8fdb\u5165\u6218\u573a\u67e5\u770b\u7ec8\u5c40\u76d8\u9762\uff0c\u6216\u76f4\u63a5\u91cd\u65b0\u5f00\u59cb\u9009\u5c06\u518d\u6765\u4e00\u5c40\u3002`
-        : `\u623f\u95f4 ${state.room.room_id} \u7684\u5bf9\u5c40\u6b63\u5728\u8fdb\u884c\u4e2d\u3002\u70b9\u51fb\u201c\u8fdb\u5165\u6218\u573a\u201d\u5373\u53ef\u67e5\u770b\u5e76\u7ee7\u7eed\u64cd\u4f5c\u3002`;
-    }
-  } else if (isRandomRoomMode()) {
-    if (state.room.viewer_player_id === null) {
-      roomMessage.textContent = state.room.is_full
-        ? "\u8fd9\u4e2a\u623f\u95f4\u5df2\u7ecf\u6ee1\u5458\u3002\u4f60\u5f53\u524d\u53ef\u4ee5\u89c2\u6218\uff0c\u4f46\u4e0d\u80fd\u4ee3\u66ff\u5176\u4e2d\u4efb\u610f\u4e00\u4f4d\u73a9\u5bb6\u64cd\u4f5c\u3002"
-        : `\u8fd9\u4e2a\u623f\u95f4\u8fd8\u6709\u7a7a\u4f4d\u3002\u70b9\u51fb\u201c\u52a0\u5165\u623f\u95f4\u201d\u540e\uff0c\u5373\u53ef\u4ee5\u201c${effectiveProfileName()}\u201d\u4f5c\u4e3a\u53e6\u4e00\u4f4d\u73a9\u5bb6\u8fdb\u5165\u3002`;
-    } else if (state.room.status === "finished") {
-      roomMessage.textContent = "\u672c\u5c40\u5bf9\u6218\u5df2\u7ed3\u675f\u3002\u53ef\u4ee5\u76f4\u63a5\u91cd\u65b0\u5f00\u59cb\u9009\u5c06\uff0c\u518d\u6765\u4e00\u5c40\u968f\u673a\u5bf9\u5c40\u3002";
-    } else if (!state.room.can_start) {
-      roomMessage.textContent = "\u5f53\u524d\u4f7f\u7528\u968f\u673a\u9009\u4eba\u6a21\u5f0f\uff0c\u65e0\u9700\u624b\u52a8\u9009\u5c06\uff0c\u6b63\u5728\u7b49\u5f85\u53e6\u4e00\u4f4d\u73a9\u5bb6\u52a0\u5165\u3002";
-    } else {
-      roomMessage.textContent = "\u53cc\u65b9\u90fd\u5df2\u5c31\u7eea\uff0c\u5f00\u5c40\u540e\u4f1a\u968f\u673a\u5206\u914d\u6b66\u5c06\uff0c\u5e76\u5728\u66f4\u5927\u7684\u6218\u573a\u4e0a\u968f\u673a\u51fa\u751f\u3002";
-    }
-  } else if (state.room.viewer_player_id === null) {
-    roomMessage.textContent = state.room.is_full
-      ? "\u8fd9\u4e2a\u623f\u95f4\u5df2\u7ecf\u6ee1\u5458\u3002\u4f60\u5f53\u524d\u53ef\u4ee5\u89c2\u6218\uff0c\u4f46\u4e0d\u80fd\u4ee3\u66ff\u5176\u4e2d\u4efb\u610f\u4e00\u4f4d\u73a9\u5bb6\u64cd\u4f5c\u3002"
-      : `\u8fd9\u4e2a\u623f\u95f4\u8fd8\u6709\u7a7a\u4f4d\u3002\u70b9\u51fb\u201c\u52a0\u5165\u623f\u95f4\u201d\u540e\uff0c\u5373\u53ef\u4ee5\u201c${effectiveProfileName()}\u201d\u4f5c\u4e3a\u53e6\u4e00\u4f4d\u73a9\u5bb6\u8fdb\u5165\u3002`;
-  } else if (!currentRoomSeat()?.hero_code) {
-    roomMessage.textContent = `\u4f60\u5f53\u524d\u662f\u73a9\u5bb6 ${state.room.viewer_player_id}\uff0c\u8bf7\u4ece\u4e0b\u65b9\u9009\u62e9\u81ea\u5df1\u7684\u6b66\u5c06\u3002`;
-  } else if (state.room.status === "finished") {
-    roomMessage.textContent = "\u672c\u5c40\u5bf9\u6218\u5df2\u7ed3\u675f\u3002\u53ef\u4ee5\u76f4\u63a5\u91cd\u65b0\u5f00\u59cb\u9009\u5c06\uff0c\u4e24\u4f4d\u73a9\u5bb6\u5728\u540c\u4e00\u623f\u95f4\u518d\u6765\u4e00\u5c40\u3002";
-  } else if (!state.room.can_start) {
-    roomMessage.textContent = "\u4f60\u5df2\u7ecf\u9009\u597d\u4e86\u6b66\u5c06\uff0c\u6b63\u5728\u7b49\u5f85\u53e6\u4e00\u4f4d\u73a9\u5bb6\u52a0\u5165\u6216\u5b8c\u6210\u9009\u5c06\u3002";
-  } else {
-    roomMessage.textContent = "\u53cc\u65b9\u90fd\u5df2\u5c31\u7eea\uff0c\u53ef\u4ee5\u5f00\u59cb\u8fd9\u573a\u8054\u673a\u6d4b\u8bd5\u5bf9\u5c40\u3002";
-  }
-
-  const seatCards = $("seat-cards");
-  seatCards.innerHTML = "";
-  (state.room.seats || []).forEach((seat) => {
-    const heroLabel = isRandomRoomMode()
-      ? (seat.hero_name || (seat.occupied ? "\u5f00\u5c40\u540e\u968f\u673a\u5206\u914d" : "\u672a\u9009\u62e9"))
-      : (seat.hero_name || "\u672a\u9009\u62e9");
-    const card = document.createElement("article");
-    card.className = `seat-card ${seat.player_id === state.room.viewer_player_id ? "is-viewer" : ""} ${seat.occupied ? "" : "is-empty"}`;
-    card.innerHTML = `
-      <div class="seat-head">
-        <div>
-          <div class="seat-name">\u73a9\u5bb6 ${seat.player_id}</div>
-          <div class="seat-note">${seat.name || "\u5c1a\u672a\u52a0\u5165"}</div>
-        </div>
-        <span class="seat-badge">${seat.is_host ? "\u623f\u4e3b" : "\u5e2d\u4f4d"}</span>
-      </div>
-      <div class="seat-hero"><strong>\u5f53\u524d\u6b66\u5c06\uff1a</strong>${heroLabel}</div>
-      <div class="seat-note">${seat.occupied ? "\u5df2\u8fdb\u5165\u623f\u95f4" : "\u7b49\u5f85\u670b\u53cb\u52a0\u5165\u8be5\u5e2d\u4f4d"}</div>
-    `;
-    seatCards.append(card);
-  });
-}
-
 function roomHeroSelectionSummary(heroCode) {
   if (!hasRoom() || !heroCode) return "";
   const pickers = (state.room.seats || [])
@@ -4738,17 +4320,52 @@ function clampBoardZoom(value) {
 }
 
 function adjustBoardZoom(delta) {
-  state.boardZoom = clampBoardZoom((state.boardZoom || 1) + Number(delta || 0));
+  setBoardZoom((state.boardZoom || 1) + Number(delta || 0));
+}
+
+function setBoardZoom(nextZoom, anchor = null) {
+  const stage = $("board-stage");
+  const board = $("board");
+  const stageRect = stage?.getBoundingClientRect?.() || null;
+  const boardRect = board?.getBoundingClientRect?.() || null;
+  const previousZoom = clampBoardZoom(state.boardZoom);
+  const targetZoom = clampBoardZoom(nextZoom);
+  if (Math.abs(targetZoom - previousZoom) < 0.001) return;
+  let anchorRatioX = null;
+  let anchorRatioY = null;
+  let anchorClientX = 0;
+  let anchorClientY = 0;
+  if (anchor && stageRect && boardRect && boardRect.width > 0 && boardRect.height > 0) {
+    anchorClientX = Number(anchor.clientX || 0);
+    anchorClientY = Number(anchor.clientY || 0);
+    anchorRatioX = Math.max(0, Math.min(1, (anchorClientX - boardRect.left) / boardRect.width));
+    anchorRatioY = Math.max(0, Math.min(1, (anchorClientY - boardRect.top) / boardRect.height));
+  }
+  state.boardZoom = targetZoom;
   renderBoardZoomControls();
   renderBoard();
+  if (
+    anchorRatioX != null
+    && anchorRatioY != null
+    && stage
+    && board
+    && stageRect
+    && typeof stage.scrollLeft === "number"
+    && typeof stage.scrollTop === "number"
+  ) {
+    const nextBoardRect = board.getBoundingClientRect?.();
+    if (nextBoardRect?.width > 0 && nextBoardRect?.height > 0) {
+      const desiredLeft = nextBoardRect.left + (nextBoardRect.width * anchorRatioX);
+      const desiredTop = nextBoardRect.top + (nextBoardRect.height * anchorRatioY);
+      stage.scrollLeft += desiredLeft - anchorClientX;
+      stage.scrollTop += desiredTop - anchorClientY;
+    }
+  }
   scheduleBoardOverlayRender();
 }
 
 function resetBoardZoom() {
-  state.boardZoom = 1;
-  renderBoardZoomControls();
-  renderBoard();
-  scheduleBoardOverlayRender();
+  setBoardZoom(1);
 }
 
 function renderBoardZoomControls() {
@@ -4829,67 +4446,6 @@ function renderHeroCards() {
     lobbyCard.append(counter);
     lobbyCards.append(lobbyCard);
   });
-}
-
-function renderHeader() {
-  const pill = $("turn-pill");
-  const topbarSubline = $("topbar-subline");
-  const caption = $("board-caption");
-  const modeMeta = roomModeMeta();
-  if (!hasRoom()) {
-    pill.textContent = "尚未进入房间";
-    topbarSubline.textContent = "创建房间、复制邀请链接，让两位玩家分别进入同一房间后在线对战。";
-    caption.textContent = "请先创建房间或加入房间。";
-    return;
-  }
-  if (!state.battle) {
-    pill.textContent = `房间 ${state.room.room_id} · ${state.room.status === "lobby" ? "大厅中" : "等待开局"}`;
-    if (isRandomRoomMode()) {
-      topbarSubline.textContent = state.room.viewer_player_id
-        ? `你当前是玩家 ${state.room.viewer_player_id}。当前房间使用「${modeMeta.name}」，开局后会随机分配武将，并在更大的战场上随机出生。`
-        : "你当前还没有占用席位。若房间仍有空位，输入昵称后即可加入。";
-      caption.textContent = "对局尚未开始，随机选人模式下无需手动选将。";
-      return;
-    }
-    topbarSubline.textContent = state.room.viewer_player_id
-      ? `你当前是玩家 ${state.room.viewer_player_id}。在大厅里用 +1 / -1 配置自己的多武将阵容，双方都准备好后开始对局。`
-      : "你当前还没有占用席位。若房间仍有空位，输入昵称后即可加入。";
-    caption.textContent = "对局尚未开始，请先在房间大厅完成选将。";
-    return;
-  }
-  const viewerSummary = state.room.viewer_player_id
-    ? `房间 ${state.room.room_id} 在线对战中。你当前是玩家 ${state.room.viewer_player_id}。`
-    : `房间 ${state.room.room_id} 在线对战中。你当前以观战视角查看此房间。`;
-  const nextTurnName = state.battle.next_turn_unit_name || "";
-  const nextTurnPlayerId = state.battle.next_turn_player_id;
-  const nextTurnSummary = nextTurnName && nextTurnPlayerId
-    ? `下回合：玩家 ${nextTurnPlayerId} 的 ${nextTurnName}。`
-    : "下回合待定。";
-  topbarSubline.textContent = `${viewerSummary} ${nextTurnSummary}`;
-  if (isGameOver()) {
-    pill.textContent = `房间 ${state.room.room_id} · 玩家 ${state.battle.winner} 获胜`;
-    caption.textContent = `玩家 ${state.battle.winner} 已获胜，战场已锁定。`;
-    return;
-  }
-  if (isRespawnMode()) {
-    const prompt = currentRespawnPrompt();
-    const unit = unitById(prompt?.unit_id || "");
-    pill.textContent = `房间 ${state.room.room_id} · 玩家 ${inputPlayer()} 重新出现中`;
-    caption.textContent = `请为 ${unit?.name || "消失单位"} 选择重新出现的位置。`;
-    return;
-  }
-  if (isChainMode()) {
-    const current = state.battle.pending_chain?.current_unit_id
-      ? unitById(state.battle.pending_chain.current_unit_id)?.name
-      : "响应方";
-    const sourceSummary = chainQueuedActionPrompt(state.battle.pending_chain);
-    pill.textContent = `房间 ${state.room.room_id} · 玩家 ${inputPlayer()} 连锁中`;
-    caption.textContent = `等待 ${current} 响应 ${sourceSummary}`;
-    return;
-  }
-  const activeName = state.battle.active_turn_unit_name || "当前武将";
-  pill.textContent = `房间 ${state.room.room_id} · 第 ${state.battle.round_number} 轮 · ${activeName}`;
-  caption.textContent = `当前由玩家 ${inputPlayer()} 的 ${activeName} 行动。${nextTurnSummary}`;
 }
 
 function renderRoomPanels() {
@@ -5139,12 +4695,14 @@ function renderRoomPanels() {
     const teamSelect = card.querySelector(`[data-seat-team="${seat.player_id}"]`);
     if (teamSelect) {
       teamSelect.addEventListener("change", (event) => {
+        if (typeof event.target.blur === "function") event.target.blur();
         setRoomSeatTeam(seat.player_id, event.target.value);
       });
     }
     const controllerSelect = card.querySelector(`[data-seat-controller="${seat.player_id}"]`);
     if (controllerSelect) {
       controllerSelect.addEventListener("change", (event) => {
+        if (typeof event.target.blur === "function") event.target.blur();
         setRoomSeatController(seat.player_id, event.target.value);
       });
     }
@@ -5312,121 +4870,6 @@ function ensureSelectedUnit() {
 function renderMessage() {
   const node = $("message");
   if (!state.battle) {
-    node.textContent = hasRoom() ? "æˆ¿é—´å·²å»ºç«‹,ä½†å¯¹å±€è¿˜æ²¡å¼€å§‹ã€‚" : "å°šæœªè¿›å…¥æˆ¿é—´ã€‚";
-    return;
-  }
-  if (isReplayMode()) {
-    node.textContent = `å½“å‰æ­£åœ¨æŸ¥çœ‹å›žæ”¾ç¬¬ ${state.replayStepIndex}/${replayMeta().last_step_index} æ­¥ã€‚`;
-    return;
-  }
-  if (isGameOver()) {
-    node.textContent = `çŽ©å®¶ ${state.battle.winner} å·²èŽ·èƒœã€‚æˆ˜åœºå·²é”å®š,å¯å›žåˆ°æˆ¿é—´å¤§åŽ…æŸ¥çœ‹æœ¬å±€æˆ¿é—´ã€‚`;
-    return;
-  }
-  if (!canInteract()) {
-    node.textContent = `å½“å‰è½®åˆ°çŽ©å®¶ ${inputPlayer()} æ“ä½œã€‚ä½ å¯ä»¥ç»§ç»­è§‚å¯Ÿæˆ˜åœº,ç­‰å¾…å¯¹æ‰‹è¡ŒåŠ¨å®Œæˆã€‚`;
-    return;
-  }
-  if (isRespawnMode()) {
-    const prompt = currentRespawnPrompt();
-    const unit = unitById(prompt?.unit_id || "");
-    node.textContent = `${unit?.name || "æ¶ˆå¤±å•ä½"} éœ€è¦å…ˆé‡æ–°å‡ºçŽ°ã€‚è¯·ç‚¹å‡»è“è‰²é«˜äº®çš„æœ€è¿‘è½ç‚¹ã€‚`;
-    return;
-  }
-  if (state.selectedActionCode === "mana_pull" && !state.stagedPayload?.targetUnitId) {
-    node.textContent = "é­”åŠ›ç‰µå¼•åˆ†ä¸¤æ­¥:å…ˆé€‰å•ä½,å†é€‰è½ç‚¹ã€‚";
-    return;
-  }
-  if (state.stagedPayload?.targetUnitId && state.selectedActionCode === "mana_pull") {
-    node.textContent = `å·²é€‰ä¸­ ${stagedTarget()?.name || "è¢«ç‰µå¼•ç›®æ ‡"},è¯·ç‚¹å‡»è“è‰²é«˜äº®è½ç‚¹ã€‚`;
-    return;
-  }
-  if (isChainMode()) {
-    const current = unitById(state.battle.pending_chain?.current_unit_id || "");
-    const source = unitById(state.battle.pending_chain?.queued_action?.actor_id || "");
-    const actionName = state.battle.pending_chain?.queued_action?.display_name || "åŽŸåŠ¨ä½œ";
-    node.textContent = `${current?.name || "å½“å‰å•ä½"} å¯ä»¥å¯¹ ${source?.name || "å¯¹æ–¹å•ä½"} çš„ã€${actionName}ã€‘è¿›è¡Œè¿žé”,ç‚¹å‡»å…¶å‘¨å›´åŠ¨ä½œæŒ‰é’®æˆ–æ”¾å¼ƒè¿žé”ã€‚`;
-    return;
-  }
-  const action = selectedAction();
-  if (action) {
-    node.textContent = `å·²é€‰æ‹©ã€${actionTitle(action)}ã€‘ã€‚${actionNeedsTarget(action) ? "è¯·åœ¨æ£‹ç›˜ä¸Šç‚¹å‡»è“è‰²é«˜äº®ç›®æ ‡ã€‚" : "å†æ¬¡ç‚¹å‡»ä¼šç«‹å³ç»“ç®—ã€‚"} `;
-    return;
-  }
-  node.textContent = `å½“å‰ç”±çŽ©å®¶ ${inputPlayer()} æ“ä½œã€‚`;
-}
-
-function renderHeader() {
-  const pill = $("turn-pill");
-  const topbarSubline = $("topbar-subline");
-  const caption = $("board-caption");
-  const modeMeta = roomModeMeta();
-  if (!hasRoom()) {
-    pill.textContent = "å°šæœªè¿›å…¥æˆ¿é—´";
-    topbarSubline.textContent = "åˆ›å»ºæˆ¿é—´ã€å¤åˆ¶é‚€è¯·é“¾æŽ¥ï¼Œè®©ä¸¤ä½çŽ©å®¶åˆ†åˆ«è¿›å…¥åŒä¸€æˆ¿é—´åŽåœ¨çº¿å¯¹æˆ˜ã€‚";
-    caption.textContent = "è¯·å…ˆåˆ›å»ºæˆ¿é—´æˆ–åŠ å…¥æˆ¿é—´ã€‚";
-    return;
-  }
-  if (!state.battle) {
-    pill.textContent = `æˆ¿é—´ ${state.room.room_id} Â· ${state.room.status === "lobby" ? "å¤§åŽ…ä¸­" : "ç­‰å¾…å¼€å±€"}`;
-    if (isRandomRoomMode()) {
-      topbarSubline.textContent = state.room.viewer_player_id
-        ? `ä½ å½“å‰æ˜¯çŽ©å®¶ ${state.room.viewer_player_id}ã€‚å½“å‰æˆ¿é—´ä½¿ç”¨ã€Œ${modeMeta.name}ã€ï¼Œå¼€å±€åŽä¼šéšæœºåˆ†é…æ­¦å°†ï¼Œå¹¶åœ¨æ›´å¤§çš„æˆ˜åœºä¸Šéšæœºå‡ºç”Ÿã€‚`
-        : "ä½ å½“å‰è¿˜æ²¡æœ‰å ç”¨å¸­ä½ã€‚è‹¥æˆ¿é—´ä»æœ‰ç©ºä½ï¼Œè¾“å…¥æ˜µç§°åŽå³å¯åŠ å…¥ã€‚";
-      caption.textContent = "å¯¹å±€å°šæœªå¼€å§‹ï¼Œéšæœºé€‰äººæ¨¡å¼ä¸‹æ— éœ€æ‰‹åŠ¨é€‰å°†ã€‚";
-      return;
-    }
-    topbarSubline.textContent = state.room.viewer_player_id
-      ? `ä½ å½“å‰æ˜¯çŽ©å®¶ ${state.room.viewer_player_id}ã€‚åœ¨å¤§åŽ…é‡Œç”¨ +1 / -1 é…ç½®è‡ªå·±çš„å¤šæ­¦å°†é˜µå®¹ï¼ŒåŒæ–¹éƒ½å‡†å¤‡å¥½åŽå¼€å§‹å¯¹å±€ã€‚`
-      : "ä½ å½“å‰è¿˜æ²¡æœ‰å ç”¨å¸­ä½ã€‚è‹¥æˆ¿é—´ä»æœ‰ç©ºä½ï¼Œè¾“å…¥æ˜µç§°åŽå³å¯åŠ å…¥ã€‚";
-    caption.textContent = "å¯¹å±€å°šæœªå¼€å§‹ï¼Œè¯·å…ˆåœ¨æˆ¿é—´å¤§åŽ…å®Œæˆé€‰å°†ã€‚";
-    return;
-  }
-  const viewerSummary = state.room.viewer_player_id
-    ? `æˆ¿é—´ ${state.room.room_id} åœ¨çº¿å¯¹æˆ˜ä¸­ã€‚ä½ å½“å‰æ˜¯çŽ©å®¶ ${state.room.viewer_player_id}ã€‚`
-    : `æˆ¿é—´ ${state.room.room_id} åœ¨çº¿å¯¹æˆ˜ä¸­ã€‚ä½ å½“å‰ä»¥è§‚æˆ˜è§†è§’æŸ¥çœ‹æ­¤æˆ¿é—´ã€‚`;
-  const nextTurnName = state.battle.next_turn_unit_name || "";
-  const nextTurnPlayerId = state.battle.next_turn_player_id;
-  const nextTurnSummary = nextTurnName && nextTurnPlayerId
-    ? `ä¸‹å›žåˆï¼šçŽ©å®¶ ${nextTurnPlayerId} çš„ ${nextTurnName}ã€‚`
-    : "ä¸‹å›žåˆå¾…å®šã€‚";
-  topbarSubline.textContent = `${viewerSummary} ${nextTurnSummary}`;
-  if (isReplayMode()) {
-    pill.textContent = `æˆ¿é—´ ${state.room.room_id} Â· å›žæ”¾ ${state.replayStepIndex}/${replayMeta().last_step_index}`;
-    caption.textContent = state.replayOmniscient
-      ? "å½“å‰æ­£åœ¨ä»¥å…¨çŸ¥è§†è§’æŸ¥çœ‹å›žæ”¾ã€‚"
-      : "å½“å‰æ­£åœ¨æŸ¥çœ‹å›žæ”¾ã€‚";
-    return;
-  }
-  if (isGameOver()) {
-    pill.textContent = `æˆ¿é—´ ${state.room.room_id} Â· çŽ©å®¶ ${state.battle.winner} èŽ·èƒœ`;
-    caption.textContent = `çŽ©å®¶ ${state.battle.winner} å·²èŽ·èƒœï¼Œæˆ˜åœºå·²é”å®šã€‚`;
-    return;
-  }
-  if (isRespawnMode()) {
-    const prompt = currentRespawnPrompt();
-    const unit = unitById(prompt?.unit_id || "");
-    pill.textContent = `æˆ¿é—´ ${state.room.room_id} Â· çŽ©å®¶ ${inputPlayer()} é‡æ–°å‡ºçŽ°ä¸­`;
-    caption.textContent = `è¯·ä¸º ${unit?.name || "æ¶ˆå¤±å•ä½"} é€‰æ‹©é‡æ–°å‡ºçŽ°çš„ä½ç½®ã€‚`;
-    return;
-  }
-  if (isChainMode()) {
-    const current = state.battle.pending_chain?.current_unit_id
-      ? unitById(state.battle.pending_chain.current_unit_id)?.name
-      : "å“åº”æ–¹";
-    const sourceSummary = chainQueuedActionPrompt(state.battle.pending_chain);
-    pill.textContent = `æˆ¿é—´ ${state.room.room_id} Â· çŽ©å®¶ ${inputPlayer()} è¿žé”ä¸­`;
-    caption.textContent = `ç­‰å¾… ${current} å“åº” ${sourceSummary}`;
-    return;
-  }
-  const activeName = state.battle.active_turn_unit_name || "å½“å‰æ­¦å°†";
-  pill.textContent = `æˆ¿é—´ ${state.room.room_id} Â· ç¬¬ ${state.battle.round_number} è½® Â· ${activeName}`;
-  caption.textContent = `å½“å‰ç”±çŽ©å®¶ ${inputPlayer()} çš„ ${activeName} è¡ŒåŠ¨ã€‚${nextTurnSummary}`;
-}
-
-function renderMessage() {
-  const node = $("message");
-  if (!state.battle) {
     node.textContent = hasRoom() ? "\u623f\u95f4\u5df2\u5efa\u7acb,\u4f46\u5bf9\u5c40\u8fd8\u6ca1\u5f00\u59cb\u3002" : "\u5c1a\u672a\u8fdb\u5165\u623f\u95f4\u3002";
     return;
   }
@@ -5577,7 +5020,7 @@ function renderReplayToolbar() {
   if (forward) forward.disabled = currentIndex >= lastIndex;
   if (live) live.disabled = !isReplayMode();
   if (pause) {
-    pause.textContent = simulation.paused ? "\u7ee7\u7eed" : "\u6682\u505c";
+    pause.textContent = simulation.paused ? "▶" : "II";
     pause.disabled = !simulation.can_control;
   }
   if (status) {
@@ -5596,28 +5039,29 @@ function renderReplayToolbar() {
 function ensureDynamicUiScaffolding() {
   const heroHeadCopy = document.querySelector(".room-hero-head p");
   if (heroHeadCopy) {
-    heroHeadCopy.textContent = "每位玩家可以为自己选择多个武将。使用下方卡片的 +1 / -1 来配置自己的阵容。";
+    heroHeadCopy.textContent = "\u6bcf\u4f4d\u73a9\u5bb6\u53ef\u4ee5\u4e3a\u81ea\u5df1\u9009\u62e9\u591a\u4e2a\u6b66\u5c06\u3002\u4f7f\u7528\u4e0b\u65b9\u5361\u7247\u7684 +1 / -1 \u6765\u914d\u7f6e\u81ea\u5df1\u7684\u9635\u5bb9\u3002";
   }
-  if ($("board-zoom-controls")) return;
   const boardHead = document.querySelector(".board-wrap .section-head");
   const legend = boardHead?.querySelector(".legend");
   if (!boardHead) return;
-  const controls = document.createElement("div");
-  controls.id = "board-zoom-controls";
-  controls.className = "zoom-controls hidden";
-  controls.innerHTML = `
-    <button id="board-zoom-out" type="button" class="ghost">缩小</button>
-    <button id="board-zoom-reset" type="button" class="ghost">重置</button>
-    <button id="board-zoom-in" type="button" class="ghost">放大</button>
-    <span id="board-zoom-value" class="zoom-value">100%</span>
-  `;
-  if (legend) {
-    const tools = document.createElement("div");
-    tools.className = "board-tools";
-    legend.replaceWith(tools);
-    tools.append(legend, controls);
-  } else {
-    boardHead.append(controls);
+  if (!$("board-zoom-controls")) {
+    const controls = document.createElement("div");
+    controls.id = "board-zoom-controls";
+    controls.className = "zoom-controls hidden";
+    controls.innerHTML = `
+      <button id="board-zoom-out" type="button" class="ghost" data-tooltip="缩小战场">-</button>
+      <button id="board-zoom-reset" type="button" class="ghost" data-tooltip="重置战场缩放">1:1</button>
+      <button id="board-zoom-in" type="button" class="ghost" data-tooltip="放大战场">+</button>
+      <span id="board-zoom-value" class="zoom-value">100%</span>
+    `;
+    if (legend) {
+      const tools = document.createElement("div");
+      tools.className = "board-tools";
+      legend.replaceWith(tools);
+      tools.append(legend, controls);
+    } else {
+      boardHead.append(controls);
+    }
   }
   const footer = document.querySelector(".board-footer");
   const endTurnButton = $("end-turn");
@@ -5626,12 +5070,12 @@ function ensureDynamicUiScaffolding() {
     toolbar.id = "replay-toolbar";
     toolbar.className = "replay-toolbar hidden";
     toolbar.innerHTML = `
-      <button id="replay-step-back" class="ghost" type="button">åŽé€€</button>
-      <button id="replay-pause" class="ghost" type="button">æš‚åœ</button>
-      <button id="replay-live" class="ghost" type="button">å›žåˆ°å®žæ—¶</button>
-      <button id="replay-step-forward" class="ghost" type="button">å‰è¿›</button>
+      <button id="replay-step-back" class="ghost" type="button" data-tooltip="回到上一步">&lt;&lt;</button>
+      <button id="replay-pause" class="ghost" type="button" data-tooltip="暂停或继续 AI 对局">II</button>
+      <button id="replay-live" class="ghost" type="button" data-tooltip="回到实时战局">LIVE</button>
+      <button id="replay-step-forward" class="ghost" type="button" data-tooltip="前进一步">&gt;&gt;</button>
       <label class="replay-speed-control" for="replay-speed">
-        <span>é€Ÿåº¦</span>
+        <span>\u901f\u5ea6</span>
         <select id="replay-speed">
           <option value="0.5">0.5x</option>
           <option value="1" selected>1x</option>
@@ -5641,12 +5085,24 @@ function ensureDynamicUiScaffolding() {
       </label>
       <label class="replay-omniscient-toggle">
         <input id="replay-omniscient" type="checkbox" />
-        <span>å…¨çŸ¥</span>
+        <span>\u5168\u77e5</span>
       </label>
       <input id="replay-timeline" class="replay-timeline" type="range" min="0" max="0" step="1" value="0" />
-      <span id="replay-status" class="replay-status">å®žæ—¶</span>
+      <span id="replay-status" class="replay-status">\u5b9e\u65f6</span>
     `;
     footer.insertBefore(toolbar, endTurnButton);
+  }
+  if (!$("control-tooltip")) {
+    const tooltip = document.createElement("div");
+    tooltip.id = "control-tooltip";
+    tooltip.className = "control-tooltip hidden";
+    document.body.append(tooltip);
+  }
+  if (!$("floating-toast-stack")) {
+    const stack = document.createElement("div");
+    stack.id = "floating-toast-stack";
+    stack.className = "floating-toast-stack hidden";
+    document.body.append(stack);
   }
 }
 
@@ -5663,5 +5119,5 @@ window.addEventListener("DOMContentLoaded", async () => {
       return;
     }
     refreshState();
-  }, 1500);
+  }, 400);
 });

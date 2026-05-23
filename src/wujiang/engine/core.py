@@ -1419,8 +1419,14 @@ class Battle:
                 return True
         return False
 
-    def add_unit(self, unit: Unit, position: Position) -> None:
-        if not self.can_place_unit(unit, position, ignore=unit, mover=unit):
+    def add_unit(self, unit: Unit, position: Position, *, allow_stealth_overlap: bool = False) -> None:
+        if not self.can_place_unit(
+            unit,
+            position,
+            ignore=unit,
+            mover=unit,
+            allow_stealth_overlap=allow_stealth_overlap,
+        ):
             raise ActionError("目标位置已被占用。")
         unit.position = position
         self.units[unit.unit_id] = unit
@@ -1794,11 +1800,17 @@ class Battle:
         ignore: Optional[Unit] = None,
         mover: Optional[Unit] = None,
         ignore_units: bool = False,
+        allow_stealth_overlap: bool = False,
     ) -> bool:
         for cell in self.unit_cells_at(unit, position):
             if not self.in_bounds(cell):
                 return False
-            if not ignore_units and self.is_occupied(cell, ignore=ignore, mover=mover or unit):
+            if not ignore_units and self.is_occupied(
+                cell,
+                ignore=ignore,
+                mover=mover or unit,
+                allow_stealth_overlap=allow_stealth_overlap,
+            ):
                 return False
         return True
 
@@ -1830,12 +1842,16 @@ class Battle:
                 units.append(unit)
         return units
 
-    def blocks_position_for(self, occupant: Unit, *, mover: Optional[Unit] = None) -> bool:
+    def blocks_position_for(
+        self,
+        occupant: Unit,
+        *,
+        mover: Optional[Unit] = None,
+        allow_stealth_overlap: bool = False,
+    ) -> bool:
         if mover is not None and self.units_can_overlap(occupant, mover):
             return False
-        if occupant.is_stealthed():
-            return False
-        if mover is not None and mover.is_stealthed():
+        if allow_stealth_overlap and occupant.is_stealthed():
             return False
         return True
 
@@ -1845,8 +1861,12 @@ class Battle:
         *,
         ignore: Optional[Unit] = None,
         mover: Optional[Unit] = None,
+        allow_stealth_overlap: bool = False,
     ) -> bool:
-        return any(self.blocks_position_for(unit, mover=mover) for unit in self.units_at(position, ignore=ignore))
+        return any(
+            self.blocks_position_for(unit, mover=mover, allow_stealth_overlap=allow_stealth_overlap)
+            for unit in self.units_at(position, ignore=ignore)
+        )
 
     def unit_at(self, position: Position) -> Optional[Unit]:
         occupants = self.units_at(position)
@@ -2083,7 +2103,7 @@ class Battle:
         visited = {unit.position}
         direction: Optional[tuple[int, int]] = None
         distance_cost = 0
-        for step in steps:
+        for index, step in enumerate(steps):
             if not self.in_bounds(step):
                 raise ActionError("移动路径超出战场边界。")
             previous = path[-1]
@@ -2106,7 +2126,8 @@ class Battle:
                     raise ActionError("该移动必须沿同一直线前进。")
             if step in visited:
                 raise ActionError("移动路径不能重复经过同一个格子。")
-            if not self.can_place_unit(unit, step, ignore=unit, mover=unit, ignore_units=ignore_units):
+            step_ignores_units = ignore_units and index < len(steps) - 1
+            if not self.can_place_unit(unit, step, ignore=unit, mover=unit, ignore_units=step_ignores_units):
                 raise ActionError("移动路径被阻挡。")
             visited.add(step)
             distance_cost += self.normal_movement_step_cost(unit, previous, step) if use_movement_cost else 1
@@ -2160,7 +2181,10 @@ class Battle:
                     if spent > max_distance:
                         break
                     distance_value = spent if use_movement_cost else step
-                    if exact_distance is None or distance_value == exact_distance:
+                    if (
+                        (exact_distance is None or distance_value == exact_distance)
+                        and self.can_place_unit(unit, candidate, ignore=unit, mover=unit, ignore_units=False)
+                    ):
                         result.append(candidate)
             return result
         if use_movement_cost:
@@ -2184,7 +2208,9 @@ class Battle:
             return [
                 pos
                 for pos, dist in distances.items()
-                if pos != unit.position and (exact_distance is None or dist == exact_distance)
+                if pos != unit.position
+                and (exact_distance is None or dist == exact_distance)
+                and self.can_place_unit(unit, pos, ignore=unit, mover=unit, ignore_units=False)
             ]
         visited = {unit.position}
         queue: deque[tuple[Position, int]] = deque([(unit.position, 0)])
@@ -2199,7 +2225,10 @@ class Battle:
                 if not self.can_place_unit(unit, nxt, ignore=unit, mover=unit, ignore_units=ignore_units):
                     continue
                 visited.add(nxt)
-                if exact_distance is None or dist + 1 == exact_distance:
+                if (
+                    (exact_distance is None or dist + 1 == exact_distance)
+                    and self.can_place_unit(unit, nxt, ignore=unit, mover=unit, ignore_units=False)
+                ):
                     result.append(nxt)
                 queue.append((nxt, dist + 1))
         return result
@@ -2238,7 +2267,8 @@ class Battle:
             while current != destination:
                 previous = current
                 current = current.offset(dx, dy)
-                if not self.can_place_unit(unit, current, ignore=unit, mover=unit, ignore_units=ignore_units):
+                step_ignores_units = ignore_units and current != destination
+                if not self.can_place_unit(unit, current, ignore=unit, mover=unit, ignore_units=step_ignores_units):
                     raise ActionError("移动路径被阻挡。")
                 spent += self.normal_movement_step_cost(unit, previous, current) if use_movement_cost else 1
                 if spent > max_distance:
@@ -2259,7 +2289,8 @@ class Battle:
                 if pos == destination:
                     break
                 for nxt in self.neighbors(pos):
-                    if not self.can_place_unit(unit, nxt, ignore=unit, mover=unit, ignore_units=ignore_units):
+                    step_ignores_units = ignore_units and nxt != destination
+                    if not self.can_place_unit(unit, nxt, ignore=unit, mover=unit, ignore_units=step_ignores_units):
                         continue
                     next_dist = dist + self.normal_movement_step_cost(unit, pos, nxt)
                     if next_dist > max_distance:
@@ -2291,7 +2322,8 @@ class Battle:
                 next_dist = distances[pos] + 1
                 if next_dist > max_distance or nxt in parents:
                     continue
-                if not self.can_place_unit(unit, nxt, ignore=unit, mover=unit, ignore_units=ignore_units):
+                step_ignores_units = ignore_units and nxt != destination
+                if not self.can_place_unit(unit, nxt, ignore=unit, mover=unit, ignore_units=step_ignores_units):
                     continue
                 parents[nxt] = pos
                 distances[nxt] = next_dist
@@ -2334,7 +2366,7 @@ class Battle:
             raise ActionError("目标位置不能与当前位置相同。")
         if not self.in_bounds(destination):
             raise ActionError("目标位置超出战场边界。")
-        if not self.can_place_unit(unit, destination, ignore=unit, mover=unit, ignore_units=ignore_units):
+        if not self.can_place_unit(unit, destination, ignore=unit, mover=unit, ignore_units=False):
             raise ActionError("目标位置已被占用。")
         if unit.cannot_move and not forced:
             raise ActionError(f"{unit.name} 当前无法移动。")
@@ -2753,6 +2785,12 @@ class Battle:
             return False, "攻击对象不在战场上。"
         if self.distance_between_units(actor, target) > actor.targeting_range():
             return False, "目标超出普攻范围。"
+        if payload is not None and payload.get("x") is not None and payload.get("y") is not None:
+            clicked = Position(int(payload["x"]), int(payload["y"]))
+            if clicked not in self.unit_cells(target):
+                return False, "所点格子没有命中该目标。"
+            if self.unit_distance_to_cell(actor, clicked) > actor.targeting_range():
+                return False, "所点目标格超出普攻范围。"
         ok, reason = self.unit_can_be_selected(target, actor=actor, ignore_stealth=ignore_stealth)
         if not ok:
             return False, reason
@@ -3081,7 +3119,16 @@ class Battle:
             ignore_stealth = self.attack_ignores_stealth(actor, enemy)
             if self.attack_target_allowed(actor, enemy, ignore_stealth=ignore_stealth, payload=resolved_payload)[0]:
                 attack_targets.append(enemy.unit_id)
-                attack_cells.extend(cell.to_dict() for cell in self.unit_cells(enemy))
+                valid_cells = []
+                for cell in self.unit_cells(enemy):
+                    cell_payload = dict(resolved_payload)
+                    cell_payload["x"] = cell.x
+                    cell_payload["y"] = cell.y
+                    if self.attack_target_allowed(actor, enemy, ignore_stealth=ignore_stealth, payload=cell_payload)[0]:
+                        valid_cells.append(cell)
+                if not valid_cells:
+                    valid_cells = self.unit_cells(enemy)
+                attack_cells.extend(cell.to_dict() for cell in valid_cells)
         return {"cells": attack_cells, "target_unit_ids": attack_targets, "requires_target": True}
 
     def build_queued_action(self, payload: dict[str, Any]) -> QueuedAction:
@@ -3848,11 +3895,18 @@ class Battle:
         self.log(f"{unit.name} 消失了，暂时无法行动。")
         self.clear_all_stealth_if_all_heroes_stealthed()
 
-    def summon_unit(self, unit: Unit, position: Position, *, summoner: Optional[Unit] = None) -> None:
+    def summon_unit(
+        self,
+        unit: Unit,
+        position: Position,
+        *,
+        summoner: Optional[Unit] = None,
+        allow_stealth_overlap: bool = False,
+    ) -> None:
         unit.summoner_id = summoner.unit_id if summoner is not None else None
         unit.can_act_on_entry_turn = True
         unit.turn_ready = False
-        self.add_unit(unit, position)
+        self.add_unit(unit, position, allow_stealth_overlap=allow_stealth_overlap)
         self.log(f"{unit.name} 被召唤到战场。")
 
     def check_win_condition(self) -> None:

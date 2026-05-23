@@ -233,9 +233,15 @@ class MedusaSkill(Skill):
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         destination = payload_position(payload)
         ensure_distance(actor, destination, actor.targeting_range())
-        if battle.is_occupied(destination):
+        occupants = battle.units_at(destination)
+        if any(not unit.is_stealthed() for unit in occupants):
             raise ActionError("召唤位置已被占用。")
-        battle.summon_unit(MedusaSummon(actor.player_id), destination, summoner=actor)
+        battle.summon_unit(
+            MedusaSummon(actor.player_id),
+            destination,
+            summoner=actor,
+            allow_stealth_overlap=True,
+        )
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
         if actor.position is None:
@@ -244,9 +250,16 @@ class MedusaSkill(Skill):
             Position(x, y).to_dict()
             for x in range(battle.width)
             for y in range(battle.height)
-            if actor.position.distance_to(Position(x, y)) <= actor.targeting_range() and not battle.is_occupied(Position(x, y))
+            if actor.position.distance_to(Position(x, y)) <= actor.targeting_range()
+            and not any(not unit.is_stealthed() for unit in battle.units_at(Position(x, y)))
         ]
         return {"cells": cells, "target_unit_ids": [], "secondary_cells": [], "requires_target": True}
+
+    def get_target_cells_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
+        return []
+
+    def get_target_units_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[HeroUnit]:
+        return []
 
 
 class ParalyzingGloveSkill(Skill):

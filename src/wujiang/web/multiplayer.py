@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import random
 import secrets
 import threading
@@ -31,6 +32,7 @@ DEFAULT_AI_DIFFICULTY = "standard"
 AI_DIFFICULTIES = {"easy", "standard", "aggressive"}
 DEFAULT_SIMULATION_SPEED = 1.0
 SIMULATION_SPEED_OPTIONS = (0.5, 1.0, 2.0, 4.0)
+STALE_QUEUED_ACTOR_LOG_MARKER = "行动者已不在战场"
 ROOM_MODES: dict[str, dict[str, str]] = {
     "classic": {
         "name": "标准选将",
@@ -195,7 +197,6 @@ def default_team_for_seat(player_id: int) -> int:
 def team_name(team_id: int) -> str:
     return TEAM_LABELS[normalize_team_id(team_id)]
 
-
 def clone_visible_name(unit_payload: dict[str, Any], viewer_player_id: Optional[int]) -> str:
     name = str(unit_payload.get("name") or "")
     if not unit_payload.get("is_clone"):
@@ -205,16 +206,60 @@ def clone_visible_name(unit_payload: dict[str, Any], viewer_player_id: Optional[
     return name if name.endswith("（分身）") else f"{name}（分身）"
 
 
-def apply_private_clone_labels(state: dict[str, Any], viewer_player_id: Optional[int]) -> None:
+def disguise_clone_payload_for_enemy_view(
+    battle: Battle,
+    unit_payload: dict[str, Any],
+    source_payloads_by_id: dict[str, dict[str, Any]],
+) -> None:
+    unit_id = str(unit_payload.get("id") or "")
+    actual_unit = battle.get_unit(unit_id) if unit_id else None
+    source_id = battle.controlling_hero_id(actual_unit)
+    source_payload = copy.deepcopy(source_payloads_by_id.get(source_id or ""))
+    if not source_payload:
+        unit_payload["is_clone"] = False
+        return
+    preserved = {
+        "id": unit_payload.get("id"),
+        "player_id": unit_payload.get("player_id"),
+        "alive": unit_payload.get("alive"),
+        "banished": unit_payload.get("banished"),
+        "banish_turns_remaining": unit_payload.get("banish_turns_remaining"),
+        "banish_return_position": copy.deepcopy(unit_payload.get("banish_return_position")),
+        "position": copy.deepcopy(unit_payload.get("position")),
+        "footprint": copy.deepcopy(unit_payload.get("footprint")),
+        "occupied_cells": copy.deepcopy(unit_payload.get("occupied_cells")),
+        "mount_owner_id": unit_payload.get("mount_owner_id"),
+        "mounted_on_unit_id": unit_payload.get("mounted_on_unit_id"),
+        "ridden_by_unit_id": unit_payload.get("ridden_by_unit_id"),
+    }
+    source_payload.update(preserved)
+    source_payload["is_clone"] = False
+    unit_payload.clear()
+    unit_payload.update(source_payload)
+
+
+def apply_private_clone_labels(
+    state: dict[str, Any],
+    battle: Battle,
+    viewer_player_id: Optional[int],
+) -> None:
     visible_names_by_id: dict[str, str] = {}
+    source_payloads_by_id = {
+        str(unit_payload.get("id") or ""): copy.deepcopy(unit_payload)
+        for unit_payload in state.get("units", [])
+    }
     for unit_payload in state.get("units", []):
         visible_name = clone_visible_name(unit_payload, viewer_player_id)
+        if unit_payload.get("is_clone") and (viewer_player_id is None or unit_payload.get("player_id") != viewer_player_id):
+            disguise_clone_payload_for_enemy_view(battle, unit_payload, source_payloads_by_id)
         unit_payload["name"] = visible_name
         visible_names_by_id[str(unit_payload.get("id"))] = visible_name
     for active_unit in state.get("active_units", []):
         unit_id = str(active_unit.get("unit_id") or "")
         if unit_id in visible_names_by_id:
             active_unit["name"] = visible_names_by_id[unit_id]
+
+
 
 
 def battle_unit_owner_seat_id(battle: Battle, unit: Unit | None) -> Optional[int]:
@@ -305,7 +350,7 @@ def battle_state_for_viewer(
                 for unit in instant_units
                 if viewer_seat_id is None or battle_unit_owner_seat_id(battle, unit) == viewer_seat_id
             ]
-    apply_private_clone_labels(state, viewer_player_id)
+    apply_private_clone_labels(state, battle, viewer_player_id)
     return state
 
 
@@ -475,6 +520,9 @@ class GameRoom:
         self.simulation_paused = False
         self.simulation_speed = DEFAULT_SIMULATION_SPEED
         self.simulation_last_advanced_at: Optional[float] = None
+        self.pending_simulation_action: Optional[dict[str, Any]] = None
+        self.last_action_id = 0
+        self.last_action_meta: Optional[dict[str, Any]] = None
         self.status = "lobby"
         self.version = 0
         self.created_at = time.time()
@@ -585,6 +633,175 @@ class GameRoom:
     def _simulation_interval_seconds(self) -> float:
         return max(0.1, 0.9 / max(self.simulation_speed, 0.1))
 
+    def _scaled_simulation_delay(self, seconds: float) -> float:
+        return max(0.05, float(seconds) / max(self.simulation_speed, 0.1))
+
+    def _action_display_name(self, actor: Optional[Unit], payload: dict[str, Any]) -> str:
+        action_type = str(payload.get("type") or "")
+        if action_type == "move":
+            return "移动"
+        if action_type == "attack":
+            return "普攻"
+        if action_type == "skill" and actor is not None:
+            try:
+                return actor.get_skill(str(payload.get("skill_code") or "")).name
+            except ActionError:
+                return str(payload.get("skill_code") or "技能")
+        if action_type == "chain_react" and actor is not None:
+            action_code = str(payload.get("action_code") or "")
+            if action_code == "block":
+                return "格挡"
+            if action_code == "counter":
+                return "反击"
+            try:
+                return actor.get_skill(action_code).name
+            except ActionError:
+                return action_code or "连锁"
+        if action_type == "respawn_select":
+            return "重新出现"
+        if action_type == "end_turn":
+            return "结束回合"
+        if action_type == "chain_skip":
+            return "不连锁"
+        return action_type or "动作"
+
+    def _build_last_action_meta(
+        self,
+        payload: dict[str, Any],
+        *,
+        reason: str,
+        actor: Optional[Unit],
+        log_lines: list[str],
+    ) -> dict[str, Any]:
+        self.last_action_id += 1
+        path = payload.get("path") if isinstance(payload.get("path"), list) else []
+        cells = payload.get("cells") if isinstance(payload.get("cells"), list) else []
+        target_unit_ids = payload.get("target_unit_ids") if isinstance(payload.get("target_unit_ids"), list) else []
+        target_unit_id = payload.get("target_unit_id")
+        if target_unit_id:
+            target_unit_ids = [*target_unit_ids, str(target_unit_id)]
+        point_cells: list[dict[str, int]] = []
+        if payload.get("x") is not None and payload.get("y") is not None:
+            point_cells.append({"x": int(payload["x"]), "y": int(payload["y"])})
+        point_cells.extend(
+            {"x": int(cell["x"]), "y": int(cell["y"])}
+            for cell in cells
+            if isinstance(cell, dict) and cell.get("x") is not None and cell.get("y") is not None
+        )
+        return {
+            "id": self.last_action_id,
+            "reason": reason,
+            "action_type": str(payload.get("type") or ""),
+            "display_name": self._action_display_name(actor, payload),
+            "actor_id": actor.unit_id if actor is not None else str(payload.get("unit_id") or ""),
+            "actor_name": actor.name if actor is not None else "",
+            "actor_player_id": actor.player_id if actor is not None else None,
+            "actor_is_ai": bool(actor is not None and self._seat_for_actor(actor) and self._seat_for_actor(actor).is_ai),
+            "path": [
+                {"x": int(cell["x"]), "y": int(cell["y"])}
+                for cell in path
+                if isinstance(cell, dict) and cell.get("x") is not None and cell.get("y") is not None
+            ],
+            "cells": point_cells,
+            "target_unit_ids": [str(unit_id) for unit_id in target_unit_ids],
+            "log_lines": [str(line) for line in log_lines if str(line).strip()],
+        }
+
+    def _visible_last_action_for_viewer(self, viewer: Optional[PlayerSeat]) -> Optional[dict[str, Any]]:
+        if self.last_action_meta is None or self.battle is None:
+            return None
+        payload = dict(self.last_action_meta)
+        actor_id = str(payload.get("actor_id") or "")
+        if actor_id:
+            try:
+                actor = self.battle.get_unit(actor_id)
+            except Exception:
+                actor = None
+            if actor is not None and actor.has_status("隐身") and (viewer is None or viewer.team_id != actor.player_id):
+                return None
+        hidden_unit_ids = {
+            unit.unit_id
+            for unit in self.battle.all_units()
+            if unit.has_status("隐身") and (viewer is None or viewer.team_id != unit.player_id)
+        }
+        payload["target_unit_ids"] = [
+            str(unit_id)
+            for unit_id in payload.get("target_unit_ids", [])
+            if str(unit_id) not in hidden_unit_ids
+        ]
+        return payload
+
+    def _build_pending_action_meta(
+        self,
+        payload: dict[str, Any],
+        *,
+        reason: str,
+        actor: Optional[Unit],
+    ) -> dict[str, Any]:
+        path = payload.get("path") if isinstance(payload.get("path"), list) else []
+        cells = payload.get("cells") if isinstance(payload.get("cells"), list) else []
+        target_unit_ids = payload.get("target_unit_ids") if isinstance(payload.get("target_unit_ids"), list) else []
+        target_unit_id = payload.get("target_unit_id")
+        if target_unit_id:
+            target_unit_ids = [*target_unit_ids, str(target_unit_id)]
+        point_cells: list[dict[str, int]] = []
+        if payload.get("x") is not None and payload.get("y") is not None:
+            point_cells.append({"x": int(payload["x"]), "y": int(payload["y"])})
+        point_cells.extend(
+            {"x": int(cell["x"]), "y": int(cell["y"])}
+            for cell in cells
+            if isinstance(cell, dict) and cell.get("x") is not None and cell.get("y") is not None
+        )
+        return {
+            "id": self.last_action_id + 1,
+            "reason": reason,
+            "action_type": str(payload.get("type") or ""),
+            "display_name": self._action_display_name(actor, payload),
+            "actor_id": actor.unit_id if actor is not None else str(payload.get("unit_id") or ""),
+            "actor_name": actor.name if actor is not None else "",
+            "actor_player_id": actor.player_id if actor is not None else None,
+            "actor_is_ai": bool(actor is not None and self._seat_for_actor(actor) and self._seat_for_actor(actor).is_ai),
+            "path": [
+                {"x": int(cell["x"]), "y": int(cell["y"])}
+                for cell in path
+                if isinstance(cell, dict) and cell.get("x") is not None and cell.get("y") is not None
+            ],
+            "cells": point_cells,
+            "target_unit_ids": [str(unit_id) for unit_id in target_unit_ids],
+            "visible_count": 0,
+            "phase": "announce",
+            "payload": dict(payload),
+            "next_due_at": time.time() + self._scaled_simulation_delay(1.3),
+        }
+
+    def _visible_pending_action_for_viewer(self, viewer: Optional[PlayerSeat]) -> Optional[dict[str, Any]]:
+        if self.pending_simulation_action is None or self.battle is None:
+            return None
+        payload = {
+            key: value
+            for key, value in self.pending_simulation_action.items()
+            if key not in {"payload", "next_due_at"}
+        }
+        actor_id = str(payload.get("actor_id") or "")
+        if actor_id:
+            try:
+                actor = self.battle.get_unit(actor_id)
+            except Exception:
+                actor = None
+            if actor is not None and actor.has_status("éšèº«") and (viewer is None or viewer.team_id != actor.player_id):
+                return None
+        hidden_unit_ids = {
+            unit.unit_id
+            for unit in self.battle.all_units()
+            if unit.has_status("éšèº«") and (viewer is None or viewer.team_id != unit.player_id)
+        }
+        payload["target_unit_ids"] = [
+            str(unit_id)
+            for unit_id in payload.get("target_unit_ids", [])
+            if str(unit_id) not in hidden_unit_ids
+        ]
+        return payload
+
     def _record_replay_step(self, reason: str) -> None:
         if self.battle is None:
             return
@@ -607,51 +824,215 @@ class GameRoom:
             return
         self.replay.finish_and_save(room_summary=self.serialize_summary())
 
+    def _next_ai_planned_action(self) -> Optional[tuple[dict[str, Any], str, Optional[Unit]]]:
+        if self.battle is None or self.battle.winner is not None:
+            return None
+        try:
+            if self.battle.current_respawn_prompt() is not None:
+                seat = self._current_prompt_seat()
+                if seat is None or not seat.is_ai:
+                    return None
+                prompt = self.battle.current_respawn_prompt()
+                if prompt is None:
+                    return None
+                unit = self.battle.get_unit(prompt.unit_id)
+                options = sorted(self.battle.respawn_options_for(unit), key=lambda item: (item.x, item.y))
+                if not options:
+                    return None
+                difficulty = seat.ai_difficulty_override or self.default_ai_difficulty
+                payload = choose_respawn_action(self.battle, unit, options, difficulty)
+                return (payload, "ai_respawn", unit) if payload is not None else None
+            if self.battle.pending_chain is not None:
+                seat = self._current_prompt_seat()
+                if seat is None or not seat.is_ai:
+                    return None
+                current_unit_id = self.battle.pending_chain.current_unit_id()
+                if not current_unit_id:
+                    return None
+                reactor = self.battle.get_unit(current_unit_id)
+                options = self.battle.reaction_snapshot_for(reactor).get("actions", [])
+                difficulty = seat.ai_difficulty_override or self.default_ai_difficulty
+                payload = choose_chain_reaction(self.battle, reactor, options, difficulty)
+                return (payload or {"type": "chain_skip"}, "ai_chain", reactor)
+            instant_payload = self._choose_ai_instant_payload()
+            if instant_payload is not None:
+                actor = self.battle.get_unit(str(instant_payload.get("unit_id") or ""))
+                return instant_payload, "ai_instant", actor
+            seat = self._current_prompt_seat()
+            if seat is None or not seat.is_ai:
+                return None
+            current_unit = self.battle.current_turn_unit()
+            if current_unit is None:
+                return None
+            difficulty = seat.ai_difficulty_override or self.default_ai_difficulty
+            return choose_turn_action(self.battle, current_unit, difficulty), "ai_turn", current_unit
+        except ActionError:
+            seat = self._current_prompt_seat()
+            if seat is None or not seat.is_ai or self.battle is None:
+                return None
+            if self.battle.pending_chain is not None:
+                current_unit_id = self.battle.pending_chain.current_unit_id()
+                reactor = self.battle.get_unit(current_unit_id) if current_unit_id else None
+                return {"type": "chain_skip"}, "ai_chain_fallback", reactor
+            if self.battle.current_respawn_prompt() is not None:
+                prompt = self.battle.current_respawn_prompt()
+                if prompt is None:
+                    return None
+                unit = self.battle.get_unit(prompt.unit_id)
+                options = sorted(self.battle.respawn_options_for(unit), key=lambda item: (item.x, item.y))
+                if not options:
+                    return None
+                fallback = options[0]
+                return (
+                    {"type": "respawn_select", "unit_id": unit.unit_id, "x": fallback.x, "y": fallback.y},
+                    "ai_respawn_fallback",
+                    unit,
+                )
+            actor = self.battle.current_turn_unit()
+            return {"type": "end_turn"}, "ai_turn_fallback", actor
+
+    def _prepare_pending_simulation_action(self) -> bool:
+        planned = self._next_ai_planned_action()
+        if planned is None:
+            return False
+        payload, reason, actor = planned
+        self.pending_simulation_action = self._build_pending_action_meta(payload, reason=reason, actor=actor)
+        self.touch()
+        return True
+
+    def _advance_pending_simulation_action(self, *, ignore_due: bool = False) -> bool:
+        pending = self.pending_simulation_action
+        if pending is None:
+            return False
+        if not ignore_due and time.time() < float(pending.get("next_due_at") or 0):
+            return False
+        preview_cells = list(pending.get("path") or pending.get("cells") or [])
+        visible_count = max(0, int(pending.get("visible_count") or 0))
+        if visible_count < len(preview_cells):
+            visible_count += 1
+            pending["visible_count"] = visible_count
+            pending["phase"] = "selecting" if visible_count < len(preview_cells) else "confirm"
+            pending["next_due_at"] = time.time() + self._scaled_simulation_delay(0.6 if visible_count < len(preview_cells) else 1.3)
+            self.touch()
+            return True
+        payload = dict(pending.get("payload") or {})
+        reason = str(pending.get("reason") or "ai_action")
+        self.pending_simulation_action = None
+        try:
+            self._perform_battle_action(payload, reason=reason)
+        except ActionError as exc:
+            self._record_failed_ai_action(payload, reason=reason, error=exc)
+            raise
+        self.touch()
+        return True
+
+    def _record_failed_ai_action(self, payload: dict[str, Any], *, reason: str, error: ActionError) -> None:
+        if self.battle is None:
+            return
+        actor = None
+        actor_unit_id = payload.get("unit_id")
+        if actor_unit_id:
+            try:
+                actor = self.battle.get_unit(str(actor_unit_id))
+            except Exception:
+                actor = None
+        self.last_action_meta = self._build_last_action_meta(
+            payload,
+            reason=f"{reason}_failed",
+            actor=actor,
+            log_lines=[f"AI 行动未能执行：{error}"],
+        )
+        self._record_replay_step(f"{reason}_failed")
+        self.touch()
+
+    def _perform_ai_fallback_after_error(self) -> bool:
+        if self.battle is None:
+            return False
+        seat = self._current_prompt_seat()
+        if seat is None or not seat.is_ai:
+            return False
+        if self.battle.pending_chain is not None:
+            self._perform_battle_action({"type": "chain_skip"}, reason="ai_chain_fallback")
+            return True
+        if self.battle.current_respawn_prompt() is not None:
+            prompt = self.battle.current_respawn_prompt()
+            if prompt is None:
+                return False
+            unit = self.battle.get_unit(prompt.unit_id)
+            options = sorted(self.battle.respawn_options_for(unit), key=lambda item: (item.x, item.y))
+            if not options:
+                return False
+            fallback = options[0]
+            self._perform_battle_action(
+                {"type": "respawn_select", "unit_id": unit.unit_id, "x": fallback.x, "y": fallback.y},
+                reason="ai_respawn_fallback",
+            )
+            return True
+        self._perform_battle_action({"type": "end_turn"}, reason="ai_turn_fallback")
+        return True
+
     def _perform_battle_action(self, payload: dict[str, Any], *, reason: str) -> None:
         if self.battle is None:
             raise RoomError("å½“å‰æˆ¿é—´è¿˜æ²¡æœ‰å¼€å§‹å¯¹å±€ã€‚")
+        actor: Optional[Unit] = None
+        actor_unit_id = payload.get("unit_id")
+        if actor_unit_id:
+            try:
+                actor = self.battle.get_unit(str(actor_unit_id))
+            except Exception:
+                actor = None
+        elif payload.get("type") == "chain_skip" and self.battle.pending_chain is not None:
+            current_unit_id = self.battle.pending_chain.current_unit_id()
+            if current_unit_id:
+                actor = self.battle.get_unit(current_unit_id)
+        before_log_count = len(self.battle.logs)
         self.battle.perform_action(payload)
+        new_logs = self.battle.logs[before_log_count:]
+        self.last_action_meta = self._build_last_action_meta(
+            payload,
+            reason=reason,
+            actor=actor,
+            log_lines=new_logs,
+        )
         self._record_replay_step(reason)
         if self.battle.winner is not None:
             self.status = "finished"
             self._ensure_replay_saved()
+        if reason.startswith("ai_") and any(STALE_QUEUED_ACTOR_LOG_MARKER in line for line in new_logs):
+            raise ActionError("AI action actor is no longer present.")
 
     def _advance_simulation_due(self, *, force_steps: Optional[int] = None) -> int:
-        if self.battle is None or self.battle.winner is not None or not self._simulation_enabled():
+        if self.battle is None or self.battle.winner is not None:
             return 0
-        if self.simulation_paused and force_steps is None:
+        if self.simulation_paused and force_steps is None and self._simulation_enabled():
             return 0
-        if force_steps is None:
-            now = time.time()
-            last_tick = self.simulation_last_advanced_at if self.simulation_last_advanced_at is not None else now
-            elapsed = max(0.0, now - last_tick)
-            due_steps = int(elapsed / self._simulation_interval_seconds())
-            if due_steps <= 0:
-                return 0
-            force_steps = min(due_steps, 4)
-        steps = self._resolve_ai_until_human_input(max_steps=max(0, int(force_steps)))
+        step_budget = max(0, int(force_steps)) if force_steps is not None else 4
+        steps = 0
+        safety = 0
+        while self.battle is not None and self.battle.winner is None and safety < 64:
+            if force_steps is not None and steps >= step_budget:
+                break
+            if self.pending_simulation_action is not None:
+                if force_steps is None and time.time() < float(self.pending_simulation_action.get("next_due_at") or 0):
+                    break
+                try:
+                    if not self._advance_pending_simulation_action(ignore_due=force_steps is not None):
+                        break
+                except ActionError:
+                    if not self._perform_ai_fallback_after_error():
+                        break
+                steps += 1
+            else:
+                if not self._prepare_pending_simulation_action():
+                    break
+                steps += 1
+            safety += 1
+            if force_steps is None and self.pending_simulation_action is not None:
+                break
         if steps > 0:
             self.simulation_last_advanced_at = time.time()
+        self.status = "finished" if self.battle and self.battle.winner is not None else "battle"
         return steps
-
-    def _start_blocker(self) -> Optional[str]:
-        if self.battle is not None:
-            return "当前房间已经在对局中。"
-        if not self.seats:
-            return "房间里还没有席位。"
-        if any(not seat.occupied for seat in self.seats.values()):
-            return "仍有开放席位未被真人或 AI 占用。"
-        if self.human_seat_count() <= 0:
-            return "当前至少需要一个真人席位才能开始。"
-        if self.mode == "random":
-            for team_id in TEAM_IDS:
-                if self._team_quota_sum(team_id) != self.random_roster_size:
-                    return f"{team_name(team_id)} 的随机武将配额之和必须等于 n = {self.random_roster_size}。"
-            return None
-        for seat in sorted(self.seats.values(), key=lambda item: item.player_id):
-            if seat.hero_total_count <= 0:
-                return f"席位 {seat.player_id} 还没有配置武将。"
-        return None
 
     def create_host(self, player_name: str) -> tuple[int, str]:
         with self._lock:
@@ -866,38 +1247,6 @@ class GameRoom:
                 )
         return entries
 
-    def start_battle(self, token: str) -> None:
-        with self._lock:
-            self.require_seat(token)
-            if self.status != "lobby":
-                raise RoomError("当前房间已经在对局中。")
-            blocker = self._start_blocker()
-            if blocker is not None:
-                raise RoomError(blocker)
-            if self.mode == "random":
-                assignments = self._team_random_rosters()
-                for seat in self.seats.values():
-                    seat.replace_roster(assignments[seat.team_id].get(seat.player_id, []))
-            player1_entries = self._battle_entries_for_team(1)
-            player2_entries = self._battle_entries_for_team(2)
-            self.battle = create_room_battle(player1_entries, player2_entries, mode=self.mode)
-            self.status = "battle"
-            self._resolve_ai_until_human_input()
-            self.touch()
-
-    def restart_lobby(self, token: str) -> None:
-        with self._lock:
-            self.require_seat(token)
-            if self.status != "finished":
-                raise RoomError("只有对局结束后，才能重新开始选将。")
-            self.battle = None
-            self.status = "lobby"
-            for seat in self.seats.values():
-                seat.clear_roster()
-            if self.mode == "random":
-                self._reset_random_quotas_to_defaults()
-            self.touch()
-
     def leave(self, token: str) -> int:
         with self._lock:
             seat = self.require_seat(token)
@@ -910,22 +1259,6 @@ class GameRoom:
             self.touch()
             return leaving_player_id
 
-    def surrender(self, token: str) -> None:
-        with self._lock:
-            seat = self.require_seat(token)
-            if self.battle is None or self.status != "battle":
-                raise RoomError("当前房间不在对局中，不能投降。")
-            winner = 2 if seat.team_id == 1 else 1
-            self.battle.pending_chain = None
-            self.battle.pending_respawn_unit_ids = []
-            self.battle.winner = winner
-            self.battle.log(
-                f"{seat.name or f'\u5e2d\u4f4d {seat.player_id}'} "
-                f"\u6295\u964d\u3002{team_name(winner)}\u83b7\u80dc\u3002"
-            )
-            self.status = "finished"
-            self.touch()
-
     def current_input_player_id(self) -> Optional[int]:
         if self.battle is None:
             return None
@@ -935,6 +1268,12 @@ class GameRoom:
         if self.battle is None:
             return None
         return battle_unit_owner_seat_id(self.battle, unit)
+
+    def _seat_for_actor(self, unit: Unit | None) -> Optional[PlayerSeat]:
+        owner_seat_id = self._unit_owner_seat_id(unit)
+        if owner_seat_id is None:
+            return None
+        return self.seats.get(owner_seat_id)
 
     def _current_prompt_seat(self) -> Optional[PlayerSeat]:
         if self.battle is None:
@@ -972,77 +1311,6 @@ class GameRoom:
         ok, _ = skill.can_use(self.battle, actor, payload)
         return ok
 
-    def _resolve_ai_until_human_input(self) -> None:
-        if self.battle is None or self.battle.winner is not None:
-            self.status = "finished" if self.battle and self.battle.winner is not None else self.status
-            return
-        safety = 0
-        while self.battle is not None and self.battle.winner is None and safety < 512:
-            try:
-                if self.battle.current_respawn_prompt() is not None:
-                    seat = self._current_prompt_seat()
-                    if seat is None or not seat.is_ai:
-                        break
-                    prompt = self.battle.current_respawn_prompt()
-                    if prompt is None:
-                        break
-                    unit = self.battle.get_unit(prompt.unit_id)
-                    options = sorted(self.battle.respawn_options_for(unit), key=lambda item: (item.x, item.y))
-                    if not options:
-                        break
-                    difficulty = seat.ai_difficulty_override or self.default_ai_difficulty
-                    payload = choose_respawn_action(self.battle, unit, options, difficulty)
-                    if payload is None:
-                        break
-                    self.battle.perform_action(payload)
-                elif self.battle.pending_chain is not None:
-                    seat = self._current_prompt_seat()
-                    if seat is None or not seat.is_ai:
-                        break
-                    current_unit_id = self.battle.pending_chain.current_unit_id()
-                    if not current_unit_id:
-                        break
-                    reactor = self.battle.get_unit(current_unit_id)
-                    options = self.battle.reaction_snapshot_for(reactor).get("actions", [])
-                    difficulty = seat.ai_difficulty_override or self.default_ai_difficulty
-                    payload = choose_chain_reaction(self.battle, reactor, options, difficulty)
-                    self.battle.perform_action(payload or {"type": "chain_skip"})
-                else:
-                    instant_payload = self._choose_ai_instant_payload()
-                    if instant_payload is not None:
-                        self.battle.perform_action(instant_payload)
-                    else:
-                        seat = self._current_prompt_seat()
-                        if seat is None or not seat.is_ai:
-                            break
-                        current_unit = self.battle.current_turn_unit()
-                        if current_unit is None:
-                            break
-                        difficulty = seat.ai_difficulty_override or self.default_ai_difficulty
-                        self.battle.perform_action(choose_turn_action(self.battle, current_unit, difficulty))
-            except ActionError:
-                seat = self._current_prompt_seat()
-                if seat is None or not seat.is_ai:
-                    break
-                if self.battle.pending_chain is not None:
-                    self.battle.perform_action({"type": "chain_skip"})
-                elif self.battle.current_respawn_prompt() is not None:
-                    prompt = self.battle.current_respawn_prompt()
-                    if prompt is None:
-                        break
-                    unit = self.battle.get_unit(prompt.unit_id)
-                    options = sorted(self.battle.respawn_options_for(unit), key=lambda item: (item.x, item.y))
-                    if not options:
-                        break
-                    fallback = options[0]
-                    self.battle.perform_action(
-                        {"type": "respawn_select", "unit_id": unit.unit_id, "x": fallback.x, "y": fallback.y}
-                    )
-                else:
-                    self.battle.perform_action({"type": "end_turn"})
-            safety += 1
-        self.status = "finished" if self.battle and self.battle.winner is not None else "battle"
-
     def _choose_ai_instant_payload(self) -> Optional[dict[str, Any]]:
         if (
             self.battle is None
@@ -1067,34 +1335,6 @@ class GameRoom:
             if payload is not None:
                 return payload
         return None
-
-    def perform_action(self, token: str, payload: dict[str, Any]) -> None:
-        with self._lock:
-            seat = self.require_seat(token)
-            if self.battle is None:
-                raise RoomError("当前房间还没有开始对局。")
-            current_player = self.current_input_player_id()
-            instant_override = self.allows_instant_action_override(seat, payload)
-            if current_player != seat.team_id and not instant_override:
-                raise RoomError("现在还没轮到你这边操作。")
-            actor_unit_id = payload.get("unit_id")
-            if actor_unit_id:
-                actor = self.battle.get_unit(str(actor_unit_id))
-                if actor.player_id != seat.team_id:
-                    raise RoomError("不能操作对方单位。")
-                if self._unit_owner_seat_id(actor) != seat.player_id:
-                    raise RoomError("不能操作同队其他席位拥有的单位。")
-            elif not instant_override:
-                responsible_seat = self._current_prompt_seat()
-                if responsible_seat is not None and responsible_seat.player_id != seat.player_id:
-                    raise RoomError("现在还没轮到你控制的单位。")
-            try:
-                self.battle.perform_action(payload)
-            except ActionError as exc:
-                raise RoomError(str(exc)) from exc
-            self._resolve_ai_until_human_input()
-            self.status = "finished" if self.battle.winner is not None else "battle"
-            self.touch()
 
     def invite_path(self) -> str:
         return f"/?room={self.room_id}"
@@ -1133,56 +1373,6 @@ class GameRoom:
                 "start_blocker": self._start_blocker(),
                 "can_rematch": self.status == "finished",
                 "seats": seats,
-            }
-
-    def serialize_state(self, viewer_token: Optional[str] = None, *, base_url: Optional[str] = None) -> dict[str, Any]:
-        with self._lock:
-            viewer = self.seat_for_token(viewer_token)
-            viewer_player_id = viewer.player_id if viewer else None
-            viewer_team_id = viewer.team_id if viewer else None
-            viewer_name = viewer.name if viewer else None
-            heroes_by_code = hero_lookup()
-            mode_meta = room_mode_payload(self.mode)
-            room_state = {
-                "room_id": self.room_id,
-                "status": self.status,
-                "mode": mode_meta["code"],
-                "mode_name": mode_meta["name"],
-                "mode_description": mode_meta["description"],
-                "available_modes": room_mode_list_payload(),
-                "version": self.version,
-                "created_at": self.created_at,
-                "updated_at": self.updated_at,
-                "invite_path": self.invite_path(),
-                "invite_url": self.invite_url(base_url),
-                "host_player_id": self.host_player_id,
-                "random_roster_size": self.random_roster_size,
-                "default_ai_difficulty": self.default_ai_difficulty,
-                "seat_count": len(self.seats),
-                "seat_count_min": MIN_ROOM_SEAT_COUNT,
-                "seat_count_max": MAX_ROOM_SEAT_COUNT,
-                "viewer_player_id": viewer_player_id,
-                "viewer_team_id": viewer_team_id,
-                "viewer_name": viewer_name,
-                "viewer_is_host": viewer_player_id == self.host_player_id if viewer_player_id is not None else False,
-                "occupied_seat_count": self.occupied_seat_count(),
-                "human_seat_count": self.human_seat_count(),
-                "ai_seat_count": self.ai_seat_count(),
-                "is_full": all(seat.occupied for seat in self.seats.values()),
-                "can_start": self.can_start(),
-                "start_blocker": self._start_blocker(),
-                "can_rematch": self.status == "finished",
-                "seats": [seat.to_public_dict(heroes_by_code, self.host_player_id) for seat in self.seats.values()],
-            }
-            battle_state = (
-                battle_state_for_viewer(self.battle, viewer_team_id, viewer_player_id)
-                if self.battle is not None
-                else None
-            )
-            return {
-                "heroes": heroes_catalog(),
-                "room": room_state,
-                "battle": battle_state,
             }
 
     def _start_blocker(self) -> Optional[str]:
@@ -1233,6 +1423,8 @@ class GameRoom:
             "speed_options": list(SIMULATION_SPEED_OPTIONS),
             "can_control": viewer is not None and viewer.player_id == self.host_player_id and self._simulation_enabled(),
             "live_step_index": self.replay.last_index if self.replay is not None and self.replay.step_count > 0 else 0,
+            "last_action": self._visible_last_action_for_viewer(viewer),
+            "pending_action": self._visible_pending_action_for_viewer(viewer),
         }
 
     def start_battle(self, token: str) -> None:
@@ -1254,10 +1446,12 @@ class GameRoom:
             self.simulation_paused = False
             self.simulation_speed = DEFAULT_SIMULATION_SPEED
             self.simulation_last_advanced_at = time.time()
+            self.pending_simulation_action = None
+            self.last_action_id = 0
+            self.last_action_meta = None
             self.status = "battle"
             self._record_replay_step("battle_start")
-            if not self._simulation_enabled():
-                self._resolve_ai_until_human_input()
+            self._advance_simulation_due(force_steps=1)
             self.touch()
 
     def restart_lobby(self, token: str) -> None:
@@ -1270,26 +1464,14 @@ class GameRoom:
             self.simulation_paused = False
             self.simulation_speed = DEFAULT_SIMULATION_SPEED
             self.simulation_last_advanced_at = None
+            self.pending_simulation_action = None
+            self.last_action_id = 0
+            self.last_action_meta = None
             self.status = "lobby"
             for seat in self.seats.values():
                 seat.clear_roster()
             if self.mode == "random":
                 self._reset_random_quotas_to_defaults()
-            self.touch()
-
-    def surrender(self, token: str) -> None:
-        with self._lock:
-            seat = self.require_seat(token)
-            if self.battle is None or self.status != "battle":
-                raise RoomError("å½“å‰æˆ¿é—´ä¸åœ¨å¯¹å±€ä¸­ï¼Œä¸èƒ½æŠ•é™ã€‚")
-            winner = 2 if seat.team_id == 1 else 1
-            self.battle.pending_chain = None
-            self.battle.pending_respawn_unit_ids = []
-            self.battle.winner = winner
-            self.battle.log(f"{seat.name or f'å¸­ä½ {seat.player_id}'} æŠ•é™ã€‚{team_name(winner)}èŽ·èƒœã€‚")
-            self.status = "finished"
-            self._record_replay_step("surrender")
-            self._ensure_replay_saved()
             self.touch()
 
     def _resolve_ai_until_human_input(self, max_steps: Optional[int] = None) -> int:
@@ -1402,10 +1584,8 @@ class GameRoom:
                 self._perform_battle_action(payload, reason="player_action")
             except ActionError as exc:
                 raise RoomError(str(exc)) from exc
-            if not self._simulation_enabled():
-                self._resolve_ai_until_human_input()
-            elif self.battle is not None and self.battle.winner is None:
-                self.simulation_last_advanced_at = time.time()
+            if self.battle is not None and self.battle.winner is None:
+                self._advance_simulation_due(force_steps=1)
             self.status = "finished" if self.battle and self.battle.winner is not None else "battle"
             self.touch()
 
@@ -1476,7 +1656,7 @@ class GameRoom:
     def serialize_state(self, viewer_token: Optional[str] = None, *, base_url: Optional[str] = None) -> dict[str, Any]:
         with self._lock:
             viewer = self.seat_for_token(viewer_token)
-            if self._simulation_enabled():
+            if self.battle is not None and self.battle.winner is None:
                 self._advance_simulation_due()
             viewer_player_id = viewer.player_id if viewer else None
             viewer_team_id = viewer.team_id if viewer else None

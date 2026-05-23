@@ -20,14 +20,16 @@ Update this file after every new gameplay requirement or code change in `wujiang
 - `src/wujiang/heroes/first_five.py`: first hero batch and their special mechanics.
 - `src/wujiang/heroes/next_five.py`: next hero batch. Current implemented heroes include `ElementHunter`, `UndeadKingLina`, `RockGod`, `DoomlightDragon`, `Masamune`, `Jade`, and `N`.
 - `src/wujiang/heroes/registry.py`: hero registry, battle creation, classic multi-hero spawn/board sizing, random mode, start order.
-- `src/wujiang/web/multiplayer.py` and `src/wujiang/web/server.py`: room flow, host mode changes, random roster-size configuration, `2~6` seat ownership/team assignment, seat persistence, room/battle serialization, AI-room simulation control, replay serialization, and replay HTTP endpoints.
+- `src/wujiang/web/multiplayer.py` and `src/wujiang/web/server.py`: room flow, host mode changes, random roster-size configuration, `2~6` seat ownership/team assignment, seat persistence, room/battle serialization, AI-room simulation control, replay serialization, and replay HTTP endpoints. `multiplayer.py` had legacy overridden `GameRoom` methods removed; the later replay/simulation-aware implementations are the canonical ones.
 - `src/wujiang/web/ai.py`: room-side AI policy layer. It builds legal move/attack/skill/reaction/instant payloads from battle previews, keeps hidden-info legality by consuming only viewer-legal battle state, and provides per-hero / per-skill scoring hints on top of a generic candidate framework.
 - `src/wujiang/web/replay.py`: room replay recorder. It stores spectator, per-seat, and omniscient battle snapshots by step, serves viewer-legal replay state, and persists finished battles under `replays/`.
-- `static/app.js`: client state, action selection, board rendering, targeting previews, multi-cell click handling.
+- `static/app.js`: client state, action selection, board rendering, targeting previews, multi-cell click handling. Legacy top-level duplicate function definitions were removed; the remaining single definitions are the canonical edit points for lobby, header/message, replay toolbar, and selection state. Dynamic replay-toolbar / zoom-control labels are injected by `ensureDynamicUiScaffolding()` and should stay in Unicode-safe Chinese literals.
+- Frontend room-config note: lobby polling must not re-render `renderRoomPanels()` while a seat config control is actively focused (`data-seat-team`, `data-seat-controller`, `data-seat-quota`, seat-count input, random-roster-size input), otherwise native dropdowns collapse before the user can choose an option.
 - `static/styles.css` and `static/index.html`: UI layout and presentation.
 - `tests/test_battle.py`: battle-engine and hero regression coverage, including turn scheduler and spawn-order assertions.
 - `tests/test_multiplayer.py`: multiplayer/session regression coverage.
 - `tests/test_behavior.py`: behavior-driven scenarios for public lobby discovery, spectator room visibility, room-to-battle flows, classic and random multi-hero room rules, AI-only room simulation, replay HTTP/control flow, player-facing combat rules, and `quickjs` frontend smoke checks for room-directory rendering/join wiring, random-room roster-size controls, board-overlay reflow, replay toolbar rendering, and battle VFX event consumption in `static/app.js`. Use this layer for future end-to-end-like regressions before adding a full browser automation dependency.
+- Current regression coverage explicitly locks two fragile cases: room-AI defensive reactions against stealthed attacks, and fixed-slot turn-order skipping that must still preserve team alternation after a destroyed hero slot is passed.
 - `.codex/skills/wujiang-game-rules/references/hero-rule-index.md`: compact index of implemented heroes, skills, traits, summons, and key implementation constraints.
 
 ## Current Engine Patterns
@@ -69,7 +71,8 @@ Update this file after every new gameplay requirement or code change in `wujiang
 - `BattleFieldEffect.on_turn_start(...)` is available for start-of-owner-round cleanup or triggers on local fields that should not use global `duration` countdowns.
 - Multi-seat implementation note: keep battle `player_id` team-based when possible, but model room seats and seat-owned hero control separately in the room layer. Active-turn permissions should be seat-owned, while same-team support reactions remain allowed across seats.
 - Current room implementation note: human seats now own only their own heroes even inside the same battle-side team. Multi-seat room start builds battle heroes with `owner_seat_id`, filters `active_units` by seat, and keeps hidden-info visibility team-based.
-- Current room implementation note: AI seats are live in battle now. `GameRoom._resolve_ai_until_human_input()` uses `src/wujiang/web/ai.py` to play active turns, reactions, respawn choices, and instant-skill interrupts for seat-owned units. When no human-owned hero remains present, `GameRoom` auto-advances the room as a paced AI simulation, records replay steps through `src/wujiang/web/replay.py`, exposes `/api/rooms/replay` and `/api/rooms/simulation-control`, and lets the host pause / step / scrub live AI-only battles from the frontend replay toolbar.
+- Current room implementation note: AI seats are live in battle now. `GameRoom._resolve_ai_until_human_input()` uses `src/wujiang/web/ai.py` to play active turns, reactions, respawn choices, and instant-skill interrupts for seat-owned units. When no human-owned hero remains present, `GameRoom` auto-advances the room as a paced AI simulation, records replay steps through `src/wujiang/web/replay.py`, exposes `/api/rooms/replay` and `/api/rooms/simulation-control`, and lets the host pause / step / scrub live AI-only battles from the frontend replay toolbar. AI candidate scoring for area payloads should reuse payload cells instead of rebuilding expensive pattern lists for every candidate.
+- AI simulation recovery note: if a staged AI action reaches confirmation but its queued actor has left the battlefield or the staged payload has become illegal, room simulation must clear the staged action, record a failed AI replay step, and fall back to chain skip / respawn fallback / end-turn fallback instead of leaving AI stalled or throwing out of `/api/rooms/state`.
 - Replay implementation note: prefer event log plus periodic snapshots so rewind/scrub stay responsive without storing a full state for every frame.
 - `DamageContext.preserve_followup_effects` is the engine flag for “this hit's damage was prevented, but the rest of the same effect should still apply”.
 - `Unit.allow_unbounded_mana` lets a hero's current mana and displayed mana cap grow beyond base mana.
@@ -78,6 +81,8 @@ Update this file after every new gameplay requirement or code change in `wujiang
 - `Unit.allow_overheal` allows specific heroes to heal above `max_health`; default healing still caps at `max_health` for everyone else.
 - Direct attacks and point-target skills against multi-cell units must declare an actual occupied target cell, not blindly use the unit anchor.
 - Multi-cell movement must validate the destination footprint, not only the anchor/top-left cell. Non-stealthed units cannot overlap other non-stealthed units after movement.
+- Occupancy is stricter than before: no unit may end movement or be placed onto another unit's occupied cells unless a rule explicitly grants overlap. Stealth alone never grants overlap. Current explicit exceptions are mount/rider overlap and Ellie's Medusa summon onto a cell occupied only by a stealthed unit.
+- Ellie Medusa special case: summoning Medusa onto a cell with only stealthed occupants must not open a chain window for that hidden unit, but it does create a temporary overlap. The stealthed unit is then blocked by the shared-cell stealth rule until it moves away.
 - Range damage against multi-cell units should set `DamageContext.area_cell_hits=battle.unit_hit_count_for_cells(unit, cells)` so each extra occupied cell hit adds +1 attack power.
 - Full pierce uses `ignore_shield`; half pierce uses `half_ignore_shield`.
 - Shields block chain options unless the queued action has `ignore_shield` or `half_ignore_shield`.
@@ -86,10 +91,15 @@ Update this file after every new gameplay requirement or code change in `wujiang
 - Code structure: `QueuedAction` supports `skill_effect` actions with optional `effect_resolver`; use `build_skill_effect_action(...)`, `queue_skill_effect_action(...)`, or `queue_area_damage_effect(...)` for explicit effect stages. Wind Sand weather, Backstep Shot retreat/counter, Fate Kick dash/banish, and Rock Cannon impact damage are represented as explicit effect stages; the first three currently preserve the old UX by resolving their non-hostile or direct-reaction stages without opening extra windows.
 - Weather is represented as a `BattleFieldEffect` with `weather_name`; use `battle.unit_in_weather(name, unit)` for unit-specific effects because weather may be local, and `battle.has_weather(name)` only means some weather effect of that name exists. Full-board weather effects set `global_weather = True`; local weather effects must return concrete `affected_cells`.
 - Same-name weather does not stack. If a unit/cell is covered by multiple weather effects with the same `weather_name`, including local plus global weather, damage and restrictions are applied once.
-- Some skills now use a first-use-started shared use window instead of plain cooldown or per-turn count. `WindowChargeSkill` in `src/wujiang/heroes/common.py` tracks a total use pool over N rounds; leftover uses expire when the window ends, and UI labels should read from `window_*` public fields instead of only `max_uses_per_turn`.
+- Some skills now use a first-use-started shared use window instead of plain cooldown or per-turn count. `WindowChargeSkill` in `src/wujiang/heroes/common.py` tracks a total use pool over N owner rounds, decremented on the owning hero's own turn start; leftover uses expire when the window ends, and UI labels should read from `window_*` public fields instead of only `max_uses_per_turn`.
 - Multi-target wall reactions validate target count before resource prepayment. This matters for free multi-target wall variants such as `离子盾` and `量子盾`, and also avoids post-prepay validation failures on older wall skills.
 - When a hostile queued action goes through a reaction window, the original queued payload now records whether the opponent reacted at all via `payload["enemy_reacted"]`. Hero-local traits can use that during final skill resolution without re-inspecting the chain window.
 - Stealth hides logs and prevents direct hostile targeting, but point-cell skills can still hit if their cells overlap the stealthed unit. Stealthed units can still chain against enemy actions that affect them. Sandstorm suppresses all stealth statuses in its covered cells and removes only the stealth part, not non-stealth buffs from the same skill.
+- Current battle UI direction: selected-unit state, controllable-unit strip, and chain info stay on sticky side rails, but actionable buttons are again stage-local and render around the currently selected unit. When a unit has many actions, lay them out as an adaptive clamped cluster around the piece instead of forcing them into the left rail. Replay controls use icon buttons with custom tooltips instead of native browser tooltips.
+- Battlefield pan/zoom interaction rule: dragging must be startable directly from board cells or pieces, not just empty stage background. Wheel input inside `board-stage` should zoom around the pointer location rather than requiring the toolbar buttons.
+- Multi-cell targeting UI rule: when an attack or skill only legally affects some occupied cells of a large unit, preview highlighting and clickability must stay restricted to those exact cells. Do not mark the whole unit footprint as targetable just because one occupied cell is valid.
+- Battle inspection UI rule: even when the viewer cannot currently act, clicking any visible unit on the board must still switch the left rail to that unit's info/status view. Action availability and unit inspection are separate concerns.
+- Current AI-UX note: live room state now exposes a staged `room.simulation.pending_action` payload for AI-controlled turns, reactions, respawns, and instant skills. `GameRoom` prepares the action first, then reveals selected cells/path one stage at a time, and only commits the battle action after the final confirmation delay. `static/app.js` should render `pending_action.visible_count` directly; floating toasts still come from visible battle logs so the transient message stack matches the right-side log queue.
 
 ## Current Hero Rules To Preserve
 
@@ -132,12 +142,12 @@ Update this file after every new gameplay requirement or code change in `wujiang
   - Arc Attack uses player-declared 8-direction facing. Orthogonal directions attack the outer 3-cell row; diagonal directions attack the corresponding 3-cell corner arc.
   - Mounted Free Leap is implemented as a visible 0-mana once-per-turn Leap action while mounted.
 - Jade:
-  - Missile uses a first-use-started 2-round window with expiring leftover uses.
+  - Missile uses a first-use-started 2-round window counted on Jade's own turn starts, with expiring leftover uses.
   - Ion Shield is a free wall-like passive reaction with up to 2 casts per own cycle; one cast may protect multiple threatened allies.
   - Quantum Shield is a free wall-like passive reaction with up to 3 casts in a usable own cycle; if used at all, the next own cycle is unavailable and the following cycle becomes usable again.
   - Laser uses remote edge-truncated `2*10` / `10*2` area selection.
   - Plasma Thruster is a straight flying move to the 5th cell, except boundary truncation allows the last in-bounds cell; occupied destinations remain invalid.
-  - Stance is a dynamic visible local field; it does not protect Jade, only blocks damage, and only during the next enemy turn after casting.
+  - Stance is a dynamic visible local field; it does not protect Jade, only blocks damage, and lasts from after Jade's current turn ends until Jade's next own turn starts.
   - Reactive Overclock checks damaging skills after enemy chain resolution; if any original enemy target took no damage, that skill gains +1 permanent future use from Jade's next own turn, once per turn per skill.
 - N:
   - `磁力波` is the first formal instant skill: a range-based, edge-truncated `3*3` current-attack area skill paid with 2 mana points, usable once in each hero turn, including the opponent's current turn.
@@ -145,6 +155,7 @@ Update this file after every new gameplay requirement or code change in `wujiang
   - `每回合开始时决定攻击数=魔+1` snapshots once at own turn start using `floor(current_mana) + 1`; mid-turn mana changes do not alter that turn's attack cap.
   - `魔无上限` means both current mana and displayed mana cap are unbounded for N.
   - `魔大于0时不受到伤害，受到伤害时魔-1` applies per damage instance, blocks damage only, and still lets that same effect's non-damage follow-up apply.
+- `分身` for N creates 3 clones in 3 separately chosen legal cells, then randomly swaps the real hero with one of those new clones. Allied views may distinguish the real body from clones, but enemy-facing public info must still mirror the real hero so mana, skill text, trait text, and clone markers do not reveal the real body. Its preview exposes legal single cells plus `required_cells=3`; do not enumerate every 3-cell combination, because large 6v6 boards make that combinatorial.
 
 ## Frontend Coupling
 
@@ -154,6 +165,8 @@ Update this file after every new gameplay requirement or code change in `wujiang
 - Keep action wheel buttons and board alerts at a higher CSS stacking layer than footprint-spanning board pieces; large units can otherwise visually cover skill buttons even when pointer events are disabled.
 - Action wheel and board-alert overlays are stage-level absolute layers, so any zoom, board-stage scroll, or window resize path must reschedule overlay positioning after layout settles.
 - Action wheel placement must also clamp back inside the visible `board-stage` bounds when the selected unit is near an edge; do not let top or side buttons render outside the scroll viewport.
+- During target selection, the action wheel must hide so its floating buttons cannot cover clickable board cells; use board highlights plus cancel/complete controls for the targeting step.
+- During target or respawn selection, board-stage drag/pointer capture must be disabled so single clicks continue to land on the intended `.cell`.
 - Battle VFX are also stage-level overlays driven from backend `visual_events`. Engine changes that alter attack/skill/effect timing or defensive cancellation should keep `visual_events` synchronized, and frontend changes must preserve VFX positioning after board rerenders.
 - Move-path previews should show a distinct final-footprint highlight and translate clicks on any final occupied footprint cell back to the backend anchor payload.
 - Frontend move blocking must mirror `battle.can_place_unit(...)`: test the whole footprint, allow overlaps only for stealth exceptions, and reject out-of-bounds footprints.

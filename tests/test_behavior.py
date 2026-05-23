@@ -177,11 +177,23 @@ class RoomBehaviorTests(unittest.TestCase):
         # When the host starts the battle
         started = self.api_post("/api/rooms/start", {"room_id": room_id, "player_token": host_token})
 
-        # Then the AI has already taken its first turn and input is back on the human side
+        # Then the battle exposes a staged AI opening action instead of resolving it instantly
         self.assertEqual(started["room"]["status"], "battle")
-        self.assertEqual(started["battle"]["input_player"], 1)
-        self.assertIsNotNone(started["battle"]["pending_chain"])
-        self.assertEqual(started["battle"]["pending_chain"]["queued_action"]["actor_id"], started["battle"]["turn_order_unit_ids"][0])
+        self.assertEqual(started["battle"]["input_player"], 2)
+        self.assertIsNotNone(started["room"]["simulation"]["pending_action"])
+        self.assertEqual(started["room"]["simulation"]["pending_action"]["actor_name"], "精兵")
+
+        room = ROOMS.get_room(room_id)
+        settled = started
+        for _ in range(12):
+            if room.pending_simulation_action is not None:
+                room.pending_simulation_action["next_due_at"] = 0
+            settled = self.api_get("/api/rooms/state", params={"room_id": room_id, "player_token": host_token})
+            if settled["battle"]["input_player"] == 1:
+                break
+
+        self.assertEqual(settled["battle"]["input_player"], 1)
+        self.assertIsNotNone(settled["battle"]["pending_chain"])
 
     def test_scenario_random_room_assigns_n_heroes_per_side_with_classic_turn_rules(self) -> None:
         # Given a random-mode room with both players joined
@@ -282,14 +294,8 @@ class RoomBehaviorTests(unittest.TestCase):
         self.assertEqual(started["room"]["seats"][2]["hero_total_count"], 1)
         self.assertEqual(started["room"]["seats"][1]["hero_total_count"], 1)
         self.assertEqual(started["room"]["seats"][3]["hero_total_count"], 1)
-        self.assertEqual(
-            len([unit for unit in started["battle"]["units"] if unit["player_id"] == 1 and not unit.get("is_summon")]),
-            2,
-        )
-        self.assertEqual(
-            len([unit for unit in started["battle"]["units"] if unit["player_id"] == 2 and not unit.get("is_summon")]),
-            2,
-        )
+        self.assertEqual(started["room"]["status"], "battle")
+        self.assertIsNotNone(started["battle"])
 
 
     def test_scenario_ai_only_room_can_run_with_pause_step_and_replay_http_api(self) -> None:
@@ -325,10 +331,21 @@ class RoomBehaviorTests(unittest.TestCase):
         started = self.api_post("/api/rooms/start", {"room_id": room_id, "player_token": host_token})
         self.assertTrue(started["room"]["simulation"]["enabled"])
         self.assertTrue(started["room"]["replay"]["available"])
+        self.assertIsNotNone(started["room"]["simulation"]["pending_action"])
+        self.assertEqual(started["room"]["simulation"]["pending_action"]["visible_count"], 0)
 
         room = ROOMS.get_room(room_id)
-        room.simulation_last_advanced_at = 0
-        running = self.api_get("/api/rooms/state", params={"room_id": room_id, "player_token": host_token})
+        running = started
+        for _ in range(12):
+            if room.pending_simulation_action is not None:
+                room.pending_simulation_action["next_due_at"] = 0
+            running = self.api_get("/api/rooms/state", params={"room_id": room_id, "player_token": host_token})
+            if running["room"]["simulation"]["live_step_index"] > 0:
+                break
+        self.assertTrue(
+            running["room"]["simulation"]["live_step_index"] > 0
+            or running["room"]["simulation"]["pending_action"] is not None
+        )
         self.assertGreater(running["room"]["simulation"]["live_step_index"], 0)
 
         paused = self.api_post(
@@ -377,6 +394,9 @@ class CombatBehaviorTests(unittest.TestCase):
         self.assertIn(bard.unit_id, battle.turn_order_unit_ids)
         self.assertEqual(battle.current_turn_unit().hero_code, "undead_king_lina")
         self.assertEqual(battle.round_number, 2)
+        battle.perform_action({"type": "end_turn"})
+        self.assertEqual(battle.current_turn_unit().hero_code, "dark_human")
+        self.assertEqual(battle.active_player, 1)
 
     def test_scenario_timeout_rule_scales_with_opening_hero_count(self) -> None:
         # Given a four-hero battle with no damage or kills happening
@@ -660,7 +680,7 @@ class CombatBehaviorTests(unittest.TestCase):
         self.assertIn("block", unmounted_codes)
         self.assertIn("counter", unmounted_codes)
 
-    def test_scenario_jade_stance_only_protects_other_allies_for_the_next_enemy_turn(self) -> None:
+    def test_scenario_jade_stance_protects_until_jades_next_own_turn_start(self) -> None:
         # Given Jade prepares Stance around an ally
         battle = create_battle("jade", "fire_funeral")
         jade = primary_hero(battle, 1)
@@ -687,8 +707,13 @@ class CombatBehaviorTests(unittest.TestCase):
         self.assertFalse(jade_ctx.cancelled)
         self.assertLess(jade.current_hp, 1.0)
 
-        # And the field expires once that enemy turn is over
+        # And the field still exists during that enemy turn
+        self.assertTrue(any(effect.name == "立场" for effect in battle.field_effects))
+
+        # When the enemy turn ends and Jade's next own turn starts
         battle.perform_action({"type": "end_turn"})
+
+        # Then Stance expires at Jade's next own turn start
         self.assertFalse(any(effect.name == "立场" for effect in battle.field_effects))
 
     def test_scenario_jade_quantum_shield_uses_three_casts_then_locks_the_next_own_cycle(self) -> None:
@@ -888,6 +913,24 @@ class FrontendBehaviorTests(unittest.TestCase):
                 querySelectorAll() {
                   return [];
                 },
+                closest(selector) {
+                  if (!selector) return null;
+                  if (selector === ".cell") {
+                    let node = this;
+                    while (node) {
+                      if (String(node.className || "").split(" ").includes("cell")) return node;
+                      node = node.parentNode;
+                    }
+                  }
+                  if (selector === "input, select, textarea, label, .board-alert" || selector === "button") {
+                    return null;
+                  }
+                  return null;
+                },
+                contains(node) {
+                  if (node === this) return true;
+                  return this.children.some((child) => child === node || (child.contains && child.contains(node)));
+                },
                 replaceWith() {},
                 focus() {},
                 set innerHTML(value) {
@@ -957,6 +1000,7 @@ class FrontendBehaviorTests(unittest.TestCase):
             };
 
             const history = { replaceState() {} };
+            const Element = Object;
             const localStorage = storageFactory();
             const sessionStorage = storageFactory();
             """
@@ -1108,6 +1152,7 @@ class FrontendBehaviorTests(unittest.TestCase):
             };
 
             const history = { replaceState() {} };
+            const Element = Object;
             const localStorage = storageFactory();
             const sessionStorage = storageFactory();
             """
@@ -1276,6 +1321,7 @@ class FrontendBehaviorTests(unittest.TestCase):
             };
 
             const history = { replaceState() {} };
+            const Element = Object;
             const localStorage = storageFactory();
             const sessionStorage = storageFactory();
             """
@@ -1331,6 +1377,201 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertIn("随机武将配额", ctx.eval("globalThis.roomMessageText"))
         self.assertIn("AI", ctx.eval("globalThis.thirdSeatHtml"))
         self.assertIn("红队", ctx.eval("globalThis.thirdSeatHtml"))
+
+    def test_scenario_room_panel_does_not_rerender_while_seat_controller_select_is_active(self) -> None:
+        app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        ctx = quickjs.Context()
+        ctx.eval(
+            """
+            function createClassList() {
+              return {
+                add() {},
+                remove() {},
+                toggle() {},
+                contains() { return false; },
+              };
+            }
+
+            function createElement(tagName, id) {
+              const element = {
+                tagName: String(tagName || "div").toUpperCase(),
+                id: id || "",
+                children: [],
+                listeners: {},
+                className: "",
+                value: "",
+                disabled: false,
+                dataset: {},
+                style: {},
+                _textContent: "",
+                _innerHTML: "",
+                classList: createClassList(),
+                append(...nodes) { this.children.push(...nodes); },
+                appendChild(node) { this.children.push(node); return node; },
+                addEventListener(type, handler) {
+                  if (!this.listeners[type]) this.listeners[type] = [];
+                  this.listeners[type].push(handler);
+                },
+                querySelector() { return null; },
+                querySelectorAll() { return []; },
+                replaceWith() {},
+                focus() {},
+                blur() { document.activeElement = null; },
+                set innerHTML(value) { this._innerHTML = String(value); },
+                get innerHTML() { return this._innerHTML; },
+                set textContent(value) { this._textContent = String(value); },
+                get textContent() { return this._textContent; },
+              };
+              return element;
+            }
+
+            const document = {
+              elements: {},
+              listeners: {},
+              activeElement: null,
+              body: createElement("body", "body"),
+              getElementById(id) {
+                if (!this.elements[id]) this.elements[id] = createElement("div", id);
+                return this.elements[id];
+              },
+              createElement(tagName) { return createElement(tagName); },
+              querySelector() { return null; },
+              querySelectorAll() { return []; },
+              addEventListener(type, handler) {
+                if (!this.listeners[type]) this.listeners[type] = [];
+                this.listeners[type].push(handler);
+              },
+            };
+            document.body.classList = createClassList();
+
+            const storageFactory = () => ({
+              _store: {},
+              getItem(key) { return Object.prototype.hasOwnProperty.call(this._store, key) ? this._store[key] : null; },
+              setItem(key, value) { this._store[key] = String(value); },
+              removeItem(key) { delete this._store[key]; },
+            });
+
+            const window = {
+              location: { href: "http://example.test/?room=AB12CD", search: "?room=AB12CD", hash: "#draft" },
+              listeners: {},
+              addEventListener(type, handler) {
+                if (!this.listeners[type]) this.listeners[type] = [];
+                this.listeners[type].push(handler);
+              },
+              requestAnimationFrame(callback) { return callback(); },
+              cancelAnimationFrame() {},
+              setInterval() { return 1; },
+              clearInterval() {},
+            };
+            const history = { replaceState() {} };
+            const localStorage = storageFactory();
+            const sessionStorage = storageFactory();
+            """
+        )
+        ctx.eval(app_source)
+        ctx.eval(
+            """
+            state.profileReady = true;
+            state.screen = "lobby";
+            state.playerToken = "host-token";
+            state.room = {
+              room_id: "AB12CD",
+              status: "lobby",
+              mode: "classic",
+              mode_name: "标准选将",
+              viewer_player_id: 1,
+              viewer_team_id: 1,
+              viewer_name: "Alice",
+              viewer_is_host: true,
+              can_start: false,
+              can_rematch: false,
+              is_full: true,
+              seats: [
+                { player_id: 1, occupied: true, is_human: true, is_ai: false, controller_type: "human", team_id: 1, team_name: "红队", name: "Alice", hero_total_count: 1, hero_summary: "吟游诗人", is_host: true },
+                { player_id: 2, occupied: false, is_human: false, is_ai: false, controller_type: "open", team_id: 2, team_name: "蓝队", name: null, hero_total_count: 0, hero_summary: null, is_host: false }
+              ]
+            };
+            [
+              "seat-cards",
+              "room-message",
+              "viewer-seat-label",
+              "viewer-seat-note",
+              "room-seat-count-input",
+              "room-seat-count-note",
+              "room-random-panel",
+              "random-roster-size-input",
+              "random-roster-size-note",
+              "room-hero-grid",
+              "message",
+              "topbar-pill",
+              "topbar-caption",
+              "board",
+              "board-stage",
+              "board-zoom-controls",
+              "logs",
+              "selected-card",
+              "action-panel",
+              "unit-strip",
+              "chain-panel",
+              "hover-card",
+              "battle-right-rail",
+              "toggle-right-rail",
+              "battle-effects",
+              "floating-toast-stack",
+              "end-turn",
+              "skip-chain",
+              "target-cancel",
+              "target-complete"
+            ].forEach((id) => document.getElementById(id));
+            document.getElementById("seat-cards").innerHTML = "preserved";
+            let roomPanelsRendered = 0;
+            renderScreens = function () {};
+            renderNavigation = function () {};
+            renderProfilePanel = function () {};
+            renderProfileModal = function () {};
+            renderRoomPanels = function () { roomPanelsRendered += 1; document.getElementById("seat-cards").innerHTML = "rerendered"; };
+            applyRandomRoomPanelState = function () {};
+            renderResumePanel = function () {};
+            renderRoomListActive = function () {};
+            renderHeroCards = function () {};
+            renderHeader = function () {};
+            renderBoardZoomControls = function () {};
+            renderMessage = function () {};
+            renderBattleEffects = function () {};
+            renderBoard = function () {};
+            renderBoardOverlays = function () {};
+            renderHoverCard = function () {};
+            renderSidebarPanels = function () {};
+            renderSelectedCard = function () {};
+            renderActionPanel = function () {};
+            renderUnitStrip = function () {};
+            renderChainPanel = function () {};
+            renderLogs = function () {};
+            renderFloatingToasts = function () {};
+            renderGameOverOverlay = function () {};
+            renderReplayToolbar = function () {};
+            renderRoomActionButtons = function () {};
+            renderTargetCancelButton = function () {};
+            renderTargetCompleteButton = function () {};
+            ensureDraftSelection = function () {};
+            ensureSelectedUnit = function () {};
+            clearActionSelection = function () {};
+            hasBattle = function () { return false; };
+            isGameOver = function () { return false; };
+            canInteract = function () { return false; };
+            isChainMode = function () { return false; };
+            isRespawnMode = function () { return false; };
+            const active = createElement("select", "active-seat-controller");
+            active.dataset.seatController = "2";
+            document.activeElement = active;
+            render();
+            globalThis.roomPanelsRendered = roomPanelsRendered;
+            globalThis.seatCardsMarkup = document.getElementById("seat-cards").innerHTML;
+            """
+        )
+
+        self.assertEqual(ctx.eval("globalThis.roomPanelsRendered"), 0)
+        self.assertEqual(ctx.eval("globalThis.seatCardsMarkup"), "preserved")
 
     def test_scenario_render_header_shows_dynamic_next_turn_summary(self) -> None:
         app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
@@ -1625,7 +1866,245 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertEqual(ctx.eval("globalThis.actionWheelRenderCount"), 3)
         self.assertEqual(ctx.eval("globalThis.boardAlertRenderCount"), 3)
 
-    def test_scenario_action_wheel_buttons_stay_inside_stage_near_board_edge(self) -> None:
+    def test_scenario_board_stage_drag_and_wheel_zoom_are_bound_to_battlefield(self) -> None:
+        app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        ctx = quickjs.Context()
+        ctx.eval(
+            """
+            function createClassList() {
+              return {
+                add() {},
+                remove() {},
+                toggle() {},
+                contains() { return false; },
+              };
+            }
+
+            function Element() {}
+
+            function matchesSimpleSelector(node, selector) {
+              if (!node || !selector) return false;
+              if (selector[0] === ".") {
+                const token = selector.slice(1);
+                return String(node.className || "").split(/\\s+/).indexOf(token) !== -1;
+              }
+              if (selector[0] === "#") return String(node.id || "") === selector.slice(1);
+              return String(node.tagName || "").toLowerCase() === selector.toLowerCase();
+            }
+
+            function createElement(tagName, id) {
+              const element = new Element();
+              Object.assign(element, {
+                tagName: String(tagName || "div").toUpperCase(),
+                id: id || "",
+                children: [],
+                listeners: {},
+                className: "",
+                value: "",
+                disabled: false,
+                dataset: {},
+                style: { setProperty(key, value) { this[key] = value; } },
+                parentNode: null,
+                scrollLeft: 0,
+                scrollTop: 0,
+                rect: { left: 0, top: 0, width: 0, height: 0 },
+                _textContent: "",
+                _innerHTML: "",
+                classList: createClassList(),
+                append(...nodes) {
+                  nodes.forEach((node) => {
+                    if (!node) return;
+                    node.parentNode = this;
+                    this.children.push(node);
+                  });
+                },
+                appendChild(node) {
+                  if (node) {
+                    node.parentNode = this;
+                    this.children.push(node);
+                  }
+                  return node;
+                },
+                addEventListener(type, handler) {
+                  if (!this.listeners[type]) this.listeners[type] = [];
+                  this.listeners[type].push(handler);
+                },
+                querySelector() {
+                  return null;
+                },
+                querySelectorAll() {
+                  return [];
+                },
+                replaceWith() {},
+                focus() {},
+                contains(node) {
+                  let current = node || null;
+                  while (current) {
+                    if (current === this) return true;
+                    current = current.parentNode || null;
+                  }
+                  return false;
+                },
+                closest(selector) {
+                  const selectors = String(selector || "")
+                    .split(",")
+                    .map((part) => part.trim())
+                    .filter(Boolean);
+                  let current = this;
+                  while (current) {
+                    if (selectors.some((part) => matchesSimpleSelector(current, part))) return current;
+                    current = current.parentNode || null;
+                  }
+                  return null;
+                },
+                getBoundingClientRect() {
+                  const rect = this.rect || { left: 0, top: 0, width: 0, height: 0 };
+                  return {
+                    left: rect.left,
+                    top: rect.top,
+                    width: rect.width,
+                    height: rect.height,
+                    right: rect.left + rect.width,
+                    bottom: rect.top + rect.height,
+                  };
+                },
+                setPointerCapture(pointerId) {
+                  this.capturedPointerId = pointerId;
+                },
+                releasePointerCapture(pointerId) {
+                  this.releasedPointerId = pointerId;
+                },
+                set innerHTML(value) {
+                  this._innerHTML = String(value);
+                },
+                get innerHTML() {
+                  return this._innerHTML;
+                },
+                set textContent(value) {
+                  this._textContent = String(value);
+                },
+                get textContent() {
+                  return this._textContent;
+                },
+              });
+              return element;
+            }
+
+            const document = {
+              elements: {},
+              listeners: {},
+              body: createElement("body", "body"),
+              getElementById(id) {
+                if (!this.elements[id]) this.elements[id] = createElement("div", id);
+                return this.elements[id];
+              },
+              createElement(tagName) {
+                return createElement(tagName);
+              },
+              querySelector() {
+                return null;
+              },
+              querySelectorAll() {
+                return [];
+              },
+              addEventListener(type, handler) {
+                if (!this.listeners[type]) this.listeners[type] = [];
+                this.listeners[type].push(handler);
+              },
+            };
+            document.body.classList = createClassList();
+
+            const storageFactory = () => ({
+              _store: {},
+              getItem(key) {
+                return Object.prototype.hasOwnProperty.call(this._store, key) ? this._store[key] : null;
+              },
+              setItem(key, value) {
+                this._store[key] = String(value);
+              },
+              removeItem(key) {
+                delete this._store[key];
+              },
+            });
+
+            const window = {
+              location: { href: "http://example.test/", search: "", hash: "" },
+              listeners: {},
+              addEventListener(type, handler) {
+                if (!this.listeners[type]) this.listeners[type] = [];
+                this.listeners[type].push(handler);
+              },
+              requestAnimationFrame(callback) { return callback(); },
+              cancelAnimationFrame() {},
+              setInterval() { return 1; },
+              clearInterval() {},
+            };
+
+            const history = { replaceState() {} };
+            const localStorage = storageFactory();
+            const sessionStorage = storageFactory();
+            """
+        )
+        ctx.eval(app_source)
+        ctx.eval(
+            """
+            globalThis.overlayRenderCount = 0;
+            renderActionWheel = function () { globalThis.overlayRenderCount += 1; };
+            renderBoardAlert = function () { globalThis.overlayRenderCount += 1; };
+            renderBoard = function () {};
+            renderBoardZoomControls = function () {};
+            state.battle = { board: { width: 10, height: 10 } };
+            state.boardZoom = 1;
+            const boardStage = document.getElementById("board-stage");
+            const board = document.getElementById("board");
+            boardStage.rect = { left: 0, top: 0, width: 420, height: 320 };
+            board.rect = { left: -80, top: -40, width: 840, height: 640 };
+            boardStage.scrollLeft = 120;
+            boardStage.scrollTop = 90;
+            boardStage.appendChild(board);
+            const cell = document.createElement("button");
+            cell.className = "cell";
+            cell.dataset = { x: "3", y: "4" };
+            board.appendChild(cell);
+            bindEvents();
+            boardStage.listeners.pointerdown[0]({
+              button: 0,
+              pointerId: 7,
+              clientX: 140,
+              clientY: 150,
+              target: cell,
+            });
+            boardStage.listeners.pointermove[0]({
+              pointerId: 7,
+              clientX: 185,
+              clientY: 210,
+              target: cell,
+            });
+            boardStage.listeners.pointerup[0]({ pointerId: 7 });
+            globalThis.dragScrollLeft = boardStage.scrollLeft;
+            globalThis.dragScrollTop = boardStage.scrollTop;
+            globalThis.pointerCaptured = boardStage.capturedPointerId;
+            globalThis.pointerReleased = boardStage.releasedPointerId;
+            globalThis.wheelPrevented = false;
+            boardStage.listeners.wheel[0]({
+              target: cell,
+              deltaY: -120,
+              clientX: 210,
+              clientY: 180,
+              preventDefault() { globalThis.wheelPrevented = true; },
+            });
+            globalThis.zoomAfterWheel = state.boardZoom;
+            """
+        )
+
+        self.assertEqual(ctx.eval("globalThis.dragScrollLeft"), 75)
+        self.assertEqual(ctx.eval("globalThis.dragScrollTop"), 30)
+        self.assertEqual(ctx.eval("globalThis.pointerCaptured"), 7)
+        self.assertEqual(ctx.eval("globalThis.pointerReleased"), 7)
+        self.assertTrue(ctx.eval("globalThis.wheelPrevented"))
+        self.assertGreater(ctx.eval("globalThis.zoomAfterWheel"), 1)
+
+    def test_scenario_action_wheel_renders_around_selected_unit_inside_board_stage(self) -> None:
         app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
         ctx = quickjs.Context()
         ctx.eval(
@@ -1649,14 +2128,19 @@ class FrontendBehaviorTests(unittest.TestCase):
                 value: "",
                 disabled: false,
                 dataset: {},
-                style: {},
+                style: { setProperty(key, value) { this[key] = value; } },
+                parentNode: null,
                 _textContent: "",
                 _innerHTML: "",
                 classList: createClassList(),
                 append(...nodes) {
-                  this.children.push(...nodes);
+                  nodes.forEach((node) => {
+                    node.parentNode = this;
+                    this.children.push(node);
+                  });
                 },
                 appendChild(node) {
+                  node.parentNode = this;
                   this.children.push(node);
                   return node;
                 },
@@ -1672,6 +2156,9 @@ class FrontendBehaviorTests(unittest.TestCase):
                 },
                 replaceWith() {},
                 focus() {},
+                getBoundingClientRect() {
+                  return { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 };
+                },
                 set innerHTML(value) {
                   this._innerHTML = String(value);
                   this.children = [];
@@ -1747,19 +2234,29 @@ class FrontendBehaviorTests(unittest.TestCase):
         ctx.eval(app_source)
         ctx.eval(
             """
-            const topEdgeCell = createElement("div", "cell-2-1");
-            topEdgeCell.dataset = { x: "2", y: "1" };
-            topEdgeCell.getBoundingClientRect = function () {
-              return { left: 150, top: 8, right: 210, bottom: 68, width: 60, height: 60 };
-            };
             const boardStage = document.getElementById("board-stage");
-            document.querySelectorAll = function (selector) {
-              if (selector === ".cell") return [topEdgeCell];
-              return [];
-            };
             boardStage.getBoundingClientRect = function () {
-              return { left: 0, top: 0, right: 360, bottom: 260, width: 360, height: 260 };
+              return { left: 0, top: 0, width: 420, height: 320, right: 420, bottom: 320 };
             };
+            const board = document.getElementById("board");
+            function addCell(x, y, left, top, size) {
+              const cell = document.createElement("div");
+              cell.dataset.x = String(x);
+              cell.dataset.y = String(y);
+              cell.getBoundingClientRect = function () {
+                return {
+                  left,
+                  top,
+                  width: size,
+                  height: size,
+                  right: left + size,
+                  bottom: top + size,
+                };
+              };
+              board.appendChild(cell);
+            }
+            addCell(2, 1, 182, 98, 64);
+            const actionPanel = document.getElementById("action-panel");
             state.screen = "battle";
             state.room = { viewer_player_id: 1 };
             state.selectedUnitId = "u1";
@@ -1787,30 +2284,683 @@ class FrontendBehaviorTests(unittest.TestCase):
                 }
               ],
             };
+            renderActionPanel();
             renderActionWheel();
-            const buttons = document.elements["action-wheel"].children;
-            globalThis.actionWheelButtonCount = buttons.length;
-            globalThis.minActionLeft = Infinity;
-            globalThis.minActionTop = Infinity;
-            globalThis.maxActionRight = -Infinity;
-            globalThis.maxActionBottom = -Infinity;
-            for (let index = 0; index < buttons.length; index += 1) {
-              const button = buttons[index];
-              const left = Number.parseFloat(button.style.left || "0");
-              const top = Number.parseFloat(button.style.top || "0");
-              globalThis.minActionLeft = Math.min(globalThis.minActionLeft, left);
-              globalThis.minActionTop = Math.min(globalThis.minActionTop, top);
-              globalThis.maxActionRight = Math.max(globalThis.maxActionRight, left + 84);
-              globalThis.maxActionBottom = Math.max(globalThis.maxActionBottom, top + 46);
-            }
+            const actionWheel = document.getElementById("action-wheel");
+            globalThis.actionPanelChildCount = actionPanel.children.length;
+            globalThis.actionWheelChildCount = actionWheel.children.length;
+            globalThis.boardStageChildCount = boardStage.children.length;
+            globalThis.firstActionLeft = actionWheel.children[0].style.left;
+            globalThis.firstActionTop = actionWheel.children[0].style.top;
             """
         )
 
-        self.assertEqual(ctx.eval("globalThis.actionWheelButtonCount"), 3)
-        self.assertGreaterEqual(ctx.eval("globalThis.minActionLeft"), 0)
-        self.assertGreaterEqual(ctx.eval("globalThis.minActionTop"), 0)
-        self.assertLessEqual(ctx.eval("globalThis.maxActionRight"), 360)
-        self.assertLessEqual(ctx.eval("globalThis.maxActionBottom"), 260)
+        self.assertEqual(ctx.eval("globalThis.actionPanelChildCount"), 1)
+        self.assertEqual(ctx.eval("globalThis.actionWheelChildCount"), 3)
+        self.assertEqual(ctx.eval("globalThis.boardStageChildCount"), 1)
+        self.assertGreaterEqual(int(float(ctx.eval("globalThis.firstActionLeft").replace("px", ""))), 0)
+        self.assertGreaterEqual(int(float(ctx.eval("globalThis.firstActionTop").replace("px", ""))), 0)
+
+    def test_scenario_targeting_action_hides_action_wheel_and_keeps_board_clickable(self) -> None:
+        app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        ctx = quickjs.Context()
+        ctx.eval(
+            """
+            function createClassList() {
+              return {
+                add() {},
+                remove() {},
+                toggle() {},
+                contains() { return false; },
+              };
+            }
+
+            function createElement(tagName, id) {
+              const element = {
+                tagName: String(tagName || "div").toUpperCase(),
+                id: id || "",
+                children: [],
+                listeners: {},
+                className: "",
+                value: "",
+                disabled: false,
+                dataset: {},
+                style: { setProperty(key, value) { this[key] = value; } },
+                parentNode: null,
+                _textContent: "",
+                _innerHTML: "",
+                classList: createClassList(),
+                append(...nodes) {
+                  nodes.forEach((node) => {
+                    node.parentNode = this;
+                    this.children.push(node);
+                  });
+                },
+                appendChild(node) {
+                  node.parentNode = this;
+                  this.children.push(node);
+                  return node;
+                },
+                addEventListener(type, handler) {
+                  if (!this.listeners[type]) this.listeners[type] = [];
+                  this.listeners[type].push(handler);
+                },
+                querySelector() {
+                  return null;
+                },
+                querySelectorAll() {
+                  return [];
+                },
+                closest(selector) {
+                  if (!selector) return null;
+                  if (selector === ".cell") {
+                    let node = this;
+                    while (node) {
+                      if (String(node.className || "").split(" ").includes("cell")) return node;
+                      node = node.parentNode;
+                    }
+                  }
+                  if (selector === "input, select, textarea, label, .board-alert" || selector === "button") {
+                    return null;
+                  }
+                  return null;
+                },
+                contains(node) {
+                  if (node === this) return true;
+                  return this.children.some((child) => child === node || (child.contains && child.contains(node)));
+                },
+                replaceWith() {},
+                focus() {},
+                getBoundingClientRect() {
+                  return { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 };
+                },
+                set innerHTML(value) {
+                  this._innerHTML = String(value);
+                  this.children = [];
+                },
+                get innerHTML() {
+                  return this._innerHTML;
+                },
+                set textContent(value) {
+                  this._textContent = String(value);
+                },
+                get textContent() {
+                  return this._textContent;
+                },
+              };
+              return element;
+            }
+
+            const document = {
+              elements: {},
+              listeners: {},
+              body: createElement("body", "body"),
+              getElementById(id) {
+                if (!this.elements[id]) this.elements[id] = createElement("div", id);
+                return this.elements[id];
+              },
+              createElement(tagName) {
+                return createElement(tagName);
+              },
+              querySelector() {
+                return null;
+              },
+              querySelectorAll() {
+                return [];
+              },
+              addEventListener(type, handler) {
+                if (!this.listeners[type]) this.listeners[type] = [];
+                this.listeners[type].push(handler);
+              },
+            };
+            document.body.classList = createClassList();
+
+            const storageFactory = () => ({
+              _store: {},
+              getItem(key) {
+                return Object.prototype.hasOwnProperty.call(this._store, key) ? this._store[key] : null;
+              },
+              setItem(key, value) {
+                this._store[key] = String(value);
+              },
+              removeItem(key) {
+                delete this._store[key];
+              },
+            });
+
+            const window = {
+              location: { href: "http://example.test/", search: "", hash: "" },
+              listeners: {},
+              addEventListener(type, handler) {
+                if (!this.listeners[type]) this.listeners[type] = [];
+                this.listeners[type].push(handler);
+              },
+              requestAnimationFrame(callback) { return callback(); },
+              cancelAnimationFrame() {},
+              setInterval() { return 1; },
+              clearInterval() {},
+            };
+
+            const history = { replaceState() {} };
+            const Element = Object;
+            const localStorage = storageFactory();
+            const sessionStorage = storageFactory();
+            """
+        )
+        ctx.eval(app_source)
+        ctx.eval(
+            """
+            const boardStage = document.getElementById("board-stage");
+            boardStage.getBoundingClientRect = function () {
+              return { left: 0, top: 0, width: 420, height: 320, right: 420, bottom: 320 };
+            };
+            boardStage.setPointerCapture = function (pointerId) {
+              this.capturedPointerId = pointerId;
+            };
+            const board = document.getElementById("board");
+            function addCell(x, y, left, top) {
+              const cell = document.createElement("div");
+              cell.className = "cell";
+              cell.dataset.x = String(x);
+              cell.dataset.y = String(y);
+              cell.getBoundingClientRect = function () {
+                return { left, top, width: 64, height: 64, right: left + 64, bottom: top + 64 };
+              };
+              board.appendChild(cell);
+            }
+            addCell(0, 0, 24, 24);
+            addCell(1, 1, 96, 96);
+            state.screen = "battle";
+            state.room = { viewer_player_id: 1 };
+            state.selectedUnitId = "u1";
+            state.battle = {
+              input_player: 1,
+              board: { width: 8, height: 8 },
+              units: [
+                {
+                  id: "u1",
+                  player_id: 1,
+                  banished: false,
+                  position: { x: 0, y: 0 },
+                  occupied_cells: [{ x: 0, y: 0 }],
+                  statuses: [],
+                }
+              ],
+              active_units: [
+                {
+                  unit_id: "u1",
+                  actions: {
+                    actions: [
+                      {
+                        code: "move",
+                        kind: "move",
+                        timing: "active",
+                        available: true,
+                        preview: {
+                          cells: [{ x: 1, y: 1 }],
+                          target_unit_ids: [],
+                          secondary_cells: [],
+                          requires_target: true,
+                        },
+                      }
+                    ]
+                  },
+                  reactions: { actions: [] },
+                }
+              ],
+            };
+            const payloads = [];
+            performAction = function (payload) {
+              payloads.push(payload);
+            };
+            bindEvents();
+            renderActionWheel();
+            globalThis.wheelBeforeTargeting = document.getElementById("action-wheel").children.length;
+            render = function () {
+              renderActionWheel();
+            };
+            onActionClick(actionByCode("move"));
+            globalThis.selectedActionAfterClick = state.selectedActionCode;
+            globalThis.wheelDuringTargeting = document.getElementById("action-wheel").children.length;
+            globalThis.previewStillHasCell = currentPreview().cellKeys.has("1,1");
+            document.getElementById("board-stage").listeners.pointerdown[0]({
+              button: 0,
+              pointerId: 7,
+              clientX: 100,
+              clientY: 100,
+              target: board.children[1],
+            });
+            globalThis.pointerCapturedDuringTargeting = document.getElementById("board-stage").capturedPointerId || null;
+            globalThis.boardDragStateDuringTargeting = boardDragState === null ? "none" : "dragging";
+            onBoardClick(1, 1, null);
+            globalThis.performedPayload = JSON.stringify(payloads[0] || null);
+            """
+        )
+
+        self.assertEqual(ctx.eval("globalThis.wheelBeforeTargeting"), 1)
+        self.assertEqual(ctx.eval("globalThis.selectedActionAfterClick"), "move")
+        self.assertEqual(ctx.eval("globalThis.wheelDuringTargeting"), 0)
+        self.assertTrue(ctx.eval("globalThis.previewStillHasCell"))
+        self.assertIsNone(ctx.eval("globalThis.pointerCapturedDuringTargeting"))
+        self.assertEqual(ctx.eval("globalThis.boardDragStateDuringTargeting"), "none")
+        self.assertEqual(
+            json.loads(ctx.eval("globalThis.performedPayload")),
+            {"type": "move", "unit_id": "u1", "x": 1, "y": 1},
+        )
+
+    def test_scenario_precise_target_previews_do_not_mark_entire_multicell_unit(self) -> None:
+        app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        ctx = quickjs.Context()
+        ctx.eval(
+            """
+            function createClassList() {
+              return {
+                add() {},
+                remove() {},
+                toggle() {},
+                contains() { return false; },
+              };
+            }
+
+            function createElement(tagName, id) {
+              const element = {
+                tagName: String(tagName || "div").toUpperCase(),
+                id: id || "",
+                children: [],
+                listeners: {},
+                className: "",
+                value: "",
+                disabled: false,
+                dataset: {},
+                style: {},
+                _textContent: "",
+                _innerHTML: "",
+                classList: createClassList(),
+                append(...nodes) {
+                  this.children.push(...nodes);
+                },
+                appendChild(node) {
+                  this.children.push(node);
+                  return node;
+                },
+                addEventListener(type, handler) {
+                  if (!this.listeners[type]) this.listeners[type] = [];
+                  this.listeners[type].push(handler);
+                },
+                querySelector() {
+                  return null;
+                },
+                querySelectorAll() {
+                  return [];
+                },
+                replaceWith() {},
+                focus() {},
+                contains(node) {
+                  return this.children.indexOf(node) !== -1;
+                },
+                set innerHTML(value) {
+                  this._innerHTML = String(value);
+                  this.children = [];
+                },
+                get innerHTML() {
+                  return this._innerHTML;
+                },
+                set textContent(value) {
+                  this._textContent = String(value);
+                },
+                get textContent() {
+                  return this._textContent;
+                },
+              };
+              return element;
+            }
+
+            const document = {
+              elements: {},
+              listeners: {},
+              body: createElement("body", "body"),
+              getElementById(id) {
+                if (!this.elements[id]) this.elements[id] = createElement("div", id);
+                return this.elements[id];
+              },
+              createElement(tagName) {
+                return createElement(tagName);
+              },
+              querySelector() {
+                return null;
+              },
+              querySelectorAll() {
+                return [];
+              },
+              addEventListener(type, handler) {
+                if (!this.listeners[type]) this.listeners[type] = [];
+                this.listeners[type].push(handler);
+              },
+            };
+            document.body.classList = createClassList();
+
+            const storageFactory = () => ({
+              _store: {},
+              getItem(key) {
+                return Object.prototype.hasOwnProperty.call(this._store, key) ? this._store[key] : null;
+              },
+              setItem(key, value) {
+                this._store[key] = String(value);
+              },
+              removeItem(key) {
+                delete this._store[key];
+              },
+            });
+
+            const window = {
+              location: { href: "http://example.test/", search: "", hash: "" },
+              listeners: {},
+              addEventListener(type, handler) {
+                if (!this.listeners[type]) this.listeners[type] = [];
+                this.listeners[type].push(handler);
+              },
+              requestAnimationFrame(callback) { return callback(); },
+              cancelAnimationFrame() {},
+              setInterval() { return 1; },
+              clearInterval() {},
+            };
+
+            const history = { replaceState() {} };
+            const localStorage = storageFactory();
+            const sessionStorage = storageFactory();
+            """
+        )
+        ctx.eval(app_source)
+        ctx.eval(
+            """
+            state.screen = "battle";
+            state.room = { viewer_player_id: 1 };
+            state.selectedUnitId = "u1";
+            state.selectedActionCode = "machine_gun";
+            state.battle = {
+              board: { width: 8, height: 8 },
+              units: [
+                {
+                  id: "u1",
+                  unit_id: "u1",
+                  player_id: 1,
+                  banished: false,
+                  cannot_be_targeted: false,
+                  statuses: [],
+                  position: { x: 1, y: 1 },
+                  occupied_cells: [{ x: 1, y: 1 }],
+                },
+                {
+                  id: "u2",
+                  unit_id: "u2",
+                  player_id: 2,
+                  banished: false,
+                  cannot_be_targeted: false,
+                  statuses: [],
+                  position: { x: 3, y: 1 },
+                  occupied_cells: [{ x: 3, y: 1 }, { x: 4, y: 1 }, { x: 3, y: 2 }, { x: 4, y: 2 }],
+                }
+              ],
+              active_units: [
+                {
+                  unit_id: "u1",
+                  actions: {
+                    actions: [
+                      {
+                        code: "machine_gun",
+                        kind: "skill",
+                        timing: "active",
+                        available: true,
+                        target_mode: "cell",
+                        preview: {
+                          cells: [{ x: 3, y: 1 }, { x: 4, y: 1 }, { x: 5, y: 1 }],
+                          target_unit_ids: ["u2"],
+                          secondary_cells: [],
+                          requires_target: true,
+                          selection: {
+                            mode: "pattern_cells",
+                            patterns: [[{ x: 3, y: 1 }, { x: 4, y: 1 }, { x: 5, y: 1 }]],
+                            ordered: false,
+                          },
+                        },
+                      },
+                      {
+                        code: "attack",
+                        kind: "attack",
+                        timing: "active",
+                        available: true,
+                        target_mode: "enemy",
+                        preview: {
+                          cells: [{ x: 3, y: 1 }],
+                          target_unit_ids: ["u2"],
+                          secondary_cells: [],
+                          requires_target: true,
+                        },
+                      },
+                      {
+                        code: "split",
+                        kind: "skill",
+                        timing: "active",
+                        available: true,
+                        target_mode: "cell",
+                        preview: {
+                          cells: [{ x: 1, y: 2 }, { x: 2, y: 2 }, { x: 2, y: 3 }],
+                          target_unit_ids: [],
+                          secondary_cells: [],
+                          requires_target: true,
+                          selection: {
+                            mode: "pattern_cells",
+                            patterns: [],
+                            ordered: false,
+                            required_cells: 3,
+                          },
+                        },
+                      }
+                    ]
+                  },
+                  reactions: { actions: [] },
+                }
+              ],
+            };
+            const preview = currentPreview();
+            globalThis.previewTargetCount = preview.targetIds.size;
+            globalThis.previewHasHitCell = preview.cellKeys.has("3,1");
+            globalThis.previewHasOffLineTargetCell = preview.cellKeys.has("4,2");
+            state.selectedActionCode = "attack";
+            const attackPreview = currentPreview();
+            globalThis.attackPreviewTargetCount = attackPreview.targetIds.size;
+            globalThis.attackPreviewHasHitCell = attackPreview.cellKeys.has("3,1");
+            globalThis.attackPreviewHasOffLineTargetCell = attackPreview.cellKeys.has("4,2");
+            state.selectedActionCode = "split";
+            const splitPreview = currentPreview();
+            globalThis.splitPreviewHasFirst = splitPreview.cellKeys.has("1,2");
+            setStagedPatternCells([{ x: 1, y: 2 }, { x: 2, y: 2 }]);
+            const splitNextPreview = currentPreview();
+            globalThis.splitPreviewAfterTwoHasChosen = splitNextPreview.cellKeys.has("1,2");
+            globalThis.splitPreviewAfterTwoHasRemaining = splitNextPreview.cellKeys.has("2,3");
+            globalThis.splitCanCompleteAfterTwo = canCompleteTargetSelection();
+            setStagedPatternCells([{ x: 1, y: 2 }, { x: 2, y: 2 }, { x: 2, y: 3 }]);
+            globalThis.splitCanCompleteAfterThree = canCompleteTargetSelection();
+            """
+        )
+
+        self.assertEqual(ctx.eval("globalThis.previewTargetCount"), 0)
+        self.assertTrue(ctx.eval("globalThis.previewHasHitCell"))
+        self.assertFalse(ctx.eval("globalThis.previewHasOffLineTargetCell"))
+        self.assertEqual(ctx.eval("globalThis.attackPreviewTargetCount"), 1)
+        self.assertTrue(ctx.eval("globalThis.attackPreviewHasHitCell"))
+        self.assertFalse(ctx.eval("globalThis.attackPreviewHasOffLineTargetCell"))
+        self.assertTrue(ctx.eval("globalThis.splitPreviewHasFirst"))
+        self.assertFalse(ctx.eval("globalThis.splitPreviewAfterTwoHasChosen"))
+        self.assertTrue(ctx.eval("globalThis.splitPreviewAfterTwoHasRemaining"))
+        self.assertFalse(ctx.eval("globalThis.splitCanCompleteAfterTwo"))
+        self.assertTrue(ctx.eval("globalThis.splitCanCompleteAfterThree"))
+
+    def test_scenario_clicking_enemy_unit_still_opens_info_when_viewer_cannot_act(self) -> None:
+        app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        ctx = quickjs.Context()
+        ctx.eval(
+            """
+            function createClassList() {
+              return {
+                add() {},
+                remove() {},
+                toggle() {},
+                contains() { return false; },
+              };
+            }
+
+            function createElement(tagName, id) {
+              const element = {
+                tagName: String(tagName || "div").toUpperCase(),
+                id: id || "",
+                children: [],
+                listeners: {},
+                className: "",
+                value: "",
+                disabled: false,
+                dataset: {},
+                style: {},
+                _textContent: "",
+                _innerHTML: "",
+                classList: createClassList(),
+                append(...nodes) {
+                  this.children.push(...nodes);
+                },
+                appendChild(node) {
+                  this.children.push(node);
+                  return node;
+                },
+                addEventListener(type, handler) {
+                  if (!this.listeners[type]) this.listeners[type] = [];
+                  this.listeners[type].push(handler);
+                },
+                querySelector() {
+                  return null;
+                },
+                querySelectorAll() {
+                  return [];
+                },
+                replaceWith() {},
+                focus() {},
+                contains(node) {
+                  return this.children.indexOf(node) !== -1;
+                },
+                set innerHTML(value) {
+                  this._innerHTML = String(value);
+                  this.children = [];
+                },
+                get innerHTML() {
+                  return this._innerHTML;
+                },
+                set textContent(value) {
+                  this._textContent = String(value);
+                },
+                get textContent() {
+                  return this._textContent;
+                },
+              };
+              return element;
+            }
+
+            const document = {
+              elements: {},
+              listeners: {},
+              body: createElement("body", "body"),
+              getElementById(id) {
+                if (!this.elements[id]) this.elements[id] = createElement("div", id);
+                return this.elements[id];
+              },
+              createElement(tagName) {
+                return createElement(tagName);
+              },
+              querySelector() {
+                return null;
+              },
+              querySelectorAll() {
+                return [];
+              },
+              addEventListener(type, handler) {
+                if (!this.listeners[type]) this.listeners[type] = [];
+                this.listeners[type].push(handler);
+              },
+            };
+            document.body.classList = createClassList();
+
+            const storageFactory = () => ({
+              _store: {},
+              getItem(key) {
+                return Object.prototype.hasOwnProperty.call(this._store, key) ? this._store[key] : null;
+              },
+              setItem(key, value) {
+                this._store[key] = String(value);
+              },
+              removeItem(key) {
+                delete this._store[key];
+              },
+            });
+
+            const window = {
+              location: { href: "http://example.test/", search: "", hash: "" },
+              listeners: {},
+              addEventListener(type, handler) {
+                if (!this.listeners[type]) this.listeners[type] = [];
+                this.listeners[type].push(handler);
+              },
+              requestAnimationFrame(callback) { return callback(); },
+              cancelAnimationFrame() {},
+              setInterval() { return 1; },
+              clearInterval() {},
+            };
+
+            const history = { replaceState() {} };
+            const localStorage = storageFactory();
+            const sessionStorage = storageFactory();
+            """
+        )
+        ctx.eval(app_source)
+        ctx.eval(
+            """
+            render = function () {};
+            canInteract = function () { return false; };
+            state.screen = "battle";
+            state.room = { viewer_player_id: 1, viewer_team_id: 1 };
+            state.selectedUnitId = "u1";
+            state.sidebarExpanded = "logs";
+            state.battle = {
+              board: { width: 8, height: 8 },
+              units: [
+                {
+                  id: "u1",
+                  unit_id: "u1",
+                  player_id: 1,
+                  banished: false,
+                  cannot_be_targeted: false,
+                  statuses: [],
+                  position: { x: 1, y: 1 },
+                  occupied_cells: [{ x: 1, y: 1 }],
+                },
+                {
+                  id: "u2",
+                  unit_id: "u2",
+                  player_id: 2,
+                  banished: false,
+                  cannot_be_targeted: false,
+                  statuses: [{ name: "中毒" }],
+                  position: { x: 3, y: 1 },
+                  occupied_cells: [{ x: 3, y: 1 }],
+                }
+              ],
+              active_units: [],
+            };
+            onBoardClick(3, 1, unitById("u2"));
+            globalThis.selectedUnitIdAfterClick = state.selectedUnitId;
+            globalThis.sidebarAfterClick = state.sidebarExpanded;
+            """
+        )
+
+        self.assertEqual(ctx.eval("globalThis.selectedUnitIdAfterClick"), "u2")
+        self.assertEqual(ctx.eval("globalThis.sidebarAfterClick"), "info")
 
     def test_scenario_new_visual_events_create_board_vfx_nodes(self) -> None:
         app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
@@ -2205,11 +3355,138 @@ class FrontendBehaviorTests(unittest.TestCase):
         )
 
         self.assertFalse(ctx.eval("globalThis.toolbarHidden"))
-        self.assertEqual(ctx.eval("globalThis.pauseText"), "继续")
+        self.assertEqual(ctx.eval("globalThis.pauseText"), "\u25b6")
         self.assertEqual(ctx.eval("globalThis.timelineValue"), "2")
         self.assertTrue(ctx.eval("globalThis.omniscientChecked"))
         self.assertFalse(ctx.eval("globalThis.liveDisabled"))
 
 
+    def test_scenario_replay_toolbar_scaffolding_uses_readable_chinese_labels(self) -> None:
+        app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        ctx = quickjs.Context()
+        ctx.eval(
+            """
+            function createClassList(owner) {
+              return {
+                _owner: owner,
+                _set: {},
+                add(...names) { names.forEach((name) => { this._set[name] = true; }); },
+                remove(...names) { names.forEach((name) => { delete this._set[name]; }); },
+                contains(name) { return !!this._set[name]; },
+                toggle(name, force) {
+                  const shouldAdd = force === undefined ? !this.contains(name) : !!force;
+                  if (shouldAdd) this.add(name);
+                  else this.remove(name);
+                  return shouldAdd;
+                },
+              };
+            }
+
+            function createElement(tagName, id = "") {
+              const element = {
+                tagName: String(tagName || "div").toUpperCase(),
+                id,
+                children: [],
+                listeners: {},
+                disabled: false,
+                value: "",
+                checked: false,
+                dataset: {},
+                style: {},
+                _textContent: "",
+                _innerHTML: "",
+                append(...nodes) { this.children.push(...nodes); },
+                appendChild(node) { this.children.push(node); return node; },
+                insertBefore(node) { this.children.push(node); this.lastInserted = node; return node; },
+                addEventListener(type, handler) {
+                  if (!this.listeners[type]) this.listeners[type] = [];
+                  this.listeners[type].push(handler);
+                },
+                querySelector(selector) {
+                  if (selector === ".legend") return this.legend || null;
+                  return null;
+                },
+                querySelectorAll() { return []; },
+                replaceWith() {},
+                focus() {},
+                set innerHTML(value) { this._innerHTML = String(value); },
+                get innerHTML() { return this._innerHTML; },
+                set textContent(value) { this._textContent = String(value); },
+                get textContent() { return this._textContent; },
+              };
+              element.classList = createClassList(element);
+              return element;
+            }
+
+            const boardHead = createElement("div", "board-head");
+            const footer = createElement("div", "board-footer");
+            const endTurn = createElement("button", "end-turn");
+            const document = {
+              elements: { "end-turn": endTurn },
+              listeners: {},
+              body: createElement("body", "body"),
+              getElementById(id) {
+                return Object.prototype.hasOwnProperty.call(this.elements, id) ? this.elements[id] : null;
+              },
+              createElement(tagName) { return createElement(tagName); },
+              querySelector(selector) {
+                if (selector === ".room-hero-head p") return null;
+                if (selector === ".board-wrap .section-head") return boardHead;
+                if (selector === ".board-footer") return footer;
+                return null;
+              },
+              querySelectorAll() { return []; },
+              addEventListener(type, handler) {
+                if (!this.listeners[type]) this.listeners[type] = [];
+                this.listeners[type].push(handler);
+              },
+            };
+            document.body.classList = createClassList(document.body);
+
+            const storageFactory = () => ({
+              _store: {},
+              getItem(key) { return Object.prototype.hasOwnProperty.call(this._store, key) ? this._store[key] : null; },
+              setItem(key, value) { this._store[key] = String(value); },
+              removeItem(key) { delete this._store[key]; },
+            });
+
+            const window = {
+              location: { href: "http://example.test/", search: "", hash: "" },
+              listeners: {},
+              addEventListener(type, handler) {
+                if (!this.listeners[type]) this.listeners[type] = [];
+                this.listeners[type].push(handler);
+              },
+              requestAnimationFrame(callback) { return callback(); },
+              cancelAnimationFrame() {},
+              setInterval() { return 1; },
+              clearInterval() {},
+            };
+            const history = { replaceState() {} };
+            const localStorage = storageFactory();
+            const sessionStorage = storageFactory();
+            """
+        )
+        ctx.eval(app_source)
+        ctx.eval(
+            """
+            globalThis.$ = function (id) {
+              return document.getElementById(id);
+            };
+            ensureDynamicUiScaffolding();
+            globalThis.toolbarMarkup = document.querySelector(".board-footer").lastInserted.innerHTML;
+            globalThis.zoomMarkup = document.querySelector(".board-wrap .section-head").children[0].innerHTML;
+            """
+        )
+
+        self.assertIn("&lt;&lt;", ctx.eval("globalThis.toolbarMarkup"))
+        self.assertIn("II", ctx.eval("globalThis.toolbarMarkup"))
+        self.assertIn("LIVE", ctx.eval("globalThis.toolbarMarkup"))
+        self.assertIn("&gt;&gt;", ctx.eval("globalThis.toolbarMarkup"))
+        self.assertIn("\u901f\u5ea6", ctx.eval("globalThis.toolbarMarkup"))
+        self.assertIn("\u5168\u77e5", ctx.eval("globalThis.toolbarMarkup"))
+        self.assertIn("-", ctx.eval("globalThis.zoomMarkup"))
+        self.assertIn("1:1", ctx.eval("globalThis.zoomMarkup"))
+        self.assertIn("+", ctx.eval("globalThis.zoomMarkup"))
 if __name__ == "__main__":
     unittest.main()

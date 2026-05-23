@@ -12,7 +12,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from wujiang.engine.core import Position  # noqa: E402
+from wujiang.engine.core import Position, QueuedAction, ReactionWindow  # noqa: E402
 from wujiang.heroes.registry import create_battle  # noqa: E402
 from wujiang.web.multiplayer import RoomError, RoomRegistry, random_room_hero_codes  # noqa: E402
 from wujiang.web.server import normalize_public_base_url  # noqa: E402
@@ -21,6 +21,26 @@ from wujiang.web.server import normalize_public_base_url  # noqa: E402
 class MultiplayerRoomTests(unittest.TestCase):
     def setUp(self) -> None:
         self.registry = RoomRegistry()
+
+    def advance_ai_step(self, room) -> int:
+        if room.pending_simulation_action is not None:
+            room.pending_simulation_action["next_due_at"] = 0
+        return room._advance_simulation_due(force_steps=1)
+
+    def finish_current_ai_action(self, room, *, limit: int = 24) -> None:
+        expected_id = None
+        if room.pending_simulation_action is not None:
+            expected_id = int(room.pending_simulation_action.get("id") or 0)
+        for _ in range(limit):
+            progressed = self.advance_ai_step(room)
+            if progressed <= 0:
+                break
+            if expected_id is None:
+                if room.pending_simulation_action is not None:
+                    expected_id = int(room.pending_simulation_action.get("id") or 0)
+                continue
+            if room.pending_simulation_action is None and room.last_action_id >= expected_id:
+                break
 
     def test_random_mode_samples_unique_heroes_across_both_sides(self) -> None:
         player1_roster, player2_roster = random_room_hero_codes(3)
@@ -272,6 +292,12 @@ class MultiplayerRoomTests(unittest.TestCase):
 
         room.start_battle(host_token)
 
+        self.assertIsNotNone(room.pending_simulation_action)
+        self.assertEqual(room.pending_simulation_action["actor_name"], "精兵")
+        self.assertEqual(room.pending_simulation_action["visible_count"], 0)
+
+        self.finish_current_ai_action(room)
+
         self.assertEqual(room.current_input_player_id(), 1)
         self.assertEqual(room.battle.active_player, 2)
         self.assertIsNotNone(room.battle.pending_chain)
@@ -289,8 +315,104 @@ class MultiplayerRoomTests(unittest.TestCase):
         bard = next(unit for unit in room.battle.hero_units(2) if unit.hero_code == "bard")
         room.perform_action(host_token, {"type": "attack", "unit_id": soldier.unit_id, "target_unit_id": bard.unit_id})
 
+        self.assertIsNotNone(room.pending_simulation_action)
+        self.assertEqual(room.pending_simulation_action["reason"], "ai_chain")
+        self.finish_current_ai_action(room)
+
         self.assertEqual(bard.current_hp, 1.0)
         self.assertGreaterEqual(bard.total_shields(), 1)
+
+    def test_ai_seat_uses_protection_reaction_when_attacked_by_stealthed_enemy(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        room.set_seat_controller(host_token, 2, "ai")
+        room.select_hero(host_token, "dark_human")
+        room.select_hero(host_token, "bard", seat_id=2)
+
+        room.start_battle(host_token)
+
+        dark = next(unit for unit in room.battle.hero_units(1) if unit.hero_code == "dark_human")
+        bard = next(unit for unit in room.battle.hero_units(2) if unit.hero_code == "bard")
+        dark.position = Position(3, 4)
+        bard.position = Position(4, 4)
+
+        room.perform_action(host_token, {"type": "skill", "unit_id": dark.unit_id, "skill_code": "stealth"})
+        room.perform_action(host_token, {"type": "attack", "unit_id": dark.unit_id, "target_unit_id": bard.unit_id})
+
+        self.assertIsNotNone(room.pending_simulation_action)
+        self.finish_current_ai_action(room)
+
+        self.assertEqual(bard.current_hp, 1.0)
+        self.assertGreaterEqual(bard.total_shields(), 1)
+
+    def test_ai_simulation_recovers_when_queued_actor_left_battlefield(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        room.set_seat_controller(host_token, 2, "ai")
+        room.select_hero(host_token, "elite_soldier")
+        room.select_hero(host_token, "bard", seat_id=2)
+        room.start_battle(host_token)
+
+        soldier = next(unit for unit in room.battle.hero_units(1) if unit.hero_code == "elite_soldier")
+        bard = next(unit for unit in room.battle.hero_units(2) if unit.hero_code == "bard")
+        room.pending_simulation_action = None
+        soldier.banished = True
+        soldier.banish_turns_remaining = 1
+        room.battle.pending_chain = ReactionWindow(
+            reactive_player_id=2,
+            queued_action=QueuedAction(
+                action_type="attack",
+                actor_id=soldier.unit_id,
+                display_name="测试攻击",
+                speed=1,
+                payload={"type": "attack", "unit_id": soldier.unit_id, "target_unit_id": bard.unit_id},
+                target_unit_ids=[bard.unit_id],
+                source_player_id=1,
+                hostile=True,
+            ),
+            pending_reactor_ids=[bard.unit_id],
+            options_by_unit={bard.unit_id: []},
+        )
+
+        self.advance_ai_step(room)
+        self.assertIsNotNone(room.pending_simulation_action)
+        self.assertEqual(room.pending_simulation_action["reason"], "ai_chain")
+
+        self.finish_current_ai_action(room)
+
+        self.assertIsNone(room.pending_simulation_action)
+        self.assertIsNone(room.battle.pending_chain)
+        self.assertIn("行动者已不在战场", "".join(room.battle.logs))
+
+    def test_ai_simulation_recovers_when_staged_payload_becomes_illegal(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        room.set_seat_controller(host_token, 2, "ai")
+        room.select_hero(host_token, "bard")
+        room.select_hero(host_token, "rock_god", seat_id=2)
+        room.start_battle(host_token)
+
+        rock = next(unit for unit in room.battle.hero_units(2) if unit.hero_code == "rock_god")
+        room.pending_simulation_action = {
+            "id": 999,
+            "reason": "ai_turn",
+            "payload": {
+                "type": "skill",
+                "unit_id": rock.unit_id,
+                "skill_code": "rock_absorb",
+                "stat_name": "not_a_stat",
+                "cells": [{"x": 0, "y": 0}],
+            },
+            "actor_id": rock.unit_id,
+            "actor_name": rock.name,
+            "cells": [{"x": 0, "y": 0}],
+            "visible_count": 99,
+            "next_due_at": 0,
+        }
+
+        progressed = room._advance_simulation_due(force_steps=1)
+
+        self.assertEqual(progressed, 1)
+        self.assertIsNone(room.pending_simulation_action)
+        self.assertEqual(room.last_action_meta["reason"], "ai_turn_fallback")
+        self.assertTrue(any(step.reason == "ai_turn_failed" for step in room.replay.steps))
 
     def test_ai_seat_can_fire_instant_skill_during_enemy_turn(self) -> None:
         room, _, host_token = self.registry.create_room("Alice")
@@ -307,6 +429,9 @@ class MultiplayerRoomTests(unittest.TestCase):
         caster.mana_points = 2
 
         room.perform_action(host_token, {"type": "move", "unit_id": dark.unit_id, "x": 4, "y": 4})
+        self.assertIsNotNone(room.pending_simulation_action)
+        self.assertEqual(room.pending_simulation_action["reason"], "ai_instant")
+        self.finish_current_ai_action(room)
 
         self.assertFalse(dark.turn_ready)
         self.assertIn("磁力波", "".join(room.battle.logs))
@@ -437,6 +562,82 @@ class MultiplayerRoomTests(unittest.TestCase):
             self.assertEqual(host_active_units[clone.unit_id], "元素猎人（分身）")
         self.assertEqual(guest_units[clone.unit_id], "元素猎人")
 
+    def test_clone_truth_is_visible_to_allied_team_view_but_hidden_from_enemy_team(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        _, guest_token = room.join("Bob")
+        room.set_seat_count(host_token, 4)
+        room.set_seat_team(host_token, 3, 1)
+        room.set_seat_controller(host_token, 4, "ai")
+        _, ally_token = room.join("Charlie")
+        room.select_hero(host_token, "n")
+        room.select_hero(guest_token, "bard")
+        room.select_hero(ally_token, "bard", seat_id=3)
+        room.select_hero(host_token, "bard", seat_id=4)
+        room.start_battle(host_token)
+        caster = next(unit for unit in room.battle.hero_units(1) if unit.hero_code == "n")
+        caster.position = Position(4, 4)
+
+        with mock.patch("wujiang.heroes.next_five.random.choice", side_effect=lambda seq: seq[0]):
+            room.perform_action(
+                host_token,
+                {
+                    "type": "skill",
+                    "unit_id": caster.unit_id,
+                    "skill_code": "split",
+                    "cells": [{"x": 3, "y": 3}, {"x": 3, "y": 4}, {"x": 4, "y": 3}],
+                },
+            )
+
+        clones = [unit for unit in room.battle.all_units() if unit.is_clone]
+        ally_view = room.serialize_state(ally_token)
+        enemy_view = room.serialize_state(guest_token)
+        ally_units = {unit["id"]: unit for unit in ally_view["battle"]["units"]}
+        enemy_units = {unit["id"]: unit for unit in enemy_view["battle"]["units"]}
+
+        self.assertEqual(ally_units[caster.unit_id]["name"], "N")
+        for clone in clones:
+            self.assertEqual(ally_units[clone.unit_id]["name"], "N（分身）")
+            self.assertEqual(enemy_units[clone.unit_id]["name"], "N")
+            self.assertFalse(enemy_units[clone.unit_id]["is_clone"])
+
+
+    def test_enemy_view_cannot_identify_n_split_clones_by_mana_or_skill_text(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        _, guest_token = room.join("Bob")
+        room.select_hero(host_token, "n")
+        room.select_hero(guest_token, "bard")
+        room.start_battle(host_token)
+        caster = next(unit for unit in room.battle.hero_units(1) if unit.hero_code == "n")
+        caster.position = Position(4, 4)
+
+        with mock.patch("wujiang.heroes.next_five.random.choice", side_effect=lambda seq: seq[0]):
+            room.perform_action(
+                host_token,
+                {
+                    "type": "skill",
+                    "unit_id": caster.unit_id,
+                    "skill_code": "split",
+                    "cells": [{"x": 3, "y": 3}, {"x": 3, "y": 4}, {"x": 4, "y": 3}],
+                },
+            )
+
+        clones = [unit for unit in room.battle.all_units() if unit.is_clone]
+        caster.current_mana = 0.5
+        caster.mana_points = 3
+        guest_view = room.serialize_state(guest_token)
+        units_by_id = {unit["id"]: unit for unit in guest_view["battle"]["units"]}
+        visible_caster = units_by_id[caster.unit_id]
+
+        for clone in clones:
+            visible_clone = units_by_id[clone.unit_id]
+            self.assertEqual(visible_clone["name"], visible_caster["name"])
+            self.assertFalse(visible_clone["is_clone"])
+            self.assertEqual(visible_clone["mana"], visible_caster["mana"])
+            self.assertEqual(visible_clone["max_mana"], visible_caster["max_mana"])
+            self.assertEqual(visible_clone["mana_points"], visible_caster["mana_points"])
+            self.assertEqual(visible_clone["raw_skill_text"], visible_caster["raw_skill_text"])
+            self.assertEqual(visible_clone["raw_trait_text"], visible_caster["raw_trait_text"])
+
     def test_finished_room_can_restart_lobby_and_clear_rosters(self) -> None:
         room, _, host_token = self.registry.create_room("Alice")
         _, guest_token = room.join("Bob")
@@ -560,8 +761,12 @@ class MultiplayerRoomTests(unittest.TestCase):
         room.start_battle(host_token)
 
         initial_steps = room.replay.step_count
-        room.simulation_last_advanced_at = time.time() - 5
-        room.serialize_state(host_token)
+        self.assertIsNotNone(room.pending_simulation_action)
+        for _ in range(12):
+            room.pending_simulation_action["next_due_at"] = 0
+            room.serialize_state(host_token)
+            if room.replay.step_count > initial_steps:
+                break
         advanced_steps = room.replay.step_count
 
         self.assertGreater(advanced_steps, initial_steps)
@@ -570,6 +775,26 @@ class MultiplayerRoomTests(unittest.TestCase):
         room.control_simulation(host_token, "step")
         self.assertGreaterEqual(room.replay.last_index, paused_step)
         self.assertTrue(room.simulation_paused)
+
+    def test_ai_only_6v6_with_split_actor_prepares_without_enumerating_combinations(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        room.set_seat_controller(host_token, 2, "ai")
+        for hero_code in ["bard", "dark_human", "elite_soldier", "fire_funeral", "ellie", "jade"]:
+            room.select_hero(host_token, hero_code, seat_id=1)
+        for hero_code in ["doomlight_dragon", "rock_god", "masamune", "undead_king_lina", "element_hunter", "n"]:
+            room.select_hero(host_token, hero_code, seat_id=2)
+
+        started_at = time.perf_counter()
+        room.start_battle(host_token)
+        elapsed = time.perf_counter() - started_at
+
+        self.assertLess(elapsed, 1.0)
+        self.assertIsNotNone(room.pending_simulation_action)
+        for _ in range(8):
+            if room.pending_simulation_action is not None:
+                room.pending_simulation_action["next_due_at"] = 0
+            room.serialize_state(host_token)
+        self.assertGreater(room.replay.step_count, 1)
 
     def test_replay_endpoint_uses_spectator_view_before_finish_and_allows_omniscient_after_finish(self) -> None:
         room, _, host_token = self.registry.create_room("Alice")
