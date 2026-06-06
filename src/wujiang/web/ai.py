@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import random
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
-from wujiang.engine.core import ActionError, Battle, Position, QueuedAction, Unit
+from wujiang.engine.core import ActionError, Battle, DamageContext, Position, QueuedAction, Unit
 
 
 AI_DIFFICULTIES = {"easy", "standard", "aggressive"}
 
-SUPPORT_HERO_CODES = {"ellie", "bard", "element_hunter"}
-SUMMON_SKILL_CODES = {"medusa", "thunder_god", "earth_walker", "split", "motor_horse"}
+SUPPORT_HERO_CODES = {"ellie", "bard", "element_hunter", "chanter"}
+SUMMON_SKILL_CODES = {"medusa", "thunder_god", "earth_walker", "split", "motor_horse", "summon_dragon"}
 HEAL_SKILL_CODES = {"heal", "heal_mount", "mech_enhancement"}
 ALLY_BUFF_SKILL_CODES = {"defend_twice", "baptism", "chant", "experiment"}
 SELF_BUFF_SKILL_CODES = {
@@ -22,6 +24,7 @@ SELF_BUFF_SKILL_CODES = {
     "headshot",
     "six_blade_style",
     "n_skill",
+    "form_shift",
 }
 MOVE_SKILL_CODES = {"fly_leap", "fate_kick", "crazy_sand", "plasma_thruster", "mounted_leap"}
 DAMAGING_SKILL_CODES = {
@@ -42,6 +45,8 @@ DAMAGING_SKILL_CODES = {
     "missile",
     "laser",
     "magnetic_wave",
+    "dragon_slash",
+    "whirlwind_attack",
 }
 CONTROL_SKILL_CODES = {
     "curse",
@@ -53,8 +58,28 @@ CONTROL_SKILL_CODES = {
     "magnetic_wave",
     "stance",
     "plant_growth",
+    "paralysis_card",
+    "poison_card",
+    "drain_card",
+    "magic_claw",
+    "chain_pull",
+    "dragon_slash",
+    "smoke_spray",
 }
 REACTION_SHIELD_CODES = {"magic_wall", "light_wall", "stone_wall", "ion_shield", "quantum_shield", "protection"}
+HOSTILE_EFFECT_SKILL_CODES = (
+    CONTROL_SKILL_CODES
+    | {
+        "drain_mana",
+        "premature_burial",
+        "erasure",
+        "descent_moment",
+        "great_funeral",
+        "judgment_fire",
+        "rock_absorb",
+        "wind_sand",
+    }
+) - {"stance"}
 
 
 @dataclass(slots=True)
@@ -210,6 +235,8 @@ def build_attack_candidates(
     for payload in payloads:
         if not payload_is_legal(battle, payload):
             continue
+        if not attack_payload_has_effective_enemy_impact(battle, actor, payload):
+            continue
         score = score_attack_payload(battle, actor, payload, profile)
         candidates.append(AICandidate(payload=payload, score=score, summary=f"attack:{payload.get('target_unit_id')}"))
     return candidates
@@ -229,6 +256,13 @@ def build_skill_candidates(
     for payload in payloads:
         generated_from_preview = bool(payload.get("cells")) and selection_mode in {"pattern_cells", "choice_pattern"}
         if not generated_from_preview and not payload_is_legal(battle, payload):
+            continue
+        if skill_payload_requires_enemy_impact(battle, actor, action, payload) and not skill_payload_has_effective_enemy_impact(
+            battle,
+            actor,
+            action,
+            payload,
+        ):
             continue
         score = score_skill_payload(battle, actor, action, payload, profile, instant_only=instant_only)
         candidates.append(AICandidate(payload=payload, score=score, summary=f"skill:{action.get('code')}"))
@@ -274,6 +308,14 @@ def attack_payloads_for_action(battle: Battle, actor: Unit, action: dict[str, An
                         choice_code=code,
                     )
                 )
+    elif mode == "pattern_cells":
+        for pattern in selection.get("patterns", []):
+            cells = preview_positions(pattern)
+            if not cells:
+                continue
+            payload = dict(base_payload)
+            payload["cells"] = positions_to_payload(cells)
+            payloads.append(payload)
     else:
         for target_id in preview.get("target_unit_ids", []):
             target = battle.get_unit(str(target_id))
@@ -330,6 +372,22 @@ def skill_payloads_for_action(battle: Battle, actor: Unit, action: dict[str, Any
         return rock_cannon_payloads(battle, actor)
     if code == "split":
         return split_payloads(battle, actor, action)
+    if code == "descent_moment":
+        payloads: list[dict[str, Any]] = []
+        destinations_by_target = preview.get("destinations_by_target", {}) or {}
+        for target_id in preview.get("target_unit_ids", []):
+            for cell in preview_positions(destinations_by_target.get(str(target_id))):
+                payloads.append(
+                    {
+                        "type": "skill",
+                        "unit_id": actor.unit_id,
+                        "skill_code": code,
+                        "target_unit_id": str(target_id),
+                        "dest_x": cell.x,
+                        "dest_y": cell.y,
+                    }
+                )
+        return dedupe_payloads(payloads)
     if target_mode in {"none", "self"}:
         return [base_payload]
     if target_mode in {"ally", "enemy", "unit"}:
@@ -374,6 +432,22 @@ def skill_payloads_for_action(battle: Battle, actor: Unit, action: dict[str, Any
             return dedupe_payloads(payloads)
         if mode == "body_direction":
             return rock_cannon_payloads(battle, actor)
+        if mode == "revive_unit_cell":
+            payloads: list[dict[str, Any]] = []
+            for candidate in selection.get("candidates", []):
+                revive_unit_id = str(candidate.get("id") or "")
+                for cell in preview_positions(candidate.get("cells")):
+                    payloads.append(
+                        {
+                            "type": "skill",
+                            "unit_id": actor.unit_id,
+                            "skill_code": code,
+                            "revive_unit_id": revive_unit_id,
+                            "x": cell.x,
+                            "y": cell.y,
+                        }
+                    )
+            return dedupe_payloads(payloads)
         payloads = []
         for cell in preview_positions(preview.get("cells")):
             payloads.append({"type": "skill", "unit_id": actor.unit_id, "skill_code": code, "x": cell.x, "y": cell.y})
@@ -579,13 +653,45 @@ def score_attack_payload(
     payload: dict[str, Any],
     profile: DifficultyProfile,
 ) -> float:
+    if not payload.get("target_unit_id"):
+        resolved_payload = battle.resolved_basic_attack_payload(actor, payload)
+        cells = battle.payload_positions(resolved_payload, "attack_cells")
+        if not cells:
+            cells = preview_positions(payload.get("cells"))
+        attack_power = battle.basic_attack_preview_power(actor, payload)
+        score = 0.0
+        for target in battle.effect_units_at_cells(cells):
+            if target.player_id == actor.player_id:
+                score -= friendly_fire_penalty(target)
+                continue
+            hit_count = max(1, battle.unit_hit_count_for_cells(target, cells) if cells else 1)
+            expected_damage = estimate_attack_damage(
+                battle,
+                actor,
+                target,
+                resolved_payload,
+                attack_power=attack_power,
+                area_cell_hits=hit_count,
+            )
+            score += expected_damage * 100.0
+            if expected_damage >= target.current_hp - 1e-9:
+                score += 95.0
+            score += hostile_unit_value(target) * 0.65
+        if hero_style(actor) != "support":
+            score += profile.aggressive_bonus
+        return score
     target = battle.get_unit(str(payload["target_unit_id"]))
     attack_power = battle.basic_attack_preview_power(actor, payload)
     cells = battle.payload_positions(battle.resolved_basic_attack_payload(actor, payload), "attack_cells")
     hit_count = max(1, battle.unit_hit_count_for_cells(target, cells) if cells else 1)
-    ignore_shield = bool(payload.get("ignore_shield"))
-    half_ignore_shield = bool(payload.get("half_ignore_shield"))
-    expected_damage = estimate_damage(battle, target, attack_power + max(0, hit_count - 1), ignore_shield=ignore_shield, half_ignore_shield=half_ignore_shield)
+    expected_damage = estimate_attack_damage(
+        battle,
+        actor,
+        target,
+        payload,
+        attack_power=attack_power,
+        area_cell_hits=hit_count,
+    )
     score = expected_damage * 100.0
     if expected_damage >= target.current_hp - 1e-9:
         score += 95.0
@@ -643,7 +749,7 @@ def score_skill_payload(
         return score
     if code in SELF_BUFF_SKILL_CODES:
         return self_buff_score(battle, actor, code, profile)
-    if code in {"stance", "great_holy_light", "plant_growth"}:
+    if code in {"stance", "great_holy_light", "plant_growth", "smoke_spray"}:
         return field_skill_score(battle, actor, code, targets, profile)
     if code == "drain_mana":
         return drain_mana_score(battle, actor, targets, profile)
@@ -697,6 +803,11 @@ def score_reaction_payload(
             expected = estimate_damage(battle, attacker, battle.basic_attack_preview_power(reactor))
             score += expected * 85.0 + profile.aggressive_bonus
         return score
+    if code == "card_transposition":
+        destination = payload_destination(payload)
+        if destination is None:
+            return -5.0
+        return threat + score_move_destination(battle, reactor, destination, hero_style(reactor), profile) / 2.0 + 22.0
     if code == "knockback":
         return threat * 0.8 + 18.0
     return 0.0
@@ -720,10 +831,14 @@ def skill_damage_score(
         attack_power = skill_attack_power(battle, actor, skill, payload, unit, cells)
         ignore_shield = bool(skill.ignores_shield_for_payload(battle, actor, payload))
         half_ignore_shield = bool(skill.half_ignores_shield_for_payload(battle, actor, payload))
-        damage = estimate_damage(
+        damage = estimate_skill_damage(
             battle,
+            actor,
+            skill,
+            payload,
             unit,
             attack_power,
+            cells=cells,
             ignore_shield=ignore_shield,
             half_ignore_shield=half_ignore_shield,
         )
@@ -731,7 +846,7 @@ def skill_damage_score(
         score += hostile_unit_value(unit) * 0.5
         if damage >= unit.current_hp - 1e-9:
             score += 90.0
-    if code in {"judgment_fire", "great_funeral", "laser", "missile", "machine_gun", "pierce", "remote_dragon_breath", "dragon_breath", "magnetic_wave"}:
+    if code in {"judgment_fire", "great_funeral", "laser", "missile", "machine_gun", "pierce", "remote_dragon_breath", "dragon_breath", "magnetic_wave", "whirlwind_attack"}:
         score += len([unit for unit in affected if unit.player_id != actor.player_id]) * 18.0
     if hero_style(actor) != "support":
         score += profile.aggressive_bonus
@@ -768,6 +883,16 @@ def skill_control_bonus(
         return field_skill_score(battle, actor, code, targets, profile)
     if code == "plant_growth":
         return field_skill_score(battle, actor, code, targets, profile)
+    if code == "smoke_spray":
+        return field_skill_score(battle, actor, code, targets, profile)
+    if code in {"paralysis_card", "poison_card", "drain_card", "magic_claw"}:
+        if code == "drain_card":
+            return sum(min(unit.current_mana, 1.0) * 35.0 + hostile_unit_value(unit) * 0.12 for unit in enemies)
+        if code == "poison_card":
+            return len(enemies) * 28.0 + sum(unit.current_hp * 18.0 for unit in enemies)
+        if code == "magic_claw":
+            return len(enemies) * 30.0
+        return len(enemies) * 32.0
     return 0.0
 
 
@@ -804,6 +929,8 @@ def self_buff_score(battle: Battle, actor: Unit, code: str, profile: DifficultyP
         return 60.0 if battle.action_snapshot_for(actor).get("attack_targets") else 18.0
     if code == "six_blade_style":
         return 54.0 if battle.action_snapshot_for(actor).get("attack_targets") else 12.0
+    if code == "form_shift":
+        return 58.0
     if code == "into_darkness":
         return 52.0
     if code == "stealth":
@@ -842,6 +969,10 @@ def field_skill_score(
         return nearby_enemies * 16.0 + nearby_allies * 10.0
     if code == "plant_growth":
         return len([unit for unit in targets if unit.player_id != actor.player_id]) * 12.0 + 10.0
+    if code == "smoke_spray":
+        enemy_hits = len([unit for unit in targets if unit.player_id != actor.player_id])
+        ally_hits = len([unit for unit in targets if unit.player_id == actor.player_id])
+        return enemy_hits * 26.0 - ally_hits * 18.0 + 8.0
     return 6.0
 
 
@@ -884,6 +1015,407 @@ def score_respawn_destination(
     if role != "support":
         score -= nearest_ally
     return score
+
+
+def attack_payload_has_effective_enemy_impact(battle: Battle, actor: Unit, payload: dict[str, Any]) -> bool:
+    for target in attack_payload_enemy_targets(battle, actor, payload):
+        if attack_target_has_effective_impact(battle, actor, target, payload):
+            return True
+    return False
+
+
+def attack_payload_enemy_targets(battle: Battle, actor: Unit, payload: dict[str, Any]) -> list[Unit]:
+    try:
+        resolved_payload = battle.resolved_basic_attack_payload(actor, payload)
+    except Exception:
+        resolved_payload = dict(payload)
+    cells = battle.payload_positions(resolved_payload, "attack_cells")
+    if cells:
+        return [unit for unit in battle.effect_units_at_cells(cells) if unit.player_id != actor.player_id]
+    if payload.get("target_unit_id"):
+        try:
+            target = battle.effect_recipient(battle.get_unit(str(payload["target_unit_id"])))
+        except Exception:
+            return []
+        return [target] if target.player_id != actor.player_id else []
+    try:
+        cells = battle.basic_attack_area_cells_for_payload(actor, resolved_payload) or []
+    except Exception:
+        cells = preview_positions(payload.get("cells"))
+    return [unit for unit in battle.effect_units_at_cells(cells) if unit.player_id != actor.player_id]
+
+
+def attack_target_has_effective_impact(battle: Battle, actor: Unit, target: Unit, payload: dict[str, Any]) -> bool:
+    try:
+        resolved_payload = battle.resolved_basic_attack_payload(actor, payload)
+        cells = battle.payload_positions(resolved_payload, "attack_cells")
+        hit_count = max(1, battle.unit_hit_count_for_cells(target, cells) if cells else 1)
+        impact = probe_attack_damage_impact(
+            battle,
+            actor,
+            target,
+            resolved_payload,
+            attack_power=battle.basic_attack_preview_power(actor, resolved_payload),
+            area_cell_hits=hit_count,
+        )
+        return impact.changed_target or impact.damage > 0
+    except Exception:
+        return False
+
+
+def skill_payload_requires_enemy_impact(
+    battle: Battle,
+    actor: Unit,
+    action: dict[str, Any],
+    payload: dict[str, Any],
+) -> bool:
+    code = str(action.get("code") or payload.get("skill_code") or "")
+    if code in MOVE_SKILL_CODES or code in SUMMON_SKILL_CODES or code in HEAL_SKILL_CODES:
+        return False
+    if code in ALLY_BUFF_SKILL_CODES or code in SELF_BUFF_SKILL_CODES:
+        return False
+    if code in {"stance", "great_holy_light"}:
+        return False
+    if code in DAMAGING_SKILL_CODES or code in HOSTILE_EFFECT_SKILL_CODES:
+        return True
+    try:
+        skill = actor.get_skill(code)
+        return any(unit.player_id != actor.player_id for unit in skill_effect_units(battle, actor, skill, payload))
+    except Exception:
+        return False
+
+
+def skill_payload_has_effective_enemy_impact(
+    battle: Battle,
+    actor: Unit,
+    action: dict[str, Any],
+    payload: dict[str, Any],
+) -> bool:
+    code = str(action.get("code") or payload.get("skill_code") or "")
+    try:
+        skill = actor.get_skill(code)
+    except Exception:
+        return False
+    targets = [unit for unit in skill_effect_units(battle, actor, skill, payload) if unit.player_id != actor.player_id]
+    if not targets:
+        return False
+    cells = skill_effect_cells(battle, actor, skill, payload)
+    if code in HOSTILE_EFFECT_SKILL_CODES:
+        for target in targets:
+            if hostile_skill_effect_target_has_impact(battle, actor, skill, payload, target):
+                return True
+    if code in DAMAGING_SKILL_CODES:
+        for target in targets:
+            attack_power = skill_attack_power(battle, actor, skill, payload, target, cells)
+            ignore_shield = bool(skill.ignores_shield_for_payload(battle, actor, payload))
+            half_ignore_shield = bool(skill.half_ignores_shield_for_payload(battle, actor, payload))
+            impact = probe_skill_damage_impact(
+                battle,
+                actor,
+                skill,
+                payload,
+                target,
+                attack_power,
+                cells=cells,
+                ignore_shield=ignore_shield,
+                half_ignore_shield=half_ignore_shield,
+            )
+            if impact.changed_target or impact.damage > 0:
+                return True
+    return False
+
+
+def hostile_skill_effect_target_has_impact(
+    battle: Battle,
+    actor: Unit,
+    skill: Any,
+    payload: dict[str, Any],
+    target: Unit,
+) -> bool:
+    code = str(skill.code)
+    if code == "drain_mana" and target.current_mana <= 0 and target.total_shields() <= 0:
+        return False
+    if code == "erasure" and not any(status.name == "抹杀计数点" for status in target.statuses):
+        return False
+    try:
+        return probe_target_effect_impact(
+            battle,
+            actor,
+            target,
+            action_name=str(skill.name),
+            is_skill=True,
+            ignore_shield=bool(skill.ignores_shield_for_payload(battle, actor, payload)),
+            half_ignore_shield=bool(skill.half_ignores_shield_for_payload(battle, actor, payload)),
+            extra_effect_applies=lambda probe_target: hostile_skill_extra_effect_applies(code, probe_target),
+        )
+    except Exception:
+        return False
+
+
+def hostile_skill_extra_effect_applies(code: str, target: Unit) -> bool:
+    if code == "drain_mana":
+        return target.current_mana > 0
+    if code == "erasure":
+        return any(status.name == "抹杀计数点" for status in target.statuses)
+    return True
+
+
+@dataclass(slots=True)
+class DamageImpact:
+    damage: float
+    changed_target: bool
+
+
+def estimate_attack_damage(
+    battle: Battle,
+    actor: Unit,
+    target: Unit,
+    payload: dict[str, Any],
+    *,
+    attack_power: float,
+    area_cell_hits: int = 1,
+) -> float:
+    return probe_attack_damage_impact(
+        battle,
+        actor,
+        target,
+        payload,
+        attack_power=attack_power,
+        area_cell_hits=area_cell_hits,
+    ).damage
+
+
+def estimate_skill_damage(
+    battle: Battle,
+    actor: Unit,
+    skill: Any,
+    payload: dict[str, Any],
+    target: Unit,
+    attack_power: float,
+    *,
+    cells: list[Position],
+    ignore_shield: bool,
+    half_ignore_shield: bool,
+) -> float:
+    return probe_skill_damage_impact(
+        battle,
+        actor,
+        skill,
+        payload,
+        target,
+        attack_power,
+        cells=cells,
+        ignore_shield=ignore_shield,
+        half_ignore_shield=half_ignore_shield,
+    ).damage
+
+
+def probe_attack_damage_impact(
+    battle: Battle,
+    actor: Unit,
+    target: Unit,
+    payload: dict[str, Any],
+    *,
+    attack_power: float,
+    area_cell_hits: int = 1,
+) -> DamageImpact:
+    resolved_payload = battle.resolved_basic_attack_payload(actor, payload)
+    attack_tags = {"attack"}
+    attack_tags.update(set(resolved_payload.get("attack_tags", [])))
+    with ai_probe_rollback(battle):
+        probe_actor = battle.get_unit(actor.unit_id)
+        probe_target = battle.get_unit(target.unit_id)
+        before = unit_impact_signature(probe_target)
+        target_ctx = battle.validate_target(
+            probe_actor,
+            probe_target,
+            action_name=str(resolved_payload.get("attack_name") or "普攻"),
+            is_skill=False,
+            is_hostile=True,
+            resolve_defenses=False,
+            tags=set(attack_tags),
+        )
+        if target_ctx.cancelled:
+            return DamageImpact(0.0, unit_impact_signature(probe_target) != before)
+        damage_ctx = DamageContext(
+            source=probe_actor,
+            target=probe_target,
+            attack_power=attack_power,
+            is_skill=False,
+            action_name=str(resolved_payload.get("attack_name") or "普攻"),
+            ignore_shield=bool(target_ctx.ignore_shield or resolved_payload.get("ignore_shield")),
+            half_ignore_shield=bool(target_ctx.half_ignore_shield or resolved_payload.get("half_ignore_shield")),
+            ignore_magic_immunity=target_ctx.ignore_magic_immunity,
+            cannot_evade=target_ctx.cannot_evade,
+            tags=set(target_ctx.tags),
+            area_cell_hits=max(1, int(area_cell_hits)),
+        )
+        battle.resolve_damage(damage_ctx)
+        return DamageImpact(damage_ctx.damage, unit_impact_signature(probe_target) != before)
+
+
+def probe_skill_damage_impact(
+    battle: Battle,
+    actor: Unit,
+    skill: Any,
+    payload: dict[str, Any],
+    target: Unit,
+    attack_power: float,
+    *,
+    cells: list[Position],
+    ignore_shield: bool,
+    half_ignore_shield: bool,
+) -> DamageImpact:
+    hit_count = max(1, battle.unit_hit_count_for_cells(target, cells) if cells else 1)
+    adjusted_attack_power = max(0.0, float(attack_power) - max(0, hit_count - 1))
+    resolves_as_attack = str(skill.code) == "whirlwind_attack"
+    target_tags = {"attack", "whirlwind"} if resolves_as_attack else {"skill", str(skill.code)}
+    with ai_probe_rollback(battle):
+        probe_actor = battle.get_unit(actor.unit_id)
+        probe_target = battle.get_unit(target.unit_id)
+        before = unit_impact_signature(probe_target)
+        target_ctx = battle.validate_target(
+            probe_actor,
+            probe_target,
+            action_name=str(skill.name),
+            is_skill=not resolves_as_attack,
+            is_hostile=True,
+            ignore_shield=ignore_shield,
+            half_ignore_shield=half_ignore_shield,
+            resolve_defenses=False,
+            tags=set(target_tags),
+        )
+        if target_ctx.cancelled:
+            return DamageImpact(0.0, unit_impact_signature(probe_target) != before)
+        damage_ctx = DamageContext(
+            source=probe_actor,
+            target=probe_target,
+            attack_power=adjusted_attack_power,
+            is_skill=not resolves_as_attack,
+            action_name=str(skill.name),
+            ignore_shield=bool(target_ctx.ignore_shield or ignore_shield),
+            half_ignore_shield=bool(target_ctx.half_ignore_shield or half_ignore_shield),
+            ignore_magic_immunity=target_ctx.ignore_magic_immunity,
+            cannot_evade=target_ctx.cannot_evade,
+            tags=set(target_ctx.tags),
+            area_cell_hits=hit_count,
+        )
+        battle.resolve_damage(damage_ctx)
+        return DamageImpact(damage_ctx.damage, unit_impact_signature(probe_target) != before)
+
+
+def probe_target_effect_impact(
+    battle: Battle,
+    actor: Unit,
+    target: Unit,
+    *,
+    action_name: str,
+    is_skill: bool,
+    ignore_shield: bool = False,
+    half_ignore_shield: bool = False,
+    extra_effect_applies: Optional[Callable[[Unit], bool]] = None,
+) -> bool:
+    with ai_probe_rollback(battle):
+        probe_actor = battle.get_unit(actor.unit_id)
+        probe_target = battle.get_unit(target.unit_id)
+        before = unit_impact_signature(probe_target)
+        ctx = battle.validate_target(
+            probe_actor,
+            probe_target,
+            action_name=action_name,
+            is_skill=is_skill,
+            is_hostile=True,
+            ignore_shield=ignore_shield,
+            half_ignore_shield=half_ignore_shield,
+            resolve_defenses=True,
+            tags={"skill"} if is_skill else {"attack"},
+        )
+        changed = unit_impact_signature(probe_target) != before
+        if changed:
+            return True
+        if ctx.cancelled:
+            return False
+        return extra_effect_applies(probe_target) if extra_effect_applies is not None else True
+
+
+@contextmanager
+def ai_probe_rollback(battle: Battle) -> Iterable[None]:
+    random_state = random.getstate()
+    battle_state = shallow_object_state(battle)
+    units = list(battle.all_units())
+    unit_states = [(unit, shallow_object_state(unit)) for unit in units]
+    components = []
+    for unit in units:
+        components.extend(list(unit.iter_components()))
+    components.extend(list(getattr(battle, "field_effects", [])))
+    component_states = [(component, shallow_object_state(component)) for component in components]
+    try:
+        yield
+    finally:
+        for component, state in component_states:
+            restore_object_state(component, state)
+        for unit, state in unit_states:
+            restore_object_state(unit, state)
+        restore_object_state(battle, battle_state)
+        random.setstate(random_state)
+
+
+def shallow_object_state(obj: Any) -> dict[str, Any]:
+    state: dict[str, Any] = {}
+    for key, value in getattr(obj, "__dict__", {}).items():
+        if isinstance(value, list):
+            state[key] = list(value)
+        elif isinstance(value, dict):
+            state[key] = dict(value)
+        elif isinstance(value, set):
+            state[key] = set(value)
+        else:
+            state[key] = value
+    return state
+
+
+def restore_object_state(obj: Any, state: dict[str, Any]) -> None:
+    obj.__dict__.clear()
+    obj.__dict__.update(state)
+
+
+def unit_impact_signature(unit: Unit) -> tuple[Any, ...]:
+    return (
+        unit.alive,
+        unit.position,
+        round(float(unit.current_hp), 6),
+        round(float(unit.current_mana), 6),
+        round(float(unit.mana_points), 6),
+        unit.shields,
+        unit.temporary_shields,
+        unit.dodge_charges,
+        unit.magic_immunity,
+        unit.cannot_be_targeted,
+        unit.cannot_move,
+        unit.cannot_normal_move,
+        unit.cannot_heal,
+        unit.cannot_attack,
+        unit.cannot_use_skills,
+        tuple(status_impact_signature(status) for status in unit.statuses),
+    )
+
+
+def status_impact_signature(status: Any) -> tuple[Any, ...]:
+    data = []
+    for key, value in sorted(getattr(status, "__dict__", {}).items(), key=lambda item: str(item[0])):
+        if key == "owner":
+            continue
+        if isinstance(value, (str, int, float, bool, type(None))):
+            data.append((key, value))
+        elif isinstance(value, set):
+            data.append((key, tuple(sorted(value))))
+        elif isinstance(value, list):
+            data.append((key, tuple(repr(item) for item in value)))
+        elif isinstance(value, dict):
+            data.append((key, tuple(sorted((str(k), repr(v)) for k, v in value.items()))))
+        else:
+            data.append((key, repr(value)))
+    return (type(status).__name__, tuple(data))
 
 
 def payload_is_legal(battle: Battle, payload: dict[str, Any]) -> bool:
@@ -950,6 +1482,8 @@ def skill_attack_power(
     if code == "judgment_fire":
         return 6.0
     if code == "great_funeral":
+        return 5.0
+    if code == "dragon_slash":
         return 5.0
     if code == "rock_cannon":
         selected_cells = preview_positions(payload.get("cells", []))

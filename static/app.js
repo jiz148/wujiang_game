@@ -1097,6 +1097,10 @@ function bodyDirectionSelection(action) {
   return action?.preview?.selection?.mode === "body_direction" ? action.preview.selection : null;
 }
 
+function reviveUnitCellSelection(action) {
+  return action?.preview?.selection?.mode === "revive_unit_cell" ? action.preview.selection : null;
+}
+
 function normalizedPatternCells(cells = []) {
   const normalized = [];
   const seen = new Set();
@@ -1249,6 +1253,50 @@ function setStagedBodyDirection(direction) {
 function bodyDirectionSelectionCanComplete(action, chosen = stagedBodyCells(action)) {
   const direction = stagedBodyDirection(action);
   return Boolean(bodyDirectionSelection(action) && chosen.length && direction);
+}
+
+function stagedReviveUnitId(action = selectedAction()) {
+  if (!action || state.selectedActionCode !== action.code || !reviveUnitCellSelection(action)) return "";
+  return String(state.stagedPayload?.reviveUnitId || "").trim();
+}
+
+function stagedReviveCell(action = selectedAction()) {
+  if (!action || state.selectedActionCode !== action.code || !reviveUnitCellSelection(action)) return null;
+  const cell = state.stagedPayload?.cell;
+  if (!cell || cell.x == null || cell.y == null) return null;
+  return { x: Number(cell.x), y: Number(cell.y) };
+}
+
+function setStagedReviveUnitId(unitId) {
+  const action = selectedAction();
+  if (!reviveUnitCellSelection(action)) return;
+  const next = String(unitId || "").trim();
+  const current = next && next === stagedReviveUnitId(action) ? stagedReviveCell(action) : null;
+  state.stagedPayload = next || current ? { ...(next ? { reviveUnitId: next } : {}), ...(current ? { cell: current } : {}) } : null;
+}
+
+function setStagedReviveCell(cell) {
+  const reviveUnitId = stagedReviveUnitId();
+  const next = cell && cell.x != null && cell.y != null ? { x: Number(cell.x), y: Number(cell.y) } : null;
+  state.stagedPayload = reviveUnitId || next ? { ...(reviveUnitId ? { reviveUnitId } : {}), ...(next ? { cell: next } : {}) } : null;
+}
+
+function reviveCandidate(action, unitId = stagedReviveUnitId(action)) {
+  const id = String(unitId || "").trim();
+  return (reviveUnitCellSelection(action)?.candidates || []).find((entry) => String(entry.id || "") === id) || null;
+}
+
+function reviveSelectionCells(action) {
+  const candidate = reviveCandidate(action);
+  if (candidate) return candidate.cells || [];
+  return action.preview?.cells || [];
+}
+
+function reviveUnitCellSelectionCanComplete(action) {
+  const cell = stagedReviveCell(action);
+  const unitId = stagedReviveUnitId(action);
+  if (!reviveUnitCellSelection(action) || !unitId || !cell) return false;
+  return positionsToSet(reviveSelectionCells(action)).has(positionKey(cell));
 }
 
 function movePathMaxSteps(action) {
@@ -1478,6 +1526,16 @@ function currentPreview() {
     };
   }
 
+  if (state.selectedActionCode === "descent_moment" && state.stagedPayload?.targetUnitId) {
+    const target = stagedTarget();
+    return {
+      cellKeys: positionsToSet(descentMomentDestinations(action, target)),
+      targetIds: new Set(target ? [target.id] : []),
+      secondaryCellKeys: positionsToSet(target ? unitOccupiedCells(target) : []),
+      destinationCellKeys: new Set(),
+    };
+  }
+
   const filteredTargetIds = (action.preview?.target_unit_ids || []).filter((id) => unitIsSelectableTarget(unitById(id)));
   if (action.code === "backstep_shot" && isChainMode()) {
     const retreatCell = stagedBackstepRetreatCell(action);
@@ -1554,6 +1612,15 @@ function currentPreview() {
       destinationCellKeys: new Set(),
     };
   }
+  if (reviveUnitCellSelection(action)) {
+    const selectedCell = stagedReviveCell(action);
+    return {
+      cellKeys: positionsToSet(reviveSelectionCells(action)),
+      targetIds: new Set(),
+      secondaryCellKeys: positionsToSet([...(action.preview?.secondary_cells || []), ...(selectedCell ? [selectedCell] : [])]),
+      destinationCellKeys: new Set(),
+    };
+  }
   const useDirectTargetCells = action.kind === "attack"
     || (action.preview?.requires_target && ["ally", "enemy", "unit"].includes(action.target_mode));
   const previewCells = useDirectTargetCells
@@ -1598,6 +1665,13 @@ function manaPullDestinations(target) {
   return results;
 }
 
+function descentMomentDestinations(action, target) {
+  if (!action || !target) return [];
+  const mapping = action.preview?.destinations_by_target || {};
+  const cells = mapping[target.id] || [];
+  return Array.isArray(cells) ? cells : [];
+}
+
 function actionNeedsTarget(action) {
   if (!action) return false;
   if (isChainMode()) return Boolean(action.preview?.requires_target);
@@ -1628,6 +1702,7 @@ function canCompleteTargetSelection() {
   if (multiUnitSelection(action)) return multiUnitSelectionCanComplete(action);
   if (statCellSelection(action)) return statCellSelectionCanComplete(action);
   if (bodyDirectionSelection(action)) return bodyDirectionSelectionCanComplete(action);
+  if (reviveUnitCellSelection(action)) return reviveUnitCellSelectionCanComplete(action);
   return false;
 }
 
@@ -1978,6 +2053,25 @@ function renderBoardAlert() {
     return;
   }
 
+  if (action?.code === "descent_moment" && !state.stagedPayload?.targetUnitId) {
+    node.className = "board-alert is-step";
+    node.innerHTML = `
+      <strong>降临时刻</strong>
+      <span>先点击带有抹杀计数点的对方单位，再点击其周围合法落点。</span>
+    `;
+    return;
+  }
+
+  if (action?.code === "descent_moment" && state.stagedPayload?.targetUnitId) {
+    const target = stagedTarget();
+    node.className = "board-alert is-step";
+    node.innerHTML = `
+      <strong>降临时刻</strong>
+      <span>已选中 ${target?.name || "目标"}，请点击其周围蓝色高亮落点。</span>
+    `;
+    return;
+  }
+
   if (action?.code === "backstep_shot" && isChainMode()) {
     const retreatCell = stagedBackstepRetreatCell(action);
     const source = unitById(state.battle?.pending_chain?.queued_action?.actor_id || "");
@@ -2036,6 +2130,22 @@ function renderBoardAlert() {
       <strong>${actionTitle(action)}</strong>
       <span>点击岩神身体格选择要发射的部分，然后选择方向。当前已选 ${chosenCells.length} 格；再次点击已选身体格可取消。</span>
       <div class="board-alert-actions">${directionButtons}</div>
+    `;
+    return;
+  }
+
+  if (action && reviveUnitCellSelection(action)) {
+    const selectedId = stagedReviveUnitId(action);
+    const selectedCell = stagedReviveCell(action);
+    const candidates = reviveUnitCellSelection(action).candidates || [];
+    const buttons = candidates.map((entry) => `
+      <button type="button" class="board-alert-choice ${selectedId === String(entry.id) ? "is-selected" : ""}" data-revive-unit-id="${entry.id}">${entry.name}</button>
+    `).join("");
+    node.className = "board-alert is-step";
+    node.innerHTML = `
+      <strong>${actionTitle(action)}</strong>
+      <span>${selectedId ? `已选择复活单位${selectedCell ? "和落点" : "，现在点击周围高亮格作为落点"}。` : "先选择一个已被破坏的单位，再点击周围高亮格作为落点。"}</span>
+      <div class="board-alert-actions">${buttons}</div>
     `;
     return;
   }
@@ -3653,6 +3763,7 @@ function onBoardClick(x, y, occupant) {
       || multiUnitSelection(action)
       || statCellSelection(action)
       || bodyDirectionSelection(action)
+      || reviveUnitCellSelection(action)
       || (isChainMode() && action.code === "backstep_shot")
     ),
   );
@@ -3823,6 +3934,15 @@ function onBoardClick(x, y, occupant) {
     return;
   }
 
+  if (reviveUnitCellSelection(action)) {
+    if (!stagedReviveUnitId(action)) return;
+    if (!positionsToSet(reviveSelectionCells(action)).has(key)) return;
+    const selectedCell = stagedReviveCell(action);
+    setStagedReviveCell(selectedCell && sameCell(selectedCell, { x, y }) ? null : { x, y });
+    render();
+    return;
+  }
+
   if (isChainMode()) {
     if (!actionNeedsTarget(action)) return;
     if (!canUseCell && !canUseUnit) return;
@@ -3881,6 +4001,25 @@ function onBoardClick(x, y, occupant) {
       render();
       return;
     }
+    performAction({
+      type: "skill",
+      unit_id: state.selectedUnitId,
+      skill_code: action.code,
+      target_unit_id: state.stagedPayload.targetUnitId,
+      dest_x: x,
+      dest_y: y,
+    });
+    return;
+  }
+
+  if (action.code === "descent_moment") {
+    if (!state.stagedPayload?.targetUnitId) {
+      if (!(occupant && canUseUnit)) return;
+      state.stagedPayload = { targetUnitId: occupant.id };
+      render();
+      return;
+    }
+    if (!canUseCell) return;
     performAction({
       type: "skill",
       unit_id: state.selectedUnitId,
@@ -4147,6 +4286,13 @@ function bindEvents() {
       });
       render();
     }
+    const reviveButton = target?.closest("[data-revive-unit-id]");
+    if (reviveButton) {
+      const action = selectedAction();
+      if (!action || !reviveUnitCellSelection(action)) return;
+      setStagedReviveUnitId(reviveButton.dataset.reviveUnitId);
+      render();
+    }
   });
   document.addEventListener("pointerover", (event) => {
     const target = event.target instanceof Element ? event.target.closest("[data-tooltip]") : null;
@@ -4219,6 +4365,17 @@ function bindEvents() {
       performAction(payload);
       return;
     }
+    if (action.kind === "attack" && patternSelection(action)) {
+      const payload = {
+        type: "attack",
+        unit_id: state.selectedUnitId,
+        cells: stagedPatternCells(action),
+        ...(action.attack_payload || {}),
+      };
+      if (choicePatternSelection(action)) payload.choice_code = stagedPatternChoiceCode(action);
+      performAction(payload);
+      return;
+    }
     const payload = {
       type: "skill",
       unit_id: state.selectedUnitId,
@@ -4235,6 +4392,11 @@ function bindEvents() {
     } else if (bodyDirectionSelection(action)) {
       payload.cells = stagedBodyCells(action);
       payload.direction = stagedBodyDirection(action);
+    } else if (reviveUnitCellSelection(action)) {
+      const cell = stagedReviveCell(action);
+      payload.revive_unit_id = stagedReviveUnitId(action);
+      payload.x = cell.x;
+      payload.y = cell.y;
     }
     performAction(payload);
   });
@@ -4897,6 +5059,14 @@ function renderMessage() {
   }
   if (state.stagedPayload?.targetUnitId && state.selectedActionCode === "mana_pull") {
     node.textContent = `\u5df2\u9009\u4e2d ${stagedTarget()?.name || "\u88ab\u7275\u5f15\u76ee\u6807"},\u8bf7\u70b9\u51fb\u84dd\u8272\u9ad8\u4eae\u843d\u70b9\u3002`;
+    return;
+  }
+  if (state.selectedActionCode === "descent_moment" && !state.stagedPayload?.targetUnitId) {
+    node.textContent = "降临时刻分两步：先选择带有抹杀计数点的对方单位，再选择周围落点。";
+    return;
+  }
+  if (state.stagedPayload?.targetUnitId && state.selectedActionCode === "descent_moment") {
+    node.textContent = `已选中 ${stagedTarget()?.name || "降临目标"}，请点击蓝色高亮落点。`;
     return;
   }
   if (isChainMode()) {

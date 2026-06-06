@@ -5,8 +5,9 @@ from dataclasses import dataclass
 from typing import Callable, Sequence
 
 from wujiang.engine.core import Battle, Position
+from wujiang.heroes.excel_roster import EXCEL_HERO_REGISTRY
 from wujiang.heroes.first_five import Bard, DarkHuman, EliteSoldier, Ellie, FireFuneral
-from wujiang.heroes.next_five import DoomlightDragon, ElementHunter, Jade, Masamune, N, RockGod, UndeadKingLina
+from wujiang.heroes.next_five import BloodEater, Chanter, DoomlightDragon, DragonRider, ElementHunter, ErasureApostle, Jade, Li, Masamune, N, RockGod, SoulWraith, UndeadKingLina
 
 
 HeroFactory = Callable[[int], object]
@@ -25,7 +26,14 @@ HERO_REGISTRY: dict[str, HeroFactory] = {
     "masamune": Masamune,
     "jade": Jade,
     "n": N,
+    "blood_eater": BloodEater,
+    "li": Li,
+    "chanter": Chanter,
+    "erasure_apostle": ErasureApostle,
+    "dragon_rider": DragonRider,
+    "soul_wraith": SoulWraith,
 }
+HERO_REGISTRY.update(EXCEL_HERO_REGISTRY)
 
 CLASSIC_BATTLE_MODE = "classic"
 RANDOM_HERO_BATTLE_MODE = "random"

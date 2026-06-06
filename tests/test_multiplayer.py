@@ -381,6 +381,67 @@ class MultiplayerRoomTests(unittest.TestCase):
         self.assertIsNone(room.pending_simulation_action)
         self.assertIsNone(room.battle.pending_chain)
         self.assertIn("行动者已不在战场", "".join(room.battle.logs))
+        self.assertEqual(room.last_action_meta["reason"], "ai_turn_fallback")
+
+        room.serialize_state(host_token)
+        self.assertIsNotNone(room.pending_simulation_action)
+        self.assertTrue(str(room.pending_simulation_action["reason"]).startswith("ai_"))
+
+    def test_ai_simulation_recovers_when_stale_skill_actor_left_battlefield_without_visible_log(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        room.set_seat_count(host_token, 4)
+        room.set_seat_controller(host_token, 2, "ai")
+        room.set_seat_controller(host_token, 3, "ai")
+        room.set_seat_controller(host_token, 4, "ai")
+        room.set_seat_team(host_token, 2, 2)
+        room.set_seat_team(host_token, 3, 1)
+        room.set_seat_team(host_token, 4, 2)
+        room.select_hero(host_token, "ellie", seat_id=3)
+        room.select_hero(host_token, "bard", seat_id=2)
+        room.start_battle(host_token)
+
+        ellie = next(unit for unit in room.battle.hero_units(1) if unit.hero_code == "ellie")
+        bard = next(unit for unit in room.battle.hero_units(2) if unit.hero_code == "bard")
+        room.pending_simulation_action = None
+        ellie.banished = True
+        ellie.banish_turns_remaining = 1
+        room.battle.pending_chain = ReactionWindow(
+            reactive_player_id=2,
+            queued_action=QueuedAction(
+                action_type="skill",
+                actor_id=ellie.unit_id,
+                display_name="吸魔",
+                speed=1,
+                payload={
+                    "type": "skill",
+                    "unit_id": ellie.unit_id,
+                    "skill_code": "drain_mana",
+                    "target_unit_id": bard.unit_id,
+                },
+                target_unit_ids=[bard.unit_id],
+                source_player_id=1,
+                hostile=True,
+                suppress_logs=True,
+            ),
+            pending_reactor_ids=[bard.unit_id],
+            options_by_unit={bard.unit_id: []},
+        )
+
+        self.advance_ai_step(room)
+        self.assertIsNotNone(room.pending_simulation_action)
+        self.assertEqual(room.pending_simulation_action["reason"], "ai_chain")
+
+        self.finish_current_ai_action(room)
+
+        self.assertIsNone(room.pending_simulation_action)
+        self.assertIsNone(room.battle.pending_chain)
+        self.assertEqual(room.battle.stale_queued_action_count, 1)
+        self.assertNotIn("吸魔", "".join(room.battle.logs))
+        self.assertEqual(room.last_action_meta["reason"], "ai_turn_fallback")
+
+        room.serialize_state(host_token)
+        self.assertIsNotNone(room.pending_simulation_action)
+        self.assertTrue(str(room.pending_simulation_action["reason"]).startswith("ai_"))
 
     def test_ai_simulation_recovers_when_staged_payload_becomes_illegal(self) -> None:
         room, _, host_token = self.registry.create_room("Alice")

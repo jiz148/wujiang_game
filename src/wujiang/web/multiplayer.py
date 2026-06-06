@@ -949,12 +949,14 @@ class GameRoom:
         if self.battle is None:
             return False
         seat = self._current_prompt_seat()
-        if seat is None or not seat.is_ai:
-            return False
         if self.battle.pending_chain is not None:
+            if seat is None or not seat.is_ai:
+                return False
             self._perform_battle_action({"type": "chain_skip"}, reason="ai_chain_fallback")
             return True
         if self.battle.current_respawn_prompt() is not None:
+            if seat is None or not seat.is_ai:
+                return False
             prompt = self.battle.current_respawn_prompt()
             if prompt is None:
                 return False
@@ -968,6 +970,23 @@ class GameRoom:
                 reason="ai_respawn_fallback",
             )
             return True
+        current_unit = self.battle.current_turn_unit()
+        if current_unit is None or not current_unit.can_take_turn_actions(self.battle):
+            self._perform_battle_action({"type": "end_turn"}, reason="ai_turn_fallback")
+            return True
+        if seat is None or not seat.is_ai:
+            return False
+        self._perform_battle_action({"type": "end_turn"}, reason="ai_turn_fallback")
+        return True
+
+    def _recover_stalled_inactive_turn(self) -> bool:
+        if self.battle is None or self.battle.winner is not None:
+            return False
+        if self.battle.pending_chain is not None or self.battle.current_respawn_prompt() is not None:
+            return False
+        current_unit = self.battle.current_turn_unit()
+        if current_unit is not None and current_unit.can_take_turn_actions(self.battle):
+            return False
         self._perform_battle_action({"type": "end_turn"}, reason="ai_turn_fallback")
         return True
 
@@ -986,6 +1005,7 @@ class GameRoom:
             if current_unit_id:
                 actor = self.battle.get_unit(current_unit_id)
         before_log_count = len(self.battle.logs)
+        before_stale_count = int(getattr(self.battle, "stale_queued_action_count", 0))
         self.battle.perform_action(payload)
         new_logs = self.battle.logs[before_log_count:]
         self.last_action_meta = self._build_last_action_meta(
@@ -998,7 +1018,11 @@ class GameRoom:
         if self.battle.winner is not None:
             self.status = "finished"
             self._ensure_replay_saved()
-        if reason.startswith("ai_") and any(STALE_QUEUED_ACTOR_LOG_MARKER in line for line in new_logs):
+        after_stale_count = int(getattr(self.battle, "stale_queued_action_count", 0))
+        stale_queued_action = after_stale_count > before_stale_count or any(
+            STALE_QUEUED_ACTOR_LOG_MARKER in line for line in new_logs
+        )
+        if reason.startswith("ai_") and stale_queued_action:
             raise ActionError("AI action actor is no longer present.")
 
     def _advance_simulation_due(self, *, force_steps: Optional[int] = None) -> int:
@@ -1023,6 +1047,10 @@ class GameRoom:
                         break
                 steps += 1
             else:
+                if self._recover_stalled_inactive_turn():
+                    steps += 1
+                    safety += 1
+                    continue
                 if not self._prepare_pending_simulation_action():
                     break
                 steps += 1

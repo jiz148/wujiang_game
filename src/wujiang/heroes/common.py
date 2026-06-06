@@ -317,6 +317,9 @@ class StatModifierStatus(StatusEffect):
         if stat_name == "defense":
             return value + self.defense_delta
         if stat_name == "speed":
+            if self.speed_delta < 0 and self.owner is not None:
+                if any(trait.name == "不受敌方减速" for trait in self.owner.traits):
+                    return value
             return value + self.speed_delta
         if stat_name == "attack_range":
             return value + self.range_delta
@@ -396,6 +399,8 @@ class SlowStatus(StatusEffect):
 
     def modify_stat(self, stat_name: str, value: float) -> float:
         if stat_name == "speed":
+            if self.owner is not None and any(trait.name == "不受敌方减速" for trait in self.owner.traits):
+                return value
             return max(1.0, value - self.amount)
         return value
 
@@ -1057,7 +1062,7 @@ class MultiTargetChainShieldSkill(Skill):
             for unit in battle.player_units(actor.player_id)
             if unit.position is not None
             and actor.position is not None
-            and actor.position.distance_to(unit.position) <= actor.targeting_range()
+            and battle.unit_target_in_range_and_line(actor, unit, actor.targeting_range())
         ]
 
     def threatened_allies(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> list[HeroUnit]:
@@ -1134,7 +1139,12 @@ class MultiTargetChainShieldSkill(Skill):
         seen: set[str] = set()
         for target in targets:
             ensure_ally(actor, target)
-            ensure_distance(actor, target, actor.targeting_range())
+            battle.require_unit_target_in_range_and_line(
+                actor,
+                target,
+                actor.targeting_range(),
+                action_name=self.name,
+            )
             if target.unit_id in seen:
                 continue
             seen.add(target.unit_id)

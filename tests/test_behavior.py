@@ -22,7 +22,9 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from wujiang.engine.core import ActionError, DamageContext, Position, StatusEffect  # noqa: E402
+from wujiang.heroes.next_five import ErasureCounterStatus  # noqa: E402
 from wujiang.heroes.registry import create_battle, create_hero  # noqa: E402
+from wujiang.web.ai import build_attack_candidates, build_skill_candidates, choose_turn_action, difficulty_profile  # noqa: E402
 from wujiang.web.multiplayer import GameRoom, ROOMS, battle_state_for_viewer  # noqa: E402
 from wujiang.web.server import SESSION, WujiangHandler, configure_public_base_url  # noqa: E402
 
@@ -51,6 +53,143 @@ def resolve_pending_chain(battle) -> None:
 def end_turns(battle, count: int) -> None:
     for _ in range(count):
         battle.perform_action({"type": "end_turn"})
+
+
+class AIDecisionBehaviorTests(unittest.TestCase):
+    def test_ai_skips_damage_only_actions_that_cannot_affect_ellie_after_using_skill(self) -> None:
+        # Given FireFuneral has already used an active skill this turn
+        battle = create_battle("fire_funeral", "ellie")
+        fire = battle.player_units(1)[0]
+        ellie = battle.player_units(2)[0]
+        fire.position = Position(4, 4)
+        ellie.position = Position(5, 4)
+
+        battle.perform_action({"type": "skill", "unit_id": fire.unit_id, "skill_code": "shensu"})
+
+        # When the AI evaluates the rest of that turn
+        profile = difficulty_profile("standard")
+        attack_candidates = []
+        skill_candidates = []
+        for action in battle.action_snapshot_for(fire).get("actions", []):
+            if action.get("kind") == "attack":
+                attack_candidates.extend(build_attack_candidates(battle, fire, action, profile))
+            if action.get("kind") == "skill":
+                skill_candidates.extend(build_skill_candidates(battle, fire, action, profile, instant_only=False))
+        chosen = choose_turn_action(battle, fire, "standard")
+
+        # Then it does not waste an attack or pure damage skill on Ellie Ward
+        self.assertEqual([], attack_candidates)
+        self.assertNotIn("pierce", [candidate.payload.get("skill_code") for candidate in skill_candidates])
+        self.assertNotEqual("attack", chosen.get("type"))
+        self.assertNotEqual("pierce", chosen.get("skill_code"))
+
+    def test_ai_keeps_multi_target_skill_when_at_least_one_enemy_can_be_affected(self) -> None:
+        # Given a damage area covers Ellie and another enemy after the actor used a skill
+        battle = create_battle("fire_funeral", ["ellie", "bard"])
+        fire = battle.player_units(1)[0]
+        ellie = next(unit for unit in battle.player_units(2) if unit.hero_code == "ellie")
+        bard = next(unit for unit in battle.player_units(2) if unit.hero_code == "bard")
+        fire.position = Position(4, 4)
+        ellie.position = Position(5, 4)
+        bard.position = Position(6, 4)
+
+        battle.perform_action({"type": "skill", "unit_id": fire.unit_id, "skill_code": "shensu"})
+
+        # When the AI evaluates Pierce
+        profile = difficulty_profile("standard")
+        pierce_action = next(action for action in battle.action_snapshot_for(fire)["actions"] if action.get("code") == "pierce")
+        candidates = build_skill_candidates(battle, fire, pierce_action, profile, instant_only=False)
+
+        # Then the line that can still hurt Bard remains a valid candidate
+        self.assertTrue(any(candidate.payload.get("skill_code") == "pierce" for candidate in candidates))
+
+    def test_ai_keeps_self_targeted_skill_that_actually_hits_enemies(self) -> None:
+        # Given Whirlwind Attack targets self but resolves attacks around Li
+        battle = create_battle("li", "bard")
+        li = battle.player_units(1)[0]
+        bard = battle.player_units(2)[0]
+        li.position = Position(4, 4)
+        bard.position = Position(5, 4)
+
+        # When the AI evaluates that action
+        profile = difficulty_profile("standard")
+        whirlwind_action = next(action for action in battle.action_snapshot_for(li)["actions"] if action.get("code") == "whirlwind_attack")
+        candidates = build_skill_candidates(battle, li, whirlwind_action, profile, instant_only=False)
+
+        # Then the offensive self-targeted skill is still available to the AI
+        self.assertTrue(any(candidate.payload.get("skill_code") == "whirlwind_attack" for candidate in candidates))
+
+    def test_ai_skips_basic_attack_that_cannot_affect_physical_immune_soul_wraith(self) -> None:
+        # Given Soul Wraith is adjacent but immune to basic-attack damage and effects
+        battle = create_battle("fire_funeral", "soul_wraith")
+        fire = battle.player_units(1)[0]
+        wraith = battle.player_units(2)[0]
+        fire.position = Position(4, 4)
+        wraith.position = Position(5, 4)
+
+        # When the AI evaluates FireFuneral's basic attack
+        profile = difficulty_profile("standard")
+        attack_action = next(action for action in battle.action_snapshot_for(fire)["actions"] if action.get("code") == "attack")
+        candidates = build_attack_candidates(battle, fire, attack_action, profile)
+
+        # Then the candidate is filtered out because it has no effective enemy impact
+        self.assertEqual([], candidates)
+
+    def test_ai_keeps_basic_attack_that_only_consumes_temporary_shield(self) -> None:
+        # Given the enemy has a leftover temporary shield from a protection effect
+        battle = create_battle("fire_funeral", "bard")
+        fire = battle.player_units(1)[0]
+        bard = battle.player_units(2)[0]
+        fire.position = Position(4, 4)
+        bard.position = Position(5, 4)
+        bard.temporary_shields = 1
+
+        # When the AI evaluates FireFuneral's basic attack assuming no chain
+        profile = difficulty_profile("standard")
+        attack_action = next(action for action in battle.action_snapshot_for(fire)["actions"] if action.get("code") == "attack")
+        candidates = build_attack_candidates(battle, fire, attack_action, profile)
+
+        # Then consuming that shield counts as an effective impact
+        self.assertTrue(any(candidate.payload.get("target_unit_id") == bard.unit_id for candidate in candidates))
+
+    def test_ai_keeps_damage_skill_that_only_consumes_temporary_shield(self) -> None:
+        # Given the enemy has a leftover temporary shield from a protection effect
+        battle = create_battle("fire_funeral", "bard")
+        fire = battle.player_units(1)[0]
+        bard = battle.player_units(2)[0]
+        fire.position = Position(4, 4)
+        bard.position = Position(5, 4)
+        bard.temporary_shields = 1
+
+        # When the AI evaluates a hostile damage skill assuming no chain
+        profile = difficulty_profile("standard")
+        pierce_action = next(action for action in battle.action_snapshot_for(fire)["actions"] if action.get("code") == "pierce")
+        candidates = build_skill_candidates(battle, fire, pierce_action, profile, instant_only=False)
+
+        # Then consuming that shield counts as an effective impact
+        self.assertTrue(any(candidate.payload.get("skill_code") == "pierce" for candidate in candidates))
+
+    def test_soul_wraith_growth_is_visible_in_public_state(self) -> None:
+        # Given Bard blocks Soul Wraith's arc attack with a passive skill
+        battle = create_battle("soul_wraith", "bard")
+        wraith = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        wraith.position = Position(4, 4)
+        bard.position = Position(5, 4)
+        bard.current_mana = 1
+
+        battle.perform_action({"type": "attack", "unit_id": wraith.unit_id, "choice_code": "right"})
+        while battle.pending_chain is not None and battle.pending_chain.current_unit_id() != bard.unit_id:
+            battle.perform_action({"type": "chain_skip"})
+        battle.perform_action({"type": "chain_react", "unit_id": bard.unit_id, "action_code": "protection"})
+        resolve_pending_chain(battle)
+
+        # Then the public unit snapshot exposes the changed stats and extra move count
+        public_wraith = next(unit for unit in battle.to_public_dict()["units"] if unit["id"] == wraith.unit_id)
+        self.assertEqual(public_wraith["stats"]["attack"], 5)
+        self.assertEqual(public_wraith["stats"]["speed"], 6)
+        self.assertEqual(public_wraith["normal_move_actions_per_turn"], 2)
+        self.assertTrue(any(status["name"] == "销魂成长" and status["stacks"] == 1 for status in public_wraith["statuses"]))
 
 
 class RoomBehaviorTests(unittest.TestCase):
@@ -440,6 +579,25 @@ class CombatBehaviorTests(unittest.TestCase):
         with self.assertRaises(ActionError):
             battle.perform_action({"type": "attack", "unit_id": soldier.unit_id, "target_unit_id": dark.unit_id})
 
+    def test_scenario_direct_unit_skill_preview_requires_straight_line(self) -> None:
+        # Given Bard has one ally in square range but not on any straight line
+        battle = create_battle("bard", "fire_funeral")
+        bard = primary_hero(battle, 1)
+        enemy = primary_hero(battle, 2)
+        ally = create_hero("elite_soldier", 1)
+        bard.position = Position(3, 3)
+        enemy.position = Position(7, 7)
+        battle.add_unit(ally, Position(5, 4))
+
+        # Then the player-facing Heal preview does not expose that ally as a selectable target
+        actions = {action["code"]: action for action in battle.action_snapshot_for(bard)["actions"]}
+        self.assertNotIn(ally.unit_id, actions["heal"]["preview"]["target_unit_ids"])
+
+        # And the same ally becomes selectable when it is in Bard's range on a straight line
+        ally.position = Position(5, 5)
+        actions = {action["code"]: action for action in battle.action_snapshot_for(bard)["actions"]}
+        self.assertIn(ally.unit_id, actions["heal"]["preview"]["target_unit_ids"])
+
     def test_scenario_bard_chant_adds_mana_points_without_refilling_mana(self) -> None:
         # Given a Bard with mana below cap
         battle = create_battle("bard", "dark_human")
@@ -455,6 +613,121 @@ class CombatBehaviorTests(unittest.TestCase):
         # Then mana points increase but mana itself does not
         self.assertEqual(bard.mana_points, 2.0)
         self.assertEqual(bard.current_mana, 3)
+
+    def test_scenario_blood_eater_blood_dance_locks_until_blood_eaters_next_turn_start(self) -> None:
+        # Given BloodEater has an allied unit in range
+        battle = create_battle("blood_eater", "fire_funeral")
+        blood = primary_hero(battle, 1)
+        ally = create_hero("bard", 1)
+        enemy = primary_hero(battle, 2)
+        battle.add_unit(ally, Position(4, 4))
+        blood.position = Position(3, 4)
+        enemy.position = Position(7, 7)
+        blood.current_mana = 4
+        ally.current_mana = 4
+        blood.current_hp = 0.5
+        ally.current_hp = 0.5
+
+        # When BloodEater uses Blood Dance
+        battle.perform_action({"type": "skill", "unit_id": blood.unit_id, "skill_code": "blood_dance", "target_unit_id": ally.unit_id})
+
+        # Then both units are healed, gain mana, and cannot move yet
+        self.assertAlmostEqual(blood.current_hp, 0.75)
+        self.assertAlmostEqual(ally.current_hp, 0.75)
+        self.assertEqual(blood.current_mana, 5)
+        self.assertEqual(ally.current_mana, 5)
+        self.assertTrue(blood.cannot_move)
+        self.assertTrue(ally.cannot_move)
+
+        # When only the enemy turn starts, the lock is still active
+        battle.perform_action({"type": "end_turn"})
+        self.assertTrue(blood.cannot_move)
+        self.assertTrue(ally.cannot_move)
+
+        # And it ends at BloodEater's next own turn start
+        battle.perform_action({"type": "end_turn"})
+        self.assertFalse(blood.cannot_move)
+        self.assertFalse(ally.cannot_move)
+
+    def test_scenario_li_start_phase_toggle_and_split_move_are_player_visible(self) -> None:
+        # Given Li is at the beginning of his turn
+        battle = create_battle("li", "bard")
+        li = primary_hero(battle, 1)
+        enemy = primary_hero(battle, 2)
+        li.position = Position(3, 4)
+        enemy.position = Position(8, 8)
+
+        # Then Red Heat is available before actions and normal movement shows the full speed budget
+        start_actions = {action["code"]: action for action in battle.action_snapshot_for(li)["actions"]}
+        self.assertTrue(start_actions["red_heat"]["available"])
+        self.assertEqual(start_actions["move"]["preview"]["selection"]["max_steps"], 3)
+
+        # When Li splits his normal move
+        battle.perform_action({"type": "move", "unit_id": li.unit_id, "path": [{"x": 4, "y": 4}, {"x": 5, "y": 4}]})
+
+        # Then the frontend action snapshot still exposes the remaining normal move distance
+        after_move = {action["code"]: action for action in battle.action_snapshot_for(li)["actions"]}
+        self.assertTrue(after_move["move"]["available"])
+        self.assertEqual(after_move["move"]["preview"]["selection"]["max_steps"], 1)
+        self.assertFalse(after_move["red_heat"]["available"])
+
+    def test_scenario_li_stillness_is_once_per_battle_ultimate_not_instant(self) -> None:
+        # Given Li is at the beginning of his own turn
+        battle = create_battle("li", "bard")
+        li = primary_hero(battle, 1)
+        enemy = primary_hero(battle, 2)
+        li.position = Position(3, 4)
+        enemy.position = Position(8, 8)
+
+        # Then Stillness is exposed as an active once-per-battle skill
+        own_actions = {action["code"]: action for action in battle.action_snapshot_for(li)["actions"]}
+        stillness = own_actions["stillness"]
+        self.assertTrue(stillness["available"])
+        self.assertEqual(stillness["timing"], "active")
+        self.assertEqual(stillness["max_uses_per_battle"], 1)
+
+        # And it is not exposed as an instant action while the enemy is acting
+        battle.perform_action({"type": "end_turn"})
+        waiting_actions = {action["code"]: action for action in battle.action_snapshot_for(li)["actions"]}
+        self.assertFalse(waiting_actions["stillness"]["available"])
+        self.assertEqual(waiting_actions["stillness"]["timing"], "active")
+
+    def test_scenario_chanter_card_marker_blocks_enemy_skill_from_field_state(self) -> None:
+        # Given Chanter places a paralysis card on an enemy's cell
+        battle = create_battle("chanter", "bard")
+        chanter = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        chanter.position = Position(3, 4)
+        bard.position = Position(5, 4)
+
+        battle.perform_action({"type": "skill", "unit_id": chanter.unit_id, "skill_code": "paralysis_card", "x": 5, "y": 4})
+        resolve_pending_chain(battle)
+
+        # Then the field marker is visible and the enemy cannot use skills while inside its 3x3 area
+        public_state = battle.to_public_dict()
+        self.assertTrue(any(effect["name"] == "麻痹牌" for effect in public_state["field_effects"]))
+
+        battle.perform_action({"type": "end_turn"})
+        with self.assertRaises(ActionError):
+            battle.perform_action({"type": "skill", "unit_id": bard.unit_id, "skill_code": "heal", "target_unit_id": bard.unit_id})
+
+    def test_scenario_erasure_apostle_descent_preview_exposes_target_destinations(self) -> None:
+        # Given an enemy has any erasure counter and there are legal adjacent landing cells
+        battle = create_battle("erasure_apostle", "bard")
+        apostle = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        apostle.position = Position(3, 4)
+        bard.position = Position(5, 4)
+        bard.add_status(ErasureCounterStatus("other-source"))
+
+        # Then the player-facing action snapshot exposes both the selectable target and landing cells
+        actions = {action["code"]: action for action in battle.action_snapshot_for(apostle)["actions"]}
+        descent = actions["descent_moment"]
+        preview = descent["preview"]
+
+        self.assertTrue(descent["available"])
+        self.assertIn(bard.unit_id, preview["target_unit_ids"])
+        self.assertIn({"x": 4, "y": 4}, preview["destinations_by_target"][bard.unit_id])
 
     def test_scenario_ellie_experiment_kills_after_three_target_rounds_not_three_global_turns(self) -> None:
         # Given Ellie buffs a faster ally with Experiment
