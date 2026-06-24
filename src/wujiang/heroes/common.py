@@ -261,6 +261,10 @@ def ensure_ally(actor: HeroUnit, target: HeroUnit) -> None:
         raise ActionError("需要选择己方单位。")
 
 
+def is_mana_drain_immune(target: HeroUnit) -> bool:
+    return any(getattr(component, "prevents_mana_drain", False) for component in target.iter_components())
+
+
 class FlagStatus(StatusEffect):
     def __init__(
         self,
@@ -880,6 +884,14 @@ class DashMoveSkill(Skill):
         self.allow_anywhere = allow_anywhere
         self.exact_distance = exact_distance
 
+    def can_use(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok:
+            return ok, reason
+        if actor.cannot_move:
+            return False, f"{actor.name} 当前无法移动。"
+        return True, ""
+
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         destination = payload_position(payload)
         battle.move_unit(
@@ -895,6 +907,8 @@ class DashMoveSkill(Skill):
         )
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
+        if actor.cannot_move:
+            return {"cells": [], "target_unit_ids": [], "secondary_cells": [], "requires_target": True}
         cells = battle.reachable_positions(
             actor,
             max_distance=self.max_distance,
@@ -1065,7 +1079,14 @@ class MultiTargetChainShieldSkill(Skill):
             and battle.unit_target_in_range_and_line(actor, unit, actor.targeting_range())
         ]
 
-    def threatened_allies(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> list[HeroUnit]:
+    def threatened_allies(
+        self,
+        battle: Battle,
+        actor: HeroUnit,
+        queued_action: QueuedAction,
+        *,
+        ignore_existing_shields: bool = False,
+    ) -> list[HeroUnit]:
         threatened: list[HeroUnit] = []
         seen: set[str] = set()
         for unit_id in queued_action.target_unit_ids:
@@ -1075,13 +1096,28 @@ class MultiTargetChainShieldSkill(Skill):
             unit = battle.units.get(unit_id)
             if unit is None or unit.player_id != actor.player_id or unit.position is None or unit.banished or not unit.alive:
                 continue
-            if battle.shield_auto_blocks_chain(unit, queued_action):
+            if not ignore_existing_shields and battle.shield_auto_blocks_chain(unit, queued_action):
                 continue
             threatened.append(unit)  # type: ignore[arg-type]
         return threatened
 
-    def selectable_targets(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> list[HeroUnit]:
-        threatened_ids = {unit.unit_id for unit in self.threatened_allies(battle, actor, queued_action)}
+    def selectable_targets(
+        self,
+        battle: Battle,
+        actor: HeroUnit,
+        queued_action: QueuedAction,
+        *,
+        ignore_existing_shields: bool = False,
+    ) -> list[HeroUnit]:
+        threatened_ids = {
+            unit.unit_id
+            for unit in self.threatened_allies(
+                battle,
+                actor,
+                queued_action,
+                ignore_existing_shields=ignore_existing_shields,
+            )
+        }
         return [unit for unit in self.ally_targets(battle, actor) if unit.unit_id in threatened_ids]
 
     def affordable_target_limit(self, actor: HeroUnit) -> int:
@@ -1114,7 +1150,7 @@ class MultiTargetChainShieldSkill(Skill):
         if not ok:
             return ok, reason
         reaction_payload = dict(payload or {})
-        selectable_units = self.selectable_targets(battle, actor, queued_action)
+        selectable_units = self.selectable_targets(battle, actor, queued_action, ignore_existing_shields=True)
         selectable = {unit.unit_id for unit in selectable_units}
         if not reaction_payload.get("target_unit_id") and not reaction_payload.get("target_unit_ids"):
             if actor.unit_id in selectable:
@@ -1134,10 +1170,15 @@ class MultiTargetChainShieldSkill(Skill):
         return True, ""
 
     def chosen_targets(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[HeroUnit]:
-        targets = payload_target_units(battle, payload)
         valid_targets: list[HeroUnit] = []
         seen: set[str] = set()
-        for target in targets:
+        target_ids = battle.payload_target_unit_ids(payload)
+        if not target_ids:
+            target_ids = [str(payload.get("target_unit_id"))] if payload.get("target_unit_id") else []
+        for target_id in target_ids:
+            target = battle.units.get(target_id)
+            if target is None or not target.alive or target.banished:
+                continue
             ensure_ally(actor, target)
             battle.require_unit_target_in_range_and_line(
                 actor,
@@ -1157,21 +1198,21 @@ class MultiTargetChainShieldSkill(Skill):
             battle.log(f"{target.name} 获得了 {self.shield_amount} 层临时护盾。")
 
     def react(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any], queued_action: QueuedAction) -> None:
-        selectable_units = self.selectable_targets(battle, actor, queued_action)
-        selectable = {unit.unit_id for unit in selectable_units}
+        selectable_units = self.selectable_targets(battle, actor, queued_action, ignore_existing_shields=True)
+        selectable = {unit.unit_id: unit for unit in selectable_units}
         reaction_payload = dict(payload)
         if not reaction_payload.get("target_unit_id") and not reaction_payload.get("target_unit_ids"):
             if actor.unit_id in selectable:
                 reaction_payload["target_unit_id"] = actor.unit_id
             elif len(selectable) == 1:
                 reaction_payload["target_unit_id"] = next(iter(selectable))
-        if reaction_payload.get("target_unit_id"):
-            reaction_payload.pop("resolved_target_unit_id", None)
-        targets = self.chosen_targets(battle, actor, reaction_payload)
+        target_ids = battle.payload_target_unit_ids(reaction_payload)
+        if not target_ids and reaction_payload.get("target_unit_id"):
+            target_ids = [str(reaction_payload["target_unit_id"])]
+        targets = [selectable[target_id] for target_id in dict.fromkeys(target_ids) if target_id in selectable]
         if not targets:
-            raise ActionError("需要选择至少一个目标。")
-        if any(target.unit_id not in selectable for target in targets):
-            raise ActionError("存在不能被当前护盾保护的目标。")
+            battle.log(f"{actor.name} 的【{self.name}】因目标已离开保护范围而未能生效。")
+            return
         self.apply_shields(battle, actor, targets)
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
@@ -1280,6 +1321,9 @@ class DrainManaSkill(Skill):
         if target_ctx.cancelled:
             battle.log(target_ctx.reason)
             return
+        if is_mana_drain_immune(target):
+            battle.log(f"{target.name} 无法被吸魔。")
+            return
         lost = min(target.current_mana, 1.0)
         target.spend_mana(lost)
         actor.gain_mana(lost)
@@ -1299,6 +1343,14 @@ class HardenSkill(SelfBuffSkill):
             mana_cost=1,
             max_uses_per_turn=1,
         )
+
+    def can_use(self, battle: Battle, actor: HeroUnit, payload: Optional[dict[str, Any]] = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok:
+            return ok, reason
+        if actor.has_status("变硬"):
+            return False, "变硬效果尚未结束。"
+        return True, ""
 
     def apply_to_self(self, battle: Battle, actor: HeroUnit) -> None:
         if actor.has_status("变硬"):
@@ -1892,6 +1944,8 @@ class PassiveEvasionSkill(Skill):
         ok, reason = super().can_react_to(battle, actor, queued_action)
         if not ok:
             return ok, reason
+        if queued_action.payload.get("cannot_evade"):
+            return False, "该动作无法回避。"
         if queued_action.source_player_id == actor.player_id or actor.unit_id not in queued_action.target_unit_ids:
             return False, "当前不能回避。"
         if not self.evade_cells(battle, actor):

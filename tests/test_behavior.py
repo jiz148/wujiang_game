@@ -21,10 +21,12 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from wujiang.engine.core import ActionError, DamageContext, Position, StatusEffect  # noqa: E402
-from wujiang.heroes.next_five import ErasureCounterStatus  # noqa: E402
+from wujiang.engine.core import ActionError, DamageContext, Position, QueuedAction, ReactionWindow, StatusEffect  # noqa: E402
+from wujiang.heroes.excel_roster import KingsInsightField, SkillDisabledStatus  # noqa: E402
+from wujiang.heroes.first_five import MedusaSummon  # noqa: E402
+from wujiang.heroes.next_five import BloodDanceLockStatus, ErasureCounterStatus  # noqa: E402
 from wujiang.heroes.registry import create_battle, create_hero  # noqa: E402
-from wujiang.web.ai import build_attack_candidates, build_skill_candidates, choose_turn_action, difficulty_profile  # noqa: E402
+from wujiang.web.ai import attack_payloads_for_action, build_attack_candidates, build_move_candidates, build_reaction_candidates, build_skill_candidates, choose_chain_reaction, choose_turn_action, choose_turn_bundle_action, difficulty_profile, payload_is_legal, reaction_payload_is_legal, reaction_payloads_for_option  # noqa: E402
 from wujiang.web.multiplayer import GameRoom, ROOMS, battle_state_for_viewer  # noqa: E402
 from wujiang.web.server import SESSION, WujiangHandler, configure_public_base_url  # noqa: E402
 
@@ -169,6 +171,1036 @@ class AIDecisionBehaviorTests(unittest.TestCase):
         # Then consuming that shield counts as an effective impact
         self.assertTrue(any(candidate.payload.get("skill_code") == "pierce" for candidate in candidates))
 
+    def test_ai_builds_area_attack_candidates_from_pattern_preview(self) -> None:
+        # Given an area basic attack declares pattern cells instead of a single target
+        battle = create_battle("soul_wraith", "bard")
+        wraith = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        wraith.position = Position(4, 4)
+        bard.position = Position(5, 4)
+
+        # When the AI evaluates the area basic attack
+        profile = difficulty_profile("standard")
+        attack_action = next(action for action in battle.action_snapshot_for(wraith)["actions"] if action.get("kind") == "attack")
+        candidates = build_attack_candidates(battle, wraith, attack_action, profile)
+
+        # Then pattern-cell attacks produce legal candidates instead of falling back to end turn
+        self.assertTrue(any(candidate.payload.get("choice_code") == "right" for candidate in candidates))
+
+    def test_ai_bundle_lets_mount_or_summon_act_when_hero_has_no_action(self) -> None:
+        # Given a rider's mounted dragon is controlled in the rider's turn bundle
+        battle = create_battle("dragon_rider", "bard")
+        rider = primary_hero(battle, 1)
+        dragon = summon_by_code(battle, 1, "dragon_mount")
+        bard = primary_hero(battle, 2)
+        battle.configure_turn_order([rider.unit_id, bard.unit_id], starting_index=0)
+        rider.position = Position(2, 2)
+        dragon.position = Position(2, 2)
+        bard.position = Position(5, 2)
+        rider.cannot_attack = True
+        rider.cannot_use_skills = True
+        rider.cannot_move = True
+        dragon.turn_ready = True
+
+        # When the AI chooses for the whole turn bundle
+        payload, actor = choose_turn_bundle_action(battle, battle.current_turn_bundle_units(include_banished=False), "standard")
+
+        # Then it selects the mounted dragon instead of ending the hero turn
+        self.assertIs(actor, dragon)
+        self.assertNotEqual(payload.get("type"), "end_turn")
+        self.assertEqual(payload.get("unit_id"), dragon.unit_id)
+
+    def test_ai_does_not_dismount_knight_by_moving_rider_body(self) -> None:
+        # Given a mounted knight and mount can both act in the same turn bundle
+        battle = create_battle("dragon_rider", "bard")
+        rider = primary_hero(battle, 1)
+        dragon = summon_by_code(battle, 1, "dragon_mount")
+        bard = primary_hero(battle, 2)
+        battle.configure_turn_order([rider.unit_id, bard.unit_id], starting_index=0)
+        rider.position = Position(1, 1)
+        dragon.position = Position(1, 1)
+        bard.position = Position(6, 1)
+        rider.cannot_attack = True
+        rider.cannot_use_skills = True
+        dragon.cannot_attack = True
+        dragon.cannot_use_skills = True
+        dragon.turn_ready = True
+
+        # When the AI chooses movement for the whole mounted turn bundle
+        payload, actor = choose_turn_bundle_action(battle, battle.current_turn_bundle_units(include_banished=False), "standard")
+
+        # Then it moves the mount, not the rider body, so riding is preserved
+        self.assertIs(actor, dragon)
+        self.assertEqual(payload.get("type"), "move")
+        battle.perform_action(payload)
+        self.assertIs(battle.mounted_unit_for(rider), dragon)
+        self.assertEqual(rider.position, dragon.position)
+
+    def test_ai_skips_movement_skills_when_actor_cannot_move(self) -> None:
+        # Given Dark Human is under a movement-skill lock such as Blood Dance
+        battle = create_battle("dark_human", "bard")
+        dark = primary_hero(battle, 1)
+        enemy = primary_hero(battle, 2)
+        dark.position = Position(4, 4)
+        enemy.position = Position(7, 7)
+        dark.add_status(BloodDanceLockStatus("test"))
+
+        # When the AI evaluates Fate Kick
+        profile = difficulty_profile("standard")
+        fate_kick_action = next(action for action in battle.action_snapshot_for(dark)["actions"] if action.get("code") == "fate_kick")
+        candidates = build_skill_candidates(battle, dark, fate_kick_action, profile, instant_only=False)
+        chosen = choose_turn_action(battle, dark, "standard")
+
+        # Then the movement skill is not considered a legal candidate
+        self.assertFalse(fate_kick_action["available"])
+        self.assertEqual([], candidates)
+        self.assertNotEqual("fate_kick", chosen.get("skill_code"))
+
+    def test_dash_move_skill_is_unavailable_when_actor_cannot_move(self) -> None:
+        battle = create_battle("dark_human", "bard")
+        dark = primary_hero(battle, 1)
+        dark.cannot_move = True
+
+        action = next(action for action in battle.action_snapshot_for(dark)["actions"] if action["code"] == "fly_leap")
+
+        self.assertFalse(action["available"])
+        self.assertEqual(action["preview"]["cells"], [])
+
+    def test_mounted_leap_moves_masamune_and_dismounts(self) -> None:
+        # Given Masamune is mounted and uses his mounted-only free leap
+        battle = create_battle("masamune", "bard")
+        masamune = primary_hero(battle, 1)
+        mount = summon_by_code(battle, 1, "motor_horse")
+        mount.position = Position(2, 2)
+        masamune.position = Position(2, 2)
+
+        # When the mounted leap resolves
+        battle.perform_action({"type": "skill", "unit_id": masamune.unit_id, "skill_code": "mounted_leap", "x": 5, "y": 2})
+
+        # Then Masamune moves himself and leaves the mount behind
+        self.assertEqual(mount.position, Position(2, 2))
+        self.assertEqual(masamune.position, Position(5, 2))
+        self.assertIsNone(battle.mounted_unit_for(masamune))
+
+    def test_ai_oberon_uses_judgment_stone_and_can_plan_world_seed(self) -> None:
+        # Given Oberon can summon Judgment Stone near an enemy
+        battle = create_battle("excel_r020", "bard")
+        oberon = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        oberon.position = Position(1, 1)
+        bard.position = Position(3, 1)
+        oberon.current_mana = 5
+
+        # When the AI chooses an action
+        payload = choose_turn_action(battle, oberon, "standard")
+
+        # Then Judgment Stone is generated at the nearest legal surrounding cell
+        self.assertEqual(payload.get("skill_code"), "judgment_stone")
+        self.assertIn((payload.get("x"), payload.get("y")), {(2, 0), (2, 1), (2, 2)})
+
+        profile = difficulty_profile("standard")
+        heaven_lock = next(action for action in battle.action_snapshot_for(oberon)["actions"] if action.get("code") == "heaven_lock")
+        heaven_candidates = build_skill_candidates(battle, oberon, heaven_lock, profile, instant_only=False)
+        self.assertTrue(any(candidate.payload.get("target_unit_id") == bard.unit_id for candidate in heaven_candidates))
+
+        # And on a board large enough for the 5x5 seed plus roots, World Seed has legal AI candidates
+        battle = create_battle("excel_r020", ["bard", "ellie"])
+        battle.width = 12
+        battle.height = 12
+        oberon = primary_hero(battle, 1)
+        oberon.position = Position(0, 0)
+        oberon.current_mana = 5
+        world_seed = next(action for action in battle.action_snapshot_for(oberon)["actions"] if action.get("code") == "world_seed")
+        world_candidates = build_skill_candidates(battle, oberon, world_seed, profile, instant_only=False)
+        self.assertTrue(any(candidate.payload.get("skill_code") == "world_seed" for candidate in world_candidates))
+
+    def test_ai_fei_wang_opens_stance_then_scores_gale_and_large_pierce(self) -> None:
+        # Given Fei Wang has an enemy inside Gale and Large Pierce range
+        battle = create_battle("excel_r028", "bard")
+        fei_wang = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        fei_wang.position = Position(1, 1)
+        bard.position = Position(3, 1)
+        fei_wang.current_mana = 5
+
+        # Then the AI opens the start-phase stance before spending its main actions
+        payload = choose_turn_action(battle, fei_wang, "standard")
+        self.assertEqual(payload.get("skill_code"), "inner_dimension_sword")
+        battle.perform_action(payload)
+
+        followup = choose_turn_action(battle, fei_wang, "standard")
+        self.assertEqual(followup.get("skill_code"), "gale")
+        self.assertEqual(followup.get("direction"), "east")
+
+        profile = difficulty_profile("standard")
+        actions = {action.get("code"): action for action in battle.action_snapshot_for(fei_wang)["actions"]}
+        pierce_candidates = build_skill_candidates(battle, fei_wang, actions["large_pierce_plus"], profile, instant_only=False)
+        insight_candidates = build_skill_candidates(battle, fei_wang, actions["kings_insight"], profile, instant_only=False)
+
+        self.assertTrue(pierce_candidates)
+        self.assertTrue(any(candidate.score >= profile.action_threshold for candidate in insight_candidates))
+
+    def test_ai_wuchang_scores_mist_and_migratory_bird_mark_without_wasting_mist_control(self) -> None:
+        battle = create_battle("excel_r027", "bard")
+        wuchang = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        wuchang.position = Position(1, 1)
+        bard.position = Position(3, 1)
+        bard.max_health = 10
+        bard.current_hp = 10
+
+        profile = difficulty_profile("standard")
+        actions = {action.get("code"): action for action in battle.action_snapshot_for(wuchang)["actions"]}
+        mist_candidates = build_skill_candidates(battle, wuchang, actions["wuchang_mist"], profile, instant_only=False)
+        mark_candidates = build_skill_candidates(battle, wuchang, actions["migratory_bird_mark"], profile, instant_only=False)
+
+        self.assertEqual(choose_turn_action(battle, wuchang, "standard").get("skill_code"), "wuchang_mist")
+        self.assertTrue(any(candidate.score >= profile.action_threshold for candidate in mist_candidates))
+        self.assertTrue(any(candidate.payload.get("skill_code") == "migratory_bird_mark" for candidate in mark_candidates))
+
+        battle.perform_action({"type": "skill", "unit_id": wuchang.unit_id, "skill_code": "wuchang_mist"})
+        battle.perform_action({"type": "end_turn"})
+        battle.perform_action({"type": "end_turn"})
+        actions = {action.get("code"): action for action in battle.action_snapshot_for(wuchang)["actions"]}
+        mark_after_mist = build_skill_candidates(battle, wuchang, actions["migratory_bird_mark"], profile, instant_only=False)
+
+        self.assertFalse(any(candidate.score >= profile.action_threshold for candidate in mark_after_mist))
+
+    def test_ai_basic_attack_payload_uses_legal_cell_for_large_targets(self) -> None:
+        battle = create_battle("excel_r026", "doomlight_dragon")
+        guardian = primary_hero(battle, 1)
+        dragon = primary_hero(battle, 2)
+        guardian.position = Position(6, 3)
+        dragon.position = Position(4, 2)
+        dragon.max_health = 10
+        dragon.current_hp = 10
+
+        attack_action = next(action for action in battle.action_snapshot_for(guardian)["actions"] if action.get("kind") == "attack")
+        payloads = attack_payloads_for_action(battle, guardian, attack_action)
+
+        self.assertTrue(payloads)
+        self.assertTrue(all(payload_is_legal(battle, payload) for payload in payloads))
+        self.assertTrue(any((payload.get("x"), payload.get("y")) in {(5, 2), (5, 3)} for payload in payloads))
+
+    def test_ai_agency_contract_cancel_payload_has_no_self_target(self) -> None:
+        battle = create_battle(["excel_r025", "excel_r026"], "bard")
+        mubie = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r025")
+        guardian = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r026")
+        bard = primary_hero(battle, 2)
+        mubie.position = Position(1, 1)
+        guardian.position = Position(2, 1)
+        bard.position = Position(4, 1)
+        battle.configure_turn_order([mubie.unit_id, bard.unit_id], starting_index=0)
+
+        action = next(action for action in battle.action_snapshot_for(mubie)["actions"] if action.get("code") == "agency_contract")
+        attach_payload = next(
+            candidate
+            for candidate in build_skill_candidates(battle, mubie, action, difficulty_profile("standard"), instant_only=False)
+            if candidate.payload.get("target_unit_id") == guardian.unit_id
+        ).payload
+        battle.perform_action(attach_payload)
+        battle.perform_action({"type": "end_turn"})
+        battle.perform_action({"type": "end_turn"})
+
+        action = next(action for action in battle.action_snapshot_for(mubie)["actions"] if action.get("code") == "agency_contract")
+        candidates = build_skill_candidates(battle, mubie, action, difficulty_profile("standard"), instant_only=False)
+
+        self.assertTrue(candidates)
+        self.assertTrue(all("target_unit_id" not in candidate.payload for candidate in candidates))
+        self.assertTrue(all(payload_is_legal(battle, candidate.payload) for candidate in candidates))
+
+    def test_ai_red_uses_deadly_bow_and_generates_weapon_copy_targets(self) -> None:
+        battle = create_battle(["excel_r029", "bard"], "ellie")
+        red = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r029")
+        ally = next(unit for unit in battle.hero_units(1) if unit.hero_code == "bard")
+        enemy = primary_hero(battle, 2)
+        red.position = Position(1, 1)
+        ally.position = Position(2, 1)
+        enemy.position = Position(4, 1)
+        red.current_mana = 5
+        red.mana_points = 5
+        ally.base_stats.attack = 4
+        enemy.max_health = 10
+        enemy.current_hp = 10
+
+        chosen = choose_turn_action(battle, red, "standard")
+        self.assertEqual(chosen.get("skill_code"), "deadly_bow")
+        self.assertEqual(chosen.get("direction"), "east")
+
+        profile = difficulty_profile("standard")
+        actions = {action.get("code"): action for action in battle.action_snapshot_for(red)["actions"]}
+        copy_candidates = build_skill_candidates(battle, red, actions["weapon_copy"], profile, instant_only=False)
+
+        self.assertTrue(any(candidate.payload.get("target_unit_id") == ally.unit_id for candidate in copy_candidates))
+        self.assertTrue(all(payload_is_legal(battle, candidate.payload) for candidate in copy_candidates))
+
+    def test_ai_fusion_opens_nuclear_rush_before_pierce(self) -> None:
+        battle = create_battle("excel_r030", "bard")
+        fusion = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        fusion.position = Position(1, 1)
+        bard.position = Position(3, 1)
+        bard.max_health = 10
+        bard.current_hp = 10
+
+        chosen = choose_turn_action(battle, fusion, "standard")
+
+        self.assertEqual(chosen.get("skill_code"), "nuclear_rush")
+        battle.perform_action(chosen)
+
+        profile = difficulty_profile("standard")
+        attack_action = next(action for action in battle.action_snapshot_for(fusion)["actions"] if action.get("kind") == "attack")
+        payloads = attack_payloads_for_action(battle, fusion, attack_action)
+        attack_candidates = build_attack_candidates(battle, fusion, attack_action, profile)
+
+        self.assertTrue(any(payload.get("direction") == "east" for payload in payloads))
+        self.assertTrue(any(candidate.payload.get("direction") == "east" for candidate in attack_candidates))
+        self.assertTrue(any(candidate.payload.get("direction") == "east" and payload_is_legal(battle, candidate.payload) for candidate in attack_candidates))
+
+    def test_ai_does_not_spend_wall_against_piercing_gale(self) -> None:
+        # Given Gale is a shield-piercing forced movement skill aimed at Oberon
+        battle = create_battle("excel_r028", "excel_r020")
+        fei_wang = primary_hero(battle, 1)
+        oberon = primary_hero(battle, 2)
+        fei_wang.position = Position(6, 3)
+        oberon.position = Position(3, 3)
+        fei_wang.current_mana = 5
+        oberon.current_mana = 5
+
+        battle.perform_action({"type": "skill", "unit_id": fei_wang.unit_id, "skill_code": "gale", "direction": "west"})
+        self.assertIsNotNone(battle.pending_chain)
+        options = [option.to_public_dict() for option in battle.pending_chain.options_by_unit.get(oberon.unit_id, [])]
+
+        # Then the reaction AI does not waste Light Wall on an action that pierces shields
+        reaction = choose_chain_reaction(battle, oberon, options, "standard")
+        self.assertIsNone(reaction)
+
+    def test_reaction_actor_death_during_declaration_does_not_stall_chain(self) -> None:
+        # Given King's Insight will defeat Oberon as soon as he declares a passive Light Wall
+        battle = create_battle("excel_r028", "excel_r020")
+        fei_wang = primary_hero(battle, 1)
+        oberon = primary_hero(battle, 2)
+        fei_wang.position = Position(1, 1)
+        oberon.position = Position(3, 1)
+        fei_wang.current_mana = 5
+        oberon.current_mana = 5
+        oberon.current_hp = 0.75
+        battle.add_field_effect(KingsInsightField(fei_wang.player_id))
+
+        # When Oberon chooses Light Wall against Fei Wang's large pierce
+        battle.perform_action(
+            {
+                "type": "skill",
+                "unit_id": fei_wang.unit_id,
+                "skill_code": "large_pierce_plus",
+                "cells": [{"x": 2, "y": 1}, {"x": 3, "y": 1}, {"x": 4, "y": 1}],
+            }
+        )
+        self.assertIsNotNone(battle.pending_chain)
+        battle.perform_action(
+            {
+                "type": "chain_react",
+                "unit_id": oberon.unit_id,
+                "action_code": "light_wall",
+                "target_unit_id": oberon.unit_id,
+            }
+        )
+
+        # Then the invalidated reaction is skipped and the chain finishes instead of looping on ActionError
+        self.assertIsNone(battle.pending_chain)
+        self.assertFalse(oberon.alive and oberon.unit_id in battle.units)
+        self.assertTrue(any("未能结算" in message for message in battle.logs))
+
+    def test_reaction_payload_builder_skips_stale_shield_preview_targets(self) -> None:
+        # Given a shield preview still contains a unit id that was destroyed earlier in the chain
+        battle = create_battle("excel_r028", "ellie")
+        fei_wang = primary_hero(battle, 1)
+        ellie = primary_hero(battle, 2)
+        queued = QueuedAction(
+            action_type="skill",
+            actor_id=fei_wang.unit_id,
+            display_name="测试技能",
+            speed=1,
+            payload={},
+            target_unit_ids=[ellie.unit_id],
+            target_cells=[],
+            source_player_id=fei_wang.player_id,
+            hostile=True,
+        )
+        option = {
+            "action_code": "magic_wall",
+            "preview": {
+                "target_unit_ids": ["destroyed-unit-id", ellie.unit_id],
+                "selection": {"mode": "multi_unit", "max_targets": 2},
+            },
+        }
+
+        # Then AI payload generation keeps the live target and does not raise ActionError for the stale id
+        payloads = reaction_payloads_for_option(battle, ellie, queued, option)
+
+        self.assertEqual(payloads[0]["target_unit_ids"], [ellie.unit_id])
+
+    def test_ai_evasion_avoids_cells_still_inside_declared_area(self) -> None:
+        # Given an area skill still covers one adjacent evasion destination
+        battle = create_battle("doomlight_dragon", "dark_human")
+        dragon = primary_hero(battle, 1)
+        dark = primary_hero(battle, 2)
+        dragon.position = Position(2, 4)
+        dark.position = Position(4, 4)
+        dark.current_mana = 5
+        queued = QueuedAction(
+            action_type="skill",
+            actor_id=dragon.unit_id,
+            display_name="龙息",
+            speed=1,
+            payload={},
+            target_unit_ids=[dark.unit_id],
+            target_cells=[Position(4, 4), Position(4, 5)],
+            source_player_id=dragon.player_id,
+            hostile=True,
+        )
+        evasion = dark.get_skill("evasion")
+        option = {
+            "action_code": "evasion",
+            "preview": evasion.reaction_preview(battle, dark, queued),
+        }
+
+        # When the AI scores evasion candidates
+        candidates = build_reaction_candidates(battle, dark, queued, option, difficulty_profile("standard"))
+        chosen = max(candidates, key=lambda candidate: candidate.score)
+
+        # Then it does not choose the still-damaging cell inside the declared area
+        self.assertNotEqual((chosen.payload.get("x"), chosen.payload.get("y")), (4, 5))
+
+    def test_ai_evasion_avoids_destinations_reserved_by_prior_chain_reactions(self) -> None:
+        battle = create_battle(["dark_human", "excel_r030"], "excel_r094")
+        dark = next(unit for unit in battle.hero_units(1) if unit.hero_code == "dark_human")
+        fusion = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r030")
+        attacker = primary_hero(battle, 2)
+        dark.position = Position(4, 4)
+        fusion.position = Position(7, 4)
+        attacker.position = Position(9, 4)
+        fusion.current_mana = 5
+        queued = QueuedAction(
+            action_type="skill",
+            actor_id=attacker.unit_id,
+            display_name="穿刺",
+            speed=1,
+            payload={},
+            target_unit_ids=[dark.unit_id, fusion.unit_id],
+            target_cells=[Position(7, 4), Position(8, 4)],
+            source_player_id=attacker.player_id,
+            hostile=True,
+        )
+        battle.pending_chain = ReactionWindow(
+            reactive_player_id=1,
+            queued_action=queued,
+            pending_reactor_ids=[fusion.unit_id],
+            options_by_unit={},
+            chosen_reactions=[
+                QueuedAction(
+                    action_type="reaction_skill",
+                    actor_id=dark.unit_id,
+                    display_name="回避",
+                    speed=2,
+                    payload={"action_code": "evasion", "x": 8, "y": 5},
+                    target_unit_ids=[attacker.unit_id],
+                    target_cells=[],
+                    source_player_id=dark.player_id,
+                    hostile=True,
+                )
+            ],
+        )
+
+        reserved_payload = {"type": "chain_react", "unit_id": fusion.unit_id, "action_code": "evasion", "x": 8, "y": 5}
+        open_payload = {"type": "chain_react", "unit_id": fusion.unit_id, "action_code": "evasion", "x": 6, "y": 3}
+
+        self.assertFalse(reaction_payload_is_legal(battle, fusion, queued, reserved_payload))
+        self.assertTrue(reaction_payload_is_legal(battle, fusion, queued, open_payload))
+
+    def test_ai_throttles_unlimited_nonhostile_skill_after_one_use(self) -> None:
+        battle = create_battle("erasure_apostle", "bard")
+        apostle = primary_hero(battle, 1)
+        apostle.position = Position(1, 1)
+        apostle.current_mana = 5
+        actions = {action["code"]: action for action in battle.action_snapshot_for(apostle)["actions"]}
+        stealth = apostle.get_skill("stealth")
+        profile = difficulty_profile("standard")
+
+        first_candidates = build_skill_candidates(battle, apostle, actions["stealth"], profile, instant_only=False)
+        stealth.uses_this_turn = 1
+        second_candidates = build_skill_candidates(battle, apostle, actions["stealth"], profile, instant_only=False)
+
+        self.assertTrue(first_candidates)
+        self.assertEqual(second_candidates, [])
+
+    def test_ai_enables_sakura_floating_cannon_berserk_on_next_turn(self) -> None:
+        battle = create_battle("excel_r034", "bard")
+        sakura = primary_hero(battle, 1)
+        sakura.position = Position(3, 3)
+
+        battle.perform_action(
+            {"type": "skill", "unit_id": sakura.unit_id, "skill_code": "floating_cannons", "x": 2, "y": 2}
+        )
+        battle.perform_action({"type": "end_turn"})
+        while battle.current_turn_unit() is not sakura:
+            battle.perform_action({"type": "end_turn"})
+
+        payload, actor = choose_turn_bundle_action(
+            battle,
+            battle.current_turn_bundle_units(include_banished=False),
+            "standard",
+        )
+
+        self.assertIs(actor, sakura)
+        self.assertEqual(payload.get("skill_code"), "floating_cannon_berserk")
+        cannons = [unit for unit in battle.current_turn_bundle_units() if unit.hero_code == "floating_cannon"]
+        self.assertTrue(cannons)
+        self.assertTrue(all(cannon.turn_ready for cannon in cannons))
+
+    def test_ushioni_counter_requires_enemy_chain_and_ai_uses_awakening(self) -> None:
+        from wujiang.heroes.excel_roster import MountainGodCounterStatus
+
+        immune_battle = create_battle("excel_r035", "soul_wraith")
+        oni = primary_hero(immune_battle, 1)
+        wraith = primary_hero(immune_battle, 2)
+        oni.position = Position(1, 1)
+        wraith.position = Position(2, 1)
+
+        immune_battle.perform_action(
+            {"type": "attack", "unit_id": oni.unit_id, "target_unit_id": wraith.unit_id}
+        )
+
+        self.assertFalse(any(isinstance(status, MountainGodCounterStatus) for status in oni.statuses))
+
+        chained_battle = create_battle("excel_r035", "bard")
+        oni = primary_hero(chained_battle, 1)
+        bard = primary_hero(chained_battle, 2)
+        oni.position = Position(1, 1)
+        bard.position = Position(2, 1)
+        bard.current_mana = 5
+        chained_battle.perform_action(
+            {"type": "attack", "unit_id": oni.unit_id, "target_unit_id": bard.unit_id}
+        )
+        chained_battle.perform_action(
+            {"type": "chain_react", "unit_id": bard.unit_id, "action_code": "protection"}
+        )
+        resolve_pending_chain(chained_battle)
+
+        self.assertEqual(sum(isinstance(status, MountainGodCounterStatus) for status in oni.statuses), 1)
+
+        for _ in range(7):
+            oni.add_status(MountainGodCounterStatus())
+        chosen = choose_turn_action(chained_battle, oni, "standard")
+        self.assertEqual(chosen.get("skill_code"), "mountain_awakening")
+
+    def test_batch_13_ai_builds_jirobo_and_remi_special_actions(self) -> None:
+        profile = difficulty_profile("standard")
+        battle = create_battle("excel_r047", "bard")
+        jirobo = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        jirobo.position = Position(1, 1)
+        bard.position = Position(4, 1)
+        actions = {action["code"]: action for action in battle.action_snapshot_for(jirobo)["actions"]}
+
+        burial = build_skill_candidates(battle, jirobo, actions["hundred_bird_burial"], profile, instant_only=False)
+
+        self.assertTrue(burial)
+
+        bard.position = Position(2, 1)
+        battle.perform_action({"type": "attack", "unit_id": jirobo.unit_id, "target_unit_id": bard.unit_id})
+        resolve_pending_chain(battle)
+        actions = {action["code"]: action for action in battle.action_snapshot_for(jirobo)["actions"]}
+        follow_steps = build_skill_candidates(battle, jirobo, actions["jirobo_follow_step"], profile, instant_only=False)
+
+        self.assertTrue(follow_steps)
+
+        battle = create_battle("excel_r056", "bard")
+        remi = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        remi.position = Position(1, 1)
+        bard.position = Position(1, 5)
+        actions = {action["code"]: action for action in battle.action_snapshot_for(remi)["actions"]}
+        chaos = build_skill_candidates(battle, remi, actions["remi_chaos"], profile, instant_only=False)
+        bats = build_skill_candidates(battle, remi, actions["summon_remi_bat"], profile, instant_only=False)
+
+        self.assertTrue(any((candidate.payload.get("x"), candidate.payload.get("y")) == (1, 4) for candidate in chaos))
+        self.assertTrue(bats)
+
+        battle = create_battle("excel_r056", "bard")
+        remi = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        remi.position = Position(1, 1)
+        bard.position = Position(3, 1)
+        battle.perform_action({"type": "skill", "unit_id": remi.unit_id, "skill_code": "summon_remi_bat", "x": 2, "y": 1})
+        bat = next(unit for unit in battle.current_turn_bundle_units() if unit.hero_code == "remi_bat")
+        attack_action = next(action for action in battle.action_snapshot_for(bat)["actions"] if action["kind"] == "attack")
+
+        self.assertTrue(build_attack_candidates(battle, bat, attack_action, profile))
+
+    def test_batch_13_ai_builds_nian_special_actions_without_wasting_dragon_dance(self) -> None:
+        battle = create_battle("excel_r059", "bard")
+        nian = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        nian.position = Position(1, 1)
+        bard.position = Position(2, 1)
+        nian.current_mana = nian.max_mana()
+        bard.max_health = 4
+        bard.current_hp = 4
+        profile = difficulty_profile("standard")
+        actions = {action["code"]: action for action in battle.action_snapshot_for(nian)["actions"]}
+
+        breath = build_skill_candidates(battle, nian, actions["nian_large_dragon_breath"], profile, instant_only=False)
+        roar = build_skill_candidates(battle, nian, actions["nian_roar"], profile, instant_only=False)
+        flash = build_skill_candidates(battle, nian, actions["nian_jade_flash"], profile, instant_only=False)
+        dance = build_skill_candidates(battle, nian, actions["nian_dragon_dance"], profile, instant_only=False)
+
+        self.assertTrue(breath)
+        self.assertTrue(roar)
+        self.assertTrue(flash)
+        self.assertTrue(dance)
+        self.assertLess(max(candidate.score for candidate in dance), 0)
+
+        nian.current_mana -= 1
+        dance = build_skill_candidates(battle, nian, actions["nian_dragon_dance"], profile, instant_only=False)
+
+        self.assertLess(max(candidate.score for candidate in dance), 0)
+
+    def test_batch_14_ai_uses_black_cat_form_and_selects_unsealed_heaven_punishment_skill(self) -> None:
+        profile = difficulty_profile("standard")
+        battle = create_battle("excel_r066", "fire_funeral")
+        cat = primary_hero(battle, 1)
+        enemy = primary_hero(battle, 2)
+        cat.position = Position(1, 1)
+        enemy.position = Position(7, 7)
+        actions = {action["code"]: action for action in battle.action_snapshot_for(cat)["actions"]}
+        form = build_skill_candidates(battle, cat, actions["black_cat_form"], profile, instant_only=False)
+
+        self.assertGreater(max(candidate.score for candidate in form), 18)
+        self.assertEqual(choose_turn_action(battle, cat, "standard").get("skill_code"), "black_cat_form")
+
+        battle = create_battle("excel_r070", "bard")
+        crab = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        crab.position = Position(1, 1)
+        bard.position = Position(4, 1)
+        action = next(action for action in battle.action_snapshot_for(crab)["actions"] if action["code"] == "heaven_punishment")
+        candidates = build_skill_candidates(battle, crab, action, profile, instant_only=False)
+
+        self.assertTrue(candidates)
+        self.assertTrue(all(candidate.payload.get("target_unit_id") == bard.unit_id for candidate in candidates))
+        self.assertTrue(all(candidate.payload.get("disabled_skill_code") for candidate in candidates))
+
+        bard.add_status(SkillDisabledStatus("heal", "回血"))
+        candidates = build_skill_candidates(battle, crab, action, profile, instant_only=False)
+
+        self.assertNotIn("heal", {candidate.payload.get("disabled_skill_code") for candidate in candidates})
+
+    def test_batch_14_ai_values_big_avalanche_before_weather_exists(self) -> None:
+        battle = create_battle("excel_r071", "bard")
+        giant = primary_hero(battle, 1)
+        action = next(action for action in battle.action_snapshot_for(giant)["actions"] if action["code"] == "big_avalanche")
+        candidates = build_skill_candidates(battle, giant, action, difficulty_profile("standard"), instant_only=False)
+
+        self.assertGreater(max(candidate.score for candidate in candidates), 18)
+
+    def test_batch_15_ai_builds_kaiser_damage_skill_candidates(self) -> None:
+        battle = create_battle("excel_r093", "bard")
+        kaiser = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        kaiser.position = Position(4, 4)
+        bard.position = Position(5, 4)
+        actions = {action["code"]: action for action in battle.action_snapshot_for(kaiser)["actions"]}
+        profile = difficulty_profile("standard")
+
+        large_pierce = build_skill_candidates(battle, kaiser, actions["large_pierce"], profile, instant_only=False)
+        fist = build_skill_candidates(battle, kaiser, actions["kaiser_fist"], profile, instant_only=False)
+
+        self.assertTrue(large_pierce)
+        self.assertTrue(fist)
+        self.assertTrue(all(candidate.payload.get("target_unit_id") == bard.unit_id for candidate in fist))
+
+    def test_batch_15_ai_values_interference_and_noise_wave_without_fictional_damage(self) -> None:
+        battle = create_battle("excel_r094", "bard")
+        noise = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        noise.position = Position(1, 1)
+        bard.position = Position(4, 1)
+        noise.current_mana = 1
+        medusa = MedusaSummon(2)
+        battle.summon_unit(medusa, Position(5, 1), summoner=bard)
+        actions = {action["code"]: action for action in battle.action_snapshot_for(noise)["actions"]}
+        profile = difficulty_profile("standard")
+
+        interference = build_skill_candidates(battle, noise, actions["interference"], profile, instant_only=False)
+        wave = build_skill_candidates(battle, noise, actions["noise_wave"], profile, instant_only=False)
+
+        self.assertTrue(interference)
+        self.assertGreater(max(candidate.score for candidate in interference), profile.action_threshold)
+        self.assertTrue(wave)
+        self.assertGreater(max(candidate.score for candidate in wave), profile.action_threshold)
+
+    def test_batch_15_ai_builds_purify_and_sacred_duel_direct_targets(self) -> None:
+        battle = create_battle("excel_r113", "fire_funeral")
+        ernest = primary_hero(battle, 1)
+        fire = primary_hero(battle, 2)
+        ernest.position = Position(4, 4)
+        fire.position = Position(5, 4)
+        actions = {action["code"]: action for action in battle.action_snapshot_for(ernest)["actions"]}
+        profile = difficulty_profile("standard")
+
+        purify = build_skill_candidates(battle, ernest, actions["purify_mana"], profile, instant_only=False)
+        duel = build_skill_candidates(battle, ernest, actions["sacred_duel"], profile, instant_only=False)
+
+        self.assertTrue(purify)
+        self.assertTrue(duel)
+        self.assertEqual({candidate.payload.get("target_unit_id") for candidate in purify}, {fire.unit_id})
+        self.assertEqual({candidate.payload.get("target_unit_id") for candidate in duel}, {fire.unit_id})
+        self.assertEqual(choose_turn_action(battle, ernest, "standard").get("skill_code"), "sacred_duel")
+
+    def test_chain_shield_target_moving_out_of_range_does_not_abort_resolution(self) -> None:
+        battle = create_battle(["fire_funeral", "bard"], ["ellie", "excel_r030"])
+        fire = next(unit for unit in battle.player_units(1) if unit.hero_code == "fire_funeral")
+        ellie = next(unit for unit in battle.player_units(2) if unit.hero_code == "ellie")
+        fusion = next(unit for unit in battle.player_units(2) if unit.hero_code == "excel_r030")
+        fire.position = Position(4, 4)
+        fusion.position = Position(5, 4)
+        ellie.position = Position(5, 5)
+        queued = QueuedAction(
+            action_type="attack",
+            actor_id=fire.unit_id,
+            display_name="普攻",
+            speed=1,
+            payload={"target_unit_id": fusion.unit_id},
+            target_unit_ids=[fusion.unit_id],
+            source_player_id=fire.player_id,
+            hostile=True,
+        )
+        wall = skill_by_code(ellie, "magic_wall")
+        self.assertTrue(wall.can_react_with_payload(battle, ellie, queued, {"target_unit_id": fusion.unit_id})[0])
+
+        fusion.position = Position(7, 4)
+        wall.react(battle, ellie, {"target_unit_id": fusion.unit_id}, queued)
+
+        self.assertEqual(fusion.position, Position(7, 4))
+        self.assertTrue(any("已离开保护范围" in entry for entry in battle.logs))
+
+    def test_batch_16_ai_scores_zero_dash_through_enemy(self) -> None:
+        battle = create_battle("excel_r118", "bard")
+        battle.width = 10
+        battle.height = 10
+        zero = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        zero.position = Position(1, 1)
+        bard.position = Position(4, 1)
+        zero.current_mana = 0
+        action = next(action for action in battle.action_snapshot_for(zero)["actions"] if action["code"] == "zero_dash")
+
+        candidates = build_skill_candidates(battle, zero, action, difficulty_profile("standard"), instant_only=False)
+        best = max(candidates, key=lambda candidate: candidate.score)
+
+        self.assertEqual(best.payload.get("direction"), {"dx": 1, "dy": 0})
+        self.assertGreater(best.score, difficulty_profile("standard").action_threshold)
+
+    def test_ai_zero_normal_move_plans_repeated_crossings(self) -> None:
+        battle = create_battle("excel_r118", "bard")
+        zero = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        zero.position = Position(1, 1)
+        bard.position = Position(3, 1)
+        action = next(action for action in battle.action_snapshot_for(zero)["actions"] if action["code"] == "move")
+
+        candidates = build_move_candidates(battle, zero, action, difficulty_profile("standard"))
+        best = max(candidates, key=lambda candidate: candidate.score)
+        path = [(cell["x"], cell["y"]) for cell in best.payload.get("path", [])]
+
+        self.assertGreaterEqual(path.count((3, 1)), 2)
+        self.assertTrue(payload_is_legal(battle, best.payload))
+
+    def test_ai_judgment_stone_moves_onto_enemy_to_explode(self) -> None:
+        battle = create_battle("excel_r020", "bard")
+        oberon = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        oberon.position = Position(1, 1)
+        bard.position = Position(4, 1)
+        oberon.current_mana = 5
+        battle.perform_action({"type": "skill", "unit_id": oberon.unit_id, "skill_code": "judgment_stone", "x": 2, "y": 1})
+        resolve_pending_chain(battle)
+        stone = summon_by_code(battle, 1, "judgment_stone")
+        stone.turn_ready = True
+        stone.can_act_on_entry_turn = True
+        action = next(action for action in battle.action_snapshot_for(stone)["actions"] if action["code"] == "move")
+
+        candidates = build_move_candidates(battle, stone, action, difficulty_profile("standard"))
+        best = max(candidates, key=lambda candidate: candidate.score)
+
+        self.assertEqual((best.payload.get("x"), best.payload.get("y")), (4, 1))
+
+    def test_ai_kiku_values_sun_slash_damage_and_passive_lock(self) -> None:
+        battle = create_battle("excel_r379", "bard")
+        kiku = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        kiku.position = Position(2, 2)
+        bard.position = Position(3, 2)
+        bard.max_health = 4
+        bard.current_hp = 4
+
+        sun_slash = next(action for action in battle.action_snapshot_for(kiku)["actions"] if action["code"] == "sun_slash")
+        payload = choose_turn_action(battle, kiku, "standard")
+
+        self.assertEqual(sun_slash["preview"]["target_unit_ids"], [bard.unit_id])
+        self.assertEqual(payload.get("skill_code"), "sun_slash")
+        self.assertEqual(payload.get("target_unit_id"), bard.unit_id)
+
+    def test_batch_16_ai_builds_fuma_trap_and_shuriken_candidates(self) -> None:
+        battle = create_battle("excel_r123", "bard")
+        fuma = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        fuma.position = Position(1, 1)
+        bard.position = Position(3, 1)
+        actions = {action["code"]: action for action in battle.action_snapshot_for(fuma)["actions"]}
+        profile = difficulty_profile("standard")
+
+        traps = build_skill_candidates(battle, fuma, actions["fuma_trap"], profile, instant_only=False)
+        shuriken = build_skill_candidates(battle, fuma, actions["fuma_shuriken"], profile, instant_only=False)
+
+        self.assertGreater(max(candidate.score for candidate in traps), profile.action_threshold)
+        self.assertGreater(max(candidate.score for candidate in shuriken), profile.action_threshold)
+        self.assertLess(len(shuriken), 10)
+
+    def test_batch_16_ai_builds_fantasy_and_rainbow_mirror_compound_payloads(self) -> None:
+        battle = create_battle("excel_r127", "bard")
+        bird = primary_hero(battle, 1)
+        enemy = primary_hero(battle, 2)
+        bird.position = Position(1, 1)
+        enemy.position = Position(3, 1)
+        actions = {action["code"]: action for action in battle.action_snapshot_for(bird)["actions"]}
+        profile = difficulty_profile("standard")
+
+        fantasy = build_skill_candidates(battle, bird, actions["fantasy_move"], profile, instant_only=False)
+
+        self.assertTrue(fantasy)
+        self.assertTrue(all(candidate.payload.get("target_unit_id") == enemy.unit_id for candidate in fantasy))
+        self.assertTrue(all(candidate.payload.get("x") is not None and candidate.payload.get("y") is not None for candidate in fantasy))
+
+        ally = create_hero("bard", 1)
+        battle.add_unit(ally, Position(7, 7))
+        actions = {action["code"]: action for action in battle.action_snapshot_for(bird)["actions"]}
+        mirrors = build_skill_candidates(battle, bird, actions["rainbow_mirror"], profile, instant_only=False)
+
+        self.assertTrue(any(candidate.payload.get("target_unit_id") == ally.unit_id for candidate in mirrors))
+        self.assertTrue(all(candidate.payload.get("x") is not None and candidate.payload.get("y") is not None for candidate in mirrors))
+
+    def test_batch_16_ai_saves_friendly_mirror_for_strong_attackers(self) -> None:
+        battle = create_battle("excel_r127", "bard")
+        bird = primary_hero(battle, 1)
+        enemy = primary_hero(battle, 2)
+        enemy.base_stats.attack = 3
+        action = next(action for action in battle.action_snapshot_for(bird)["actions"] if action["code"] == "friendly_mirror")
+        profile = difficulty_profile("standard")
+
+        candidates = build_skill_candidates(battle, bird, action, profile, instant_only=False)
+
+        self.assertGreater(max(candidate.score for candidate in candidates), profile.once_per_battle_threshold)
+
+    def test_batch_16_fantasy_does_not_offer_evasion_reaction(self) -> None:
+        battle = create_battle("excel_r127", "dark_human")
+        bird = primary_hero(battle, 1)
+        target = primary_hero(battle, 2)
+        bird.position = Position(1, 1)
+        target.position = Position(3, 1)
+
+        battle.perform_action(
+            {
+                "type": "skill",
+                "unit_id": bird.unit_id,
+                "skill_code": "fantasy_move",
+                "target_unit_id": target.unit_id,
+                "x": 7,
+                "y": 1,
+            }
+        )
+
+        if battle.pending_chain is not None:
+            options = battle.pending_chain.options_by_unit.get(target.unit_id, [])
+            self.assertNotIn("evasion", {option.action_code for option in options})
+        resolve_pending_chain(battle)
+        self.assertEqual(target.position, Position(7, 1))
+
+    def test_batch_17_ai_builds_true_blade_target_and_landing_payloads(self) -> None:
+        battle = create_battle("excel_r136", "bard")
+        oboro = primary_hero(battle, 1)
+        target = primary_hero(battle, 2)
+        oboro.position = Position(1, 1)
+        target.position = Position(7, 1)
+        action = next(action for action in battle.action_snapshot_for(oboro)["actions"] if action["code"] == "true_blade_air_slash")
+
+        candidates = build_skill_candidates(battle, oboro, action, difficulty_profile("standard"), instant_only=False)
+
+        self.assertTrue(candidates)
+        self.assertTrue(all(candidate.payload.get("target_unit_id") == target.unit_id for candidate in candidates))
+        self.assertTrue(all(candidate.payload.get("x") is not None and candidate.payload.get("y") is not None for candidate in candidates))
+        self.assertGreater(max(candidate.score for candidate in candidates), difficulty_profile("standard").action_threshold)
+
+    def test_batch_17_ai_builds_and_values_devour_targets(self) -> None:
+        battle = create_battle("excel_r137", "bard")
+        undead = primary_hero(battle, 1)
+        target = primary_hero(battle, 2)
+        undead.position = Position(1, 1)
+        target.position = Position(2, 1)
+        undead.current_hp = 0.5
+        action = next(action for action in battle.action_snapshot_for(undead)["actions"] if action["code"] == "undead_boy_devour")
+
+        candidates = build_skill_candidates(battle, undead, action, difficulty_profile("standard"), instant_only=False)
+
+        self.assertEqual({candidate.payload.get("target_unit_id") for candidate in candidates}, {target.unit_id})
+        self.assertGreater(max(candidate.score for candidate in candidates), difficulty_profile("standard").action_threshold)
+
+    def test_batch_17_ai_values_illumination_and_skips_it_without_targets(self) -> None:
+        battle = create_battle("excel_r139", "excel_r137")
+        sola = primary_hero(battle, 1)
+        target = primary_hero(battle, 2)
+        sola.position = Position(1, 1)
+        target.position = Position(4, 1)
+        target.shields = 1
+        profile = difficulty_profile("standard")
+        action = next(action for action in battle.action_snapshot_for(sola)["actions"] if action["code"] == "illumination_light")
+
+        candidates = build_skill_candidates(battle, sola, action, profile, instant_only=False)
+
+        self.assertGreater(max(candidate.score for candidate in candidates), profile.action_threshold)
+        target.position = Position(9, 9)
+        action = next(action for action in battle.action_snapshot_for(sola)["actions"] if action["code"] == "illumination_light")
+        self.assertEqual(build_skill_candidates(battle, sola, action, profile, instant_only=False), [])
+
+    def test_batch_17_nuclear_rush_attack_is_not_candidate_while_immobile(self) -> None:
+        battle = create_battle("excel_r030", "bard")
+        fusion = primary_hero(battle, 1)
+        target = primary_hero(battle, 2)
+        fusion.position = Position(1, 1)
+        target.position = Position(3, 1)
+        battle.perform_action({"type": "skill", "unit_id": fusion.unit_id, "skill_code": "nuclear_rush"})
+        fusion.cannot_move = True
+        attack = next(action for action in battle.action_snapshot_for(fusion)["actions"] if action["kind"] == "attack")
+
+        self.assertEqual(build_attack_candidates(battle, fusion, attack, difficulty_profile("standard")), [])
+
+    def test_batch_18_ai_builds_damaging_hell_slash_candidates(self) -> None:
+        battle = create_battle("excel_r158", "bard")
+        warrior = primary_hero(battle, 1)
+        target = primary_hero(battle, 2)
+        warrior.position = Position(1, 1)
+        target.position = Position(4, 1)
+        action = next(action for action in battle.action_snapshot_for(warrior)["actions"] if action["code"] == "hell_slash")
+
+        candidates = build_skill_candidates(battle, warrior, action, difficulty_profile("standard"), instant_only=False)
+
+        self.assertTrue(candidates)
+        self.assertGreater(max(candidate.score for candidate in candidates), difficulty_profile("standard").action_threshold)
+
+    def test_batch_18_ai_electric_wind_avoids_friendly_control(self) -> None:
+        battle = create_battle(["excel_r166", "bard"], ["excel_r137", "excel_r139"])
+        electric = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r166")
+        ally = next(unit for unit in battle.hero_units(1) if unit.hero_code == "bard")
+        north_enemy = next(unit for unit in battle.hero_units(2) if unit.hero_code == "excel_r137")
+        east_enemy = next(unit for unit in battle.hero_units(2) if unit.hero_code == "excel_r139")
+        electric.position = Position(4, 4)
+        ally.position = Position(5, 4)
+        north_enemy.position = Position(4, 2)
+        east_enemy.position = Position(6, 4)
+        action = next(action for action in battle.action_snapshot_for(electric)["actions"] if action["code"] == "electric_wind")
+
+        candidates = build_skill_candidates(battle, electric, action, difficulty_profile("standard"), instant_only=False)
+        best = max(candidates, key=lambda candidate: candidate.score)
+        hit_ids = {unit.unit_id for unit in battle.units_at_cells([Position(cell["x"], cell["y"]) for cell in best.payload["cells"]])}
+
+        self.assertIn(north_enemy.unit_id, hit_ids)
+        self.assertNotIn(ally.unit_id, hit_ids)
+
+    def test_batch_18_ai_values_martial_seal_and_unset_pandemonium(self) -> None:
+        profile = difficulty_profile("standard")
+        warrior_battle = create_battle("excel_r158", "bard")
+        warrior = primary_hero(warrior_battle, 1)
+        seal = next(action for action in warrior_battle.action_snapshot_for(warrior)["actions"] if action["code"] == "martial_god_seal")
+        seal_candidates = build_skill_candidates(warrior_battle, warrior, seal, profile, instant_only=False)
+        self.assertGreater(max(candidate.score for candidate in seal_candidates), profile.action_threshold)
+
+        demon_battle = create_battle("excel_r187", "bard")
+        demon = primary_hero(demon_battle, 1)
+        weather = next(action for action in demon_battle.action_snapshot_for(demon)["actions"] if action["code"] == "pandemonium")
+        weather_candidates = build_skill_candidates(demon_battle, demon, weather, profile, instant_only=False)
+        self.assertGreater(max(candidate.score for candidate in weather_candidates), profile.once_per_battle_threshold)
+
+    def test_batch_18_pandemonium_immediately_syncs_all_demon_leaders(self) -> None:
+        battle = create_battle(["excel_r187", "excel_r187"], "bard")
+        leaders = [unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r187"]
+
+        battle.perform_action({"type": "skill", "unit_id": leaders[0].unit_id, "skill_code": "pandemonium"})
+
+        self.assertTrue(all(leader.has_status("万魔殿加速") for leader in leaders))
+        self.assertTrue(all(leader.stat("speed") == 6 for leader in leaders))
+
+    def test_batch_19_ai_builds_vitality_blast_candidates_after_weather(self) -> None:
+        battle = create_battle("excel_r188", "bard")
+        guardian = primary_hero(battle, 1)
+        target = primary_hero(battle, 2)
+        guardian.position = Position(1, 1)
+        target.position = Position(4, 1)
+        battle.perform_action({"type": "skill", "unit_id": guardian.unit_id, "skill_code": "sky_sanctuary"})
+        action = next(action for action in battle.action_snapshot_for(guardian)["actions"] if action["code"] == "vitality_blast")
+
+        candidates = build_skill_candidates(battle, guardian, action, difficulty_profile("standard"), instant_only=False)
+
+        self.assertTrue(candidates)
+        self.assertGreater(max(candidate.score for candidate in candidates), difficulty_profile("standard").action_threshold)
+
+    def test_batch_19_vain_giant_shadow_exposes_targets_and_cannot_be_evaded(self) -> None:
+        battle = create_battle("excel_r326", "bard")
+        florenza = primary_hero(battle, 1)
+        target = primary_hero(battle, 2)
+        florenza.position = Position(1, 1)
+        target.position = Position(3, 1)
+        action = next(action for action in battle.action_snapshot_for(florenza)["actions"] if action["code"] == "vain_giant_shadow")
+
+        candidates = build_skill_candidates(battle, florenza, action, difficulty_profile("standard"), instant_only=False)
+
+        self.assertIn(target.unit_id, action["preview"]["target_unit_ids"])
+        self.assertTrue(any(candidate.payload.get("target_unit_id") == target.unit_id for candidate in candidates))
+        battle.perform_action({"type": "skill", "unit_id": florenza.unit_id, "skill_code": "vain_giant_shadow", "target_unit_id": target.unit_id})
+        self.assertIsNotNone(battle.pending_chain)
+        self.assertTrue(battle.pending_chain.queued_action.payload.get("cannot_evade"))
+
+    def test_batch_19_ai_values_both_weather_ultimates(self) -> None:
+        profile = difficulty_profile("standard")
+        guardian_battle = create_battle("excel_r188", "bard")
+        guardian = primary_hero(guardian_battle, 1)
+        sky = next(action for action in guardian_battle.action_snapshot_for(guardian)["actions"] if action["code"] == "sky_sanctuary")
+        self.assertEqual(sky["name"], "天使的气息")
+        self.assertGreater(max(candidate.score for candidate in build_skill_candidates(guardian_battle, guardian, sky, profile, instant_only=False)), profile.once_per_battle_threshold)
+
+        tina_battle = create_battle("excel_r337", "bard")
+        tina = primary_hero(tina_battle, 1)
+        wetland = next(action for action in tina_battle.action_snapshot_for(tina)["actions"] if action["code"] == "wetland_grassland")
+        self.assertGreater(max(candidate.score for candidate in build_skill_candidates(tina_battle, tina, wetland, profile, instant_only=False)), profile.once_per_battle_threshold)
+
+    def test_ai_moves_to_line_up_great_fire_funeral(self) -> None:
+        # Given Fire Funeral is not yet aligned with the enemy but can move into the same row
+        battle = create_battle("fire_funeral", "bard")
+        fire = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        fire.position = Position(1, 1)
+        bard.position = Position(4, 4)
+
+        # When the AI first prepares mobility and then chooses movement
+        payload = choose_turn_action(battle, fire, "standard")
+        self.assertEqual(payload.get("skill_code"), "shensu")
+        battle.perform_action(payload)
+        payload = choose_turn_action(battle, fire, "standard")
+
+        # Then movement toward a 大火葬 line is a valid high-value plan
+        self.assertEqual(payload.get("type"), "move")
+        self.assertTrue(payload.get("x") == bard.position.x or payload.get("y") == bard.position.y)
+
     def test_soul_wraith_growth_is_visible_in_public_state(self) -> None:
         # Given Bard blocks Soul Wraith's arc attack with a passive skill
         battle = create_battle("soul_wraith", "bard")
@@ -245,6 +1277,14 @@ class RoomBehaviorTests(unittest.TestCase):
         self.assertEqual(lobby_after["rooms"][0]["occupied_seat_count"], 1)
         self.assertEqual(lobby_after["rooms"][0]["status"], "lobby")
         self.assertEqual(hero_index["rooms"][0]["room_id"], room_id)
+        hero_codes = {hero["code"] for hero in hero_index["heroes"]}
+        self.assertIn("excel_r030", hero_codes)
+        self.assertIn("excel_r031", hero_codes)
+        self.assertIn("excel_r032", hero_codes)
+        self.assertIn("excel_r033", hero_codes)
+        self.assertIn("excel_r034", hero_codes)
+        self.assertIn("excel_r035", hero_codes)
+        self.assertNotIn("excel_r038", hero_codes)
 
     def test_scenario_anonymous_viewer_can_open_room_state_before_joining(self) -> None:
         # Given a host has created a room

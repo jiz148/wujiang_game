@@ -19,7 +19,14 @@ Use this skill as the always-on project onboarding and maintenance workflow for 
 8. Keep rule docs, engine code, frontend previews, and tests synchronized. Do not change only code when the user clarified a durable rule.
 9. After every new gameplay requirement or code change in this repo, update this skill in the same turn. Prefer concise updates to `references/project-map.md` and `references/hero-rule-index.md`; update `SKILL.md` only when the workflow itself changes.
 10. After every gameplay, room-flow, or player-visible UI change, add or update behavior-driven tests for the changed feature in the same turn. Prefer `tests/test_behavior.py` for scenario-style coverage and keep it synchronized with the feature that changed.
-11. Validate in three layers when feasible: changed-rule targeted tests first, then the relevant behavior scenarios, then the broader suite with `python -m unittest discover -s tests`.
+11. After every hero implementation, and during comprehensive AI debugging of already implemented heroes, run the full per-hero AI debug workflow for each target hero:
+    - Read the implemented hero's source/doc text and questionnaire answers if the answer workbook or saved answers exist. For older heroes whose questionnaire answers were not preserved, explicitly note that the questionnaire is unavailable and rely on the existing docs, source text, and durable chat clarifications.
+    - Run 10 AI-vs-AI simulations using `tools/per_hero_ai_debug.py` for each target hero. Each match pairs the target hero with one randomly chosen implemented teammate against two randomly chosen implemented opponents. Vary teammates, opponents, and seeds; avoid duplicates where feasible. Use `tools/simulate_match.py` only for one-off follow-up reproduction.
+    - For each simulation, compare the battle report, structured findings, hero text, and questionnaire answers/source clarifications. Identify both hero-rule implementation defects and AI defects, including general AI policy issues and hero-specific AI targeting/scoring/payload issues.
+    - Record every suspected defect in a traceable report under `reports/`, including target hero, seed, teams, report path, observed behavior, expected rule/AI behavior, source evidence, severity, and proposed fix. Do not treat audit findings as automatic truth; verify against the hero text/questionnaire first.
+    - Fix code from the recorded defects, then rerun targeted tests and enough simulations to verify the repair.
+12. Validate in three layers when feasible: changed-rule targeted tests first, then the relevant behavior scenarios and AI audit, then the broader suite with `python -m unittest discover -s tests`.
+13. After each completed fix batch, report the concrete repair outcome to the user: what was fixed, what audit/test command was run, whether high-signal findings remain, and what remains next.
 
 ## Implementation Priorities
 
@@ -28,6 +35,7 @@ Use this skill as the always-on project onboarding and maintenance workflow for 
 - Use `apply_patch` for file edits.
 - Prefer reusable engine hooks for general mechanics before adding hero-local special cases.
 - For grid/range/targeting changes, check backend legality, frontend preview/click selection, and reaction-window target discovery together.
+- Treat AI behavior as part of the implementation surface. When fixing a hero, also inspect and update general AI payload generation/scoring and any hero-specific AI logic needed for that hero to use, target, chain, and avoid wasting its mechanics correctly.
 
 ## Reference Loading
 

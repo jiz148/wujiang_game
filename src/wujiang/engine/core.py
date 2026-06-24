@@ -676,6 +676,14 @@ class Skill(BattleComponent, ABC):
     ) -> bool:
         return False
 
+    def cannot_evade_for_payload(
+        self,
+        battle: "Battle",
+        actor: "Unit",
+        payload: dict[str, Any],
+    ) -> bool:
+        return False
+
     def to_public_dict(self, battle: "Battle") -> dict[str, Any]:
         self.sync_turn_scope(battle)
         owner = self.owner
@@ -983,6 +991,7 @@ class Unit(ABC):
         self.cannot_use_skills = is_clone
         self.allow_overheal = False
         self.ignore_units_while_moving = False
+        self.allow_enemy_destination_overlap = False
         self.has_flying = False
         self.has_block_counter = False
         self.is_summon = is_summon
@@ -1105,6 +1114,8 @@ class Unit(ABC):
         action_type: str,
         payload: dict[str, Any],
     ) -> None:
+        for effect in list(battle.field_effects):
+            effect.on_owner_action_declared(battle, action_type, payload)
         for component in list(self.iter_components()):
             component.on_owner_action_declared(battle, action_type, payload)
 
@@ -1325,12 +1336,17 @@ class Unit(ABC):
             "cannot_heal": self.cannot_heal,
             "cannot_attack": self.cannot_attack,
             "cannot_use_skills": self.cannot_use_skills,
+            "ignore_units_while_moving": self.ignore_units_while_moving,
+            "allow_enemy_destination_overlap": self.allow_enemy_destination_overlap,
             "raw_skill_text": self.raw_skill_text,
             "raw_trait_text": self.raw_trait_text,
             "skills": [skill.to_public_dict(battle) for skill in self.skills],
             "traits": [trait.to_public_dict(battle) for trait in self.traits],
             "statuses": [status.to_public_dict(battle) for status in self.statuses],
         }
+
+    def allows_destination_overlap_with(self, battle: "Battle", occupant: "Unit") -> bool:
+        return self.allow_enemy_destination_overlap and occupant.player_id != self.player_id
 
 
 class HeroUnit(Unit, ABC):
@@ -1840,6 +1856,8 @@ class Battle:
                 or right.mounted_on_unit_id == left.unit_id
                 or (left.is_mount and left.mount_owner_id == right.unit_id)
                 or (right.is_mount and right.mount_owner_id == left.unit_id)
+                or left.allows_destination_overlap_with(self, right)
+                or right.allows_destination_overlap_with(self, left)
             )
         )
 
@@ -1903,6 +1921,33 @@ class Battle:
 
     def unit_occupies(self, unit: Unit, position: Position) -> bool:
         return position in self.unit_cells(unit)
+
+    def path_crossing_units(self, mover: Unit, path: list[Position]) -> list[Unit]:
+        """Return an event each time the path enters a unit after fully leaving it."""
+        if len(path) <= 2:
+            return []
+        candidates = [
+            unit
+            for unit in self.all_units()
+            if unit.unit_id != mover.unit_id and unit.alive and not unit.banished and unit.position is not None
+        ]
+
+        def overlapping_ids(anchor: Position) -> set[str]:
+            mover_cells = set(self.unit_cells_at(mover, anchor))
+            return {
+                unit.unit_id
+                for unit in candidates
+                if any(cell in mover_cells for cell in self.unit_cells(unit))
+            }
+
+        previous_overlaps = overlapping_ids(path[0])
+        by_id = {unit.unit_id: unit for unit in candidates}
+        crossed: list[Unit] = []
+        for anchor in path[1:-1]:
+            current_overlaps = overlapping_ids(anchor)
+            crossed.extend(by_id[unit_id] for unit_id in current_overlaps - previous_overlaps)
+            previous_overlaps = current_overlaps
+        return crossed
 
     def can_place_unit(
         self,
@@ -2241,7 +2286,6 @@ class Battle:
         if not steps:
             raise ActionError("缺少移动路径。")
         path = [unit.position]
-        visited = {unit.position}
         direction: Optional[tuple[int, int]] = None
         distance_cost = 0
         for index, step in enumerate(steps):
@@ -2265,12 +2309,9 @@ class Battle:
                     direction = current_direction
                 elif current_direction != direction:
                     raise ActionError("该移动必须沿同一直线前进。")
-            if step in visited:
-                raise ActionError("移动路径不能重复经过同一个格子。")
             step_ignores_units = ignore_units and index < len(steps) - 1
             if not self.can_place_unit(unit, step, ignore=unit, mover=unit, ignore_units=step_ignores_units):
                 raise ActionError("移动路径被阻挡。")
-            visited.add(step)
             distance_cost += self.normal_movement_step_cost(unit, previous, step) if use_movement_cost else 1
             path.append(step)
         if distance_cost > max_distance:
@@ -2503,7 +2544,7 @@ class Battle:
         carried_rider = self.rider_for(unit)
         carried_rider_start = carried_rider.position if carried_rider is not None else None
         mounted_on = self.mounted_unit_for(unit)
-        if destination == unit.position:
+        if destination == unit.position and path is None:
             raise ActionError("目标位置不能与当前位置相同。")
         if not self.in_bounds(destination):
             raise ActionError("目标位置超出战场边界。")
@@ -2891,6 +2932,10 @@ class Battle:
         actor: Unit,
         payload: Optional[dict[str, Any]] = None,
     ) -> Optional[list[Position]]:
+        if payload and payload.get("queued_resolution"):
+            declared_cells = self.payload_positions(payload, "attack_cells")
+            if declared_cells:
+                return declared_cells
         resolved_payload = self.resolved_basic_attack_payload(actor, payload)
         for component in actor.iter_components():
             cells = component.basic_attack_area_cells(self, actor, resolved_payload)
@@ -3240,7 +3285,9 @@ class Battle:
             selected = self.selectable_unit_at(declared, actor=actor, ignore_stealth=ignore_stealth)
             return self.effect_recipient(selected) if selected is not None else None
         for unit_id in preferred_ids:
-            unit = self.get_unit(unit_id)
+            unit = self.units.get(unit_id)
+            if unit is None:
+                continue
             ok, _ = self.unit_can_be_selected(unit, actor=actor, ignore_stealth=ignore_stealth)
             if ok:
                 return self.effect_recipient(unit)
@@ -3276,6 +3323,18 @@ class Battle:
             if not ok:
                 raise ActionError(reason)
             skill.prepay_resources(self, actor, payload)
+        if (
+            payload.get("queued_resolution")
+            and self.declared_target_position(payload) is not None
+            and payload.get("target_unit_id")
+            and not payload.get("resolved_target_unit_id")
+            and skill.target_mode in {"ally", "enemy", "unit"}
+        ):
+            self.log(f"【{skill.name}】落在原定格上，没有命中有效目标。")
+            skill.finalize_use(self, actor)
+            actor.actions_taken_this_turn.append(f"skill:{skill.code}")
+            self.check_win_condition()
+            return
         target_id = payload.get("resolved_target_unit_id") or payload.get("target_unit_id")
         if target_id:
             target = self.get_unit(target_id)
@@ -3501,6 +3560,7 @@ class Battle:
             queued_payload["ignore_shield"] = skill.ignores_shield_for_payload(self, actor, payload)
             queued_payload["half_ignore_shield"] = skill.half_ignores_shield_for_payload(self, actor, payload)
             queued_payload["ignore_stealth"] = skill.ignores_stealth_for_payload(self, actor, payload)
+            queued_payload["cannot_evade"] = skill.cannot_evade_for_payload(self, actor, payload)
             declared_targets = self.payload_target_unit_ids(payload)
             if skill.target_mode in {"ally", "enemy", "unit"} and skill.requires_direct_unit_target_line:
                 for target_id in declared_targets:
@@ -4062,6 +4122,14 @@ class Battle:
                 actor.actions_taken_this_turn.append("move")
                 return
             if queued_action.action_type == "attack":
+                if payload.get("action_failed_by_wuchang_mist"):
+                    attack_cost = int(payload.get("attack_cost", 1) or 1)
+                    actor.attacks_used += attack_cost
+                    actor.actions_taken_this_turn.append("attack")
+                    actor.consume_attack_attempt_buffs(self)
+                    actor.notify_basic_attack_finished(self, payload, [], missed=True)
+                    self.log(f"{actor.name} 的攻击因【无常之雾】失败。")
+                    return
                 if self.basic_attack_area_cells_for_payload(actor, payload) is not None:
                     def resolve_area_attack() -> None:
                         area_cells = self.basic_attack_area_cells_for_payload(actor, payload)
@@ -4079,7 +4147,9 @@ class Battle:
                         payload,
                         ignore_stealth=bool(payload.get("ignore_stealth")),
                     )
-                    if target is None or target.player_id == actor.player_id:
+                    if target is None or (
+                        target.player_id == actor.player_id and not payload.get("allow_allied_attack_target")
+                    ):
                         actor.attacks_used += attack_cost
                         actor.actions_taken_this_turn.append("attack")
                         actor.consume_attack_attempt_buffs(self)
@@ -4091,6 +4161,12 @@ class Battle:
                 self.resolve_from_declared_origin(actor, payload, lambda: self.basic_attack_with_payload(actor, target, payload))
                 return
             if queued_action.action_type == "skill":
+                if payload.get("action_failed_by_wuchang_mist"):
+                    skill = actor.get_skill(payload["skill_code"])
+                    skill.finalize_use(self, actor)
+                    actor.actions_taken_this_turn.append(f"skill:{skill.code}")
+                    self.log(f"{actor.name} 的【{skill.name}】因【无常之雾】失败。")
+                    return
                 resolved_payload = dict(payload)
                 resolved_target = self.resolve_declared_target_unit(
                     actor,
@@ -4306,11 +4382,18 @@ class Battle:
                         self,
                         "skill",
                         {
+                            "unit_id": reactor.unit_id,
                             "skill_code": chosen.action_code,
                             **reaction_payload,
                             "queued_resolution": True,
                         },
                     )
+                    if reactor.unit_id not in self.units or not reactor.alive or reactor.banished:
+                        self.pending_chain.decision_log.append(f"{reactor.name} 的连锁因自身离场而失效。")
+                        self.log(f"{reactor.name} 的【{chosen.action_name}】未能结算，因为使用者已不在战场。")
+                        self.pending_chain.pending_reactor_ids.pop(0)
+                        self.advance_reaction_window()
+                        return
                 queued = QueuedAction(
                     action_type="reaction_skill" if chosen.action_type == "skill" else "reaction_action",
                     actor_id=current_unit_id,
@@ -4333,7 +4416,7 @@ class Battle:
                     },
                     target_unit_ids=[self.pending_chain.queued_action.actor_id],
                     target_cells=[],
-                    source_player_id=self.get_unit(current_unit_id).player_id,
+                    source_player_id=reactor.player_id,
                     hostile=True,
                     reaction_source_id=self.pending_chain.queued_action.actor_id,
                     suppress_logs=reactor.is_stealthed() or self.pending_chain.queued_action.suppress_logs,

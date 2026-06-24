@@ -45,6 +45,7 @@ from wujiang.heroes.common import (
     dedupe_positions,
     ensure_distance,
     ensure_ally,
+    is_mana_drain_immune,
     match_payload_pattern,
     pattern_selection_preview,
     pattern_signature,
@@ -933,7 +934,10 @@ class AttackLockTrait(Trait):
         if target is None or not target.alive or target.position is None:
             self.locked_target_id = None
             return None
-        return target  # type: ignore[return-value]
+        effective_target = battle.effect_recipient(target)
+        if effective_target.unit_id != target.unit_id:
+            self.locked_target_id = effective_target.unit_id
+        return effective_target  # type: ignore[return-value]
 
     def can_attack_target(self, battle: Battle, actor: HeroUnit, target: HeroUnit) -> tuple[bool, str]:
         if self.owner is None or actor.unit_id != self.owner.unit_id:
@@ -948,7 +952,11 @@ class AttackLockTrait(Trait):
             return
         target_id = str(payload.get("target_unit_id") or "").strip()
         if target_id:
-            self.locked_target_id = target_id
+            target = battle.units.get(target_id)
+            if target is not None:
+                self.locked_target_id = battle.effect_recipient(target).unit_id
+            else:
+                self.locked_target_id = target_id
 
     def on_after_damage(self, battle: Battle, ctx: DamageContext) -> None:
         if self.owner is None or ctx.source is None or ctx.source.unit_id != self.owner.unit_id:
@@ -2038,7 +2046,7 @@ class MountedLeapSkill(DashMoveSkill):
         super().__init__(
             "mounted_leap",
             "飞跃",
-            "普通技能：仅能在乘骑状态时使用；不费魔，每回合最多 1 次，直线飞行移动恰好 3 格。",
+            "普通技能：仅能在乘骑状态时使用；不费魔，每回合最多 1 次，自己直线飞行移动恰好 3 格；若离开坐骑占格则下马。",
             max_distance=3,
             mana_cost=0,
             max_uses_per_turn=1,
@@ -2051,9 +2059,22 @@ class MountedLeapSkill(DashMoveSkill):
         ok, reason = super().can_use(battle, actor, payload)
         if not ok:
             return ok, reason
-        if battle.mounted_unit_for(actor) is None:
+        mount = battle.mounted_unit_for(actor)
+        if mount is None:
             return False, "只有乘骑状态时才能使用飞跃。"
+        if actor.cannot_move:
+            return False, f"{actor.name} 当前无法移动。"
         return True, ""
+
+    def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
+        if battle.mounted_unit_for(actor) is None:
+            raise ActionError("只有乘骑状态时才能使用飞跃。")
+        super().execute(battle, actor, payload)
+
+    def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
+        if battle.mounted_unit_for(actor) is None or actor.cannot_move:
+            return {"cells": [], "target_unit_ids": [], "secondary_cells": [], "requires_target": True}
+        return super().preview(battle, actor)
 
 
 class SixBladeStyleStatus(StatusEffect):
@@ -2800,7 +2821,7 @@ class PlasmaThrusterSkill(Skill):
         )
 
     def selectable_destinations(self, battle: Battle, actor: HeroUnit) -> list[Position]:
-        if actor.position is None:
+        if actor.position is None or actor.cannot_move:
             return []
         destinations: list[Position] = []
         seen: set[tuple[int, int]] = set()
@@ -2822,6 +2843,14 @@ class PlasmaThrusterSkill(Skill):
             destinations.append(last_in_bounds)
         destinations.sort(key=lambda cell: (cell.y, cell.x))
         return destinations
+
+    def can_use(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok:
+            return ok, reason
+        if actor.cannot_move:
+            return False, f"{actor.name} å½“å‰æ— æ³•ç§»åŠ¨ã€‚"
+        return True, ""
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         destination = payload_position(payload)
@@ -3398,8 +3427,9 @@ class BloodGuardSkill(Skill):
         super().__init__(
             "blood_guard",
             "守*2",
-            "普通技能：费 1 魔，对自己或己方武将使用；目标守 +1，持续 2 轮，来自同一武将的不叠加。",
+            "普通技能：费 1 魔，每回合最多 1 次，对自己或己方武将使用；目标守 +1，持续 2 轮，来自同一武将的不叠加。",
             mana_cost=1,
+            max_uses_per_turn=1,
             target_mode="ally",
         )
 
@@ -3775,7 +3805,14 @@ class ChainPullSkill(Skill):
                 battle.log(f"{target.name} 已经在 {actor.name} 周围。")
                 return
             if battle.can_place_unit(target, destination, ignore=target):
-                battle.move_unit(target, destination, via_skill=True, forced=True, tags={"chain_pull"})
+                battle.move_unit(
+                    target,
+                    destination,
+                    via_skill=True,
+                    forced=True,
+                    max_distance=battle.width + battle.height,
+                    tags={"chain_pull"},
+                )
                 battle.log(f"{actor.name} 用链条将 {target.name} 拉到身边。")
                 return
         battle.log(f"{actor.name} 的链条击中了 {target.name}，但没有合法落点。")
@@ -4358,6 +4395,8 @@ class CardTranspositionSkill(Skill):
 
     def selectable_centers(self, battle: Battle, actor: HeroUnit) -> list[Position]:
         centers = [card.center for card in self.own_cards(battle, actor)]
+        if actor.position is not None:
+            centers = [center for center in centers if center != actor.position]
         centers.sort(key=lambda cell: (cell.y, cell.x))
         return centers
 
@@ -4379,7 +4418,7 @@ class CardTranspositionSkill(Skill):
             return False, "只能对敌方动作连锁。"
         if battle.reaction_proxy_target(actor, queued_action) is None:
             return False, "当前动作没有影响到自己。"
-        if not self.own_cards(battle, actor):
+        if not self.selectable_centers(battle, actor):
             return False, "场上没有自己放置的牌。"
         return True, ""
 
@@ -4399,6 +4438,8 @@ class CardTranspositionSkill(Skill):
             return False, str(exc)
         if actor.position is None:
             return False, "单位不在战场上。"
+        if card.center == actor.position:
+            return False, "ç›®æ ‡ä½ç½®ä¸èƒ½ä¸Žå½“å‰ä½ç½®ç›¸åŒã€‚"
         if not battle.can_place_unit(actor, card.center, ignore=actor, mover=actor):
             return False, "牌所在格已被占用，无法交换。"
         return True, ""
@@ -5616,7 +5657,14 @@ class DragonSlashSkill(Skill):
                 battle.log(f"{target.name} 已经在 {source.name} 周围。")
                 return
             if battle.can_place_unit(target, destination, ignore=target):
-                battle.move_unit(target, destination, via_skill=True, forced=True, tags={"dragon_slash", "chain_pull"})
+                battle.move_unit(
+                    target,
+                    destination,
+                    via_skill=True,
+                    forced=True,
+                    max_distance=battle.width + battle.height,
+                    tags={"dragon_slash", "chain_pull"},
+                )
                 battle.log(f"{actor.name} 用龙斩链条将 {target.name} 拉到身边。")
                 return
         battle.log(f"{actor.name} 的龙斩链条击中了 {target.name}，但没有合法落点。")
@@ -5765,6 +5813,9 @@ class AttackManaDrainTrait(Trait):
         if ctx.is_skill or "attack" not in ctx.tags or ctx.cancelled or (ctx.raw_damage or 0) <= 0:
             return
         if ctx.target.player_id == owner.player_id:
+            return
+        if is_mana_drain_immune(ctx.target):
+            battle.log(f"{ctx.target.name} 无法被吸魔。")
             return
         lost = min(float(ctx.target.current_mana), 1.0)
         if lost <= 0:

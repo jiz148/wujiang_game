@@ -211,3 +211,6 @@ tools/node_modules/
 
 # Local game replay recordings
 replays/
+
+# Local generated audit reports
+reports/

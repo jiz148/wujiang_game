@@ -14,7 +14,7 @@ from wujiang.web.ai import (
     choose_chain_reaction,
     choose_instant_action,
     choose_respawn_action,
-    choose_turn_action,
+    choose_turn_bundle_action,
 )
 from wujiang.web.replay import ReplayRecorder
 
@@ -865,7 +865,12 @@ class GameRoom:
             if current_unit is None:
                 return None
             difficulty = seat.ai_difficulty_override or self.default_ai_difficulty
-            return choose_turn_action(self.battle, current_unit, difficulty), "ai_turn", current_unit
+            payload, actor = choose_turn_bundle_action(
+                self.battle,
+                self.battle.current_turn_bundle_units(include_banished=False),
+                difficulty,
+            )
+            return payload, "ai_turn", actor or current_unit
         except ActionError:
             seat = self._current_prompt_seat()
             if seat is None or not seat.is_ai or self.battle is None:
@@ -971,7 +976,7 @@ class GameRoom:
             )
             return True
         current_unit = self.battle.current_turn_unit()
-        if current_unit is None or not current_unit.can_take_turn_actions(self.battle):
+        if current_unit is None or not self.battle.units_can_act_in_current_turn():
             self._perform_battle_action({"type": "end_turn"}, reason="ai_turn_fallback")
             return True
         if seat is None or not seat.is_ai:
@@ -985,7 +990,7 @@ class GameRoom:
         if self.battle.pending_chain is not None or self.battle.current_respawn_prompt() is not None:
             return False
         current_unit = self.battle.current_turn_unit()
-        if current_unit is not None and current_unit.can_take_turn_actions(self.battle):
+        if current_unit is not None and self.battle.units_can_act_in_current_turn():
             return False
         self._perform_battle_action({"type": "end_turn"}, reason="ai_turn_fallback")
         return True
@@ -1555,8 +1560,13 @@ class GameRoom:
                         if current_unit is None:
                             break
                         difficulty = seat.ai_difficulty_override or self.default_ai_difficulty
+                        payload, _actor = choose_turn_bundle_action(
+                            self.battle,
+                            self.battle.current_turn_bundle_units(include_banished=False),
+                            difficulty,
+                        )
                         self._perform_battle_action(
-                            choose_turn_action(self.battle, current_unit, difficulty),
+                            payload,
                             reason="ai_turn",
                         )
                         steps += 1

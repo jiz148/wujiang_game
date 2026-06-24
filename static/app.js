@@ -186,7 +186,9 @@ function unitsCanOverlapOnBoard(left, right) {
   return left.mounted_on_unit_id === right.id
     || right.mounted_on_unit_id === left.id
     || left.ridden_by_unit_id === right.id
-    || right.ridden_by_unit_id === left.id;
+    || right.ridden_by_unit_id === left.id
+    || (left.allow_enemy_destination_overlap && left.player_id !== right.player_id)
+    || (right.allow_enemy_destination_overlap && right.player_id !== left.player_id);
 }
 
 function boardPieceZIndex(unit) {
@@ -1159,12 +1161,18 @@ function setStagedPatternCells(cells) {
 
 function stagedMovePath(action = selectedAction()) {
   if (!action || state.selectedActionCode !== action.code || !movePathSelection(action)) return [];
-  return normalizedPatternCells(Array.isArray(state.stagedPayload?.path) ? state.stagedPayload.path : []);
+  return normalizedMovePath(Array.isArray(state.stagedPayload?.path) ? state.stagedPayload.path : []);
 }
 
 function setStagedMovePath(path) {
-  const normalized = normalizedPatternCells(path);
+  const normalized = normalizedMovePath(path);
   state.stagedPayload = normalized.length ? { path: normalized } : null;
+}
+
+function normalizedMovePath(path = []) {
+  return path
+    .filter((cell) => cell && cell.x != null && cell.y != null)
+    .map((cell) => ({ x: Number(cell.x), y: Number(cell.y) }));
 }
 
 function normalizedTargetIds(ids = []) {
@@ -1334,10 +1342,12 @@ function movePathAnchorForClickedCell(action, clickedCell, chosen = stagedMovePa
 
 function movePathIndexForClickedCell(action, clickedCell, chosen = stagedMovePath(action)) {
   if (!movePathSelection(action)) return -1;
-  return chosen.findIndex((anchor) => (
-    sameCell(anchor, clickedCell)
-    || unitFootprintCellsAt(selectedUnit(), anchor).some((cell) => sameCell(cell, clickedCell))
-  ));
+  for (let index = chosen.length - 1; index >= 0; index -= 1) {
+    const anchor = chosen[index];
+    if (sameCell(anchor, clickedCell)
+      || unitFootprintCellsAt(selectedUnit(), anchor).some((cell) => sameCell(cell, clickedCell))) return index;
+  }
+  return -1;
 }
 
 function nextMovePathCells(action, chosen = stagedMovePath(action)) {
@@ -1346,14 +1356,12 @@ function nextMovePathCells(action, chosen = stagedMovePath(action)) {
   const maxSteps = movePathMaxSteps(action);
   if (!unit?.position || !head || !state.battle || chosen.length >= maxSteps) return [];
   const next = [];
-  const chosenKeys = positionsToSet(chosen);
   for (let dx = -1; dx <= 1; dx += 1) {
     for (let dy = -1; dy <= 1; dy += 1) {
       if (dx === 0 && dy === 0) continue;
       const candidate = { x: head.x + dx, y: head.y + dy };
       if (!cellInBounds(candidate)) continue;
-      if (chosenKeys.has(positionKey(candidate))) continue;
-      if (cellBlockedForMover(unit, candidate)) continue;
+      if (cellBlockedForMover(unit, candidate) && !unit.ignore_units_while_moving) continue;
       next.push(candidate);
     }
   }
@@ -1361,7 +1369,8 @@ function nextMovePathCells(action, chosen = stagedMovePath(action)) {
 }
 
 function movePathCanComplete(action, chosen = stagedMovePath(action)) {
-  return Boolean(movePathSelection(action) && chosen.length);
+  const unit = selectedUnit();
+  return Boolean(movePathSelection(action) && chosen.length && unit && !cellBlockedForMover(unit, chosen[chosen.length - 1]));
 }
 
 function multiUnitSelectionCanComplete(action, chosen = stagedMultiTargetIds(action)) {
@@ -3842,16 +3851,18 @@ function onBoardClick(x, y, occupant) {
   if (movePathSelection(action)) {
     const chosenPath = stagedMovePath(action);
     const clickedCell = { x, y };
+    const nextAnchor = movePathAnchorForClickedCell(action, clickedCell, chosenPath);
+    if (nextAnchor) {
+      setStagedMovePath([...chosenPath, nextAnchor]);
+      render();
+      return;
+    }
     const existingIndex = movePathIndexForClickedCell(action, clickedCell, chosenPath);
     if (existingIndex >= 0) {
       setStagedMovePath(chosenPath.slice(0, existingIndex));
       render();
       return;
     }
-    const nextAnchor = movePathAnchorForClickedCell(action, clickedCell, chosenPath);
-    if (!nextAnchor) return;
-    setStagedMovePath([...chosenPath, nextAnchor]);
-    render();
     return;
   }
 

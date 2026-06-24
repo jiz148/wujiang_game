@@ -14,7 +14,7 @@ if str(SRC) not in sys.path:
 
 from wujiang.engine.core import Position, QueuedAction, ReactionWindow  # noqa: E402
 from wujiang.heroes.registry import create_battle  # noqa: E402
-from wujiang.web.multiplayer import RoomError, RoomRegistry, random_room_hero_codes  # noqa: E402
+from wujiang.web.multiplayer import RoomError, RoomRegistry, hero_lookup, random_room_hero_codes  # noqa: E402
 from wujiang.web.server import normalize_public_base_url  # noqa: E402
 
 
@@ -48,6 +48,24 @@ class MultiplayerRoomTests(unittest.TestCase):
         self.assertEqual(len(player1_roster), 3)
         self.assertEqual(len(player2_roster), 3)
         self.assertEqual(len(set(player1_roster + player2_roster)), 6)
+
+    def test_random_and_manual_selection_exclude_unimplemented_excel_heroes(self) -> None:
+        selectable_codes = set(hero_lookup())
+        self.assertIn("excel_r030", selectable_codes)
+        self.assertIn("excel_r031", selectable_codes)
+        self.assertIn("excel_r032", selectable_codes)
+        self.assertIn("excel_r033", selectable_codes)
+        self.assertIn("excel_r034", selectable_codes)
+        self.assertIn("excel_r035", selectable_codes)
+        self.assertNotIn("excel_r038", selectable_codes)
+
+        with mock.patch("wujiang.web.multiplayer.random.sample", side_effect=lambda population, count: list(population)[:count]):
+            player1_roster, player2_roster = random_room_hero_codes(3)
+        self.assertNotIn("excel_r038", set(player1_roster + player2_roster))
+
+        room, _, host_token = self.registry.create_room("Alice")
+        with self.assertRaises(RoomError):
+            room.select_hero(host_token, "excel_r038")
 
     def test_create_and_join_room_assign_distinct_player_seats(self) -> None:
         room, host_player_id, host_token = self.registry.create_room("Alice")

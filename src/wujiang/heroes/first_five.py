@@ -322,6 +322,14 @@ class FateKickSkill(Skill):
     def __init__(self) -> None:
         super().__init__("fate_kick", "命运飞踢", "直线冲刺至多 4 格，再判定前方单位；硬币正面则自己消失 1轮，反面则目标消失 1轮。", cooldown_turns=2, target_mode="cell")
 
+    def can_use(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok:
+            return ok, reason
+        if actor.cannot_move:
+            return False, f"{actor.name} 当前无法移动。"
+        return True, ""
+
     def reaction_window_timing(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> str:
         return "after"
 
@@ -385,7 +393,7 @@ class FateKickSkill(Skill):
             )
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
-        if actor.position is None:
+        if actor.position is None or actor.cannot_move:
             return {"cells": [], "target_unit_ids": [], "secondary_cells": [], "requires_target": True}
         cells = battle.reachable_positions(actor, max_distance=4, straight_only=True, ignore_units=True)
         return {"cells": [cell.to_dict() for cell in cells], "target_unit_ids": [], "secondary_cells": [], "requires_target": True}

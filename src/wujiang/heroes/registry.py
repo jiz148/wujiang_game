@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Callable, Sequence
 
 from wujiang.engine.core import Battle, Position
-from wujiang.heroes.excel_roster import EXCEL_HERO_REGISTRY
+from wujiang.heroes.excel_roster import EXCEL_HERO_REGISTRY, IMPLEMENTED_EXCEL_HERO_CODES
 from wujiang.heroes.first_five import Bard, DarkHuman, EliteSoldier, Ellie, FireFuneral
 from wujiang.heroes.next_five import BloodEater, Chanter, DoomlightDragon, DragonRider, ElementHunter, ErasureApostle, Jade, Li, Masamune, N, RockGod, SoulWraith, UndeadKingLina
 
@@ -58,6 +58,8 @@ def create_hero(hero_code: str, player_id: int):
 def list_heroes() -> list[dict[str, object]]:
     result = []
     for code, factory in HERO_REGISTRY.items():
+        if code.startswith("excel_") and code not in IMPLEMENTED_EXCEL_HERO_CODES:
+            continue
         unit = factory(1)
         result.append(
             {
