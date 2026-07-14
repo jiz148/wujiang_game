@@ -38,6 +38,7 @@ pip-delete-this-directory.txt
 
 # Unit test / coverage reports
 htmlcov/
+.runtime/
 .tox/
 .nox/
 .coverage
@@ -214,3 +215,9 @@ replays/
 
 # Local generated audit reports
 reports/
+
+# Local SQLite state for accounts / long-running game saves
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm

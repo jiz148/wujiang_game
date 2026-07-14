@@ -42,6 +42,17 @@
           </div>
 
           <div id="room-home" class="room-home">
+            <section class="mode-gateway">
+              <div class="mode-gateway-copy">
+                <span class="meta-label">选择玩法</span>
+                <strong>先进入一个可玩的模式</strong>
+                <span class="meta-note">想经营城邦就进入英灵城邦；想快速对战就进入武将对战。</span>
+              </div>
+              <div class="mode-gateway-actions">
+                <button id="focus-strategy-mode" class="primary" type="button">英灵城邦战役</button>
+                <button id="focus-duel-mode" class="ghost" type="button">武将对战房间</button>
+              </div>
+            </section>
             <section class="identity-card">
               <div>
                 <span class="meta-label">当前昵称</span>
@@ -51,16 +62,42 @@
               <button id="identity-edit" class="ghost">修改昵称</button>
             </section>
 
+            <section class="identity-card auth-card">
+              <div>
+                <span class="meta-label">账号</span>
+                <strong id="auth-display-name">未登录</strong>
+                <span id="auth-display-note" class="meta-note">战略模式存档会绑定到登录账号；当前房间测试仍可使用临时昵称。</span>
+                <span id="auth-message" class="auth-message"></span>
+              </div>
+              <div id="auth-form" class="auth-form">
+                <div class="auth-fields">
+                  <label>
+                    <span>用户名</span>
+                    <input id="auth-username" type="text" maxlength="32" autocomplete="username" />
+                  </label>
+                  <label>
+                    <span>密码</span>
+                    <input id="auth-password" type="password" maxlength="128" autocomplete="current-password" />
+                  </label>
+                </div>
+                <div class="auth-actions">
+                  <button id="auth-login" class="ghost" type="button">登录</button>
+                  <button id="auth-register" class="primary" type="button">注册</button>
+                  <button id="auth-logout" class="ghost hidden" type="button">退出登录</button>
+                </div>
+              </div>
+            </section>
+
             <div class="room-home-grid">
               <section class="room-entry-card">
                 <h3>创建房间</h3>
-                <p>使用当前昵称创建房间，并生成可分享的邀请链接。</p>
+                <p>登录后使用当前昵称创建房间，并生成可分享的邀请链接。</p>
                 <button id="create-room" class="primary">创建房间</button>
               </section>
 
               <section class="room-entry-card">
                 <h3>加入房间</h3>
-                <p>输入房间码后，直接以当前昵称加入朋友已经创建好的房间。</p>
+                <p>登录后输入房间码，以当前昵称加入朋友已经创建好的房间。</p>
                 <label>
                   <span>房间码</span>
                   <input id="join-room-code" type="text" maxlength="6" placeholder="例如：A7K9Q2" />
@@ -68,6 +105,42 @@
                 <button id="join-room" class="primary">加入房间</button>
               </section>
             </div>
+
+            <section id="strategy-panel" class="strategy-panel">
+              <div class="section-head">
+                <div>
+                  <h3>英灵城邦</h3>
+                  <p id="strategy-caption">登录后可以创建、恢复并推进长期战略沙盒。</p>
+                </div>
+                <div class="strategy-actions">
+                  <button id="strategy-refresh" class="ghost" type="button">刷新</button>
+                  <button id="strategy-advance-month" class="primary" type="button">推进一月</button>
+                </div>
+              </div>
+              <div class="strategy-create-row">
+                <label>
+                  <span>战役名</span>
+                  <input id="strategy-name" type="text" maxlength="40" value="英灵城邦" />
+                </label>
+                <label>
+                  <span>种子</span>
+                  <input id="strategy-seed" type="number" step="1" value="1" />
+                </label>
+                <label>
+                  <span>初始玩家</span>
+                  <input id="strategy-player-count" type="number" min="1" max="6" step="1" value="2" />
+                </label>
+                <button id="strategy-create" class="primary" type="button">创建战役</button>
+                <label>
+                  <span>加入码</span>
+                  <input id="strategy-join-code" type="text" maxlength="6" placeholder="ABC234" />
+                </label>
+                <button id="strategy-join" class="ghost" type="button">加入战役</button>
+              </div>
+              <div id="strategy-message" class="strategy-message"></div>
+              <div id="strategy-campaign-list" class="strategy-campaign-list"></div>
+              <div id="strategy-current" class="strategy-current"></div>
+            </section>
 
             <div id="resume-room-panel" class="draft-note hidden">
               <span id="resume-room-text">检测到这个浏览器之前进入过当前房间。</span>
@@ -221,6 +294,7 @@
                     <h3 id="game-over-title">游戏结束</h3>
                     <p id="game-over-text">本局对战已经结束。</p>
                     <div class="game-over-actions">
+                      <button id="game-over-strategy" class="ghost hidden">返回战役</button>
                       <button id="game-over-rematch" class="primary">重新开始选将</button>
                       <button id="game-over-back" class="ghost">返回房间大厅</button>
                     </div>

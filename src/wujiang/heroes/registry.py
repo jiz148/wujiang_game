@@ -8,6 +8,15 @@ from wujiang.engine.core import Battle, Position
 from wujiang.heroes.excel_roster import EXCEL_HERO_REGISTRY, IMPLEMENTED_EXCEL_HERO_CODES
 from wujiang.heroes.first_five import Bard, DarkHuman, EliteSoldier, Ellie, FireFuneral
 from wujiang.heroes.next_five import BloodEater, Chanter, DoomlightDragon, DragonRider, ElementHunter, ErasureApostle, Jade, Li, Masamune, N, RockGod, SoulWraith, UndeadKingLina
+from wujiang.heroes.strategy_soldiers import (
+    StrategyArcher,
+    StrategyCavalry,
+    StrategyEtherScout,
+    StrategyGarrison,
+    StrategyInfantry,
+    StrategyMountainSoldier,
+    StrategyWallEngineer,
+)
 
 
 HeroFactory = Callable[[int], object]
@@ -32,6 +41,13 @@ HERO_REGISTRY: dict[str, HeroFactory] = {
     "erasure_apostle": ErasureApostle,
     "dragon_rider": DragonRider,
     "soul_wraith": SoulWraith,
+    "strategy_infantry": StrategyInfantry,
+    "strategy_garrison": StrategyGarrison,
+    "strategy_archer": StrategyArcher,
+    "strategy_cavalry": StrategyCavalry,
+    "strategy_mountain_soldier": StrategyMountainSoldier,
+    "strategy_ether_scout": StrategyEtherScout,
+    "strategy_wall_engineer": StrategyWallEngineer,
 }
 HERO_REGISTRY.update(EXCEL_HERO_REGISTRY)
 
@@ -58,6 +74,8 @@ def create_hero(hero_code: str, player_id: int):
 def list_heroes() -> list[dict[str, object]]:
     result = []
     for code, factory in HERO_REGISTRY.items():
+        if code.startswith("strategy_"):
+            continue
         if code.startswith("excel_") and code not in IMPLEMENTED_EXCEL_HERO_CODES:
             continue
         unit = factory(1)

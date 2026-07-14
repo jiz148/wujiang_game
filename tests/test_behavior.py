@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -26,8 +29,11 @@ from wujiang.heroes.excel_roster import KingsInsightField, SkillDisabledStatus  
 from wujiang.heroes.first_five import MedusaSummon  # noqa: E402
 from wujiang.heroes.next_five import BloodDanceLockStatus, ErasureCounterStatus  # noqa: E402
 from wujiang.heroes.registry import create_battle, create_hero  # noqa: E402
+from wujiang.strategy import StrategyStore, declare_city_attack, ensure_office_system, strategic_hero_pool_public, summon_strategic_hero  # noqa: E402
+from wujiang.web.auth import UserStore  # noqa: E402
 from wujiang.web.ai import attack_payloads_for_action, build_attack_candidates, build_move_candidates, build_reaction_candidates, build_skill_candidates, choose_chain_reaction, choose_turn_action, choose_turn_bundle_action, difficulty_profile, payload_is_legal, reaction_payload_is_legal, reaction_payloads_for_option  # noqa: E402
 from wujiang.web.multiplayer import GameRoom, ROOMS, battle_state_for_viewer  # noqa: E402
+import wujiang.web.server as server_module  # noqa: E402
 from wujiang.web.server import SESSION, WujiangHandler, configure_public_base_url  # noqa: E402
 
 
@@ -1242,14 +1248,117 @@ class RoomBehaviorTests(unittest.TestCase):
     def setUp(self) -> None:
         ROOMS._rooms.clear()  # type: ignore[attr-defined]
         SESSION.battle = None
+        self.auth_tmpdir = tempfile.TemporaryDirectory()
+        server_module.AUTH_STORE = UserStore(Path(self.auth_tmpdir.name) / "auth.sqlite3")
+        server_module.STRATEGY_STORE = StrategyStore(Path(self.auth_tmpdir.name) / "strategy.sqlite3")
+        self._default_session_token: str | None = None
+
+    def tearDown(self) -> None:
+        self.auth_tmpdir.cleanup()
 
     def api_get(self, path: str, *, params: dict[str, str] | None = None) -> dict:
         query = f"?{urlencode(params)}" if params else ""
         with urlopen(f"http://127.0.0.1:{self.port}{path}{query}") as response:
             return json.loads(response.read().decode("utf-8"))
 
+    def api_get_error(self, path: str, *, params: dict[str, str] | None = None) -> tuple[int, dict]:
+        query = f"?{urlencode(params)}" if params else ""
+        try:
+            with urlopen(f"http://127.0.0.1:{self.port}{path}{query}") as response:
+                return response.status, json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+
+    def default_session_token(self) -> str:
+        if self._default_session_token is None:
+            payload = self.api_post(
+                "/api/auth/register",
+                {"username": "TestUser", "password": "secret123"},
+            )
+            self._default_session_token = payload["session_token"]
+        return self._default_session_token
+
+    def _bind_test_action_office(self, path: str, payload: dict) -> None:
+        campaign_id = payload.get("campaign_id")
+        if campaign_id is None:
+            return
+        action_payload = payload.get("action_payload") if isinstance(payload.get("action_payload"), dict) else payload
+        if action_payload.get("issuer_office_id"):
+            return
+        action_type = str(payload.get("action_type") or "")
+        office_type = ""
+        city_id = ""
+        if path.endswith("/advance-month") or path.endswith("/unlock-tactic-tech"):
+            office_type = "lord"
+        elif path.endswith("/set-city-policy"):
+            office_type, city_id = "governor", str(payload.get("city_id") or "")
+        elif path.endswith("/set-defense-hero"):
+            office_type = "grand_general"
+        elif path.endswith("/set-battle-defense-hero"):
+            office_type = "general"
+        elif path.endswith("/declare-attack"):
+            office_type, city_id = "general", str(payload.get("source_city_id") or "")
+        elif path.endswith("/queue-action"):
+            city_id = str(action_payload.get("city_id") or action_payload.get("source_city_id") or "")
+            if action_type in {"set_city_policy", "rebellion_action", "rebellion_battle", "resolve_story_event"}:
+                office_type = "governor"
+            elif action_type in {"increase_city_troops", "register_city_soldiers", "construct_city_building", "perform_hero_ritual"}:
+                office_type = "governor"
+            elif action_type in {"transfer_registered_units", "approve_registered_unit_request"}:
+                office_type = "grand_general"
+            elif action_type == "request_registered_units":
+                office_type = "general"
+            elif action_type == "declare_attack":
+                office_type = "general"
+            elif action_type in {
+                "unlock_tactic_tech",
+                "unbind_strategic_hero",
+                "exile_action",
+                "assign_strategic_hero_duty",
+            }:
+                office_type = "lord"
+        if not office_type:
+            return
+        token = str(payload.get("session_token") or self.default_session_token())
+        user = server_module.AUTH_STORE.user_for_session(token)
+        campaign = server_module.STRATEGY_STORE.get_campaign_for_user(int(campaign_id), user.user_id)
+        member = next(item for item in campaign.members if item.user_id == user.user_id)
+        if action_type == "resolve_story_event" and not city_id:
+            event_id = str(action_payload.get("event_id") or "")
+            event = next((item for item in campaign.world.story_events if item.event_id == event_id), None)
+            city_id = event.city_id if event is not None else ""
+        candidates = [
+            office
+            for office in campaign.world.offices
+            if office.faction_id == member.faction_id
+            and office.office_type == office_type
+            and (not city_id or city_id in office.managed_entity_ids or office_type in {"lord", "grand_general"})
+        ]
+        if not candidates:
+            return
+        office = sorted(candidates, key=lambda item: item.office_id)[0]
+        for item in campaign.world.offices:
+            if item.faction_id == member.faction_id and item.controller_user_id == user.user_id:
+                item.controller_type = "ai"
+                item.controller_user_id = None
+        office.controller_type = "player"
+        office.controller_user_id = user.user_id
+        for hero in campaign.world.strategic_heroes:
+            if hero.controller_user_id == user.user_id:
+                hero.controller_type = "ai"
+                hero.controller_user_id = None
+            if hero.hero_code == office.holder_id:
+                hero.controller_type = "player"
+                hero.controller_user_id = user.user_id
+        server_module.STRATEGY_STORE.update_world(int(campaign_id), user.user_id, campaign.world)
+        action_payload["issuer_office_id"] = office.office_id
+
     def api_post(self, path: str, payload: dict) -> dict:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request_payload = dict(payload)
+        if path.startswith("/api/rooms/") or path.startswith("/api/strategy/") or path in {"/api/new-game", "/api/action"}:
+            request_payload.setdefault("session_token", self.default_session_token())
+        self._bind_test_action_office(path, request_payload)
+        body = json.dumps(request_payload, ensure_ascii=False).encode("utf-8")
         request = Request(
             f"http://127.0.0.1:{self.port}{path}",
             data=body,
@@ -1258,6 +1367,1540 @@ class RoomBehaviorTests(unittest.TestCase):
         )
         with urlopen(request) as response:
             return json.loads(response.read().decode("utf-8"))
+
+    def api_post_error(self, path: str, payload: dict) -> tuple[int, dict]:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            data=body,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST",
+        )
+        try:
+            with urlopen(request) as response:
+                return response.status, json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+
+    def test_scenario_user_can_register_login_query_and_logout(self) -> None:
+        registered = self.api_post("/api/auth/register", {"username": "Alice", "password": "secret123"})
+        token = registered["session_token"]
+
+        self.assertEqual(registered["user"]["username"], "Alice")
+        self.assertTrue(token)
+
+        me = self.api_get("/api/auth/me", params={"session_token": token})
+        self.assertEqual(me["user"]["username"], "Alice")
+
+        self.api_post("/api/auth/logout", {"session_token": token})
+        status, expired = self.api_get_error("/api/auth/me", params={"session_token": token})
+        self.assertEqual(status, 401)
+        self.assertIn("error", expired)
+
+        logged_in = self.api_post("/api/auth/login", {"username": "alice", "password": "secret123"})
+        self.assertEqual(logged_in["user"]["username"], "Alice")
+        self.assertNotEqual(logged_in["session_token"], token)
+
+        status, bad_login = self.api_post_error(
+            "/api/auth/login",
+            {"username": "Alice", "password": "wrong-password"},
+        )
+        self.assertEqual(status, 401)
+        self.assertIn("error", bad_login)
+
+    def test_scenario_room_entry_requires_login(self) -> None:
+        status, create_error = self.api_post_error("/api/rooms/create", {"player_name": "Alice"})
+        self.assertEqual(status, 401)
+        self.assertIn("登录", create_error["error"])
+
+        created = self.api_post("/api/rooms/create", {"player_name": "Alice"})
+        room_id = created["room"]["room_id"]
+
+        status, join_error = self.api_post_error(
+            "/api/rooms/join",
+            {"room_id": room_id, "player_name": "Bob"},
+        )
+        self.assertEqual(status, 401)
+        self.assertIn("登录", join_error["error"])
+
+    def test_scenario_strategy_campaign_create_list_enter_and_resume(self) -> None:
+        status, create_error = self.api_post_error(
+            "/api/strategy/campaigns/create",
+            {"name": "未登录战役"},
+        )
+        self.assertEqual(status, 401)
+        self.assertIn("登录", create_error["error"])
+
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "英灵城邦", "seed": 90, "city_count": 6, "faction_count": 2},
+        )
+        campaign = created["campaign"]
+        campaign_id = campaign["id"]
+
+        self.assertEqual(campaign["name"], "英灵城邦")
+        self.assertEqual(campaign["world"]["seed"], 90)
+        self.assertEqual(len(campaign["world"]["cities"]), 6)
+        self.assertEqual(campaign["resume"]["can_resume"], False)
+        self.assertEqual(campaign["resume"]["missing_initial_user_ids"], [])
+
+        listed = self.api_get(
+            "/api/strategy/campaigns",
+            params={"session_token": self.default_session_token()},
+        )
+        self.assertEqual([item["id"] for item in listed["campaigns"]], [campaign_id])
+
+        entered = self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.assertFalse(entered["campaign"]["resume"]["can_resume"])
+        self.assertEqual(entered["campaign"]["resume"]["missing_initial_user_ids"], [])
+
+        locked = self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+        self.assertEqual(locked["campaign"]["status"], "active")
+        self.assertTrue(locked["campaign"]["resume"]["can_resume"])
+
+        resumed = self.api_post("/api/strategy/campaigns/resume", {"campaign_id": campaign_id})
+        self.assertTrue(resumed["campaign"]["resume"]["can_resume"])
+        self.assertEqual(resumed["campaign"]["id"], campaign_id)
+
+        left = self.api_post("/api/strategy/campaigns/leave", {"campaign_id": campaign_id})
+        self.assertFalse(left["resume"]["can_resume"])
+
+    def test_scenario_player_selects_hero_and_founds_persistent_faction(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "武将建国", "seed": 901, "city_count": 6, "faction_count": 2},
+        )["campaign"]
+        roaming = next(hero for hero in created["world"]["strategic_hero_pool"] if hero["status"] == "roaming")
+
+        founded = self.api_post(
+            "/api/strategy/campaigns/choose-hero-path",
+            {
+                "campaign_id": created["id"],
+                "hero_code": roaming["code"],
+                "path": "found",
+            },
+        )["campaign"]
+        controlled = next(
+            hero
+            for hero in founded["world"]["strategic_hero_pool"]
+            if hero["controller_type"] == "player"
+        )
+        member = next(item for item in founded["members"] if item["user_id"] == founded["owner_user_id"])
+        capital = next(city for city in founded["world"]["cities"] if city["id"] == controlled["city_id"])
+
+        self.assertEqual(len(founded["world"]["factions"]), 3)
+        self.assertEqual((controlled["status"], controlled["faction_id"]), ("serving", member["faction_id"]))
+        self.assertEqual(capital["owner_faction_id"], member["faction_id"])
+        self.assertEqual(
+            [hero["code"] for hero in founded["world"]["strategic_hero_pool"] if hero["faction_id"] == member["faction_id"]],
+            [controlled["code"]],
+        )
+        self.assertTrue(
+            any(
+                office["status"] == "vacant"
+                for office in founded["world"]["offices"]
+                if office["faction_id"] == member["faction_id"] and office["office_type"] != "lord"
+            )
+        )
+
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": created["id"]})
+        another = next(
+            hero
+            for hero in founded["world"]["strategic_hero_pool"]
+            if hero["status"] == "roaming" and hero["code"] != controlled["code"]
+        )
+        status, error = self.api_post_error(
+            "/api/strategy/campaigns/choose-hero-path",
+            {
+                "campaign_id": created["id"],
+                "hero_code": another["code"],
+                "path": "roaming",
+                "session_token": self.default_session_token(),
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("不能改为控制另一名武将", error["error"])
+
+    def test_scenario_strategy_campaign_join_code_lock_and_multiplayer_resume_gate(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "åŒäººåŸŽé‚¦", "seed": 95, "city_count": 6, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        join_code = created["campaign"]["join_code"]
+        bob = self.api_post(
+            "/api/auth/register",
+            {"username": "BobUser", "password": "secret123"},
+        )
+        carol = self.api_post(
+            "/api/auth/register",
+            {"username": "CarolUser", "password": "secret123"},
+        )
+
+        status, forbidden_rotate = self.api_post_error(
+            "/api/strategy/campaigns/rotate-join-code",
+            {"campaign_id": campaign_id, "session_token": bob["session_token"]},
+        )
+        self.assertEqual(status, 403)
+        self.assertIn("重新生成加入码", forbidden_rotate["error"])
+
+        rotated = self.api_post(
+            "/api/strategy/campaigns/rotate-join-code",
+            {"campaign_id": campaign_id},
+        )
+        rotated_code = rotated["campaign"]["join_code"]
+        self.assertNotEqual(rotated_code, join_code)
+
+        status, old_code_join = self.api_post_error(
+            "/api/strategy/campaigns/join",
+            {"join_code": join_code, "session_token": bob["session_token"]},
+        )
+        self.assertEqual(status, 404)
+        self.assertIn("加入码不存在", old_code_join["error"])
+        join_code = rotated_code
+
+        joined = self.api_post(
+            "/api/strategy/campaigns/join",
+            {"join_code": join_code.lower(), "session_token": bob["session_token"]},
+        )
+        self.assertEqual(joined["campaign"]["id"], campaign_id)
+        self.assertEqual(joined["campaign"]["status"], "lobby")
+        self.assertEqual([member["username"] for member in joined["campaign"]["members"]], ["TestUser", "BobUser"])
+        self.assertEqual(joined["campaign"]["resume"]["missing_initial_user_ids"], [])
+
+        status, forbidden_lock = self.api_post_error(
+            "/api/strategy/campaigns/lock",
+            {"campaign_id": campaign_id, "session_token": bob["session_token"]},
+        )
+        self.assertEqual(status, 403)
+        self.assertIn("锁定初始玩家", forbidden_lock["error"])
+
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        bob_entered = self.api_post(
+            "/api/strategy/campaigns/enter",
+            {"campaign_id": campaign_id, "session_token": bob["session_token"]},
+        )
+        self.assertFalse(bob_entered["campaign"]["resume"]["can_resume"])
+
+        locked = self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+        self.assertTrue(locked["campaign"]["resume"]["can_resume"])
+
+        status, locked_join = self.api_post_error(
+            "/api/strategy/campaigns/join",
+            {"join_code": join_code, "session_token": carol["session_token"]},
+        )
+        self.assertEqual(status, 409)
+        self.assertIn("已经锁定", locked_join["error"])
+
+        bob_left = self.api_post(
+            "/api/strategy/campaigns/leave",
+            {"campaign_id": campaign_id, "session_token": bob["session_token"]},
+        )
+        self.assertFalse(bob_left["resume"]["can_resume"])
+
+        status, blocked_resume = self.api_post_error(
+            "/api/strategy/campaigns/resume",
+            {"campaign_id": campaign_id, "session_token": self.default_session_token()},
+        )
+        self.assertEqual(status, 409)
+        self.assertIn("所有初始玩家在线", blocked_resume["error"])
+
+        bob_reentered = self.api_post(
+            "/api/strategy/campaigns/enter",
+            {"campaign_id": campaign_id, "session_token": bob["session_token"]},
+        )
+        self.assertTrue(bob_reentered["campaign"]["resume"]["can_resume"])
+        bob_faction_id = next(
+            member["faction_id"]
+            for member in bob_reentered["campaign"]["members"]
+            if member["username"] == "BobUser"
+        )
+        bob_city_id = next(
+            city["id"]
+            for city in bob_reentered["campaign"]["world"]["cities"]
+            if city["owner_faction_id"] == bob_faction_id
+        )
+        bob_policy = self.api_post(
+            "/api/strategy/campaigns/set-city-policy",
+            {
+                "campaign_id": campaign_id,
+                "city_id": bob_city_id,
+                "policy": "征兵优先",
+                "session_token": bob["session_token"],
+            },
+        )
+        self.assertEqual(
+            next(city for city in bob_policy["campaign"]["world"]["cities"] if city["id"] == bob_city_id)["policy"],
+            "征兵优先",
+        )
+
+        status, bob_advance = self.api_post_error(
+            "/api/strategy/campaigns/advance-month",
+            {"campaign_id": campaign_id, "session_token": bob["session_token"]},
+        )
+        self.assertEqual(status, 403)
+        self.assertIn("房主", bob_advance["error"])
+
+    def test_scenario_strategy_campaign_resume_rejects_non_member(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "私有战役", "seed": 91},
+        )
+        campaign_id = created["campaign"]["id"]
+        other = self.api_post(
+            "/api/auth/register",
+            {"username": "OtherUser", "password": "secret123"},
+        )
+        status, forbidden = self.api_post_error(
+            "/api/strategy/campaigns/enter",
+            {"campaign_id": campaign_id, "session_token": other["session_token"]},
+        )
+
+        self.assertEqual(status, 403)
+        self.assertIn("不是这个战役的成员", forbidden["error"])
+
+    def test_scenario_strategy_campaign_advances_one_month_after_resume_gate(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "月度结算战役", "seed": 92, "city_count": 6, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+
+        status, blocked = self.api_post_error(
+            "/api/strategy/campaigns/advance-month",
+            {"campaign_id": campaign_id, "session_token": self.default_session_token()},
+        )
+        self.assertEqual(status, 409)
+        self.assertIn("锁定初始玩家", blocked["error"])
+
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+        advanced = self.api_post("/api/strategy/campaigns/advance-month", {"campaign_id": campaign_id})
+        world = advanced["campaign"]["world"]
+
+        self.assertTrue(advanced["campaign"]["resume"]["can_resume"])
+        self.assertEqual(world["current_month"], 2)
+        self.assertIn("month_2_resolved", world["memory_tags"])
+        self.assertTrue(any(event["category"] == "city_income" for event in world["event_log"]))
+
+    def test_scenario_strategy_month_advance_runs_unclaimed_faction_ai(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "strategy ai month", "seed": 925, "city_count": 6, "faction_count": 3},
+        )
+        campaign_id = created["campaign"]["id"]
+        campaign = server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, 1)
+        high_risk_ai_city_id = ""
+        for faction in campaign.world.factions:
+            if faction.faction_id in {"faction_2", "faction_3"}:
+                faction.resources.ether = 1000
+        for city in campaign.world.cities:
+            if city.owner_faction_id == "faction_2" and not high_risk_ai_city_id:
+                high_risk_ai_city_id = city.city_id
+                city.support_by_faction["faction_2"] = 5
+                city.resources.food = 10000
+                city.resources.population = 1200
+                city.resources.troops = 1000
+                city.policy = next(
+                    policy for policy in campaign.world.to_public_dict()["policy_choices"] if "稳定" in policy
+                )
+        server_module.STRATEGY_STORE.update_world(campaign_id, 1, campaign.world)
+
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        locked = self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+        locked_members_by_faction = {member["faction_id"]: member for member in locked["campaign"]["members"]}
+        self.assertEqual(locked_members_by_faction["faction_2"]["role"], "ai")
+        self.assertEqual(locked_members_by_faction["faction_3"]["role"], "ai")
+        self.assertLess(locked_members_by_faction["faction_2"]["user_id"], 0)
+        self.assertEqual(locked["campaign"]["resume"]["initial_user_ids"], [1])
+        self.assertTrue(locked["campaign"]["resume"]["can_resume"])
+        advanced = self.api_post("/api/strategy/campaigns/advance-month", {"campaign_id": campaign_id})
+        world = advanced["campaign"]["world"]
+        factions = {faction["id"]: faction for faction in world["factions"]}
+        ai_events = [
+            event
+            for event in world["event_log"]
+            if event["category"] == "strategy_ai_plan"
+        ]
+
+        self.assertEqual(world["current_month"], 2)
+        self.assertEqual(factions["faction_1"]["tactic_techs"], [])
+        self.assertEqual(factions["faction_2"]["tactic_techs"], ["local_militia"])
+        self.assertEqual(factions["faction_3"]["tactic_techs"], ["local_militia"])
+        self.assertEqual(world["hero_recruitments"], [])
+        self.assertTrue(any(tag.startswith("strategic_hero_defender:") for tag in factions["faction_2"]["memory_tags"]))
+        self.assertTrue(any(tag.startswith("strategic_hero_defender:") for tag in factions["faction_3"]["memory_tags"]))
+        high_risk_ai_city = next(city for city in world["cities"] if city["id"] == high_risk_ai_city_id)
+        self.assertIn("镇压", high_risk_ai_city["policy"])
+        self.assertEqual({event["related_ids"][0] for event in ai_events}, {"faction_2", "faction_3"})
+        self.assertFalse(any(event["category"].startswith("hero_recruitment_") for event in world["event_log"]))
+
+    @unittest.skip("Superseded: one hero cannot queue governor and general actions then become lord for settlement.")
+    def test_scenario_strategy_queued_actions_resolve_on_host_month_advance(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "queued strategy actions", "seed": 94, "city_count": 6, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+
+        city = created["campaign"]["world"]["cities"][0]
+        new_policy = next(
+            policy
+            for policy in created["campaign"]["world"]["policy_choices"]
+            if policy != city["policy"]
+        )
+        queued_policy = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "set_city_policy",
+                "action_payload": {"city_id": city["id"], "policy": new_policy},
+            },
+        )
+
+        self.assertEqual(len(queued_policy["campaign"]["queued_actions"]), 1)
+        self.assertEqual(queued_policy["campaign"]["queued_actions"][0]["action_type"], "set_city_policy")
+        self.assertEqual(queued_policy["campaign"]["queued_actions"][0]["payload"]["policy"], new_policy)
+
+        queued_attack = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "declare_attack",
+                "action_payload": {
+                    "source_city_id": "city_1",
+                    "target_city_id": "city_2",
+                    "resolution_mode": "quick",
+                },
+            },
+        )
+        self.assertEqual(len(queued_attack["campaign"]["queued_actions"]), 2)
+
+        queued_manual = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "declare_attack",
+                "action_payload": {
+                    "source_city_id": "city_1",
+                    "target_city_id": "city_2",
+                    "resolution_mode": "manual",
+                },
+                "session_token": self.default_session_token(),
+            },
+        )
+        self.assertEqual(len(queued_manual["campaign"]["queued_actions"]), 2)
+        self.assertEqual(queued_manual["campaign"]["queued_actions"][-1]["payload"]["resolution_mode"], "manual")
+        self.assertEqual(queued_manual["campaign"]["queued_actions"][-1]["payload"]["attacker_hero_codes"], [])
+
+        advanced = self.api_post("/api/strategy/campaigns/advance-month", {"campaign_id": campaign_id})
+        world = advanced["campaign"]["world"]
+        changed_city = next(item for item in world["cities"] if item["id"] == city["id"])
+        queued_battle = world["pending_battles"][-1]
+
+        self.assertEqual(world["current_month"], 2)
+        self.assertEqual(changed_city["policy"], new_policy)
+        self.assertEqual(advanced["campaign"]["queued_actions"], [])
+        self.assertEqual(queued_battle["resolution_mode"], "manual")
+        self.assertEqual(queued_battle["attacker_hero_codes"], [])
+        self.assertEqual(queued_battle["status"], "pending")
+        self.assertTrue(queued_battle["battle_room_id"])
+        self.assertEqual(advanced["battle_rooms"][0]["room_id"], queued_battle["battle_room_id"])
+        self.assertTrue(advanced["battle_rooms"][0]["player_token"])
+        self.assertTrue(any(event["category"] == "battle_declared" for event in world["event_log"]))
+
+    @unittest.skip("Superseded by hero-bound office permission and command-chain scenarios.")
+    def test_scenario_strategy_office_permissions_orders_and_requests(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "office permissions", "seed": 194, "city_count": 6, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+        entered = self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})["campaign"]
+        offices = [office for office in entered["world"]["offices"] if office["faction_id"] == "faction_1"]
+        lord = next(office for office in offices if office["office_type"] == "lord")
+        governor = next(office for office in offices if office["office_type"] == "governor")
+        city = next(city for city in entered["world"]["cities"] if city["id"] in governor["managed_entity_ids"])
+        policy = next(choice for choice in entered["world"]["policy_choices"] if choice != city["policy"])
+
+        status, denied = self.api_post_error(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "set_city_policy",
+                "action_payload": {"city_id": city["id"], "policy": policy, "issuer_office_id": lord["id"]},
+                "session_token": self.default_session_token(),
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("无权", denied["error"])
+
+        queued = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "set_city_policy",
+                "action_payload": {"city_id": city["id"], "policy": policy, "issuer_office_id": governor["id"]},
+            },
+        )["campaign"]
+        policy_action = queued["queued_actions"][-1]
+        self.assertEqual(policy_action["issuer_office_id"], governor["id"])
+        self.assertEqual(policy_action["payload"]["issuer_office_id"], governor["id"])
+
+        ordered = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "issue_office_order",
+                "action_payload": {
+                    "issuer_office_id": lord["id"],
+                    "receiver_office_id": governor["id"],
+                    "objective": "稳住粮食与民心",
+                },
+            },
+        )["campaign"]
+        self.assertEqual(ordered["queued_actions"][-1]["command_cost"], 1)
+
+        requested = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "send_office_request",
+                "action_payload": {
+                    "issuer_office_id": governor["id"],
+                    "receiver_office_id": lord["id"],
+                    "objective": "请求拨付守城粮草",
+                },
+            },
+        )["campaign"]
+        self.assertEqual(requested["queued_actions"][-1]["command_cost"], 0)
+
+        advanced = self.api_post(
+            "/api/strategy/campaigns/advance-month",
+            {"campaign_id": campaign_id, "issuer_office_id": lord["id"]},
+        )["campaign"]
+        self.assertEqual(len(advanced["world"]["office_orders"]), 2)
+        self.assertEqual({order["order_type"] for order in advanced["world"]["office_orders"]}, {"order", "request"})
+
+    @unittest.skip("Superseded: this scenario mixes governor, lord, and general identities on one account.")
+    def test_scenario_strategy_city_monthly_order_limit_blocks_extra_city_orders(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "city order limit", "seed": 94, "city_count": 6, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+        entered = self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        world = entered["campaign"]["world"]
+        city = world["cities"][0]
+        new_policy = next(policy for policy in world["policy_choices"] if policy != city["policy"])
+        hero = next(item for item in world["strategic_hero_pool"] if item["home_faction_id"] == "faction_1")
+
+        self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "set_city_policy",
+                "action_payload": {"city_id": city["id"], "policy": new_policy},
+            },
+        )
+        queued_recruit = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "summon_strategic_hero",
+                "action_payload": {"city_id": city["id"], "hero_code": hero["code"]},
+            },
+        )
+        self.assertEqual(len(queued_recruit["campaign"]["queued_actions"]), 2)
+        self.assertEqual(queued_recruit["campaign"]["queued_actions"][-1]["payload"]["city_id"], city["id"])
+
+        status, payload = self.api_post_error(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "declare_attack",
+                "action_payload": {
+                    "source_city_id": "city_1",
+                    "target_city_id": "city_2",
+                    "resolution_mode": "quick",
+                },
+                "session_token": self.default_session_token(),
+            },
+        )
+        self.assertEqual(status, 409)
+        self.assertIn("每座城市每月最多 2 条军令", payload["error"])
+
+        replaced = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "set_city_policy",
+                "action_payload": {"city_id": city["id"], "policy": city["policy"]},
+            },
+        )
+        self.assertEqual(len(replaced["campaign"]["queued_actions"]), 2)
+
+    @unittest.skip("Superseded: command budgets are now exercised through one hero office at a time.")
+    def test_scenario_strategy_faction_command_points_force_monthly_tradeoffs(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "faction command budget", "seed": 94, "city_count": 6, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+        campaign = self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})["campaign"]
+        world = campaign["world"]
+        own_cities = [city for city in world["cities"] if city["owner_faction_id"] == "faction_1"]
+        source_city = next(
+            city
+            for city in own_cities
+            if any(
+                target["owner_faction_id"] != "faction_1"
+                and target["node_id"] in next(node for node in world["nodes"] if node["id"] == city["node_id"])["connected_node_ids"]
+                for target in world["cities"]
+            )
+        )
+        source_node = next(node for node in world["nodes"] if node["id"] == source_city["node_id"])
+        target_city = next(
+            city
+            for city in world["cities"]
+            if city["node_id"] in source_node["connected_node_ids"] and city["owner_faction_id"] != "faction_1"
+        )
+        other_city = next(city for city in own_cities if city["id"] != source_city["id"])
+        policy = next(choice for choice in world["policy_choices"] if choice != source_city["policy"])
+        hero = next(item for item in world["strategic_hero_pool"] if item["home_faction_id"] == "faction_1")
+
+        first = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "set_city_policy",
+                "action_payload": {"city_id": source_city["id"], "policy": policy},
+            },
+        )
+        second = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "summon_strategic_hero",
+                "action_payload": {"city_id": other_city["id"], "hero_code": hero["code"]},
+            },
+        )
+        self.assertEqual(first["campaign"]["command_points_by_faction"]["faction_1"]["remaining"], 3)
+        self.assertEqual(second["campaign"]["command_points_by_faction"]["faction_1"]["remaining"], 2)
+        self.assertEqual(second["campaign"]["queued_actions"][-1]["command_cost"], 1)
+
+        allowed_attack = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "declare_attack",
+                "action_payload": {
+                    "source_city_id": source_city["id"],
+                    "target_city_id": target_city["id"],
+                    "resolution_mode": "quick",
+                },
+            },
+        )
+        self.assertEqual(allowed_attack["campaign"]["command_points_by_faction"]["faction_1"]["remaining"], 0)
+        self.assertEqual(allowed_attack["campaign"]["queued_actions"][-1]["command_cost"], 2)
+
+        status, payload = self.api_post_error(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "set_city_policy",
+                "action_payload": {"city_id": other_city["id"], "policy": policy},
+                "session_token": self.default_session_token(),
+            },
+        )
+        self.assertEqual(status, 409)
+        self.assertIn("本势力军令不足", payload["error"])
+
+        replaced = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "set_city_policy",
+                "action_payload": {"city_id": source_city["id"], "policy": source_city["policy"]},
+            },
+        )
+        self.assertEqual(replaced["campaign"]["command_points_by_faction"]["faction_1"]["remaining"], 0)
+
+    @unittest.skip("Superseded: city-event governor and month-settlement lord are distinct hero controllers.")
+    def test_scenario_strategy_story_choice_uses_command_and_resolves_on_month_advance(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "story choice", "seed": 181, "city_count": 6, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+        campaign = self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})["campaign"]
+        event = next(
+            item
+            for item in campaign["world"]["story_events"]
+            if item["faction_id"] == "faction_1" and item["status"] == "pending"
+        )
+        choice = next(item for item in event["choices"] if item["enabled"])
+
+        queued = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "resolve_story_event",
+                "action_payload": {"event_id": event["id"], "choice_id": choice["id"]},
+            },
+        )["campaign"]
+
+        self.assertEqual(queued["command_points_by_faction"]["faction_1"]["remaining"], 3)
+        self.assertEqual(queued["queued_actions"][0]["action_type"], "resolve_story_event")
+        self.assertEqual(queued["queued_actions"][0]["command_cost"], 1)
+
+        advanced = self.api_post("/api/strategy/campaigns/advance-month", {"campaign_id": campaign_id})["campaign"]
+        resolved_event = next(item for item in advanced["world"]["story_events"] if item["id"] == event["id"])
+        self.assertEqual(resolved_event["status"], "resolved")
+        self.assertEqual(resolved_event["choice_id"], choice["id"])
+        self.assertIn(
+            f"story_choice:{event['id']}:{choice['id']}",
+            advanced["world"]["memory_tags"],
+        )
+        self.assertTrue(any(item["status"] == "pending" and item["opened_month"] == 2 for item in advanced["world"]["story_events"]))
+
+    @unittest.skip("Superseded: governor and lord must be distinct hero controllers in multiplayer settlement.")
+    def test_scenario_strategy_queued_rebellion_action_resolves_on_month_advance(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "rebellion action", "seed": 97, "city_count": 4, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        owner_user_id = created["campaign"]["owner_user_id"]
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+
+        campaign = server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, owner_user_id)
+        city = next(city for city in campaign.world.cities if city.owner_faction_id == "faction_1")
+        city.support_by_faction["faction_1"] = 70
+        city.resources.troops = 500
+        city.event_states.append("rebellion_force:100:month:1")
+        server_module.STRATEGY_STORE.update_world(campaign_id, owner_user_id, campaign.world)
+
+        queued = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "rebellion_action",
+                "action_payload": {"rebellion_action_id": "suppress", "city_id": city.city_id},
+            },
+        )
+
+        self.assertEqual(queued["campaign"]["queued_actions"][0]["action_type"], "rebellion_action")
+        self.assertIn("suppress", [choice["id"] for choice in queued["campaign"]["world"]["rebellion_action_choices"]])
+
+        advanced = self.api_post("/api/strategy/campaigns/advance-month", {"campaign_id": campaign_id})
+        world = advanced["campaign"]["world"]
+        updated_city = next(item for item in world["cities"] if item["id"] == city.city_id)
+
+        self.assertFalse(any(state.startswith("rebellion_force:") for state in updated_city["event_states"]))
+        self.assertLess(updated_city["resources"]["troops"], 500)
+        self.assertEqual(advanced["campaign"]["queued_actions"], [])
+        self.assertTrue(any(event["category"] == "rebellion_action" for event in world["event_log"]))
+        self.assertTrue(any(event["category"] == "rebellion_suppressed" for event in world["event_log"]))
+
+    @unittest.skip("Superseded: governor and lord must be distinct hero controllers in multiplayer settlement.")
+    def test_scenario_strategy_queued_rebellion_battle_resolves_on_month_advance(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "rebellion battle", "seed": 98, "city_count": 4, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        owner_user_id = created["campaign"]["owner_user_id"]
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+
+        campaign = server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, owner_user_id)
+        city = next(city for city in campaign.world.cities if city.owner_faction_id == "faction_1")
+        city.resources.troops = 500
+        city.defense = 4
+        city.support_by_faction["faction_1"] = 50
+        city.support_by_faction["local_autonomy"] = 35
+        city.event_states.append("rebellion_force:120:month:1")
+        server_module.STRATEGY_STORE.update_world(campaign_id, owner_user_id, campaign.world)
+
+        queued = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "rebellion_battle",
+                "action_payload": {"city_id": city.city_id, "troops": 160},
+            },
+        )
+
+        self.assertEqual(queued["campaign"]["queued_actions"][0]["action_type"], "rebellion_battle")
+        self.assertEqual(queued["campaign"]["queued_actions"][0]["payload"]["troops"], 160)
+
+        advanced = self.api_post("/api/strategy/campaigns/advance-month", {"campaign_id": campaign_id})
+        world = advanced["campaign"]["world"]
+        updated_city = next(item for item in world["cities"] if item["id"] == city.city_id)
+
+        self.assertFalse(any(state.startswith("rebellion_force:") for state in updated_city["event_states"]))
+        self.assertLess(updated_city["resources"]["troops"], 500)
+        self.assertEqual(advanced["campaign"]["queued_actions"], [])
+        self.assertTrue(any(event["category"] == "rebellion_battle" for event in world["event_log"]))
+        self.assertTrue(any(event["category"] == "rebellion_suppressed" for event in world["event_log"]))
+
+    @unittest.skip("Superseded: general and lord must be distinct hero controllers in multiplayer settlement.")
+    def test_scenario_strategy_queued_ai_auto_attack_runs_real_battle_on_month_advance(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "queued ai auto", "seed": 94, "city_count": 6, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+        queued = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "declare_attack",
+                "action_payload": {
+                    "source_city_id": "city_1",
+                    "target_city_id": "city_2",
+                    "resolution_mode": "ai_auto",
+                },
+            },
+        )
+
+        self.assertEqual(queued["campaign"]["queued_actions"][0]["payload"]["resolution_mode"], "ai_auto")
+
+        advanced = self.api_post("/api/strategy/campaigns/advance-month", {"campaign_id": campaign_id})
+        battle = advanced["campaign"]["world"]["pending_battles"][-1]
+        battle_room = advanced["battle_rooms"][0]
+
+        self.assertEqual(battle["resolution_mode"], "ai_auto")
+        self.assertEqual(battle["status"], "resolved")
+        self.assertEqual(battle["battle_room_id"], battle_room["room_id"])
+        self.assertEqual(battle["battle_result"]["resolution_source"], "real_grid")
+        self.assertIn(battle["battle_result"]["winner_side"], {"attacker", "defender"})
+        self.assertEqual(battle_room["status"], "finished")
+        self.assertIn(battle_room["winner"], {1, 2})
+        self.assertGreater(battle_room["simulation_steps"], 0)
+
+    def test_scenario_strategy_exiled_player_queues_exile_action_and_advances(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "exile action", "seed": 96, "city_count": 4, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        owner_user_id = created["campaign"]["owner_user_id"]
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+
+        campaign = server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, owner_user_id)
+        world = campaign.world
+        for city in world.cities:
+            city.owner_faction_id = "faction_2"
+        faction = next(item for item in world.factions if item.faction_id == "faction_1")
+        faction.resources.food = 0
+        faction.resources.money = 0
+        faction.resources.ether = 0
+        faction.resources.troops = 0
+        server_module.STRATEGY_STORE.update_world(campaign_id, owner_user_id, world)
+
+        queued = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "exile_action",
+                "action_payload": {"exile_action_id": "seek_aid"},
+            },
+        )
+
+        self.assertEqual(queued["campaign"]["queued_actions"][0]["action_type"], "exile_action")
+        self.assertIn("faction_1", queued["campaign"]["world"]["strategic_status"]["exiled_faction_ids"])
+        self.assertIn("seek_aid", [choice["id"] for choice in queued["campaign"]["world"]["exile_action_choices"]])
+
+        advanced = self.api_post("/api/strategy/campaigns/advance-month", {"campaign_id": campaign_id})
+        advanced_world = advanced["campaign"]["world"]
+        advanced_faction = next(item for item in advanced_world["factions"] if item["id"] == "faction_1")
+
+        self.assertEqual(advanced_world["current_month"], 2)
+        self.assertEqual(advanced["campaign"]["queued_actions"], [])
+        self.assertEqual(advanced_faction["resources"]["food"], 140)
+        self.assertEqual(advanced_faction["resources"]["money"], 100)
+        self.assertEqual(advanced_faction["resources"]["ether"], 10)
+        self.assertTrue(any(event["category"] == "exile_action" for event in advanced_world["event_log"]))
+
+    def test_scenario_strategy_player_performs_ritual_and_binds_summoned_hero(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "hero summon", "seed": 97, "city_count": 4, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+
+        campaign = server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, created["campaign"]["owner_user_id"])
+        city = next(item for item in campaign.world.cities if item.owner_faction_id == "faction_1")
+        faction = next(item for item in campaign.world.factions if item.faction_id == "faction_1")
+        faction.tactic_techs.extend(["local_militia", "command_staff_1"])
+        campaign = replace(campaign, world=ensure_office_system(campaign.world))
+        city = next(item for item in campaign.world.cities if item.city_id == city.city_id)
+        lord = next(
+            item
+            for item in campaign.world.offices
+            if item.faction_id == "faction_1" and item.office_type == "lord"
+        )
+        city.resources.ether = 100
+        before_codes = {item.hero_code for item in campaign.world.strategic_heroes if item.faction_id == "faction_1"}
+        server_module.STRATEGY_STORE.update_world(campaign_id, created["campaign"]["owner_user_id"], campaign.world)
+
+        queued = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "perform_hero_ritual",
+                "action_payload": {"city_id": city.city_id, "issuer_office_id": lord.office_id},
+            },
+        )
+        self.assertEqual(queued["campaign"]["queued_actions"][0]["action_type"], "perform_hero_ritual")
+
+        advanced = self.api_post("/api/strategy/campaigns/advance-month", {"campaign_id": campaign_id})
+        world = advanced["campaign"]["world"]
+        ritual_heroes = [
+            item
+            for item in world["strategic_hero_pool"]
+            if item["faction_id"] == "faction_1" and item["code"] not in before_codes
+        ]
+        self.assertTrue(
+            ritual_heroes,
+            [event for event in world["event_log"] if event["category"] in {"queued_action_failed", "hero_ritual_summoned"}],
+        )
+        advanced_hero = ritual_heroes[0]
+        recruited_code = advanced_hero["code"]
+        self.assertEqual(advanced_hero["status"], "serving")
+        self.assertEqual(advanced_hero["faction_id"], "faction_1")
+        self.assertEqual(advanced_hero["ritual_city_id"], city.city_id)
+        self.assertTrue(any(event["category"] == "hero_ritual_summoned" for event in world["event_log"]))
+
+        grand_general = next(
+            office
+            for office in world["offices"]
+            if office["faction_id"] == "faction_1" and office["office_type"] == "general" and office["status"] == "vacant"
+        )
+        appointed = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "appoint_strategic_hero",
+                "action_payload": {"target_office_id": grand_general["id"], "hero_code": recruited_code},
+            },
+        )["campaign"]
+        self.assertEqual(appointed["queued_actions"][-1]["command_cost"], 1)
+        appointed = self.api_post("/api/strategy/campaigns/advance-month", {"campaign_id": campaign_id})["campaign"]
+        appointed_hero = next(item for item in appointed["world"]["strategic_hero_pool"] if item["code"] == recruited_code)
+        appointed_office = next(item for item in appointed["world"]["offices"] if item["id"] == grand_general["id"])
+        self.assertEqual(appointed_hero["office_id"], grand_general["id"])
+        self.assertEqual(appointed_office["holder_id"], recruited_code)
+
+        defended = self.api_post(
+            "/api/strategy/campaigns/set-defense-hero",
+            {"campaign_id": campaign_id, "hero_code": recruited_code},
+        )
+        defended_world = defended["campaign"]["world"]
+        defended_hero = next(item for item in defended_world["strategic_hero_pool"] if item["code"] == recruited_code)
+        defended_faction = next(item for item in defended_world["factions"] if item["id"] == "faction_1")
+
+        self.assertTrue(defended_hero["defender_assigned"])
+        self.assertIn(f"strategic_hero_defender:{recruited_code}", defended_faction["memory_tags"])
+        self.assertTrue(any(event["category"] == "strategic_hero_defender_set" for event in defended_world["event_log"]))
+
+    def test_scenario_governor_can_perform_local_ritual_without_lord_approval(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "governor recommendation", "seed": 214, "city_count": 6, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        owner_id = created["campaign"]["owner_user_id"]
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+        campaign = server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, owner_id)
+        city = next(item for item in campaign.world.cities if item.owner_faction_id == "faction_1")
+        governor = next(
+            item
+            for item in campaign.world.offices
+            if item.faction_id == "faction_1" and item.office_type == "governor" and city.city_id in item.managed_entity_ids
+        )
+        faction = next(item for item in campaign.world.factions if item.faction_id == "faction_1")
+        faction.tactic_techs.extend(["local_militia", "command_staff_1"])
+        campaign = replace(campaign, world=ensure_office_system(campaign.world))
+        city = next(item for item in campaign.world.cities if item.city_id == city.city_id)
+        governor = next(item for item in campaign.world.offices if item.office_id == governor.office_id)
+        city.resources.ether = 100
+        before_codes = {item.hero_code for item in campaign.world.strategic_heroes if item.faction_id == "faction_1"}
+        server_module.STRATEGY_STORE.update_world(campaign_id, owner_id, campaign.world)
+
+        switch_payload = {
+            "campaign_id": campaign_id,
+            "action_type": "construct_city_building",
+            "action_payload": {"city_id": city.city_id},
+            "session_token": self.default_session_token(),
+        }
+        self._bind_test_action_office("/api/strategy/campaigns/queue-action", switch_payload)
+        governor_office_id = switch_payload["action_payload"]["issuer_office_id"]
+
+        self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "perform_hero_ritual",
+                "action_payload": {"city_id": city.city_id, "issuer_office_id": governor_office_id},
+            },
+        )
+        pending = server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, owner_id)
+        issued_world, _ = server_module.apply_strategy_action_queue(pending)
+        server_module.STRATEGY_STORE.update_world(campaign_id, owner_id, issued_world)
+        server_module.STRATEGY_STORE.mark_queued_actions_resolved(campaign_id, owner_id, pending.world.current_month)
+        issued = server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, owner_id).world.to_public_dict()
+        hero = next(item for item in issued["strategic_hero_pool"] if item["faction_id"] == "faction_1" and item["code"] not in before_codes)
+        self.assertEqual((hero["status"], hero["ritual_city_id"]), ("serving", city.city_id))
+        self.assertTrue(any(event["category"] == "hero_ritual_summoned" for event in issued["event_log"]))
+
+    def test_scenario_retired_recruitment_and_legacy_levy_actions_are_rejected(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "retired actions", "seed": 215, "city_count": 4, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+
+        for action_type in (
+            "summon_strategic_hero",
+            "issue_hero_recruitment",
+            "accept_hero_recruitment",
+            "recommend_hero_recruitment",
+            "levy_field_troops",
+            "levy_city_garrison",
+        ):
+            with self.subTest(action_type=action_type):
+                status, payload = self.api_post_error(
+                    "/api/strategy/campaigns/queue-action",
+                    {
+                        "campaign_id": campaign_id,
+                        "action_type": action_type,
+                        "action_payload": {},
+                        "session_token": self.default_session_token(),
+                    },
+                )
+                self.assertEqual(status, 400)
+                self.assertEqual(payload["error"], "Unknown strategy action type.")
+
+    def test_scenario_role_specific_management_actions_settle_together(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "role workspaces", "seed": 215, "city_count": 6, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        owner_id = created["campaign"]["owner_user_id"]
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+        campaign = server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, owner_id)
+        offices = [item for item in campaign.world.offices if item.faction_id == "faction_1"]
+        lord = next(item for item in offices if item.office_type == "lord")
+        grand = next(item for item in offices if item.office_type == "grand_general")
+        governor = next(item for item in offices if item.office_type == "governor")
+        city = next(item for item in campaign.world.cities if item.city_id in governor.managed_entity_ids)
+        hero = next(item for item in campaign.world.strategic_heroes if item.faction_id == "faction_1")
+        city.resources.population = city.resources.food = city.resources.money = 1000
+        for office in (lord, grand, governor):
+            office.controller_type = "player"
+            office.controller_user_id = owner_id
+        before_troops = city.resources.troops
+        server_module.STRATEGY_STORE.update_world(campaign_id, owner_id, campaign.world)
+
+        actions = [
+            ("assign_strategic_hero_duty", {"hero_code": hero.hero_code, "assignment_type": "garrison", "target_id": city.city_id}),
+            ("increase_city_troops", {"city_id": city.city_id}),
+            ("register_city_soldiers", {"city_id": city.city_id, "unit_count": 1}),
+        ]
+        for action_type, action_payload in actions:
+            self.api_post(
+                "/api/strategy/campaigns/queue-action",
+                {"campaign_id": campaign_id, "action_type": action_type, "action_payload": action_payload},
+            )
+        queued = server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, owner_id)
+        self.assertEqual(
+            [action.action_type for action in queued.queued_actions],
+            ["assign_strategic_hero_duty", "increase_city_troops", "register_city_soldiers"],
+        )
+        offices_by_id = {office.office_id: office.office_type for office in queued.world.offices}
+        self.assertEqual(
+            [offices_by_id[action.payload["issuer_office_id"]] for action in queued.queued_actions],
+            ["lord", "governor", "governor"],
+        )
+        self.assertEqual(server_module.strategy_action_command_cost(queued.queued_actions[0].action_type), 0)
+        self.assertEqual(
+            [server_module.strategy_action_command_cost(action.action_type, action.payload) for action in queued.queued_actions[1:]],
+            [1, 1],
+        )
+
+    def test_scenario_lord_hero_can_campaign_personally_and_order_grand_general(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "lord hero command", "seed": 211, "city_count": 6, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+        campaign = self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})["campaign"]
+        world = campaign["world"]
+        lord = next(office for office in world["offices"] if office["faction_id"] == "faction_1" and office["office_type"] == "lord")
+        grand = next(office for office in world["offices"] if office["faction_id"] == "faction_1" and office["office_type"] == "grand_general")
+        nodes = {node["id"]: node for node in world["nodes"]}
+        cities_by_node = {city["node_id"]: city for city in world["cities"]}
+        source = target = None
+        for city in world["cities"]:
+            if city["owner_faction_id"] != "faction_1":
+                continue
+            candidate = next(
+                (
+                    cities_by_node[node_id]
+                    for node_id in nodes[city["node_id"]]["connected_node_ids"]
+                    if cities_by_node[node_id]["owner_faction_id"] != "faction_1"
+                ),
+                None,
+            )
+            if candidate is not None:
+                source, target = city, candidate
+                break
+        self.assertIsNotNone(source)
+        self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "issue_office_order",
+                "action_payload": {
+                    "issuer_office_id": lord["id"],
+                    "receiver_office_id": grand["id"],
+                    "office_order_type": "attack_city",
+                    "target_entity_id": target["id"],
+                    "objective": f"进攻{target['name']}",
+                },
+            },
+        )
+        queued = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "declare_attack",
+                "action_payload": {
+                    "issuer_office_id": lord["id"],
+                    "source_city_id": source["id"],
+                    "target_city_id": target["id"],
+                    "resolution_mode": "quick",
+                },
+            },
+        )["campaign"]
+        attack = next(action for action in queued["queued_actions"] if action["action_type"] == "declare_attack")
+        self.assertEqual(attack["payload"]["commander_hero_code"], lord["holder_id"])
+        self.assertIn(lord["holder_id"], attack["payload"]["attacker_hero_codes"])
+        advanced = self.api_post(
+            "/api/strategy/campaigns/advance-month",
+            {"campaign_id": campaign_id, "issuer_office_id": lord["id"]},
+        )["campaign"]
+        self.assertEqual(advanced["world"]["office_orders"][-1]["order_type"], "attack_city")
+        self.assertIn(lord["holder_id"], advanced["world"]["pending_battles"][-1]["attacker_hero_codes"])
+
+    def test_scenario_strategy_defender_sets_pending_battle_hero_response(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "battle defender response", "seed": 98, "city_count": 6, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        owner_user_id = created["campaign"]["owner_user_id"]
+        bob = self.api_post("/api/auth/register", {"username": "BattleBob", "password": "secret123"})
+        self.api_post("/api/strategy/campaigns/join", {"join_code": created["campaign"]["join_code"], "session_token": bob["session_token"]})
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id, "session_token": bob["session_token"]})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+
+        campaign = server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, owner_user_id)
+        bob_member = next(member for member in campaign.members if member.username == "BattleBob")
+        world = campaign.world
+        heroes = [item for item in strategic_hero_pool_public(world) if item["faction_id"] == bob_member.faction_id and item["status"] == "serving"][:2]
+        self.assertEqual(len(heroes), 2)
+        bob_faction = next(item for item in world.factions if item.faction_id == bob_member.faction_id)
+        bob_faction.tactic_techs.append("hero_command")
+
+        nodes = {node.node_id: node for node in world.nodes}
+        source_city = target_city = None
+        for city in world.cities:
+            if city.owner_faction_id != "faction_1":
+                continue
+            connected = set(nodes[city.node_id].connected_node_ids)
+            target_city = next(
+                (
+                    candidate
+                    for candidate in world.cities
+                    if candidate.owner_faction_id == bob_member.faction_id and candidate.node_id in connected
+                ),
+                None,
+            )
+            if target_city is not None:
+                source_city = city
+                break
+        if source_city is None or target_city is None:
+            source_city = next(city for city in world.cities if city.owner_faction_id == "faction_1")
+            target_city = next(city for city in world.cities if city.owner_faction_id == bob_member.faction_id)
+            source_node = nodes[source_city.node_id]
+            target_node = nodes[target_city.node_id]
+            if target_node.node_id not in source_node.connected_node_ids:
+                source_node.connected_node_ids.append(target_node.node_id)
+            if source_node.node_id not in target_node.connected_node_ids:
+                target_node.connected_node_ids.append(source_node.node_id)
+        self.assertIsNotNone(source_city)
+        self.assertIsNotNone(target_city)
+        assert source_city is not None and target_city is not None
+        source_city.resources.troops = 1200
+        target_city.resources.troops = 300
+        world = declare_city_attack(
+            world,
+            faction_id="faction_1",
+            source_city_id=source_city.city_id,
+            target_city_id=target_city.city_id,
+            resolution_mode="manual",
+        )
+        battle_id = world.pending_battles[-1].battle_id
+        server_module.STRATEGY_STORE.update_world(campaign_id, owner_user_id, world)
+
+        updated = self.api_post(
+            "/api/strategy/campaigns/set-battle-defense-hero",
+            {
+                "campaign_id": campaign_id,
+                "battle_id": battle_id,
+                "hero_codes": [hero["code"] for hero in heroes],
+                "session_token": bob["session_token"],
+            },
+        )
+        battle = next(item for item in updated["campaign"]["world"]["pending_battles"] if item["id"] == battle_id)
+
+        self.assertEqual(battle["defender_hero_codes"], [hero["code"] for hero in heroes])
+        self.assertEqual(
+            next(item for item in updated["campaign"]["world"]["factions"] if item["id"] == bob_member.faction_id)["strategic_hero_deployment_limit"],
+            2,
+        )
+        self.assertTrue(any(event["category"] == "battle_defender_hero_set" for event in updated["campaign"]["world"]["event_log"]))
+
+    def test_scenario_serving_strategic_hero_enters_manual_city_battle_room(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "hero city battle", "seed": 99, "city_count": 6, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+        entered = self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        hero = next(
+            item for item in entered["campaign"]["world"]["strategic_hero_pool"]
+            if item["faction_id"] == "faction_1" and item["status"] == "serving"
+        )
+
+        declared = self.api_post(
+            "/api/strategy/campaigns/declare-attack",
+            {
+                "campaign_id": campaign_id,
+                "source_city_id": "city_1",
+                "target_city_id": "city_2",
+                "resolution_mode": "manual",
+                "attacker_hero_codes": [hero["code"]],
+            },
+        )
+        battle_room = declared["battle_room"]
+
+        self.assertIn(hero["code"], battle_room["attacker_roster"])
+        self.assertEqual(declared["campaign"]["world"]["pending_battles"][-1]["attacker_hero_codes"], [hero["code"]])
+        self.assertTrue(
+            any(
+                row["source"] == "strategic_hero" and row["hero_code"] == hero["code"] and row["grid_units"] == 1
+                for row in battle_room["attacker_roster_manifest"]
+            )
+        )
+
+    def test_strategy_room_survivor_helpers_split_troops_from_strategic_heroes(self) -> None:
+        room, _player_id, _token = ROOMS.create_preconfigured_battle_room(
+            host_name="attacker",
+            opponent_name="defender",
+            player1_roster=["strategy_infantry", "fire_funeral"],
+            player2_roster=["strategy_garrison", "ellie"],
+            start_immediately=True,
+        )
+
+        self.assertEqual(server_module.strategy_room_survivors_by_team(room), {1: 1, 2: 1})
+        self.assertEqual(server_module.strategy_room_surviving_hero_codes_by_team(room), {1: {"fire_funeral"}, 2: {"ellie"}})
+
+    def test_scenario_strategy_city_policy_and_tactic_tech_update_sandbox_state(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "战术沙盒", "seed": 93, "city_count": 6, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        city_id = created["campaign"]["world"]["cities"][0]["id"]
+        before_conversion = created["campaign"]["world"]["cities"][0]["troop_conversion"]
+
+        status, blocked = self.api_post_error(
+            "/api/strategy/campaigns/set-city-policy",
+            {
+                "campaign_id": campaign_id,
+                "city_id": city_id,
+                "policy": "征兵优先",
+                "session_token": self.default_session_token(),
+            },
+        )
+        self.assertEqual(status, 409)
+
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+        policy_updated = self.api_post(
+            "/api/strategy/campaigns/set-city-policy",
+            {"campaign_id": campaign_id, "city_id": city_id, "policy": "征兵优先"},
+        )
+        self.assertEqual(policy_updated["campaign"]["world"]["cities"][0]["policy"], "征兵优先")
+        self.assertTrue(
+            any(event["category"] == "city_policy" for event in policy_updated["campaign"]["world"]["event_log"])
+        )
+
+        tech_updated = self.api_post(
+            "/api/strategy/campaigns/unlock-tactic-tech",
+            {"campaign_id": campaign_id, "tech_id": "local_militia"},
+        )
+        after_conversion = tech_updated["campaign"]["world"]["cities"][0]["troop_conversion"]
+        tech_tree = {
+            item["id"]: item
+            for item in tech_updated["campaign"]["world"]["factions"][0]["tactic_tech_tree"]
+        }
+
+        self.assertTrue(tech_tree["local_militia"]["unlocked"])
+        self.assertTrue(tech_tree["city_doctrine"]["available"])
+        self.assertGreater(after_conversion[0]["ratio"], before_conversion[0]["ratio"])
+        self.assertTrue(any(event["category"] == "tactic_tech" for event in tech_updated["campaign"]["world"]["event_log"]))
+
+    def test_scenario_strategy_campaign_declares_and_resolves_city_attack_choice(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "战斗沙盒", "seed": 94, "city_count": 6, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+
+        resolved = self.api_post(
+            "/api/strategy/campaigns/declare-attack",
+            {
+                "campaign_id": campaign_id,
+                "source_city_id": "city_1",
+                "target_city_id": "city_2",
+                "resolution_mode": "ai_auto",
+            },
+        )
+        world = resolved["campaign"]["world"]
+        battle = world["pending_battles"][-1]
+        battle_room = resolved["battle_room"]
+
+        self.assertEqual(battle["status"], "resolved")
+        self.assertEqual(battle["resolution_mode"], "ai_auto")
+        self.assertEqual(battle["battle_room_id"], battle_room["room_id"])
+        self.assertEqual(battle["battle_result"]["resolution_source"], "real_grid")
+        self.assertIn(battle["battle_result"]["winner_side"], {"attacker", "defender"})
+        self.assertTrue(battle_room["room_id"])
+        self.assertEqual(battle_room["player_token"], "")
+        self.assertEqual(battle_room["status"], "finished")
+        self.assertIn(battle_room["winner"], {1, 2})
+        self.assertGreater(battle_room["simulation_steps"], 0)
+        self.assertIn("manual", world["battle_resolution_modes"])
+        self.assertTrue(any(event["category"] == "battle_declared" for event in world["event_log"]))
+        self.assertTrue(any(event["category"] == "battle_resolved" for event in world["event_log"]))
+        room_state = self.api_get("/api/rooms/state", params={"room_id": battle_room["room_id"]})
+        self.assertEqual(room_state["room"]["status"], "finished")
+        self.assertIn("strategy_campaign", room_state)
+        self.assertEqual(
+            room_state["strategy_campaign"]["world"]["pending_battles"][-1]["battle_result"]["resolution_source"],
+            "real_grid",
+        )
+
+    def test_scenario_strategy_manual_city_attack_creates_real_battle_room(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "真实战斗入口", "seed": 96, "city_count": 6, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+
+        declared = self.api_post(
+            "/api/strategy/campaigns/declare-attack",
+            {
+                "campaign_id": campaign_id,
+                "source_city_id": "city_1",
+                "target_city_id": "city_2",
+                "resolution_mode": "manual",
+            },
+        )
+        battle_room = declared["battle_room"]
+        battle = declared["campaign"]["world"]["pending_battles"][-1]
+
+        self.assertTrue(battle_room["room_id"])
+        self.assertTrue(battle_room["player_token"])
+        self.assertGreaterEqual(len(battle_room["attacker_roster"]), 2)
+        self.assertGreaterEqual(len(battle_room["defender_roster"]), 2)
+        self.assertEqual(
+            sum(row["grid_units"] for row in battle_room["attacker_roster_manifest"]),
+            len(battle_room["attacker_roster"]),
+        )
+        self.assertEqual(
+            sum(row["grid_units"] for row in battle_room["defender_roster_manifest"]),
+            len(battle_room["defender_roster"]),
+        )
+        self.assertTrue(any(row["source"] == "city_feature" for row in battle_room["attacker_roster_manifest"]))
+        self.assertTrue(all(code.startswith("strategy_") for code in battle_room["attacker_roster"]))
+        self.assertTrue(all(row["hero_code"].startswith("strategy_") for row in battle_room["attacker_roster_manifest"]))
+        self.assertEqual(battle["status"], "pending")
+        self.assertEqual(battle["battle_room_id"], battle_room["room_id"])
+        self.assertEqual(battle["battle_room_invite_path"], battle_room["invite_path"])
+        self.assertTrue(any(event["category"] == "battle_room_created" for event in declared["campaign"]["world"]["event_log"]))
+
+        room_state = self.api_get(
+            "/api/rooms/state",
+            params={"room_id": battle_room["room_id"], "player_token": battle_room["player_token"]},
+        )
+        self.assertEqual(room_state["room"]["status"], "battle")
+        self.assertIsNotNone(room_state["battle"])
+        self.assertEqual(room_state["room"]["viewer_player_id"], 1)
+        self.assertEqual(len(room_state["battle"]["units"]), len(battle_room["attacker_roster"]) + len(battle_room["defender_roster"]))
+
+    def test_scenario_strategy_manual_city_attack_writes_finished_real_battle_back(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "strategy writeback", "seed": 98, "city_count": 6, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+
+        declared = self.api_post(
+            "/api/strategy/campaigns/declare-attack",
+            {
+                "campaign_id": campaign_id,
+                "source_city_id": "city_1",
+                "target_city_id": "city_2",
+                "resolution_mode": "manual",
+            },
+        )
+        battle_room = declared["battle_room"]
+        declared_world = declared["campaign"]["world"]
+        declared_battle = declared_world["pending_battles"][-1]
+        source_troops_after_declared = declared_world["cities"][0]["resources"]["troops"]
+        target_owner_before = declared["campaign"]["world"]["cities"][1]["owner_faction_id"]
+
+        surrendered = self.api_post(
+            "/api/rooms/surrender",
+            {
+                "room_id": battle_room["room_id"],
+                "player_token": battle_room["player_token"],
+            },
+        )
+
+        self.assertEqual(surrendered["room"]["status"], "finished")
+        self.assertEqual(surrendered["battle"]["winner"], 2)
+        self.assertIn("strategy_campaign", surrendered)
+        campaign = surrendered["strategy_campaign"]
+        battle = campaign["world"]["pending_battles"][-1]
+        self.assertEqual(campaign["id"], campaign_id)
+        self.assertEqual(battle["status"], "resolved")
+        self.assertEqual(battle["winner_faction_id"], target_owner_before)
+        self.assertEqual(
+            campaign["world"]["cities"][0]["resources"]["troops"],
+            source_troops_after_declared + declared_battle["attacker_troops"],
+        )
+        self.assertEqual(campaign["world"]["cities"][1]["resources"]["troops"], declared_battle["defender_troops"])
+        self.assertEqual(campaign["world"]["cities"][1]["owner_faction_id"], target_owner_before)
+        self.assertTrue(any("Real grid survivors" in row for row in battle["report"]))
+        battle_result = battle["battle_result"]
+        self.assertEqual(battle_result["winner_side"], "defender")
+        self.assertEqual(battle_result["resolution_source"], "real_grid")
+        self.assertEqual(battle_result["winner_faction_id"], target_owner_before)
+        self.assertFalse(battle_result["city_captured"])
+        self.assertEqual(battle_result["lost_troops_by_side"]["attacker"], 0)
+        self.assertEqual(battle_result["lost_troops_by_side"]["defender"], 0)
+        self.assertEqual(battle_result["remaining_troops_by_side"]["attacker"], declared_battle["attacker_troops"])
+        self.assertEqual(battle_result["remaining_troops_by_side"]["defender"], declared_battle["defender_troops"])
+        self.assertGreaterEqual(battle_result["surviving_grid_units_by_side"]["attacker"], 1)
+        self.assertGreaterEqual(battle_result["surviving_grid_units_by_side"]["defender"], 1)
+        self.assertEqual(
+            sum(1 for event in campaign["world"]["event_log"] if event["category"] == "battle_resolved"),
+            1,
+        )
+
+        room_state = self.api_get(
+            "/api/rooms/state",
+            params={"room_id": battle_room["room_id"], "player_token": battle_room["player_token"]},
+        )
+        self.assertEqual(room_state["room"]["status"], "finished")
+        self.assertIn("strategy_campaign", room_state)
+        self.assertEqual(
+            sum(
+                1
+                for event in room_state["strategy_campaign"]["world"]["event_log"]
+                if event["category"] == "battle_resolved"
+            ),
+            1,
+        )
+
+    def test_scenario_strategy_watch_ai_city_attack_creates_spectator_battle_room(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "AI观战入口", "seed": 97, "city_count": 6, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+
+        declared = self.api_post(
+            "/api/strategy/campaigns/declare-attack",
+            {
+                "campaign_id": campaign_id,
+                "source_city_id": "city_1",
+                "target_city_id": "city_2",
+                "resolution_mode": "watch_ai",
+            },
+        )
+        battle_room = declared["battle_room"]
+        battle = declared["campaign"]["world"]["pending_battles"][-1]
+
+        self.assertTrue(battle_room["room_id"])
+        self.assertEqual(battle_room["player_token"], "")
+        self.assertGreaterEqual(len(battle_room["attacker_roster"]), 2)
+        self.assertTrue(any(row["source"] == "city_feature" for row in battle_room["defender_roster_manifest"]))
+        self.assertTrue(any(code.startswith("strategy_") for code in battle_room["defender_roster"]))
+        self.assertEqual(battle["status"], "pending")
+        self.assertEqual(battle["resolution_mode"], "watch_ai")
+        self.assertEqual(battle["battle_room_id"], battle_room["room_id"])
+
+        room_state = self.api_get(
+            "/api/rooms/state",
+            params={"room_id": battle_room["room_id"]},
+        )
+        self.assertEqual(room_state["room"]["status"], "battle")
+        self.assertIsNotNone(room_state["battle"])
+        self.assertIsNone(room_state["room"]["viewer_player_id"])
+        self.assertTrue(room_state["room"]["simulation"]["enabled"])
 
     def test_scenario_created_room_is_visible_to_public_lobby_queries(self) -> None:
         # Given an empty public lobby
@@ -2181,6 +3824,53 @@ class CombatBehaviorTests(unittest.TestCase):
 
 @unittest.skipIf(quickjs is None, "quickjs is required for frontend behavior checks")
 class FrontendBehaviorTests(unittest.TestCase):
+    def test_scenario_home_entry_prioritizes_game_modes_and_hides_reference_roster(self) -> None:
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        styles = (ROOT / "static" / "styles.css").read_text(encoding="utf-8")
+        app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('class="mode-gateway"', html)
+        self.assertIn('id="focus-strategy-mode"', html)
+        self.assertIn('id="focus-duel-mode"', html)
+        self.assertIn("英灵城邦战役", html)
+        self.assertIn("武将对战房间", html)
+        self.assertIn('"mode mode"', styles)
+        self.assertIn("#home-hero-cards", styles)
+        self.assertIn("display: none", styles)
+        self.assertIn("openStrategyModeEntry", app_source)
+        self.assertIn("openDuelModeEntry", app_source)
+        self.assertIn("focusAuthGateForMode(\"英灵城邦战役\")", app_source)
+        self.assertIn("focusAuthGateForMode(\"武将对战房间\")", app_source)
+        self.assertIn(".strategy-war-tabs", styles)
+        self.assertIn(".strategy-war-state", styles)
+        self.assertIn(".strategy-map-plan", styles)
+        self.assertIn("isStrategyControlActive", app_source)
+        self.assertIn('selectedCampaignId: state.strategyCampaign?.id || 0', app_source)
+        self.assertNotIn('tagName === "TEXTAREA" || tagName === "BUTTON"', app_source)
+        self.assertIn("strategyCanResume", app_source)
+        self.assertIn("strategyCityOrderLimit", app_source)
+        self.assertIn("filterStrategySelectOptions", app_source)
+        self.assertIn("createStrategyHeroPathPanel", app_source)
+        self.assertIn("createStrategyHeroAppointmentPanel", app_source)
+        self.assertIn("createLordHeroDutyPanel", app_source)
+        self.assertIn("createLordRitualPanel", app_source)
+        self.assertIn("createLordTechnologyPanel", app_source)
+        self.assertIn("createGrandGeneralMilitaryPanel", app_source)
+        self.assertIn("createGeneralLogisticsPanel", app_source)
+        self.assertIn("举行召唤祭祀", app_source)
+        self.assertIn("增加兵力", app_source)
+        self.assertIn("注册士兵", app_source)
+        self.assertIn("调拨给直属将军", app_source)
+        self.assertIn("请示直属大将军", app_source)
+        self.assertNotIn("发布招募武将令", app_source)
+        self.assertIn(".strategy-role-header.role-grand_general", styles)
+        self.assertIn(".strategy-hero-duty-row", styles)
+        self.assertIn("nextHomePollAt = now + 5000", app_source)
+        self.assertIn("homeRenderSignature === lastHomeRenderSignature", app_source)
+        self.assertIn(".strategy-map-routes-drawer", styles)
+        self.assertIn("scroll-margin-top: 76px", styles)
+        self.assertIn("transform: translate(-50%, -50%)", styles)
+
     def test_scenario_room_directory_renders_and_primary_join_button_starts_join_flow(self) -> None:
         app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
         ctx = quickjs.Context()
@@ -2350,6 +4040,1048 @@ class FrontendBehaviorTests(unittest.TestCase):
 
         ctx.eval("document.elements['room-list'].children[0].children[0].children[0].listeners.click[0]();")
         self.assertEqual(ctx.eval("globalThis.joinRoomCalledWith"), "AB12CD")
+
+    def test_scenario_strategy_panel_renders_campaign_city_policy_and_tactic_tech(self) -> None:
+        app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        ctx = quickjs.Context()
+        ctx.eval(
+            """
+            function createClassList() {
+              return { add() {}, remove() {}, toggle() {}, contains() { return false; } };
+            }
+
+            function createElement(tagName, id) {
+              const element = {
+                tagName: String(tagName || "div").toUpperCase(),
+                id: id || "",
+                children: [],
+                listeners: {},
+                className: "",
+                value: "",
+                disabled: false,
+                selected: false,
+                type: "",
+                dataset: {},
+                style: {},
+                _textContent: "",
+                _innerHTML: "",
+                classList: createClassList(),
+                append(...nodes) { this.children.push(...nodes); },
+                appendChild(node) { this.children.push(node); return node; },
+                prepend(...nodes) { this.children.unshift(...nodes); },
+                addEventListener(type, handler) {
+                  if (!this.listeners[type]) this.listeners[type] = [];
+                  this.listeners[type].push(handler);
+                },
+                querySelector() { return null; },
+                querySelectorAll() { return []; },
+                contains(node) { return node === this || this.children.some((child) => child.contains && child.contains(node)); },
+                replaceWith() {},
+                focus() {},
+                setAttribute(name, value) { this[name] = String(value); },
+                removeAttribute(name) { delete this[name]; },
+                set innerHTML(value) {
+                  this._innerHTML = String(value);
+                  if (value === "") this.children = [];
+                },
+                get innerHTML() { return this._innerHTML; },
+                set textContent(value) { this._textContent = String(value); },
+                get textContent() { return this._textContent; },
+              };
+              return element;
+            }
+
+            const document = {
+              elements: {},
+              listeners: {},
+              body: createElement("body", "body"),
+              getElementById(id) {
+                if (!this.elements[id]) this.elements[id] = createElement("div", id);
+                return this.elements[id];
+              },
+              createElement(tagName) { return createElement(tagName); },
+              querySelector() { return null; },
+              querySelectorAll() { return []; },
+              addEventListener(type, handler) {
+                if (!this.listeners[type]) this.listeners[type] = [];
+                this.listeners[type].push(handler);
+              },
+            };
+            document.body.classList = createClassList();
+
+            const storageFactory = () => ({
+              _store: {},
+              getItem(key) { return Object.prototype.hasOwnProperty.call(this._store, key) ? this._store[key] : null; },
+              setItem(key, value) { this._store[key] = String(value); },
+              removeItem(key) { delete this._store[key]; },
+            });
+            const window = {
+              location: { href: "http://example.test/", search: "", hash: "" },
+              listeners: {},
+              addEventListener(type, handler) {
+                if (!this.listeners[type]) this.listeners[type] = [];
+                this.listeners[type].push(handler);
+              },
+              requestAnimationFrame(callback) { return callback(); },
+              cancelAnimationFrame() {},
+              setInterval() { return 1; },
+              clearInterval() {},
+            };
+            function URL(href) {
+              this.href = String(href || "");
+              this.hash = "";
+              this.searchParams = {
+                values: {},
+                set(key, value) { this.values[key] = String(value); },
+                delete(key) { delete this.values[key]; },
+              };
+            }
+            const history = { replaceState() {} };
+            const Element = Object;
+            const localStorage = storageFactory();
+            const sessionStorage = storageFactory();
+            """
+        )
+        ctx.eval(app_source)
+        ctx.eval(
+            """
+            globalThis.rotatedCampaignId = 0;
+            rotateStrategyJoinCode = function (campaignId) { globalThis.rotatedCampaignId = campaignId; };
+            setStrategyDefenseHero = function (heroCode) { globalThis.defenseHeroCode = heroCode; };
+            setStrategyBattleDefenseHero = function (battleId, heroCode) {
+              globalThis.battleDefensePayload = JSON.stringify({ battleId, heroCode });
+            };
+            state.authUser = { id: 1, username: "Alice" };
+            state.strategyCampaigns = [
+              {
+                id: 7,
+                name: "英灵城邦",
+                join_code: "ABC234",
+                owner_user_id: 1,
+                status: "active",
+                members: [
+                  { user_id: 1, username: "Alice", role: "host", faction_id: "faction_1", is_initial_player: true },
+                  { user_id: -2, username: "第二势力 AI", role: "ai", faction_id: "faction_2", is_initial_player: true },
+                ],
+                queued_actions: [
+                  {
+                    id: 1,
+                    user_id: 1,
+                    username: "Alice",
+                    faction_id: "faction_1",
+                    month: 2,
+                    action_type: "set_city_policy",
+                    action_key: "city_1",
+                    payload: { city_id: "city_1", policy: "征兵优先" },
+                    status: "pending",
+                  },
+                ],
+                command_points_by_faction: {
+                  faction_1: { maximum: 4, used: 1, remaining: 3 },
+                  faction_2: { maximum: 4, used: 0, remaining: 4 },
+                },
+                resume: { can_resume: true, online_initial_user_ids: [1], missing_initial_user_ids: [], initial_user_ids: [1], campaign_status: "active" },
+                world: {
+                  current_month: 2,
+                  story_events: [
+                    {
+                      id: "story_2_faction_1_guild",
+                      template_id: "guild_dispute",
+                      faction_id: "faction_1",
+                      city_id: "city_1",
+                      opened_month: 2,
+                      status: "pending",
+                      title: "行会争端",
+                      category: "city",
+                      description: "商人与工匠都要求政厅公开表态。",
+                      choices: [
+                        { id: "favor_merchants", label: "支持商人", preview: "金钱 +100，支持度下降。", enabled: true, disabled_reason: "", command_cost: 1 },
+                        { id: "favor_workers", label: "支持工匠", preview: "消耗金钱，提高支持度。", enabled: true, disabled_reason: "", command_cost: 1 },
+                        { id: "mediate_guilds", label: "出资调停", preview: "消耗势力金钱，支持度 +3。", enabled: true, disabled_reason: "", command_cost: 1 },
+                      ],
+                    },
+                  ],
+                  scheduled_consequences: [
+                    { id: "thread_1", faction_id: "faction_1", city_id: "city_1", due_month: 3, description: "旧商路的粮队即将抵达。", status: "pending" },
+                  ],
+                  monthly_briefings: {
+                    faction_1: {
+                      month: 2,
+                      faction_id: "faction_1",
+                      entries: [
+                        { kind: "threat", title: "晨星城叛军集结", detail: "叛军规模 180，若继续放任将损耗守军与民心。", city_id: "city_1", severity: "critical" },
+                        { kind: "opportunity", title: "雾港城防线薄弱", detail: "从晨星城出征有兵力优势。", city_id: "city_1", severity: "positive" },
+                        { kind: "rival_intent", title: "斥候推测：第二势力准备进攻", detail: "情报并非完全可靠。", city_id: "city_1", severity: "warning" },
+                      ],
+                    },
+                  },
+                  policy_choices: ["稳定优先", "征兵优先", "金钱优先"],
+                  rebellion_action_choices: [
+                    { id: "appease", name: "安抚民心", description: "提升支持度", requires_target_city: true },
+                    { id: "suppress", name: "派兵镇压", description: "消耗兵力镇压", requires_target_city: true },
+                  ],
+                  building_projects: [
+                    { id: "academy", name: "学院", money: 80, food: 30 },
+                    { id: "fields", name: "田地", money: 60, food: 20 },
+                    { id: "barracks", name: "兵营", money: 90, food: 40 },
+                    { id: "ritual_site", name: "祭祀场", money: 100, food: 30 },
+                  ],
+                  registered_unit_types: [
+                    { id: "infantry", name: "步兵", troop_cost: 100 },
+                    { id: "archer", name: "弓兵", troop_cost: 140 },
+                    { id: "cavalry", name: "骑兵", troop_cost: 180 },
+                  ],
+                  nodes: [
+                    { id: "node_1", name: "晨星城", type: "city", x: 0, y: 0, connected_node_ids: ["node_2"] },
+                    { id: "node_2", name: "雾港城", type: "city", x: 1, y: 0, connected_node_ids: ["node_1"] },
+                  ],
+                  factions: [
+                    {
+                      id: "faction_1",
+                      name: "第一势力",
+                      resources: { food: 300, money: 250, population: 0, ether: 50, troops: 200 },
+                      tactic_tech_tree: [
+                        { id: "local_militia", name: "乡勇编练", branch: "兵种", description: "提高特色士兵比例", money_cost: 80, ether_cost: 0, unit_unlocks: [], unlocked: false, available: true },
+                      ],
+                      hero_ritual_capacity: { maximum: 4, used: 3, remaining: 1 },
+                      strategic_heroes: [
+                        { code: "ellie", name: "艾莉", role: "支援", attribute: "光", race: "人类", level: 1, faction_id: null, city_id: "city_1", status: "roaming" },
+                        { code: "li", name: "李", role: "勇者", attribute: "土", race: "人类", level: 9, faction_id: "faction_1", city_id: "city_1", ritual_city_id: "city_1", status: "serving" },
+                      ],
+                    },
+                    {
+                      id: "faction_2",
+                      name: "第二势力",
+                      resources: { food: 260, money: 220, population: 0, ether: 30, troops: 180 },
+                      tactic_tech_tree: [],
+                      strategic_heroes: [
+                        { code: "fire_funeral", name: "火葬", role: "法师", attribute: "火", race: "人类", level: 2, faction_id: null, city_id: "city_2", status: "roaming" },
+                      ],
+                    },
+                  ],
+                  strategic_hero_pool: [
+                    { code: "ellie", name: "艾莉", role: "支援", attribute: "光", race: "人类", level: 1, faction_id: null, city_id: "city_1", status: "roaming" },
+                    { code: "li", name: "李", role: "勇者", attribute: "土", race: "人类", level: 9, faction_id: "faction_1", city_id: "city_1", ritual_city_id: "city_1", status: "serving" },
+                    { code: "fire_funeral", name: "火葬", role: "法师", attribute: "火", race: "人类", level: 2, faction_id: null, city_id: "city_2", status: "roaming" },
+                  ],
+                  cities: [
+                    {
+                      id: "city_1",
+                      node_id: "node_1",
+                      name: "晨星城",
+                      owner_faction_id: "faction_1",
+                      policy: "稳定优先",
+                      resources: { food: 900, money: 700, population: 1200, ether: 40, troops: 300 },
+                      building_levels: { fields: 1, barracks: 1, ritual_site: 1 },
+                      building_limits: { fields: 1, barracks: 1, ritual_site: 1, academy: 1, stables: 1, archery_range: 1 },
+                      registered_units: { infantry: 2, archer: 0, cavalry: 0 },
+                      defense: 4,
+                      event_states: ["rebellion_risk:80:正式叛乱", "rebellion_force:160:month:2"],
+                      troop_conversion: [
+                        { unit_type: "守备兵", ratio: 10, troops: 30 },
+                        { unit_type: "普通步兵", ratio: 90, troops: 270 },
+                      ],
+                    },
+                    {
+                      id: "city_2",
+                      node_id: "node_2",
+                      name: "雾港城",
+                      owner_faction_id: "faction_2",
+                      policy: "征兵优先",
+                      resources: { food: 760, money: 520, population: 900, ether: 35, troops: 220 },
+                      defense: 3,
+                      troop_conversion: [
+                        { unit_type: "弓兵", ratio: 20, troops: 44 },
+                        { unit_type: "普通步兵", ratio: 80, troops: 176 },
+                      ],
+                    },
+                  ],
+                  pending_battles: [
+                    {
+                      battle_id: "battle_2_1",
+                      source_city_id: "city_1",
+                      target_city_id: "city_2",
+                      attacker_faction_id: "faction_1",
+                      defender_faction_id: "faction_2",
+                      declared_month: 2,
+                      resolution_mode: "manual",
+                      status: "pending",
+                      battle_room_id: "AB12CD",
+                      battle_room_invite_path: "/?room=AB12CD",
+                    },
+                    {
+                      battle_id: "battle_2_2",
+                      source_city_id: "city_2",
+                      target_city_id: "city_1",
+                      attacker_faction_id: "faction_2",
+                      defender_faction_id: "faction_1",
+                      declared_month: 2,
+                      resolution_mode: "manual",
+                      status: "resolved",
+                      battle_room_id: "CD34EF",
+                      battle_room_invite_path: "/?room=CD34EF",
+                      battle_result: {
+                        winner_faction_id: "faction_1",
+                        loser_faction_id: "faction_2",
+                        winner_side: "defender",
+                        loser_side: "attacker",
+                        city_captured: false,
+                        resolution_source: "real_grid",
+                        lost_troops_by_side: { attacker: 400, defender: 60 },
+                        remaining_troops_by_side: { attacker: 400, defender: 240 },
+                        initial_grid_units_by_side: { attacker: 8, defender: 3 },
+                        surviving_grid_units_by_side: { attacker: 4, defender: 2 },
+                        strategic_heroes_by_side: {
+                          attacker: { committed: ["ellie"], surviving: [], sleeping: ["ellie"] },
+                          defender: { committed: ["fire_funeral"], surviving: ["fire_funeral"], sleeping: [] },
+                        },
+                        battle_log_summary: "Real grid room CD34EF finished; winning side: defender.",
+                      },
+                    },
+                    {
+                      id: "battle_2_defense",
+                      source_city_id: "city_2",
+                      target_city_id: "city_1",
+                      attacker_faction_id: "faction_2",
+                      defender_faction_id: "faction_1",
+                      declared_month: 2,
+                      resolution_mode: "manual",
+                      status: "pending",
+                      defender_hero_codes: [],
+                    },
+                  ],
+                  strategic_status: {
+                    city_counts_by_faction: { faction_1: 2, faction_2: 0 },
+                    active_faction_ids: ["faction_1"],
+                    exiled_faction_ids: ["faction_2"],
+                    active_factions: [{ id: "faction_1", name: "第一势力", city_count: 2 }],
+                    exiled_factions: [{ id: "faction_2", name: "第二势力", city_count: 0 }],
+                    victory_conditions: [
+                      {
+                        id: "unify_cities",
+                        name: "统一城邦",
+                        description: "同一势力控制地图上的全部城市。",
+                        implemented: true,
+                        achieved: true,
+                        winner_faction_id: "faction_1",
+                      },
+                      {
+                        id: "world_mainline",
+                        name: "世界主线",
+                        description: "完成世界主线目标。",
+                        implemented: false,
+                        achieved: false,
+                        winner_faction_id: null,
+                      },
+                    ],
+                    achieved_conditions: [
+                      {
+                        id: "unify_cities",
+                        name: "统一城邦",
+                        description: "同一势力控制地图上的全部城市。",
+                        implemented: true,
+                        achieved: true,
+                        winner_faction_id: "faction_1",
+                      },
+                    ],
+                    campaign_complete: true,
+                    winner_faction_ids: ["faction_1"],
+                  },
+                  event_log: [{ month: 2, message: "晨星城执行稳定优先。" }],
+                },
+              },
+            ];
+            state.strategyCampaign = state.strategyCampaigns[0];
+            state.strategyBattleRoom = {
+              room_id: "AB12CD",
+              attacker_roster_manifest: [
+                { unit_type: "守备兵", source: "city_feature", grid_units: 1 },
+                { unit_type: "普通步兵", source: "default", grid_units: 2 },
+              ],
+              defender_roster_manifest: [
+                { unit_type: "弓兵", source: "city_feature", grid_units: 1 },
+                { unit_type: "普通步兵", source: "default", grid_units: 3 },
+              ],
+            };
+            renderStrategyPanel();
+
+            function collectText(node) {
+              if (!node) return "";
+              let text = node.textContent || "";
+              for (const child of node.children || []) text += " " + collectText(child);
+              return text;
+            }
+            function findFirstTag(node, tagName) {
+              if (!node) return null;
+              if (node.tagName === tagName) return node;
+              for (const child of node.children || []) {
+                const found = findFirstTag(child, tagName);
+                if (found) return found;
+              }
+              return null;
+            }
+            function findButtonByText(node, text) {
+              if (!node) return null;
+              if (node.tagName === "BUTTON" && node.textContent === text) return node;
+              for (const child of node.children || []) {
+                const found = findButtonByText(child, text);
+                if (found) return found;
+              }
+              return null;
+            }
+            function findButtonContainingText(node, text) {
+              if (!node) return null;
+              if (node.tagName === "BUTTON" && collectText(node).includes(text)) return node;
+              for (const child of node.children || []) {
+                const found = findButtonContainingText(child, text);
+                if (found) return found;
+              }
+              return null;
+            }
+            function findSelectWithOption(node, value) {
+              if (!node) return null;
+              if (node.tagName === "SELECT" && (node.children || []).some((child) => child.value === value)) return node;
+              for (const child of node.children || []) {
+                const found = findSelectWithOption(child, value);
+                if (found) return found;
+              }
+              return null;
+            }
+            function findMapCityButton(node, cityId) {
+              if (!node) return null;
+              if (node.tagName === "BUTTON" && node.dataset && node.dataset.cityId === cityId) return node;
+              for (const child of node.children || []) {
+                const found = findMapCityButton(child, cityId);
+                if (found) return found;
+              }
+              return null;
+            }
+            const rotateButton = findButtonByText(document.elements["strategy-current"], "重新生成加入码");
+            function findByClass(node, className) {
+              if (!node) return null;
+              const classes = String(node.className || "").split(/\\s+/);
+              if (classes.includes(className)) return node;
+              for (const child of node.children || []) {
+                const found = findByClass(child, className);
+                if (found) return found;
+              }
+              return null;
+            }
+            function findSelectNearButton(node, buttonText, optionValue) {
+              if (!node) return null;
+              if ((node.children || []).some((child) => child.tagName === "BUTTON" && child.textContent === buttonText)) {
+                return findSelectWithOption(node, optionValue);
+              }
+              for (const child of node.children || []) {
+                const found = findSelectNearButton(child, buttonText, optionValue);
+                if (found) return found;
+              }
+              return null;
+            }
+            globalThis.hasRotateJoinCodeButton = Boolean(rotateButton);
+            if (rotateButton) rotateButton.listeners.click[0]();
+            queueStrategyAction = function (actionType, payload) {
+              globalThis.queuedStrategyActionType = actionType;
+              globalThis.queuedStrategyActionPayload = JSON.stringify(payload);
+              if (actionType === "declare_attack") globalThis.queuedAttackPayload = JSON.stringify(payload);
+              if (actionType === "rebellion_action") globalThis.queuedRebellionPayload = JSON.stringify(payload);
+              if (actionType === "rebellion_battle") globalThis.queuedRebellionBattlePayload = JSON.stringify(payload);
+              if (actionType === "resolve_story_event") globalThis.queuedStoryPayload = JSON.stringify(payload);
+            };
+            const storyChoiceButton = findButtonContainingText(document.elements["strategy-current"], "出资调停");
+            globalThis.hasStoryChoiceButton = Boolean(storyChoiceButton);
+            if (storyChoiceButton) storyChoiceButton.listeners.click[0]();
+            const rebellionSelect = findSelectWithOption(document.elements["strategy-current"], "suppress");
+            globalThis.hasRebellionSelect = Boolean(rebellionSelect);
+            if (rebellionSelect) rebellionSelect.value = "suppress";
+            const rebellionButton = findButtonByText(document.elements["strategy-current"], "计划处理 · 1 军令");
+            globalThis.hasRebellionButton = Boolean(rebellionButton);
+            if (rebellionButton) rebellionButton.listeners.click[0]();
+            const rebellionBattleButton = findButtonByText(document.elements["strategy-current"], "计划清剿 · 2 军令");
+            globalThis.hasRebellionBattleButton = Boolean(rebellionBattleButton);
+            if (rebellionBattleButton) rebellionBattleButton.listeners.click[0]();
+            const heroDeploySelect = findSelectWithOption(document.elements["strategy-current"], "li");
+            globalThis.hasHeroDeploySelect = Boolean(heroDeploySelect);
+            if (heroDeploySelect) heroDeploySelect.value = "li";
+            const planAttackButton = findButtonByText(document.elements["strategy-current"], "计划进攻 · 2 军令");
+            globalThis.hasPlanAttackButton = Boolean(planAttackButton);
+            if (planAttackButton) planAttackButton.listeners.click[0]();
+            const defenseButton = findButtonByText(document.elements["strategy-current"], "设为防守");
+            globalThis.hasDefenseHeroButton = Boolean(defenseButton);
+            if (defenseButton) defenseButton.listeners.click[0]();
+            const battleDefenseButton = findButtonByText(document.elements["strategy-current"], "设置本场防守");
+            globalThis.hasBattleDefenseButton = Boolean(battleDefenseButton);
+            const battleDefenseSelect = findSelectNearButton(document.elements["strategy-current"], "设置本场防守", "li");
+            globalThis.hasBattleDefenseSelect = Boolean(battleDefenseSelect);
+            if (battleDefenseSelect) battleDefenseSelect.value = "li";
+            if (battleDefenseButton) battleDefenseButton.listeners.click[0]();
+            const ritualButton = findButtonByText(document.elements["strategy-current"], "举行祭祀 · 30 以太 · 1 军令");
+            globalThis.hasCityRitualButton = Boolean(ritualButton);
+            if (ritualButton) {
+              ritualButton.listeners.click[0]();
+              globalThis.cityRitualPayload = globalThis.queuedStrategyActionPayload;
+            }
+            const summonButton = findButtonByText(document.elements["strategy-current"], "加入召唤计划 · 1 军令");
+            globalThis.hasSummonHeroButton = Boolean(summonButton);
+            if (summonButton) summonButton.listeners.click[0]();
+            globalThis.hasGuideLocateButton = Boolean(findButtonByText(document.elements["strategy-current"], "定位 晨星城"));
+            globalThis.hasStrategyWarTabs = Boolean(findByClass(document.elements["strategy-current"], "strategy-war-tabs"));
+            globalThis.hasStrategyMapPlan = Boolean(findByClass(document.elements["strategy-current"], "strategy-map-plan"));
+            globalThis.hasStrategyCommandPlan = Boolean(findByClass(document.elements["strategy-current"], "strategy-command-plan"));
+            globalThis.hasStrategyMapStage = Boolean(findByClass(document.elements["strategy-current"], "strategy-map-stage"));
+            globalThis.hasStrategyCityCommandCard = Boolean(findByClass(document.elements["strategy-current"], "strategy-city-command-card"));
+            globalThis.hasStrategyDossier = Boolean(findByClass(document.elements["strategy-current"], "strategy-dossier"));
+            globalThis.hasStrategyRouteDrawer = Boolean(findByClass(document.elements["strategy-current"], "strategy-map-routes-drawer"));
+            const routeDrawer = findByClass(document.elements["strategy-current"], "strategy-map-routes-drawer");
+            globalThis.routeDrawerInitiallyOpen = Boolean(routeDrawer && routeDrawer.open);
+            if (routeDrawer && routeDrawer.children[0]?.listeners?.click?.length) {
+              routeDrawer.children[0].listeners.click[0]({ preventDefault() { globalThis.routePrevented = true; } });
+            }
+            globalThis.routeDrawerOpenAfterClick = Boolean(routeDrawer && routeDrawer.open);
+            globalThis.routeDrawerStateAfterClick = state.strategyRouteIntelOpen;
+            const dossier = findByClass(document.elements["strategy-current"], "strategy-dossier");
+            globalThis.dossierInitiallyOpen = Boolean(dossier && dossier.open);
+            if (dossier && dossier.children[0]?.listeners?.click?.length) {
+              dossier.children[0].listeners.click[0]({ preventDefault() { globalThis.dossierPrevented = true; } });
+            }
+            globalThis.dossierOpenAfterClick = Boolean(dossier && dossier.open);
+            globalThis.dossierStateAfterClick = state.strategyDossierOpen;
+            const dossierTabs = findByClass(dossier, "strategy-dossier-tabs");
+            globalThis.hasDossierTabs = Boolean(dossierTabs);
+            const dossierTechTab = findButtonByText(dossier, "科技");
+            globalThis.hasDossierTechTab = Boolean(dossierTechTab);
+            if (dossierTechTab) dossierTechTab.listeners.click[0]();
+            globalThis.dossierTabAfterTechClick = state.strategyDossierTab;
+            globalThis.strategyText = collectText(document.elements["strategy-current"]);
+            globalThis.advanceDisabled = document.elements["strategy-advance-month"].disabled;
+            globalThis.firstSelectDisabled = findFirstTag(document.elements["strategy-current"], "SELECT").disabled;
+            const fogMapButton = findMapCityButton(document.elements["strategy-current"], "city_2");
+            globalThis.hasFogMapButton = Boolean(fogMapButton);
+            if (fogMapButton) fogMapButton.listeners.click[0]();
+            globalThis.selectedCityAfterMapClick = state.strategySelectedCityId;
+            globalThis.strategyTextAfterMapClick = collectText(document.elements["strategy-current"]);
+            globalThis.strategyCampaignCount = document.elements["strategy-campaign-list"].children.length;
+            const originalStatus = state.strategyCampaign.status;
+            const originalResume = state.strategyCampaign.resume;
+            lockStrategyCampaign = function (campaignId) { globalThis.warStateLockCampaignId = campaignId; };
+            state.strategyCampaign.status = "lobby";
+            state.strategyCampaign.resume = { can_resume: false, online_initial_user_ids: [1], missing_initial_user_ids: [], initial_user_ids: [1], campaign_status: "lobby" };
+            renderStrategyPanel();
+            globalThis.hasStrategyWarState = Boolean(findByClass(document.elements["strategy-current"], "strategy-war-state"));
+            const warStateLockButton = findButtonByText(document.elements["strategy-current"], "锁定并启用 AI");
+            globalThis.hasWarStateLockButton = Boolean(warStateLockButton);
+            if (warStateLockButton) warStateLockButton.listeners.click[0]();
+            state.strategyCampaign.status = originalStatus;
+            state.strategyCampaign.resume = originalResume;
+            renderStrategyPanel();
+            globalThis.canResumeWhenNoInitialPlayersMissing = strategyCanResume({
+              status: "active",
+              resume: { can_resume: false, missing_initial_user_ids: [], initial_user_ids: [1], campaign_status: "active" },
+            });
+            globalThis.cannotResumeLobbyWithoutMissing = strategyCanResume({
+              status: "lobby",
+              resume: { can_resume: false, missing_initial_user_ids: [], initial_user_ids: [1], campaign_status: "lobby" },
+            });
+            document.activeElement = {
+              tagName: "SELECT",
+              closest(selector) { return selector === "#strategy-panel" ? {} : null; },
+            };
+            globalThis.strategySelectIsActive = isStrategyControlActive();
+            document.activeElement = {
+              tagName: "BUTTON",
+              closest(selector) { return selector === "#strategy-panel" ? {} : null; },
+            };
+            globalThis.strategyButtonIsActive = isStrategyControlActive();
+            const filterSelect = createElement("select");
+            const filterA = createElement("option");
+            filterA.value = "bard";
+            filterA.textContent = "吟游诗人";
+            const filterB = createElement("option");
+            filterB.value = "li";
+            filterB.textContent = "李";
+            filterSelect.append(filterA, filterB);
+            filterSelect.value = "bard";
+            filterSelect.selectedIndex = 0;
+            globalThis.heroFilterHasMatch = filterStrategySelectOptions(filterSelect, "li");
+            globalThis.heroFilterFirstHidden = filterA.hidden;
+            globalThis.heroFilterSecondVisible = !filterB.hidden;
+            const policyDraftSelect = findSelectWithOption(document.elements["strategy-current"], "金钱优先");
+            policyDraftSelect.value = "金钱优先";
+            policyDraftSelect.listeners.change[0]();
+            renderStrategyPanel();
+            const restoredPolicyDraft = findSelectWithOption(document.elements["strategy-current"], "金钱优先");
+            globalThis.restoredPolicyDraft = restoredPolicyDraft.value;
+            const zeroBudgetCampaign = {
+              command_points_by_faction: { faction_1: { maximum: 4, used: 4, remaining: 0 } },
+              queued_actions: [
+                { faction_id: "faction_1", action_type: "resolve_story_event", action_key: "story_existing", command_cost: 1, payload: {} },
+              ],
+            };
+            globalThis.storyChoiceCanReplaceAtZero = strategyCanAffordCommand(
+              zeroBudgetCampaign,
+              { id: "faction_1" },
+              "resolve_story_event",
+              { event_id: "story_existing", choice_id: "new_choice" },
+              "story_existing"
+            );
+            globalThis.newStoryChoiceBlockedAtZero = strategyCanAffordCommand(
+              zeroBudgetCampaign,
+              { id: "faction_1" },
+              "resolve_story_event",
+              { event_id: "story_new", choice_id: "new_choice" },
+              "story_new"
+            );
+            """
+        )
+
+        self.assertEqual(ctx.eval("globalThis.strategyCampaignCount"), 1)
+        self.assertIn("晨星城", ctx.eval("globalThis.strategyText"))
+        self.assertIn("成员与邀请", ctx.eval("globalThis.strategyText"))
+        self.assertIn("当前加入码：ABC234", ctx.eval("globalThis.strategyText"))
+        self.assertIn("角色：房主", ctx.eval("globalThis.strategyText"))
+        self.assertIn("角色：AI 接管", ctx.eval("globalThis.strategyText"))
+        self.assertTrue(ctx.eval("globalThis.hasStrategyWarTabs"))
+        self.assertTrue(ctx.eval("globalThis.hasStrategyMapPlan"))
+        self.assertTrue(ctx.eval("globalThis.hasStrategyCommandPlan"))
+        self.assertTrue(ctx.eval("globalThis.hasStrategyWarState"))
+        self.assertTrue(ctx.eval("globalThis.hasWarStateLockButton"))
+        self.assertEqual(ctx.eval("globalThis.warStateLockCampaignId"), 7)
+        self.assertTrue(ctx.eval("globalThis.canResumeWhenNoInitialPlayersMissing"))
+        self.assertFalse(ctx.eval("globalThis.cannotResumeLobbyWithoutMissing"))
+        self.assertTrue(ctx.eval("globalThis.strategySelectIsActive"))
+        self.assertFalse(ctx.eval("globalThis.strategyButtonIsActive"))
+        self.assertIn("本月已计划 1/2 条军令", ctx.eval("globalThis.strategyText"))
+        self.assertIn("军令 x1", ctx.eval("globalThis.strategyText"))
+        self.assertIn("房主账号 · 需由主公职位推进", ctx.eval("globalThis.strategyText"))
+        self.assertIn("初始玩家", ctx.eval("globalThis.strategyText"))
+        self.assertTrue(ctx.eval("globalThis.hasRotateJoinCodeButton"))
+        self.assertEqual(ctx.eval("globalThis.rotatedCampaignId"), 7)
+        self.assertIn("初始玩家在线状态", ctx.eval("globalThis.strategyText"))
+        self.assertIn("所有真人初始玩家在线，AI 空席会自动操作。", ctx.eval("globalThis.strategyText"))
+        self.assertIn("状态：在线", ctx.eval("globalThis.strategyText"))
+        self.assertIn("状态：AI 托管", ctx.eval("globalThis.strategyText"))
+        self.assertIn("当前账号", ctx.eval("globalThis.strategyText"))
+        self.assertIn("战略地图", ctx.eval("globalThis.strategyText"))
+        self.assertIn("本月军令", ctx.eval("globalThis.strategyText"))
+        self.assertIn("3/4 可用", ctx.eval("globalThis.strategyText"))
+        self.assertIn("晨星城叛军集结", ctx.eval("globalThis.strategyText"))
+        self.assertIn("雾港城防线薄弱", ctx.eval("globalThis.strategyText"))
+        self.assertIn("斥候推测：第二势力准备进攻", ctx.eval("globalThis.strategyText"))
+        self.assertIn("下一步：处理突发事件", ctx.eval("globalThis.strategyText"))
+        self.assertIn("行会争端", ctx.eval("globalThis.strategyText"))
+        self.assertIn("本月底未处理将自动采用放任结果", ctx.eval("globalThis.strategyText"))
+        self.assertIn("未完影响 · 第 3 月", ctx.eval("globalThis.strategyText"))
+        self.assertTrue(ctx.eval("globalThis.hasStoryChoiceButton"))
+        self.assertEqual(
+            json.loads(ctx.eval("globalThis.queuedStoryPayload")),
+            {"event_id": "story_2_faction_1_guild", "choice_id": "mediate_guilds"},
+        )
+        self.assertIn("定位 晨星城", ctx.eval("globalThis.strategyText"))
+        self.assertTrue(ctx.eval("globalThis.hasGuideLocateButton"))
+        self.assertIn("查看地图", ctx.eval("globalThis.strategyText"))
+        self.assertIn("打开军令", ctx.eval("globalThis.strategyText"))
+        self.assertTrue(ctx.eval("globalThis.hasStrategyMapStage"))
+        self.assertTrue(ctx.eval("globalThis.hasStrategyCityCommandCard"))
+        self.assertTrue(ctx.eval("globalThis.hasStrategyDossier"))
+        self.assertTrue(ctx.eval("globalThis.hasStrategyRouteDrawer"))
+        self.assertFalse(ctx.eval("globalThis.routeDrawerInitiallyOpen"))
+        self.assertTrue(ctx.eval("globalThis.routeDrawerOpenAfterClick"))
+        self.assertTrue(ctx.eval("globalThis.routeDrawerStateAfterClick"))
+        self.assertFalse(ctx.eval("globalThis.dossierInitiallyOpen"))
+        self.assertTrue(ctx.eval("globalThis.dossierOpenAfterClick"))
+        self.assertTrue(ctx.eval("globalThis.dossierStateAfterClick"))
+        self.assertTrue(ctx.eval("globalThis.hasDossierTabs"))
+        self.assertTrue(ctx.eval("globalThis.hasDossierTechTab"))
+        self.assertEqual(ctx.eval("globalThis.dossierTabAfterTechClick"), "tech")
+        self.assertTrue(ctx.eval("globalThis.heroFilterHasMatch"))
+        self.assertTrue(ctx.eval("globalThis.heroFilterFirstHidden"))
+        self.assertTrue(ctx.eval("globalThis.heroFilterSecondVisible"))
+        self.assertEqual(ctx.eval("globalThis.restoredPolicyDraft"), "金钱优先")
+        self.assertTrue(ctx.eval("globalThis.storyChoiceCanReplaceAtZero"))
+        self.assertFalse(ctx.eval("globalThis.newStoryChoiceBlockedAtZero"))
+        self.assertIn("战报卷宗", ctx.eval("globalThis.strategyText"))
+        self.assertIn("路线情报", ctx.eval("globalThis.strategyText"))
+        self.assertIn("城市军令", ctx.eval("globalThis.strategyText"))
+        self.assertIn("召唤祭祀", ctx.eval("globalThis.strategyText"))
+        self.assertIn("祭祀场 1 级", ctx.eval("globalThis.strategyText"))
+        self.assertIn("点击城市选择命令目标", ctx.eval("globalThis.strategyText"))
+        self.assertIn("己方", ctx.eval("globalThis.strategyText"))
+        self.assertIn("敌方", ctx.eval("globalThis.strategyText"))
+        self.assertIn("选中", ctx.eval("globalThis.strategyText"))
+        self.assertIn("警报", ctx.eval("globalThis.strategyText"))
+        self.assertIn("本月没有当前职位必须处理的紧急事项", ctx.eval("globalThis.strategyText"))
+        self.assertIn("晨星城 ↔ 雾港城", ctx.eval("globalThis.strategyText"))
+        self.assertIn("相邻：雾港城", ctx.eval("globalThis.strategyText"))
+        self.assertIn("可进攻：雾港城", ctx.eval("globalThis.strategyText"))
+        self.assertTrue(ctx.eval("globalThis.hasFogMapButton"))
+        self.assertEqual(ctx.eval("globalThis.selectedCityAfterMapClick"), "city_2")
+        self.assertIn("选择己方城市下达军令", ctx.eval("globalThis.strategyTextAfterMapClick"))
+        self.assertIn("乡勇编练", ctx.eval("globalThis.strategyText"))
+        self.assertIn("本势力武将", ctx.eval("globalThis.strategyText"))
+        self.assertIn("艾莉", ctx.eval("globalThis.strategyText"))
+        self.assertIn("李", ctx.eval("globalThis.strategyText"))
+        self.assertIn("举行祭祀", ctx.eval("globalThis.strategyText"))
+        self.assertNotIn("发布招募武将令", ctx.eval("globalThis.strategyText"))
+        self.assertTrue(ctx.eval("globalThis.hasHeroDeploySelect"))
+        self.assertTrue(ctx.eval("globalThis.hasPlanAttackButton"))
+        self.assertEqual(json.loads(ctx.eval("globalThis.queuedAttackPayload"))["attacker_hero_codes"], ["li"])
+        self.assertTrue(ctx.eval("globalThis.hasDefenseHeroButton"))
+        self.assertEqual(ctx.eval("globalThis.defenseHeroCode"), "li")
+        self.assertTrue(ctx.eval("globalThis.hasBattleDefenseButton"))
+        self.assertTrue(ctx.eval("globalThis.hasBattleDefenseSelect"))
+        self.assertEqual(json.loads(ctx.eval("globalThis.battleDefensePayload")), {"battleId": "battle_2_defense", "heroCode": "li"})
+        self.assertTrue(ctx.eval("globalThis.hasCityRitualButton"))
+        self.assertEqual(json.loads(ctx.eval("globalThis.cityRitualPayload")), {"city_id": "city_1"})
+        ctx.eval(
+            """
+            function collectInputs(node, typeName) {
+              if (!node) return [];
+              let found = [];
+              if (node.tagName === "INPUT" && node.type === typeName) found.push(node);
+              for (const child of node.children || []) found = found.concat(collectInputs(child, typeName));
+              return found;
+            }
+            queueStrategyAction = function (actionType, payload) {
+              if (actionType === "declare_attack") globalThis.multiQueuedAttackPayload = JSON.stringify(payload);
+            };
+            setStrategyBattleDefenseHero = function (battleId, heroCodes) {
+              globalThis.multiBattleDefensePayload = JSON.stringify({ battleId, heroCodes });
+            };
+            state.strategyCampaign.world.factions[0].strategic_hero_deployment_limit = 2;
+            state.strategyCampaign.world.factions[0].strategic_heroes.push({
+              code: "chanter",
+              name: "咏唱者",
+              role: "法师",
+              attribute: "暗",
+              race: "精灵",
+              level: 3,
+              home_faction_id: "faction_1",
+              status: "serving",
+              summon_cost_ether: 35,
+            });
+            state.strategySelectedCityId = "city_1";
+            renderStrategyPanel();
+            const checkboxes = collectInputs(document.elements["strategy-current"], "checkbox");
+            globalThis.multiHeroCheckboxCount = checkboxes.length;
+            for (const input of checkboxes) {
+              if (input.value === "li" || input.value === "chanter") input.checked = true;
+            }
+            const multiPlanAttackButton = findButtonByText(document.elements["strategy-current"], "计划进攻 · 2 军令");
+            if (multiPlanAttackButton) multiPlanAttackButton.listeners.click[0]();
+            const multiBattleDefenseButton = findButtonByText(document.elements["strategy-current"], "设置本场防守");
+            if (multiBattleDefenseButton) multiBattleDefenseButton.listeners.click[0]();
+            """
+        )
+        self.assertGreaterEqual(ctx.eval("globalThis.multiHeroCheckboxCount"), 2)
+        self.assertEqual(json.loads(ctx.eval("globalThis.multiQueuedAttackPayload"))["attacker_hero_codes"], ["li", "chanter"])
+        self.assertEqual(
+            json.loads(ctx.eval("globalThis.multiBattleDefensePayload")),
+            {"battleId": "battle_2_defense", "heroCodes": ["li", "chanter"]},
+        )
+        self.assertFalse(ctx.eval("globalThis.hasSummonHeroButton"))
+        self.assertEqual(ctx.eval("globalThis.queuedStrategyActionType"), "perform_hero_ritual")
+        self.assertIn("ABC234", ctx.eval("globalThis.strategyText"))
+        self.assertIn("AB12CD", ctx.eval("globalThis.strategyText"))
+        self.assertIn("进入真实战斗", ctx.eval("globalThis.strategyText"))
+        self.assertIn("攻方单位", ctx.eval("globalThis.strategyText"))
+        self.assertIn("守备兵", ctx.eval("globalThis.strategyText"))
+        self.assertIn("战斗记录", ctx.eval("globalThis.strategyText"))
+        self.assertIn("守方胜利", ctx.eval("globalThis.strategyText"))
+        self.assertIn("守城成功", ctx.eval("globalThis.strategyText"))
+        self.assertIn("损失：攻方 400", ctx.eval("globalThis.strategyText"))
+        self.assertIn("剩余兵力：攻方 400", ctx.eval("globalThis.strategyText"))
+        self.assertIn("存活单位：攻方 4/8", ctx.eval("globalThis.strategyText"))
+        self.assertIn("英灵：攻方 参战 ellie", ctx.eval("globalThis.strategyText"))
+        self.assertIn("沉睡 ellie", ctx.eval("globalThis.strategyText"))
+        self.assertIn("英灵：守方 参战 fire_funeral", ctx.eval("globalThis.strategyText"))
+        self.assertIn("查看真实战斗", ctx.eval("globalThis.strategyText"))
+        self.assertIn("本月行动队列", ctx.eval("globalThis.strategyText"))
+        self.assertIn("战略目标与流亡", ctx.eval("globalThis.strategyText"))
+        self.assertIn("统一城邦", ctx.eval("globalThis.strategyText"))
+        self.assertIn("已达成", ctx.eval("globalThis.strategyText"))
+        self.assertIn("世界主线", ctx.eval("globalThis.strategyText"))
+        self.assertIn("未开放", ctx.eval("globalThis.strategyText"))
+        self.assertIn("流亡势力", ctx.eval("globalThis.strategyText"))
+        self.assertIn("第二势力", ctx.eval("globalThis.strategyText"))
+        self.assertIn("方针计划为 征兵优先", ctx.eval("globalThis.strategyText"))
+        self.assertIn("叛乱风险 80 正式叛乱", ctx.eval("globalThis.strategyText"))
+        self.assertIn("叛军 160", ctx.eval("globalThis.strategyText"))
+        self.assertIn("治理", ctx.eval("globalThis.strategyText"))
+        self.assertIn("计划方针", ctx.eval("globalThis.strategyText"))
+        self.assertIn("叛乱", ctx.eval("globalThis.strategyText"))
+        self.assertIn("叛乱处理", ctx.eval("globalThis.strategyText"))
+        self.assertIn("计划处理", ctx.eval("globalThis.strategyText"))
+        self.assertIn("计划清剿", ctx.eval("globalThis.strategyText"))
+        self.assertTrue(ctx.eval("globalThis.hasRebellionSelect"))
+        self.assertTrue(ctx.eval("globalThis.hasRebellionButton"))
+        self.assertTrue(ctx.eval("globalThis.hasRebellionBattleButton"))
+        self.assertEqual(json.loads(ctx.eval("globalThis.queuedRebellionPayload")), {"rebellion_action_id": "suppress", "city_id": "city_1"})
+        self.assertEqual(json.loads(ctx.eval("globalThis.queuedRebellionBattlePayload")), {"city_id": "city_1", "troops": 160})
+        self.assertIn("计划进攻", ctx.eval("globalThis.strategyText"))
+        self.assertIn("加入月度计划", ctx.eval("globalThis.strategyText"))
+        self.assertFalse(ctx.eval("globalThis.advanceDisabled"))
+        self.assertFalse(ctx.eval("globalThis.firstSelectDisabled"))
+
+        ctx.eval(
+            """
+            queueStrategyAction = function (actionType, payload) {
+              globalThis.queuedExileActionType = actionType;
+              globalThis.queuedExilePayload = JSON.stringify(payload);
+            };
+            state.authUser = { id: 1, username: "Alice" };
+            state.strategyCampaign.world.exile_action_choices = [
+              { id: "seek_aid", name: "求援", description: "获得流亡援助", requires_target_city: false },
+              { id: "build_network", name: "潜伏联络", description: "提高目标城市支持度", requires_target_city: true },
+            ];
+            state.strategyCampaign.world.strategic_status.exiled_faction_ids = ["faction_1"];
+            state.strategyCampaign.world.strategic_status.exiled_factions = [
+              { id: "faction_1", name: "第一势力", city_count: 0 },
+            ];
+            renderStrategyPanel();
+            globalThis.strategyExileText = collectText(document.elements["strategy-current"]);
+            const exilePlanButton = findButtonByText(document.elements["strategy-current"], "加入月度计划 · 1 军令");
+            globalThis.hasExilePlanButton = Boolean(exilePlanButton);
+            if (exilePlanButton) exilePlanButton.listeners.click[0]();
+            """
+        )
+        self.assertIn("你的流亡行动", ctx.eval("globalThis.strategyExileText"))
+        self.assertIn("求援", ctx.eval("globalThis.strategyExileText"))
+        self.assertTrue(ctx.eval("globalThis.hasExilePlanButton"))
+        self.assertEqual(ctx.eval("globalThis.queuedExileActionType"), "exile_action")
+        self.assertEqual(json.loads(ctx.eval("globalThis.queuedExilePayload"))["exile_action_id"], "seek_aid")
+
+        ctx.eval(
+            """
+            state.strategyCampaign.members.push({ user_id: 2, username: "Bob", faction_id: "faction_2", is_initial_player: true });
+            state.strategyCampaign.resume = {
+              can_resume: false,
+              online_initial_user_ids: [1],
+              missing_initial_user_ids: [2],
+              initial_user_ids: [1, 2],
+              campaign_status: "active",
+            };
+            renderStrategyPanel();
+            globalThis.strategyWaitingText = collectText(document.elements["strategy-current"]);
+            globalThis.strategyWaitingListText = collectText(document.elements["strategy-campaign-list"]);
+            globalThis.waitingAdvanceDisabled = document.elements["strategy-advance-month"].disabled;
+            """
+        )
+        self.assertIn("等待初始玩家：Bob", ctx.eval("globalThis.strategyWaitingText"))
+        self.assertIn("等待初始玩家：Bob", ctx.eval("globalThis.strategyWaitingListText"))
+        self.assertIn("Bob", ctx.eval("globalThis.strategyWaitingText"))
+        self.assertIn("第二势力", ctx.eval("globalThis.strategyWaitingText"))
+        self.assertIn("状态：缺席", ctx.eval("globalThis.strategyWaitingText"))
+        self.assertTrue(ctx.eval("globalThis.waitingAdvanceDisabled"))
+
+        ctx.eval(
+            """
+            state.authUser = { id: 2, username: "Bob" };
+            state.strategyCampaign.resume = {
+              can_resume: true,
+              online_initial_user_ids: [1, 2],
+              missing_initial_user_ids: [],
+              initial_user_ids: [1, 2],
+              campaign_status: "active",
+            };
+            renderStrategyPanel();
+            globalThis.strategyMemberPermissionText = collectText(document.elements["strategy-current"]);
+            globalThis.memberAdvanceDisabled = document.elements["strategy-advance-month"].disabled;
+            """
+        )
+        self.assertIn("仅房主的主公职位可推进", ctx.eval("globalThis.strategyMemberPermissionText"))
+        self.assertTrue(ctx.eval("globalThis.memberAdvanceDisabled"))
+
+        ctx.eval(
+            """
+            state.authUser = { id: 1, username: "Alice" };
+            const syncedCampaign = JSON.parse(JSON.stringify(state.strategyCampaigns[0]));
+            syncedCampaign.name = "战后战役";
+            state.strategyCampaigns = [];
+            state.strategyCampaign = null;
+            state.screen = "battle";
+            applyRoomPayload({
+              heroes: [],
+              rooms: [],
+              room: {
+                room_id: "CD34EF",
+                status: "finished",
+                mode: "classic",
+                viewer_player_id: 1,
+                viewer_team_id: 1,
+                viewer_name: "Alice",
+                viewer_is_host: true,
+                can_rematch: false,
+                replay: { available: false },
+                seats: [],
+              },
+              battle: {
+                winner: 2,
+                board: { width: 8, height: 8 },
+                units: [],
+                active_units: [],
+                logs: ["玩家 2 获胜。"],
+                visual_events: [],
+              },
+              strategy_campaign: syncedCampaign,
+            }, { preserveScreen: true });
+            renderGameOverOverlay();
+            globalThis.syncedStrategyName = state.strategyCampaign.name;
+            globalThis.syncedStrategyMessage = state.strategyMessage;
+            globalThis.gameOverText = document.elements["game-over-text"].textContent;
+            globalThis.strategyReturnDisabled = document.elements["game-over-strategy"].disabled;
+            returnToStrategyCampaign();
+            globalThis.returnedScreen = state.screen;
+            renderStrategyPanel();
+            globalThis.returnedStrategyText = collectText(document.elements["strategy-current"]);
+            """
+        )
+        self.assertEqual(ctx.eval("globalThis.syncedStrategyName"), "战后战役")
+        self.assertIn("战役结算已同步", ctx.eval("globalThis.syncedStrategyMessage"))
+        self.assertIn("战役结算已同步", ctx.eval("globalThis.gameOverText"))
+        self.assertFalse(ctx.eval("globalThis.strategyReturnDisabled"))
+        self.assertEqual(ctx.eval("globalThis.returnedScreen"), "draft")
+        self.assertIn("战后战役", ctx.eval("globalThis.returnedStrategyText"))
+        self.assertIn("守方胜利", ctx.eval("globalThis.returnedStrategyText"))
+
+        ctx.eval(
+            """
+            state.strategyCampaign.world.office_system = {
+              office_types: [
+                { id: "lord", workspace: "LordWorkspace" },
+                { id: "grand_general", workspace: "GrandGeneralWorkspace" },
+                { id: "general", workspace: "GeneralWorkspace" },
+                { id: "governor", workspace: "GovernorWorkspace" },
+              ],
+            };
+            state.strategyCampaign.world.offices = [
+              { id: "office:faction_1:lord", faction_id: "faction_1", office_type: "lord", controller_type: "player", controller_user_id: 1, status: "active", managed_entity_ids: ["faction_1"], parent_office_id: null, subordinate_office_ids: ["office:faction_1:grand_general:1", "office:faction_1:governor:city_1"] },
+              { id: "office:faction_1:grand_general:1", faction_id: "faction_1", office_type: "grand_general", controller_type: "player", controller_user_id: 1, status: "active", managed_entity_ids: ["theater:faction_1:1"], parent_office_id: "office:faction_1:lord", subordinate_office_ids: ["office:faction_1:general:1"], unit_inventory: {} },
+              { id: "office:faction_1:general:1", faction_id: "faction_1", office_type: "general", controller_type: "player", controller_user_id: 1, status: "active", managed_entity_ids: ["army:faction_1:1", "city_1"], parent_office_id: "office:faction_1:grand_general:1", subordinate_office_ids: [], unit_inventory: { infantry: 1 } },
+              { id: "office:faction_1:governor:city_1", faction_id: "faction_1", office_type: "governor", controller_type: "player", controller_user_id: 1, status: "active", managed_entity_ids: ["city_1"], parent_office_id: "office:faction_1:lord", subordinate_office_ids: [] },
+            ];
+            state.strategyCampaign.world.office_duties = [
+              { id: "duty:lord", office_id: "office:faction_1:lord", duty_type: "review_national_strategy", priority: 1, status: "pending" },
+            ];
+            state.strategyCampaign.world.office_orders = [
+              { id: "unit-request-1", order_type: "unit_request", issuer_office_id: "office:faction_1:general:1", receiver_office_id: "office:faction_1:grand_general:1", objective: "申请 步兵 1", target_entity_id: "city_1", details: { city_id: "city_1", unit_type: "infantry", count: 1 }, status: "pending" },
+            ];
+            queueStrategyAction = function (actionType, payload) {
+              globalThis.roleActionType = actionType;
+              globalThis.roleActionPayload = JSON.stringify(payload);
+            };
+            state.strategyActiveOfficeId = "office:faction_1:lord";
+            renderStrategyPanel();
+            globalThis.hasLordWorkspace = Boolean(findByClass(document.elements["strategy-current"], "LordWorkspace"));
+            globalThis.hasOfficeSwitcher = Boolean(findByClass(document.elements["strategy-current"], "strategy-office-switcher"));
+            globalThis.lordCanOrder = Boolean(findButtonByText(document.elements["strategy-current"], "下达命令 · 1军令"));
+            globalThis.lordCanSummon = Boolean(findButtonByText(document.elements["strategy-current"], "举行祭祀 · 1 军令"));
+            const lordRitual = findButtonByText(document.elements["strategy-current"], "举行祭祀 · 1 军令");
+            if (lordRitual) lordRitual.listeners.click[0]();
+            globalThis.lordRitualType = globalThis.roleActionType;
+            globalThis.lordRitualPayload = globalThis.roleActionPayload;
+            const lordTech = findButtonByText(document.elements["strategy-current"], "研究科技 · 1 军令");
+            globalThis.lordCanResearch = Boolean(lordTech);
+            if (lordTech) lordTech.listeners.click[0]();
+            globalThis.lordTechType = globalThis.roleActionType;
+            const lordUnbind = findButtonByText(document.elements["strategy-current"], "解除绑定");
+            globalThis.lordCanUnbind = Boolean(lordUnbind);
+            if (lordUnbind) lordUnbind.listeners.click[0]();
+            globalThis.lordUnbindType = globalThis.roleActionType;
+            globalThis.lordUnbindPayload = globalThis.roleActionPayload;
+            globalThis.lordCanAttack = Boolean(findButtonByText(document.elements["strategy-current"], "计划进攻 · 2 军令"));
+
+            state.strategyActiveOfficeId = "office:faction_1:governor:city_1";
+            renderStrategyPanel();
+            globalThis.hasGovernorWorkspace = Boolean(findByClass(document.elements["strategy-current"], "GovernorWorkspace"));
+            globalThis.governorCanSetPolicy = Boolean(findButtonByText(document.elements["strategy-current"], "计划方针 · 1 军令"));
+            const governorIncrease = findButtonByText(document.elements["strategy-current"], "增加本城兵力 · 1 军令");
+            globalThis.governorCanIncrease = Boolean(governorIncrease);
+            if (governorIncrease) governorIncrease.listeners.click[0]();
+            globalThis.governorIncreaseType = globalThis.roleActionType;
+            const governorRegister = findButtonByText(document.elements["strategy-current"], "注册选定数量 · 1 军令");
+            globalThis.governorCanRegister = Boolean(governorRegister);
+            if (governorRegister) governorRegister.listeners.click[0]();
+            globalThis.governorRegisterType = globalThis.roleActionType;
+            globalThis.governorRegisterPayload = globalThis.roleActionPayload;
+            globalThis.governorCanBuild = Boolean(findButtonByText(document.elements["strategy-current"], "建造 / 升级 · 1 军令"));
+            globalThis.governorCanAttack = Boolean(findButtonByText(document.elements["strategy-current"], "计划进攻 · 2 军令"));
+            globalThis.governorCanRequest = Boolean(findButtonByText(document.elements["strategy-current"], "提交请求"));
+
+            state.strategyActiveOfficeId = "office:faction_1:general:1";
+            renderStrategyPanel();
+            globalThis.hasGeneralWorkspace = Boolean(findByClass(document.elements["strategy-current"], "GeneralWorkspace"));
+            const generalRequestUnits = findButtonByText(document.elements["strategy-current"], "请示直属大将军");
+            globalThis.generalCanRequestUnits = Boolean(generalRequestUnits);
+            if (generalRequestUnits) generalRequestUnits.listeners.click[0]();
+            globalThis.generalRequestType = globalThis.roleActionType;
+            globalThis.generalRequestPayload = globalThis.roleActionPayload;
+            globalThis.generalCanAttack = Boolean(findButtonByText(document.elements["strategy-current"], "计划进攻 · 2 军令"));
+            globalThis.generalCanSetPolicy = Boolean(findButtonByText(document.elements["strategy-current"], "计划方针 · 1 军令"));
+
+            state.strategyActiveOfficeId = "office:faction_1:grand_general:1";
+            renderStrategyPanel();
+            globalThis.hasGrandGeneralWorkspace = Boolean(findByClass(document.elements["strategy-current"], "GrandGeneralWorkspace"));
+            const grandGeneralTransfer = findButtonByText(document.elements["strategy-current"], "调拨给直属将军 · 1 军令");
+            globalThis.grandGeneralCanTransfer = Boolean(grandGeneralTransfer);
+            if (grandGeneralTransfer) grandGeneralTransfer.listeners.click[0]();
+            globalThis.grandGeneralTransferType = globalThis.roleActionType;
+            globalThis.grandGeneralTransferPayload = globalThis.roleActionPayload;
+            const grandGeneralApprove = findButtonByText(document.elements["strategy-current"], "批准调拨");
+            globalThis.grandGeneralCanApprove = Boolean(grandGeneralApprove);
+            if (grandGeneralApprove) grandGeneralApprove.listeners.click[0]();
+            globalThis.grandGeneralApproveType = globalThis.roleActionType;
+            globalThis.grandGeneralApprovePayload = globalThis.roleActionPayload;
+            globalThis.grandGeneralCanDefend = Boolean(findButtonByText(document.elements["strategy-current"], "设为防守"));
+            """
+        )
+        self.assertTrue(ctx.eval("globalThis.hasLordWorkspace"))
+        self.assertTrue(ctx.eval("globalThis.hasOfficeSwitcher"))
+        self.assertTrue(ctx.eval("globalThis.lordCanOrder"))
+        self.assertTrue(ctx.eval("globalThis.lordCanSummon"))
+        self.assertEqual(ctx.eval("globalThis.lordRitualType"), "perform_hero_ritual")
+        self.assertEqual(json.loads(ctx.eval("globalThis.lordRitualPayload")), {"city_id": "city_1"})
+        self.assertTrue(ctx.eval("globalThis.lordCanResearch"))
+        self.assertEqual(ctx.eval("globalThis.lordTechType"), "unlock_tactic_tech")
+        self.assertTrue(ctx.eval("globalThis.lordCanUnbind"))
+        self.assertEqual(ctx.eval("globalThis.lordUnbindType"), "unbind_strategic_hero")
+        self.assertEqual(json.loads(ctx.eval("globalThis.lordUnbindPayload")), {"hero_code": "li"})
+        self.assertFalse(ctx.eval("globalThis.lordCanAttack"))
+        self.assertTrue(ctx.eval("globalThis.hasGovernorWorkspace"))
+        self.assertTrue(ctx.eval("globalThis.governorCanSetPolicy"))
+        self.assertTrue(ctx.eval("globalThis.governorCanIncrease"))
+        self.assertEqual(ctx.eval("globalThis.governorIncreaseType"), "increase_city_troops")
+        self.assertTrue(ctx.eval("globalThis.governorCanRegister"))
+        self.assertEqual(ctx.eval("globalThis.governorRegisterType"), "register_city_soldiers")
+        self.assertEqual(json.loads(ctx.eval("globalThis.governorRegisterPayload"))["city_id"], "city_1")
+        self.assertTrue(ctx.eval("globalThis.governorCanBuild"))
+        self.assertFalse(ctx.eval("globalThis.governorCanAttack"))
+        self.assertTrue(ctx.eval("globalThis.governorCanRequest"))
+        self.assertTrue(ctx.eval("globalThis.hasGeneralWorkspace"))
+        self.assertTrue(ctx.eval("globalThis.generalCanRequestUnits"))
+        self.assertEqual(ctx.eval("globalThis.generalRequestType"), "request_registered_units")
+        self.assertEqual(json.loads(ctx.eval("globalThis.generalRequestPayload"))["city_id"], "city_1")
+        self.assertTrue(ctx.eval("globalThis.generalCanAttack"))
+        self.assertFalse(ctx.eval("globalThis.generalCanSetPolicy"))
+        self.assertTrue(ctx.eval("globalThis.hasGrandGeneralWorkspace"))
+        self.assertTrue(ctx.eval("globalThis.grandGeneralCanTransfer"))
+        self.assertEqual(ctx.eval("globalThis.grandGeneralTransferType"), "transfer_registered_units")
+        self.assertEqual(json.loads(ctx.eval("globalThis.grandGeneralTransferPayload"))["general_office_id"], "office:faction_1:general:1")
+        self.assertTrue(ctx.eval("globalThis.grandGeneralCanApprove"))
+        self.assertEqual(ctx.eval("globalThis.grandGeneralApproveType"), "approve_registered_unit_request")
+        self.assertEqual(json.loads(ctx.eval("globalThis.grandGeneralApprovePayload")), {"request_id": "unit-request-1"})
+        self.assertTrue(ctx.eval("globalThis.grandGeneralCanDefend"))
+
+        ctx.eval(
+            """
+            state.strategyCampaign.status = "lobby";
+            state.strategyCampaign.resume = { can_resume: false, missing_initial_user_ids: [] };
+            renderStrategyPanel();
+            globalThis.strategyLobbyText = collectText(document.elements["strategy-current"]);
+            globalThis.lobbyAdvanceDisabled = document.elements["strategy-advance-month"].disabled;
+            """
+        )
+        self.assertIn("锁定并启用 AI", ctx.eval("globalThis.strategyLobbyText"))
+        self.assertTrue(ctx.eval("globalThis.lobbyAdvanceDisabled"))
 
     def test_scenario_random_room_roster_size_control_reflects_state_and_wires_host_change(self) -> None:
         app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")

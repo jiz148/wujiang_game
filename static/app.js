@@ -23,6 +23,24 @@ const state = {
   profileDraftName: "",
   profileReady: false,
   profileModalOpen: false,
+  authToken: "",
+  authUser: null,
+  authUsername: "",
+  authPassword: "",
+  authMessage: "",
+  authBusy: false,
+  strategyCampaigns: [],
+  strategyCampaign: null,
+  strategyBattleRoom: null,
+  strategyName: "英灵城邦",
+  strategySeed: "1",
+  strategyPlayerCount: "2",
+  strategyJoinCode: "",
+  strategyMessage: "",
+  strategyBusy: false,
+  strategySelectedCityId: "",
+  strategyActiveOfficeId: "",
+  strategyCommandDrafts: {},
   playerToken: "",
   lastSyncAt: 0,
   boardZoom: 1,
@@ -34,6 +52,9 @@ const state = {
   randomRosterSizeDraft: "",
   roomEditSeatId: null,
   rightRailCollapsed: false,
+  strategyRouteIntelOpen: false,
+  strategyDossierOpen: false,
+  strategyDossierTab: "",
   floatingToasts: [],
   lastToastLogCount: 0,
   aiPreview: null,
@@ -43,7 +64,10 @@ const ROOM_TOKEN_PREFIX = "wujiang-room-token:";
 const ROOM_NAME_PREFIX = "wujiang-room-name:";
 const PROFILE_NAME_KEY = "wujiang-profile-name";
 const PROFILE_READY_KEY = "wujiang-profile-ready";
+const AUTH_TOKEN_KEY = "wujiang-auth-token";
 let pollHandle = null;
+let nextHomePollAt = 0;
+let lastHomeRenderSignature = "";
 let refreshInFlight = false;
 let boardOverlayRenderHandle = 0;
 let battleVfxCleanupHandle = 0;
@@ -54,9 +78,14 @@ let tooltipHideHandle = 0;
 const $ = (id) => document.getElementById(id);
 
 async function fetchJson(url, options = {}) {
+  const headers = {
+    "Content-Type": "application/json",
+    ...(state.authToken ? { Authorization: `Bearer ${state.authToken}` } : {}),
+    ...(options.headers || {}),
+  };
   const response = await fetch(url, {
-    headers: { "Content-Type": "application/json" },
     ...options,
+    headers,
   });
   const payload = await response.json();
   if (!response.ok) {
@@ -403,7 +432,520 @@ function confirmProfile() {
 }
 
 function profileModalVisible() {
-  return state.profileModalOpen || !state.profileReady;
+  return Boolean(state.authUser) && (state.profileModalOpen || !state.profileReady);
+}
+
+function userLoggedIn() {
+  return Boolean(state.authUser);
+}
+
+function requireAuthForRoomEntry() {
+  if (userLoggedIn()) return true;
+  focusAuthGateForMode("武将对战房间");
+  return false;
+}
+
+function focusAuthGateForMode(modeLabel = "游戏") {
+  if (userLoggedIn()) return false;
+  state.authMessage = `进入${modeLabel}前需要先登录或注册。`;
+  renderAuthPanel();
+  enqueueFloatingToast(state.authMessage);
+  focusDraftTarget(".auth-card");
+  const timer = window.setTimeout || (typeof setTimeout === "function" ? setTimeout : null);
+  if (typeof timer === "function") timer(() => {
+    const username = $("auth-username");
+    if (username && typeof username.focus === "function") username.focus();
+  }, 80);
+  return true;
+}
+
+function openStrategyModeEntry() {
+  if (focusAuthGateForMode("英灵城邦战役")) return;
+  focusDraftTarget("#strategy-panel");
+}
+
+function openDuelModeEntry() {
+  if (focusAuthGateForMode("武将对战房间")) return;
+  focusDraftTarget(".room-home-grid");
+}
+
+function normalizeAuthUsername(username) {
+  return String(username || "").trim().replace(/\s+/g, " ").slice(0, 32);
+}
+
+function initializeAuthState() {
+  state.authToken = localStorage.getItem(AUTH_TOKEN_KEY) || "";
+}
+
+function clearAuthSession(message = "") {
+  state.authToken = "";
+  state.authUser = null;
+  state.authPassword = "";
+  state.authMessage = message;
+  clearStrategyState();
+  localStorage.removeItem(AUTH_TOKEN_KEY);
+}
+
+function saveAuthSession(sessionToken, user) {
+  state.authToken = sessionToken || "";
+  state.authUser = user || null;
+  state.authPassword = "";
+  if (state.authToken) {
+    localStorage.setItem(AUTH_TOKEN_KEY, state.authToken);
+  }
+  if (user?.username) {
+    saveProfileName(user.username);
+  }
+}
+
+async function refreshAuthSession() {
+  if (!state.authToken) return;
+  try {
+    const payload = await fetchJson(`/api/auth/me?session_token=${encodeURIComponent(state.authToken)}`);
+    if (payload.user) {
+      saveAuthSession(state.authToken, payload.user);
+    } else {
+      clearAuthSession();
+    }
+  } catch (error) {
+    clearAuthSession(error.error || "登录状态已失效。");
+  }
+}
+
+async function submitAuth(mode) {
+  if (state.authBusy) return;
+  const username = normalizeAuthUsername(state.authUsername);
+  const password = state.authPassword;
+  if (!username || !password) {
+    state.authMessage = "请输入用户名和密码。";
+    renderAuthPanel();
+    return;
+  }
+  state.authBusy = true;
+  state.authMessage = mode === "register" ? "正在注册..." : "正在登录...";
+  renderAuthPanel();
+  try {
+    const payload = await fetchJson(`/api/auth/${mode}`, {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    });
+    saveAuthSession(payload.session_token, payload.user);
+    state.authUsername = "";
+    state.authMessage = mode === "register" ? "注册成功，已登录。" : "登录成功。";
+    await refreshStrategyCampaigns({ renderAfter: false });
+  } catch (error) {
+    state.authMessage = error.error || "账号操作失败。";
+  } finally {
+    state.authBusy = false;
+    render();
+  }
+}
+
+async function logoutAuth() {
+  if (state.authBusy) return;
+  state.authBusy = true;
+  renderAuthPanel();
+  try {
+    await fetchJson("/api/auth/logout", {
+      method: "POST",
+      body: JSON.stringify({ session_token: state.authToken }),
+    });
+  } catch (error) {
+    state.authMessage = error.error || "退出登录时出现问题。";
+  } finally {
+    clearAuthSession("已退出登录。");
+    state.authBusy = false;
+    render();
+  }
+}
+
+function clearStrategyState(message = "") {
+  state.strategyCampaigns = [];
+  state.strategyCampaign = null;
+  state.strategyBattleRoom = null;
+  state.strategyMessage = message;
+}
+
+function syncStrategyCampaignFromRoomPayload(payload = {}) {
+  const campaign = payload.strategy_campaign;
+  if (!campaign) return;
+  state.strategyCampaign = campaign;
+  const campaigns = Array.isArray(state.strategyCampaigns) ? state.strategyCampaigns.slice() : [];
+  const index = campaigns.findIndex((item) => Number(item.id) === Number(campaign.id));
+  if (index >= 0) {
+    campaigns[index] = campaign;
+  } else {
+    campaigns.unshift(campaign);
+  }
+  state.strategyCampaigns = campaigns;
+  if (payload.room?.status === "finished" || payload.battle?.winner) {
+    state.strategyMessage = "真实战斗已结束，战役结算已同步。";
+  }
+}
+
+async function refreshStrategyCampaigns({ renderAfter = true } = {}) {
+  if (!userLoggedIn()) {
+    clearStrategyState("请先登录账号。");
+    if (renderAfter && !isStrategyControlActive()) renderStrategyPanel();
+    return;
+  }
+  try {
+    const payload = await fetchJson("/api/strategy/campaigns");
+    state.strategyCampaigns = payload.campaigns || [];
+    if (state.strategyCampaign) {
+      state.strategyCampaign = state.strategyCampaigns.find((campaign) => campaign.id === state.strategyCampaign.id) || state.strategyCampaign;
+    }
+  } catch (error) {
+    state.strategyMessage = error.error || "读取战役列表失败。";
+  } finally {
+    if (renderAfter && !isStrategyControlActive()) renderStrategyPanel();
+  }
+}
+
+async function strategyPost(path, body) {
+  if (state.strategyBusy) return null;
+  if (!userLoggedIn()) {
+    state.strategyMessage = "请先登录账号。";
+    renderStrategyPanel();
+    return null;
+  }
+  state.strategyBusy = true;
+  try {
+    return await fetchJson(path, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    state.strategyMessage = error.error || "战略操作失败。";
+    return null;
+  } finally {
+    state.strategyBusy = false;
+  }
+}
+
+function focusStrategyWarRoom() {
+  const run = () => {
+    const target = (document.querySelector && document.querySelector(".strategy-war-room")) || $("strategy-panel");
+    if (target && typeof target.scrollIntoView === "function") {
+      target.scrollIntoView({ block: "start", inline: "nearest" });
+    }
+  };
+  if (window.requestAnimationFrame) {
+    window.requestAnimationFrame(run);
+  } else {
+    run();
+  }
+}
+
+function focusDraftTarget(selector) {
+  const target = document.querySelector ? document.querySelector(selector) : null;
+  if (target && typeof target.scrollIntoView === "function") {
+    target.scrollIntoView({ block: "start", inline: "nearest" });
+  }
+}
+
+function focusStrategyCommandPanel() {
+  focusDraftTarget(".strategy-command-panel");
+}
+
+function focusStrategyMapStage() {
+  focusDraftTarget(".strategy-map-stage");
+}
+
+function focusStrategyDossier() {
+  focusDraftTarget(".strategy-dossier");
+}
+
+async function createStrategyCampaign() {
+  const name = String(state.strategyName || "英灵城邦").trim() || "英灵城邦";
+  const seed = Number.parseInt(state.strategySeed || "1", 10) || 1;
+  const playerCount = Math.max(1, Math.min(6, Number.parseInt(state.strategyPlayerCount || "2", 10) || 2));
+  const payload = await strategyPost("/api/strategy/campaigns/create", {
+    name,
+    seed,
+    city_count: 8,
+    faction_count: playerCount,
+  });
+  if (!payload) {
+    renderStrategyPanel();
+    return;
+  }
+  state.strategyCampaign = payload.campaign;
+  state.strategyMessage = "战役大厅已创建。可以分享加入码；房主锁定后，空席会由 AI 接管。";
+  await refreshStrategyCampaigns({ renderAfter: false });
+  render();
+  focusStrategyWarRoom();
+}
+
+async function joinStrategyCampaignByCode() {
+  const joinCode = String(state.strategyJoinCode || "").trim().toUpperCase();
+  if (!joinCode) {
+    state.strategyMessage = "请输入战役加入码。";
+    renderStrategyPanel();
+    return;
+  }
+  const payload = await strategyPost("/api/strategy/campaigns/join", { join_code: joinCode });
+  if (!payload) {
+    renderStrategyPanel();
+    return;
+  }
+  state.strategyJoinCode = "";
+  state.strategyCampaign = payload.campaign;
+  state.strategyMessage = "已加入战役大厅。等待房主锁定初始玩家。";
+  await refreshStrategyCampaigns({ renderAfter: false });
+  render();
+  focusStrategyWarRoom();
+}
+
+async function chooseStrategyHeroPath(heroCode, path, targetFactionId = "") {
+  if (!state.strategyCampaign || !heroCode || !path) return;
+  const payload = await strategyPost("/api/strategy/campaigns/choose-hero-path", {
+    campaign_id: state.strategyCampaign.id,
+    hero_code: heroCode,
+    path,
+    target_faction_id: targetFactionId,
+  });
+  if (!payload) {
+    renderStrategyPanel();
+    return;
+  }
+  state.strategyCampaign = payload.campaign;
+  const messages = {
+    lord: "你已以主公身份统领初始势力。",
+    found: "你已在所在城市举旗，建立新的势力。",
+    roaming: "你已成为在野武将，可以选择建国或投靠主公。",
+    join: "投靠请求已经送到目标主公案前，获准前保持在野。",
+  };
+  state.strategyMessage = messages[path] || "武将道路已更新。";
+  await refreshStrategyCampaigns({ renderAfter: false });
+  render();
+  focusStrategyWarRoom();
+}
+
+async function lockStrategyCampaign(campaignId) {
+  const payload = await strategyPost("/api/strategy/campaigns/lock", { campaign_id: campaignId });
+  if (!payload) {
+    renderStrategyPanel();
+    return;
+  }
+  state.strategyCampaign = payload.campaign;
+  state.strategyMessage = strategyCanResume(payload.campaign)
+    ? "初始玩家已锁定，空席由 AI 接管，战役可以继续。"
+    : "初始玩家已锁定，等待所有真人初始玩家在线。";
+  await refreshStrategyCampaigns({ renderAfter: false });
+  render();
+  focusStrategyWarRoom();
+}
+
+async function rotateStrategyJoinCode(campaignId) {
+  const payload = await strategyPost("/api/strategy/campaigns/rotate-join-code", { campaign_id: campaignId });
+  if (!payload) {
+    renderStrategyPanel();
+    return;
+  }
+  state.strategyCampaign = payload.campaign;
+  state.strategyMessage = `加入码已更新：${payload.campaign.join_code || "未生成"}`;
+  await refreshStrategyCampaigns({ renderAfter: false });
+  render();
+}
+
+async function enterStrategyCampaign(campaignId) {
+  const payload = await strategyPost("/api/strategy/campaigns/enter", { campaign_id: campaignId });
+  if (!payload) {
+    renderStrategyPanel();
+    return;
+  }
+  state.strategyCampaign = payload.campaign;
+  state.strategyMessage = strategyCanResume(payload.campaign) ? "战役已就绪。" : "已进入战役，等待初始玩家到齐。";
+  await refreshStrategyCampaigns({ renderAfter: false });
+  render();
+  focusStrategyWarRoom();
+}
+
+async function leaveStrategyCampaign(campaignId) {
+  const payload = await strategyPost("/api/strategy/campaigns/leave", { campaign_id: campaignId });
+  if (!payload) {
+    renderStrategyPanel();
+    return;
+  }
+  if (state.strategyCampaign?.id === campaignId) {
+    state.strategyCampaign.resume = payload.resume;
+  }
+  state.strategyMessage = "已离开战役在线状态。";
+  await refreshStrategyCampaigns({ renderAfter: false });
+  render();
+}
+
+async function advanceStrategyMonth() {
+  if (!state.strategyCampaign) {
+    state.strategyMessage = "请先选择一个战役。";
+    renderStrategyPanel();
+    return;
+  }
+  const payload = await strategyPost("/api/strategy/campaigns/advance-month", {
+    campaign_id: state.strategyCampaign.id,
+    issuer_office_id: state.strategyActiveOfficeId,
+  });
+  if (!payload) {
+    renderStrategyPanel();
+    return;
+  }
+  state.strategyCampaign = payload.campaign;
+  state.strategyMessage = `已推进到第 ${payload.campaign.world.current_month} 月。`;
+  state.strategyBattleRoom = (payload.battle_rooms || []).slice(-1)[0] || state.strategyBattleRoom;
+  if (state.strategyBattleRoom?.player_token) {
+    saveStoredIdentity(state.strategyBattleRoom.room_id, state.strategyBattleRoom.player_token, effectiveProfileName());
+  }
+  await refreshStrategyCampaigns({ renderAfter: false });
+  render();
+}
+
+async function setStrategyCityPolicy(cityId, policy) {
+  if (!state.strategyCampaign) return;
+  const payload = await strategyPost("/api/strategy/campaigns/set-city-policy", {
+    campaign_id: state.strategyCampaign.id,
+    city_id: cityId,
+    policy,
+    issuer_office_id: state.strategyActiveOfficeId,
+  });
+  if (!payload) {
+    renderStrategyPanel();
+    return;
+  }
+  state.strategyCampaign = payload.campaign;
+  state.strategyMessage = "城市方针已更新。";
+  render();
+}
+
+async function unlockStrategyTech(techId) {
+  if (!state.strategyCampaign) return;
+  const payload = await strategyPost("/api/strategy/campaigns/unlock-tactic-tech", {
+    campaign_id: state.strategyCampaign.id,
+    tech_id: techId,
+    issuer_office_id: state.strategyActiveOfficeId,
+  });
+  if (!payload) {
+    renderStrategyPanel();
+    return;
+  }
+  state.strategyCampaign = payload.campaign;
+  state.strategyMessage = "战术科技已解锁。";
+  render();
+}
+
+async function setStrategyDefenseHero(heroCode) {
+  if (!state.strategyCampaign) return;
+  const payload = await strategyPost("/api/strategy/campaigns/set-defense-hero", {
+    campaign_id: state.strategyCampaign.id,
+    hero_code: heroCode || "",
+    issuer_office_id: state.strategyActiveOfficeId,
+  });
+  if (!payload) {
+    renderStrategyPanel();
+    return;
+  }
+  state.strategyCampaign = payload.campaign;
+  state.strategyMessage = heroCode ? "防守英灵已设置。" : "防守英灵已恢复自动配置。";
+  render();
+}
+
+async function setStrategyBattleDefenseHero(battleId, heroCode) {
+  if (!state.strategyCampaign || !battleId) return;
+  const heroCodes = Array.isArray(heroCode) ? heroCode : (heroCode ? [heroCode] : []);
+  const payload = await strategyPost("/api/strategy/campaigns/set-battle-defense-hero", {
+    campaign_id: state.strategyCampaign.id,
+    battle_id: battleId,
+    hero_codes: heroCodes,
+    issuer_office_id: state.strategyActiveOfficeId,
+  });
+  if (!payload) {
+    renderStrategyPanel();
+    return;
+  }
+  state.strategyCampaign = payload.campaign;
+  state.strategyMessage = heroCodes.length ? "本场防守英灵已设置。" : "本场防守英灵已设为不投入。";
+  render();
+}
+
+async function declareStrategyAttack(sourceCityId, targetCityId, resolutionMode, attackerHeroCodes = []) {
+  if (!state.strategyCampaign || !sourceCityId || !targetCityId) return;
+  const payload = await strategyPost("/api/strategy/campaigns/declare-attack", {
+    campaign_id: state.strategyCampaign.id,
+    source_city_id: sourceCityId,
+    target_city_id: targetCityId,
+    resolution_mode: resolutionMode || "quick",
+    attacker_hero_codes: attackerHeroCodes,
+    issuer_office_id: state.strategyActiveOfficeId,
+  });
+  if (!payload) {
+    renderStrategyPanel();
+    return;
+  }
+  state.strategyCampaign = payload.campaign;
+  state.strategyBattleRoom = payload.battle_room || null;
+  if (payload.battle_room?.player_token) {
+    saveStoredIdentity(payload.battle_room.room_id, payload.battle_room.player_token, effectiveProfileName());
+  }
+  if (payload.battle_room) {
+    state.strategyMessage = resolutionMode === "watch_ai"
+      ? "已创建 AI 观战房间，可进入观看真实格子战。"
+      : "已创建真实格子战房间，可进入战场手动处理。";
+  } else {
+    state.strategyMessage = "战斗已结算并写入战役事件。";
+  }
+  render();
+}
+
+async function queueStrategyAction(actionType, actionPayload) {
+  if (!state.strategyCampaign) return;
+  const payload = await strategyPost("/api/strategy/campaigns/queue-action", {
+    campaign_id: state.strategyCampaign.id,
+    action_type: actionType,
+    action_payload: {
+      ...(actionPayload || {}),
+      issuer_office_id: state.strategyActiveOfficeId,
+    },
+  });
+  if (!payload) {
+    renderStrategyPanel();
+    return;
+  }
+  state.strategyCampaign = payload.campaign;
+  state.strategyMessage = "已加入本月行动队列。";
+  await refreshStrategyCampaigns({ renderAfter: false });
+  const queuedAction = (state.strategyCampaign?.queued_actions || []).slice(-1)[0];
+  enqueueFloatingToast(queuedAction ? `军令已记录：${strategyQueuedActionLabel(state.strategyCampaign, queuedAction)}` : "军令已记录。");
+  render();
+}
+
+async function openStrategyBattleRoom(roomInfo = {}) {
+  const roomId = String(roomInfo.room_id || roomInfo.battle_room_id || "").trim().toUpperCase();
+  if (!roomId) {
+    state.strategyMessage = "这场战斗还没有可进入的真实房间。";
+    renderStrategyPanel();
+    return;
+  }
+  const playerToken = String(roomInfo.player_token || loadStoredIdentity(roomId).token || "").trim();
+  state.playerToken = playerToken;
+  if (playerToken) {
+    saveStoredIdentity(roomId, playerToken, effectiveProfileName());
+  }
+  state.roomForm.joinRoomCode = roomId;
+  const joinInput = $("join-room-code");
+  if (joinInput) joinInput.value = roomId;
+  syncLocation("battle", roomId);
+  await refreshState({ preserveScreen: false });
+}
+
+function returnToStrategyCampaign() {
+  if (!state.strategyCampaign) return;
+  state.strategyMessage = state.strategyMessage || "已返回战役。";
+  setScreen("draft", { renderAfter: false });
+  render();
+  const panel = $("strategy-panel");
+  if (panel && typeof panel.scrollIntoView === "function") {
+    panel.scrollIntoView({ block: "start" });
+  }
 }
 
 function loadStoredIdentity(roomId) {
@@ -588,6 +1130,8 @@ function hydrateStaticLabels() {
   }
   const rematchButton = $("game-over-rematch");
   if (rematchButton) rematchButton.textContent = "\u91cd\u65b0\u5f00\u59cb\u9009\u5c06";
+  const strategyButton = $("game-over-strategy");
+  if (strategyButton) strategyButton.textContent = "\u8fd4\u56de\u6218\u5f79";
   const backButton = $("game-over-back");
   if (backButton) backButton.textContent = "\u8fd4\u56de\u623f\u95f4\u5927\u5385";
   const surrenderButton = $("surrender-battle");
@@ -1818,10 +2362,2910 @@ function renderProfilePanel() {
   if (note) {
     note.textContent = state.profileName
       ? `当前会以"${displayName}"参与创建房间、输入房间码加入、以及从房间列表直接加入。`
-      : "当前使用自动昵称;你也可以随时修改一个更容易识别的名字。";
+      : "登录后会默认使用账号名作为昵称;你也可以再修改一个更容易识别的显示名。";
   }
-  if (createButton) createButton.disabled = !state.profileReady;
-  if (joinButton) joinButton.disabled = !state.profileReady || !String(joinCode?.value || "").trim();
+  if (createButton) createButton.disabled = !userLoggedIn() || !state.profileReady;
+  if (joinButton) joinButton.disabled = !userLoggedIn() || !state.profileReady || !String(joinCode?.value || "").trim();
+}
+
+function renderAuthPanel() {
+  const display = $("auth-display-name");
+  const note = $("auth-display-note");
+  const message = $("auth-message");
+  const username = $("auth-username");
+  const password = $("auth-password");
+  const login = $("auth-login");
+  const register = $("auth-register");
+  const logout = $("auth-logout");
+  if (!display || !note || !message || !username || !password || !login || !register || !logout) return;
+
+  const loggedIn = Boolean(state.authUser);
+  display.textContent = loggedIn ? state.authUser.username : "未登录";
+  note.textContent = loggedIn
+    ? "账号已可用于后续战略模式存档归属；当前房间测试仍沿用房间席位 token。"
+    : "注册或登录后，后续战略模式存档可以绑定到这个账号。当前房间测试仍可临时使用。";
+  message.textContent = state.authMessage || "";
+  username.value = state.authUsername;
+  password.value = state.authPassword;
+  username.disabled = state.authBusy || loggedIn;
+  password.disabled = state.authBusy || loggedIn;
+  login.disabled = state.authBusy || loggedIn;
+  register.disabled = state.authBusy || loggedIn;
+  logout.disabled = state.authBusy || !loggedIn;
+  login.classList.toggle("hidden", loggedIn);
+  register.classList.toggle("hidden", loggedIn);
+  logout.classList.toggle("hidden", !loggedIn);
+}
+
+function strategyMember(campaign = state.strategyCampaign) {
+  const userId = Number(state.authUser?.id || 0);
+  return (campaign?.members || []).find((member) => Number(member.user_id) === userId) || null;
+}
+
+const STRATEGY_OFFICE_LABELS = {
+  lord: "主公",
+  grand_general: "大将军",
+  general: "将军",
+  governor: "城主",
+};
+
+const STRATEGY_DUTY_LABELS = {
+  review_national_strategy: "审阅国家战略",
+  review_office_vacancies: "检查职位空缺",
+  review_subordinate_requests: "批阅下级请求",
+  review_theater_security: "审阅战区安全",
+  coordinate_generals: "协调属下将军",
+  report_major_threats: "上报重大威胁",
+  maintain_army_readiness: "维持军团战备",
+  execute_military_orders: "执行军事命令",
+  submit_battle_reports: "提交战斗报告",
+  maintain_food_supply: "维持城市粮食",
+  maintain_city_support: "维持城市民心",
+  manage_local_defense: "管理地方防务",
+};
+
+const STRATEGY_OFFICE_STATUS_LABELS = {
+  pending: "待处理",
+  accepted: "已接受",
+  completed: "已完成",
+  rejected: "已拒绝",
+  cancelled: "已撤销",
+};
+
+function strategyControlledOffices(campaign = state.strategyCampaign) {
+  const userId = Number(state.authUser?.id || 0);
+  const officeOrder = { lord: 0, grand_general: 1, general: 2, governor: 3 };
+  return (campaign?.world?.offices || []).filter((office) => (
+    office.controller_type === "player"
+      && Number(office.controller_user_id || 0) === userId
+      && office.status === "active"
+  )).sort((first, second) => (
+    (officeOrder[first.office_type] ?? 9) - (officeOrder[second.office_type] ?? 9)
+      || strategyOfficeLabel(first, campaign).localeCompare(strategyOfficeLabel(second, campaign), "zh-CN")
+  ));
+}
+
+function strategyControlledHero(campaign = state.strategyCampaign) {
+  const userId = Number(state.authUser?.id || 0);
+  return (campaign?.world?.strategic_hero_pool || []).find((hero) => (
+    hero.controller_type === "player" && Number(hero.controller_user_id || 0) === userId
+  )) || null;
+}
+
+function strategyActiveOffice(campaign = state.strategyCampaign) {
+  const offices = strategyControlledOffices(campaign);
+  let active = offices.find((office) => office.id === state.strategyActiveOfficeId);
+  if (!active) {
+    active = offices.find((office) => office.office_type === "lord") || offices[0] || null;
+    state.strategyActiveOfficeId = active?.id || "";
+  }
+  return active;
+}
+
+function strategyOfficeLabel(office, campaign = state.strategyCampaign) {
+  if (!office) return "未任职";
+  const base = STRATEGY_OFFICE_LABELS[office.office_type] || office.office_type;
+  if (office.office_type === "governor") {
+    const cityId = (office.managed_entity_ids || [])[0];
+    const city = (campaign?.world?.cities || []).find((item) => item.id === cityId);
+    return city ? `${city.name}城主` : base;
+  }
+  const peers = (campaign?.world?.offices || []).filter((item) => (
+    item.faction_id === office.faction_id && item.office_type === office.office_type && item.status === "active"
+  ));
+  return peers.length > 1 ? `${base} ${peers.findIndex((item) => item.id === office.id) + 1}` : base;
+}
+
+function strategyOfficeManagedCities(campaign, office) {
+  const managed = new Set(office?.managed_entity_ids || []);
+  return (campaign?.world?.cities || []).filter((city) => managed.has(city.id));
+}
+
+function strategyFaction(campaign = state.strategyCampaign) {
+  const hero = strategyControlledHero(campaign);
+  const office = strategyActiveOffice(campaign);
+  const member = strategyMember(campaign);
+  const factionId = hero?.faction_id || office?.faction_id || member?.faction_id;
+  return (campaign?.world?.factions || []).find((faction) => faction.id === factionId) || null;
+}
+
+function strategyFactionCommandPoints(campaign = state.strategyCampaign, faction = strategyFaction(campaign)) {
+  return campaign?.command_points_by_faction?.[faction?.id] || { maximum: 4, used: 0, remaining: 4 };
+}
+
+function strategyMonthlyBriefing(campaign = state.strategyCampaign, faction = strategyFaction(campaign)) {
+  return campaign?.world?.monthly_briefings?.[faction?.id] || { entries: [] };
+}
+
+function strategyCommandCost(actionType, payload = {}) {
+  if (["send_office_request", "request_registered_units", "approve_registered_unit_request", "assign_strategic_hero_duty"].includes(actionType)) return 0;
+  if (actionType === "declare_attack" || actionType === "rebellion_battle") return 2;
+  if (actionType === "rebellion_action" && (payload.rebellion_action_id || payload.action_id) === "suppress") return 2;
+  return 1;
+}
+
+function strategyCanAffordCommand(campaign, faction, actionType, payload = {}, actionKey = "") {
+  let available = strategyFactionCommandPoints(campaign, faction).remaining;
+  if (actionKey) {
+    const existing = (campaign?.queued_actions || []).find((action) => (
+      action.faction_id === faction?.id && action.action_type === actionType && action.action_key === actionKey
+    ));
+    if (existing) available += existing.command_cost || strategyCommandCost(existing.action_type, existing.payload || {});
+  }
+  return available >= strategyCommandCost(actionType, payload);
+}
+
+function strategyPendingStoryEvent(campaign, faction) {
+  return (campaign?.world?.story_events || []).find((event) => event.faction_id === faction?.id && event.status === "pending") || null;
+}
+
+function strategyCommandDraft(campaign, city) {
+  const key = `${campaign?.id || "campaign"}:${city?.id || "city"}`;
+  if (!state.strategyCommandDrafts[key]) state.strategyCommandDrafts[key] = {};
+  return state.strategyCommandDrafts[key];
+}
+
+function strategyAttackTargetsForCity(campaign, sourceCity, factionId) {
+  const nodesById = new Map((campaign?.world?.nodes || []).map((node) => [node.id, node]));
+  const citiesByNodeId = new Map((campaign?.world?.cities || []).map((city) => [city.node_id, city]));
+  const sourceNode = nodesById.get(sourceCity?.node_id);
+  if (!sourceNode || sourceCity?.owner_faction_id !== factionId) return [];
+  return (sourceNode.connected_node_ids || [])
+    .map((nodeId) => citiesByNodeId.get(nodeId))
+    .filter((city) => city && city.owner_faction_id !== factionId);
+}
+
+function strategyCitiesAreAdjacent(campaign, firstCityId, secondCityId) {
+  if (!firstCityId || !secondCityId) return false;
+  if (firstCityId === secondCityId) return true;
+  const cities = campaign?.world?.cities || [];
+  const first = cities.find((city) => city.id === firstCityId);
+  const second = cities.find((city) => city.id === secondCityId);
+  const node = (campaign?.world?.nodes || []).find((item) => item.id === first?.node_id);
+  return Boolean(second && (node?.connected_node_ids || []).includes(second.node_id));
+}
+
+function strategyFactionName(campaign, factionId) {
+  const faction = (campaign?.world?.factions || []).find((item) => item.id === factionId);
+  return faction?.name || factionId || "未归属";
+}
+
+function strategyMemberLabel(campaign, userId) {
+  const member = (campaign?.members || []).find((item) => Number(item.user_id) === Number(userId));
+  return member?.username || `用户 ${userId}`;
+}
+
+function strategyMemberIsAi(member) {
+  return String(member?.role || "").toLowerCase() === "ai" || Number(member?.user_id || 0) < 0;
+}
+
+function strategyMemberRoleLabel(campaign, member) {
+  if (strategyMemberIsAi(member)) return "AI 接管";
+  return Number(member?.user_id) === Number(campaign?.owner_user_id) ? "房主" : "成员";
+}
+
+function strategyInitialMembers(campaign) {
+  const members = (campaign?.members || []).filter((member) => member.is_initial_player !== false);
+  const initialIds = campaign?.resume?.initial_user_ids || [];
+  if (!initialIds.length) return members;
+  const byUserId = new Map(members.map((member) => [Number(member.user_id), member]));
+  const initialMembers = initialIds.map((userId) => byUserId.get(Number(userId)) || {
+    user_id: userId,
+    username: strategyMemberLabel(campaign, userId),
+    faction_id: "",
+    is_initial_player: true,
+  });
+  const includedIds = new Set(initialMembers.map((member) => Number(member.user_id)));
+  members.forEach((member) => {
+    if (strategyMemberIsAi(member) && !includedIds.has(Number(member.user_id))) initialMembers.push(member);
+  });
+  return initialMembers;
+}
+
+function strategyMissingInitialPlayerLabels(campaign) {
+  return (campaign?.resume?.missing_initial_user_ids || []).map((userId) => strategyMemberLabel(campaign, userId));
+}
+
+function renderStrategyMembersPanel(current, campaign, isOwner) {
+  const members = campaign?.members || [];
+  if (!members.length) return;
+
+  const title = document.createElement("h4");
+  title.textContent = "成员与邀请";
+  current.append(title);
+
+  const panel = document.createElement("div");
+  panel.className = "strategy-member-panel";
+  appendTextLine(panel, "strategy-meta", `当前加入码：${campaign.join_code || "未生成"}`);
+
+  const actions = document.createElement("div");
+  actions.className = "strategy-campaign-actions";
+  if (isOwner) {
+    const rotate = document.createElement("button");
+    rotate.type = "button";
+    rotate.className = "ghost";
+    rotate.textContent = "重新生成加入码";
+    rotate.disabled = state.strategyBusy;
+    rotate.addEventListener("click", () => rotateStrategyJoinCode(campaign.id));
+    actions.append(rotate);
+  } else {
+    appendTextLine(actions, "strategy-meta", "只有战役房主可以重置加入码。");
+  }
+  panel.append(actions);
+
+  const grid = document.createElement("div");
+  grid.className = "strategy-member-grid";
+  members.forEach((member) => {
+    const card = document.createElement("article");
+    card.className = "strategy-member-card";
+    const strong = document.createElement("strong");
+    strong.textContent = member.username || strategyMemberLabel(campaign, member.user_id);
+    card.append(strong);
+    appendTextLine(card, "strategy-meta", `势力：${strategyFactionName(campaign, member.faction_id)}`);
+    appendTextLine(card, "strategy-meta", `角色：${strategyMemberRoleLabel(campaign, member)}`);
+    appendTextLine(card, "strategy-meta", strategyMemberIsAi(member) ? "锁定时由 AI 操作" : (member.is_initial_player === false ? "后续成员" : "初始玩家"));
+    grid.append(card);
+  });
+  panel.append(grid);
+  current.append(panel);
+}
+
+function renderStrategyResumePanel(current, campaign) {
+  const initialMembers = strategyInitialMembers(campaign);
+  if (!initialMembers.length) return;
+
+  const title = document.createElement("h4");
+  title.textContent = "初始玩家在线状态";
+  current.append(title);
+
+  const resume = campaign.resume || {};
+  const panel = document.createElement("div");
+  panel.className = "strategy-resume-panel";
+  if (campaign.status !== "active") {
+    appendTextLine(panel, "strategy-meta", "战役锁定前，已加入成员会作为候选初始玩家显示；空席会在锁定后交给 AI。");
+  } else if (resume.can_resume) {
+    appendTextLine(panel, "strategy-meta", "所有真人初始玩家在线，AI 空席会自动操作。");
+  } else {
+    const missing = strategyMissingInitialPlayerLabels(campaign);
+    appendTextLine(panel, "strategy-meta", `等待初始玩家：${missing.join("、") || "未知"}`);
+  }
+
+  const onlineIds = new Set((resume.online_initial_user_ids || []).map((userId) => Number(userId)));
+  const missingIds = new Set((resume.missing_initial_user_ids || []).map((userId) => Number(userId)));
+  const grid = document.createElement("div");
+  grid.className = "strategy-resume-grid";
+  initialMembers.forEach((member) => {
+    const userId = Number(member.user_id);
+    let status = "待锁定";
+    let className = "strategy-resume-member is-pending";
+    if (campaign.status === "active" && strategyMemberIsAi(member)) {
+      status = "AI 托管";
+      className = "strategy-resume-member is-online";
+    } else if (campaign.status === "active" && onlineIds.has(userId)) {
+      status = "在线";
+      className = "strategy-resume-member is-online";
+    } else if (campaign.status === "active" && missingIds.has(userId)) {
+      status = "缺席";
+      className = "strategy-resume-member is-missing";
+    } else if (campaign.status === "active" && resume.can_resume) {
+      status = "在线";
+      className = "strategy-resume-member is-online";
+    }
+    const card = document.createElement("article");
+    card.className = className;
+    const strong = document.createElement("strong");
+    strong.textContent = member.username || strategyMemberLabel(campaign, userId);
+    card.append(strong);
+    appendTextLine(card, "strategy-meta", `势力：${strategyFactionName(campaign, member.faction_id)}`);
+    appendTextLine(card, "strategy-meta", `状态：${status}`);
+    if (userId === Number(state.authUser?.id || 0)) {
+      appendTextLine(card, "strategy-meta", "当前账号");
+    }
+    grid.append(card);
+  });
+  panel.append(grid);
+  current.append(panel);
+}
+
+function strategyMapNodeId(node) {
+  return node?.id || node?.node_id || "";
+}
+
+function createStrategySvgElement(tagName) {
+  if (document.createElementNS) {
+    return document.createElementNS("http://www.w3.org/2000/svg", tagName);
+  }
+  return document.createElement(tagName);
+}
+
+function strategyCityById(campaign, cityId) {
+  return (campaign?.world?.cities || []).find((city) => city.id === cityId) || null;
+}
+
+function strategyQueuedActionsForCity(campaign, cityId) {
+  const id = String(cityId || "");
+  return (campaign?.queued_actions || []).filter((action) => {
+    const payload = action?.payload || {};
+    if (String(payload.city_id || "") === id) return true;
+    if (String(payload.source_city_id || "") === id) return true;
+    return false;
+  });
+}
+
+function strategyCityOrderLimit(campaign) {
+  const parsed = Number.parseInt(campaign?.world?.city_monthly_order_limit, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 2;
+}
+
+function strategyCanResume(campaign) {
+  if (!campaign) return false;
+  const resume = campaign.resume || {};
+  if (resume.can_resume) return true;
+  const active = campaign.status === "active" || resume.campaign_status === "active";
+  const missing = Array.isArray(resume.missing_initial_user_ids) ? resume.missing_initial_user_ids : null;
+  const initial = Array.isArray(resume.initial_user_ids) ? resume.initial_user_ids : [];
+  return Boolean(active && missing && missing.length === 0 && initial.length);
+}
+
+function strategyCityOrderLimitReached(campaign, cityId) {
+  return strategyQueuedActionsForCity(campaign, cityId).length >= strategyCityOrderLimit(campaign);
+}
+
+function strategyCityMapPrompt(campaign, city, faction) {
+  if (!city) return "";
+  const ownCity = city.owner_faction_id === faction?.id;
+  const labels = strategyCityStateLabels(city);
+  const plans = strategyQueuedActionsForCity(campaign, city.id);
+  if (ownCity) {
+    const targets = strategyAttackTargetsForCity(campaign, city, faction?.id);
+    if (plans.length) return `${city.name} 已有 ${plans.length}/${strategyCityOrderLimit(campaign)} 条本月军令，可在右侧查看或替换。`;
+    if (labels.length) return `${city.name} 有警报：${labels.join(" / ")}。`;
+    if (targets.length) return `${city.name} 可进攻 ${targets.map((target) => target.name).join("、")}。`;
+    return `${city.name} 已选中，可以调整方针或查看驻军。`;
+  }
+  return `${city.name} 属于 ${strategyFactionName(campaign, city.owner_faction_id)}。请从己方相邻城市发起进攻。`;
+}
+
+function strategyDefaultSelectedCity(campaign, faction) {
+  const cities = campaign?.world?.cities || [];
+  return cities.find((city) => (
+    city.owner_faction_id === faction?.id && strategyCityRebellionForce(city) > 0
+  )) || cities.find((city) => (
+    city.owner_faction_id === faction?.id && strategyAttackTargetsForCity(campaign, city, faction?.id).length
+  )) || cities.find((city) => city.owner_faction_id === faction?.id) || cities[0] || null;
+}
+
+function strategySelectedCity(campaign, faction) {
+  const selected = strategyCityById(campaign, state.strategySelectedCityId);
+  if (selected) return selected;
+  const fallback = strategyDefaultSelectedCity(campaign, faction);
+  state.strategySelectedCityId = fallback?.id || "";
+  return fallback;
+}
+
+function strategyMapNodePositions(nodes) {
+  const positions = new Map();
+  const source = Array.isArray(nodes) ? nodes : [];
+  const numeric = source.filter((node) => Number.isFinite(Number(node.x)) && Number.isFinite(Number(node.y)));
+  if (numeric.length) {
+    const xs = numeric.map((node) => Number(node.x));
+    const ys = numeric.map((node) => Number(node.y));
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const spanX = Math.max(1, maxX - minX);
+    const spanY = Math.max(1, maxY - minY);
+    source.forEach((node, index) => {
+      const nodeId = strategyMapNodeId(node);
+      if (!nodeId) return;
+      if (Number.isFinite(Number(node.x)) && Number.isFinite(Number(node.y))) {
+        positions.set(nodeId, {
+          x: 12 + ((Number(node.x) - minX) / spanX) * 76,
+          y: 14 + ((Number(node.y) - minY) / spanY) * 72,
+        });
+        return;
+      }
+      const angle = (Math.PI * 2 * index) / Math.max(1, source.length) - Math.PI / 2;
+      positions.set(nodeId, { x: 50 + Math.cos(angle) * 34, y: 50 + Math.sin(angle) * 30 });
+    });
+    return positions;
+  }
+  source.forEach((node, index) => {
+    const nodeId = strategyMapNodeId(node);
+    if (!nodeId) return;
+    const angle = (Math.PI * 2 * index) / Math.max(1, source.length) - Math.PI / 2;
+    positions.set(nodeId, { x: 50 + Math.cos(angle) * 34, y: 50 + Math.sin(angle) * 30 });
+  });
+  return positions;
+}
+
+function strategyCityMapClass(city, campaign, faction, selectedCityId) {
+  const classes = ["strategy-map-node"];
+  if (city.owner_faction_id === faction?.id) classes.push("is-owned");
+  else if (city.owner_faction_id) classes.push("is-enemy");
+  else classes.push("is-neutral");
+  if (city.id === selectedCityId) classes.push("is-selected");
+  if (strategyCityRebellionForce(city) > 0) classes.push("has-rebellion");
+  if (strategyAttackTargetsForCity(campaign, city, faction?.id).length) classes.push("has-attack");
+  if (strategyQueuedActionsForCity(campaign, city.id).length) classes.push("has-plan");
+  return classes.join(" ");
+}
+
+function renderStrategyMap(current, campaign, faction) {
+  const nodes = campaign?.world?.nodes || [];
+  const cities = campaign?.world?.cities || [];
+  if (!nodes.length && !cities.length) return;
+
+  const map = document.createElement("div");
+  map.className = "strategy-map strategy-map-stage";
+  const nodesById = new Map(nodes.map((node) => [strategyMapNodeId(node), node]));
+  const citiesByNodeId = new Map(cities.map((city) => [city.node_id, city]));
+  const positions = strategyMapNodePositions(nodes);
+  const selectedCityId = strategySelectedCity(campaign, faction)?.id || "";
+
+  const header = document.createElement("div");
+  header.className = "strategy-map-header";
+  const title = document.createElement("h4");
+  title.textContent = "战略地图";
+  header.append(title);
+  appendTextLine(header, "strategy-meta", "点击城市选择命令目标。红色警报表示叛乱或战斗压力。");
+  const legend = document.createElement("div");
+  legend.className = "strategy-map-legend";
+  [
+    ["己方", "is-owned"],
+    ["敌方", "is-enemy"],
+    ["选中", "is-selected"],
+    ["警报", "has-rebellion"],
+  ].forEach(([label, className]) => {
+    const item = document.createElement("span");
+    item.className = `strategy-map-legend-item ${className}`;
+    item.textContent = label;
+    legend.append(item);
+  });
+  header.append(legend);
+  map.append(header);
+
+  const canvas = document.createElement("div");
+  canvas.className = "strategy-map-canvas strategy-map-stage-canvas";
+  const routeLayer = createStrategySvgElement("svg");
+  routeLayer.className = "strategy-map-route-layer";
+  routeLayer.setAttribute("viewBox", "0 0 100 100");
+  routeLayer.setAttribute("preserveAspectRatio", "none");
+  canvas.append(routeLayer);
+
+  const routeList = document.createElement("div");
+  routeList.className = "strategy-map-route-list";
+  const routeKeys = new Set();
+  nodes.forEach((node) => {
+    const sourceId = strategyMapNodeId(node);
+    (node.connected_node_ids || []).forEach((targetId) => {
+      if (!sourceId || !targetId) return;
+      const key = [sourceId, targetId].sort().join("::");
+      if (routeKeys.has(key)) return;
+      routeKeys.add(key);
+      const sourceCity = citiesByNodeId.get(sourceId);
+      const targetNode = nodesById.get(targetId);
+      const targetCity = citiesByNodeId.get(targetId);
+      const sourceName = sourceCity?.name || node.name || sourceId;
+      const targetName = targetCity?.name || targetNode?.name || targetId;
+      const sourcePos = positions.get(sourceId);
+      const targetPos = positions.get(targetId);
+      if (sourcePos && targetPos) {
+        const line = createStrategySvgElement("line");
+        line.setAttribute("x1", String(sourcePos.x));
+        line.setAttribute("y1", String(sourcePos.y));
+        line.setAttribute("x2", String(targetPos.x));
+        line.setAttribute("y2", String(targetPos.y));
+        line.className = "strategy-map-route-line";
+        routeLayer.append(line);
+      }
+      const route = document.createElement("div");
+      route.className = "strategy-map-route";
+      const strong = document.createElement("strong");
+      strong.textContent = `${sourceName} ↔ ${targetName}`;
+      route.append(strong);
+      appendTextLine(
+        route,
+        "strategy-meta",
+        `路线：${strategyFactionName(campaign, sourceCity?.owner_faction_id)} / ${strategyFactionName(campaign, targetCity?.owner_faction_id)}`
+      );
+      routeList.append(route);
+    });
+  });
+  if (!routeList.children.length) {
+    appendTextLine(routeList, "strategy-meta", "暂无可见连接路线。");
+  }
+
+  cities.forEach((city) => {
+    const node = nodesById.get(city.node_id);
+    const position = positions.get(city.node_id) || { x: 50, y: 50 };
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = strategyCityMapClass(city, campaign, faction, selectedCityId);
+    card.style.left = `${position.x}%`;
+    card.style.top = `${position.y}%`;
+    card.dataset.cityId = city.id;
+    card.dataset.cityName = city.name;
+    card.disabled = state.strategyBusy;
+    const queuedActions = strategyQueuedActionsForCity(campaign, city.id);
+    card.addEventListener("click", () => {
+      state.strategySelectedCityId = city.id;
+      enqueueFloatingToast(strategyCityMapPrompt(campaign, city, faction));
+      renderStrategyPanel();
+      if (window.innerWidth <= 720) {
+        focusStrategyCommandPanel();
+      }
+    });
+    const strong = document.createElement("strong");
+    strong.textContent = city.name;
+    const factionLine = document.createElement("span");
+    factionLine.textContent = strategyFactionName(campaign, city.owner_faction_id);
+    const statLine = document.createElement("span");
+    statLine.textContent = `兵${city.resources?.troops || 0} / 防${city.defense || 0}`;
+    card.append(strong, factionLine, statLine);
+    const cityStateLabels = strategyCityStateLabels(city);
+    if (cityStateLabels.length) {
+      const warning = document.createElement("span");
+      warning.className = "strategy-map-warning";
+      warning.textContent = cityStateLabels[0];
+      card.append(warning);
+    }
+    if (queuedActions.length) {
+      const plan = document.createElement("span");
+      plan.className = "strategy-map-plan";
+      plan.textContent = `军令 x${queuedActions.length}`;
+      card.append(plan);
+    }
+    const adjacentCities = (node?.connected_node_ids || [])
+      .map((nodeId) => citiesByNodeId.get(nodeId))
+      .filter(Boolean);
+    if (adjacentCities.length) {
+      appendTextLine(card, "strategy-map-hidden-text", `相邻：${adjacentCities.map((item) => item.name).join("、")}`);
+    }
+    const targets = strategyAttackTargetsForCity(campaign, city, faction?.id);
+    if (targets.length) {
+      appendTextLine(card, "strategy-map-hidden-text", `可进攻：${targets.map((item) => item.name).join("、")}`);
+    }
+    canvas.append(card);
+  });
+  nodes.forEach((node) => {
+    const nodeId = strategyMapNodeId(node);
+    if (!nodeId || citiesByNodeId.has(nodeId)) return;
+    const position = positions.get(nodeId) || { x: 50, y: 50 };
+    const card = document.createElement("div");
+    card.className = "strategy-map-node is-neutral";
+    card.style.left = `${position.x}%`;
+    card.style.top = `${position.y}%`;
+    const strong = document.createElement("strong");
+    strong.textContent = node.name || nodeId;
+    card.append(strong);
+    appendTextLine(card, "strategy-map-hidden-text", `节点 ${nodeId} · ${node.type || "地形"}`);
+    canvas.append(card);
+  });
+  const routeDrawer = document.createElement("details");
+  routeDrawer.className = "strategy-map-routes-drawer";
+  routeDrawer.open = Boolean(state.strategyRouteIntelOpen);
+  const routeSummary = document.createElement("summary");
+  routeSummary.textContent = `路线情报 · ${routeKeys.size || routeList.children.length} 条`;
+  routeSummary.addEventListener("click", (event) => {
+    event.preventDefault();
+    state.strategyRouteIntelOpen = !state.strategyRouteIntelOpen;
+    routeDrawer.open = state.strategyRouteIntelOpen;
+  });
+  routeDrawer.append(routeSummary, routeList);
+  map.append(canvas, routeDrawer);
+  current.append(map);
+}
+
+function createStrategyCommandSection(title, note = "") {
+  const section = document.createElement("section");
+  section.className = "strategy-command-section";
+  const head = document.createElement("div");
+  head.className = "strategy-command-section-head";
+  const strong = document.createElement("strong");
+  strong.textContent = title;
+  head.append(strong);
+  section.append(head);
+  if (note) appendTextLine(section, "strategy-meta", note);
+  return section;
+}
+
+function createStrategyField(labelText, control) {
+  const label = document.createElement("label");
+  const span = document.createElement("span");
+  span.textContent = labelText;
+  label.append(span, control);
+  return label;
+}
+
+function filterStrategySelectOptions(select, query) {
+  const needle = String(query || "").trim().toLowerCase();
+  let firstVisibleValue = "";
+  Array.from(select?.children || []).forEach((option) => {
+    const haystack = `${option.textContent || ""} ${option.value || ""}`.toLowerCase();
+    const visible = !needle || haystack.includes(needle);
+    option.hidden = !visible;
+    option.disabled = !visible;
+    if (visible && !firstVisibleValue) firstVisibleValue = option.value;
+  });
+  const selectedOption = select?.children?.[select.selectedIndex] || null;
+  if (firstVisibleValue && selectedOption?.hidden) {
+    select.value = firstVisibleValue;
+  }
+  return Boolean(firstVisibleValue);
+}
+
+function strategyCommandDisabledReason(canResume, ownCity) {
+  if (!canResume) return "等待所有真人初始玩家在线后才能下达军令。";
+  if (!ownCity) return "这不是你的城市；请在地图上选择己方城市。";
+  return "";
+}
+
+function strategyRegisteredUnitsLabel(campaign, inventory = {}) {
+  const unitTypes = campaign?.world?.registered_unit_types || [];
+  const rows = Object.entries(inventory || {})
+    .filter(([, count]) => Number(count || 0) > 0)
+    .map(([unitType, count]) => {
+      const config = unitTypes.find((item) => item.id === unitType);
+      return `${config?.name || unitType} ${count}`;
+    });
+  return rows.join(" · ") || "暂无";
+}
+
+function strategyUnlockedRegisteredUnitTypes(faction) {
+  const unlocked = new Set(["infantry"]);
+  (faction?.tactic_tech_tree || []).filter((tech) => tech.unlocked).forEach((tech) => {
+    (tech.unit_unlocks || []).forEach((unitType) => unlocked.add(unitType));
+  });
+  return unlocked;
+}
+
+function createStrategyCityCommandCard(campaign, city, faction, canResume, office = strategyActiveOffice(campaign)) {
+  const card = document.createElement("article");
+  card.className = "strategy-city-card strategy-command-card strategy-city-command-card";
+  if (!city) {
+    appendTextLine(card, "strategy-meta", "地图上还没有可操作城市。");
+    return card;
+  }
+
+  const title = document.createElement("strong");
+  title.textContent = `${city.name} · ${city.policy}`;
+  card.append(title);
+  appendTextLine(
+    card,
+    "strategy-meta",
+    `${strategyFactionName(campaign, city.owner_faction_id)} · 粮 ${city.resources?.food || 0} · 钱 ${city.resources?.money || 0} · 人 ${city.resources?.population || 0} · 以太 ${city.resources?.ether || 0} · 兵 ${city.resources?.troops || 0} · 城防 ${city.defense || 0}`
+  );
+  appendTextLine(
+    card,
+    "strategy-conversion",
+    `兵种：${(city.troop_conversion || []).map((row) => `${row.unit_type} ${row.ratio}%`).join(" / ") || "暂无编制"}`
+  );
+  const cityStateLabels = strategyCityStateLabels(city);
+  if (cityStateLabels.length) {
+    appendTextLine(card, "strategy-meta", `状态：${cityStateLabels.join(" / ")}`);
+  }
+  const queuedActions = strategyQueuedActionsForCity(campaign, city.id);
+  const draft = strategyCommandDraft(campaign, city);
+  const orderLimit = strategyCityOrderLimit(campaign);
+  const orderCount = queuedActions.length;
+  const orderLimitReached = strategyCityOrderLimitReached(campaign, city.id);
+  if (queuedActions.length) {
+    const planBox = document.createElement("div");
+    planBox.className = "strategy-command-plan";
+    const planTitle = document.createElement("strong");
+    planTitle.textContent = `本月已计划 ${orderCount}/${orderLimit} 条军令`;
+    planBox.append(planTitle);
+    queuedActions.slice(0, 3).forEach((action) => appendTextLine(planBox, "strategy-meta", strategyQueuedActionLabel(campaign, action)));
+    card.append(planBox);
+  } else {
+    appendTextLine(card, "strategy-meta", `本城军令：0/${orderLimit}`);
+  }
+
+  const stack = document.createElement("div");
+  stack.className = "strategy-command-stack";
+  const ownCity = city.owner_faction_id === faction?.id;
+  const disabledReason = strategyCommandDisabledReason(canResume, ownCity);
+  const orderLimitReason = orderLimitReached ? `本城本月军令已满（${orderCount}/${orderLimit}）。` : "";
+  const commandPoints = strategyFactionCommandPoints(campaign, faction);
+  const noCommandReason = commandPoints.remaining <= 0 ? "本势力本月军令已用尽。" : "";
+
+  const canGovern = !office || office.office_type === "governor";
+  const canRitual = !office || ["lord", "governor"].includes(office.office_type);
+  const canAttack = !office || ["lord", "general"].includes(office.office_type);
+
+  if (canGovern) {
+  const governance = createStrategyCommandSection("治理", "调整城市本月方针。想稳住局势就选稳定，准备扩张就选征兵。");
+  const select = document.createElement("select");
+  const queuedPolicy = queuedActions.find((action) => action.action_type === "set_city_policy")?.payload?.policy;
+  const desiredPolicy = draft.policy || queuedPolicy || city.policy;
+  (campaign?.world?.policy_choices || []).forEach((policy) => {
+    const option = document.createElement("option");
+    option.value = policy;
+    option.textContent = policy;
+    option.selected = policy === desiredPolicy;
+    select.append(option);
+  });
+  select.value = desiredPolicy;
+  select.disabled = state.strategyBusy || !canResume || !ownCity;
+  select.addEventListener("change", () => { draft.policy = select.value; });
+  governance.append(createStrategyField("方针", select));
+
+  const queuePolicy = document.createElement("button");
+  queuePolicy.type = "button";
+  queuePolicy.className = "primary";
+  queuePolicy.textContent = "计划方针 · 1 军令";
+  queuePolicy.disabled = state.strategyBusy || !canResume || !ownCity || orderLimitReached || !strategyCanAffordCommand(campaign, faction, "set_city_policy", {}, city.id);
+  queuePolicy.addEventListener("click", () => queueStrategyAction("set_city_policy", {
+    city_id: city.id,
+    policy: select.value,
+  }));
+  governance.append(queuePolicy);
+  if (disabledReason || orderLimitReason || noCommandReason) appendTextLine(governance, "strategy-command-lock", disabledReason || orderLimitReason || noCommandReason);
+  stack.append(governance);
+  }
+
+  if (canRitual && ownCity) {
+    const ritual = createStrategyCommandSection("召唤祭祀", "祭祀随机召唤一名未绑定武将，并永久记录本城祭祀场为保存位置。");
+    const ritualLevel = Number(city.building_levels?.ritual_site || 0);
+    const capacity = faction?.hero_ritual_capacity || { maximum: 0, used: 0, remaining: 0 };
+    appendTextLine(ritual, "strategy-meta", `祭祀场 ${ritualLevel ? `${ritualLevel} 级` : "未建"} · 以太 ${city.resources?.ether || 0}/30 · 职位容量 ${capacity.used}/${capacity.maximum}`);
+    const ritualButton = document.createElement("button");
+    ritualButton.type = "button";
+    ritualButton.className = "primary";
+    ritualButton.textContent = "举行祭祀 · 30 以太 · 1 军令";
+    ritualButton.disabled = state.strategyBusy || !canResume || orderLimitReached || ritualLevel < 1 || Number(city.resources?.ether || 0) < 30 || Number(capacity.remaining || 0) < 1 || !strategyCanAffordCommand(campaign, faction, "perform_hero_ritual", {}, city.id);
+    ritualButton.addEventListener("click", () => queueStrategyAction("perform_hero_ritual", { city_id: city.id }));
+    ritual.append(ritualButton);
+    if (!ritualLevel) appendTextLine(ritual, "strategy-command-lock", "先由城主建造祭祀场。");
+    else if (Number(capacity.remaining || 0) < 1) appendTextLine(ritual, "strategy-command-lock", "职位容量已满；研究职位科技、取得新城市或由主公解绑武将。");
+    else if (disabledReason || orderLimitReason || noCommandReason) appendTextLine(ritual, "strategy-command-lock", disabledReason || orderLimitReason || noCommandReason);
+    stack.append(ritual);
+  }
+
+  if (office?.office_type === "governor" && ownCity) {
+    const defense = createStrategyCommandSection("增加兵力", "从本城人口中征集 90 兵力，并提高 1 点城防。");
+    const levy = document.createElement("button");
+    levy.type = "button";
+    levy.className = "primary";
+    levy.textContent = "增加本城兵力 · 1 军令";
+    levy.disabled = state.strategyBusy || !canResume || orderLimitReached || Number(city.resources?.population || 0) < 80 || Number(city.resources?.food || 0) < 40 || Number(city.resources?.money || 0) < 25 || !strategyCanAffordCommand(campaign, faction, "increase_city_troops", {}, city.id);
+    levy.addEventListener("click", () => queueStrategyAction("increase_city_troops", { city_id: city.id }));
+    defense.append(levy);
+    stack.append(defense);
+
+    const registration = createStrategyCommandSection("注册士兵", "把城市兵力编成可直接进入格子战的确切单位；组成由本城训练建筑确定。");
+    const registrationCount = document.createElement("select");
+    [1, 2, 3].forEach((count) => {
+      const option = document.createElement("option");
+      option.value = String(count);
+      option.textContent = `${count} 个单位`;
+      registrationCount.append(option);
+    });
+    registrationCount.value = "1";
+    const eligible = [];
+    const unlockedUnitTypes = strategyUnlockedRegisteredUnitTypes(faction);
+    if (unlockedUnitTypes.has("infantry") && Number(city.building_levels?.barracks || 0) > 0) eligible.push("步兵 100兵力/单位");
+    if (unlockedUnitTypes.has("archer") && Number(city.building_levels?.archery_range || 0) > 0) eligible.push("弓兵 140兵力/单位");
+    if (unlockedUnitTypes.has("cavalry") && Number(city.building_levels?.stables || 0) > 0) eligible.push("骑兵 180兵力/单位");
+    appendTextLine(registration, "strategy-meta", `可用训练设施：${eligible.join(" · ") || "无"}`);
+    appendTextLine(registration, "strategy-unit-ledger", `城内已注册：${strategyRegisteredUnitsLabel(campaign, city.registered_units)}`);
+    const register = document.createElement("button");
+    register.type = "button";
+    register.className = "primary";
+    register.textContent = "注册选定数量 · 1 军令";
+    register.disabled = state.strategyBusy || !canResume || orderLimitReached || !eligible.length || Number(city.resources?.troops || 0) < 100 || !strategyCanAffordCommand(campaign, faction, "register_city_soldiers", {}, city.id);
+    register.addEventListener("click", () => queueStrategyAction("register_city_soldiers", { city_id: city.id, unit_count: Number(registrationCount.value) }));
+    registration.append(createStrategyField("注册批次", registrationCount), register);
+    stack.append(registration);
+
+    const building = createStrategyCommandSection("城市建设", "建筑可逐级升级；当前等级上限由主公研究的建筑科技决定。");
+    const buildingSelect = document.createElement("select");
+    (campaign?.world?.building_projects || []).filter((project) => Number(city.building_levels?.[project.id] || 0) < Number(city.building_limits?.[project.id] || 1)).forEach((project) => {
+      const option = document.createElement("option");
+      option.value = project.id;
+      const nextLevel = Number(city.building_levels?.[project.id] || 0) + 1;
+      option.textContent = `${project.name} ${nextLevel}级 · 钱 ${Number(project.money || 0) * nextLevel} / 粮 ${Number(project.food || 0) * nextLevel}`;
+      buildingSelect.append(option);
+    });
+    buildingSelect.value = buildingSelect.children[0]?.value || "";
+    const construct = document.createElement("button");
+    construct.type = "button";
+    construct.className = "ghost";
+    construct.textContent = "建造 / 升级 · 1 军令";
+    construct.disabled = state.strategyBusy || !canResume || orderLimitReached || !buildingSelect.children.length || !strategyCanAffordCommand(campaign, faction, "construct_city_building", {}, city.id);
+    construct.addEventListener("click", () => queueStrategyAction("construct_city_building", { city_id: city.id, building_id: buildingSelect.value }));
+    building.append(createStrategyField("建设项目", buildingSelect), construct);
+    const buildingNames = Object.entries(city.building_levels || {}).map(([id, level]) => {
+      const project = (campaign?.world?.building_projects || []).find((item) => item.id === id);
+      return `${project?.name || id} ${level}级`;
+    });
+    if (buildingNames.length) appendTextLine(building, "strategy-meta", `已有设施：${buildingNames.join("、")}`);
+    stack.append(building);
+  }
+
+  if (canGovern && (campaign?.world?.rebellion_action_choices || []).length) {
+    const rebellion = createStrategyCommandSection(
+      "叛乱",
+      strategyCityRebellionForce(city) > 0 ? "城内已有叛军。处理民心可以减压，清剿会直接消耗兵力。" : "提前处理叛乱风险，避免正式叛军扩大。"
+    );
+    const rebellionSelect = document.createElement("select");
+    (campaign.world.rebellion_action_choices || []).forEach((choice) => {
+      const option = document.createElement("option");
+      option.value = choice.id;
+      option.textContent = choice.name || choice.id;
+      rebellionSelect.append(option);
+    });
+    rebellionSelect.disabled = state.strategyBusy || !canResume || !ownCity;
+    if (draft.rebellionActionId && Array.from(rebellionSelect.children).some((option) => option.value === draft.rebellionActionId)) {
+      rebellionSelect.value = draft.rebellionActionId;
+    }
+    rebellionSelect.addEventListener("change", () => { draft.rebellionActionId = rebellionSelect.value; });
+    rebellion.append(createStrategyField("叛乱处理", rebellionSelect));
+
+    const queueRebellion = document.createElement("button");
+    queueRebellion.type = "button";
+    queueRebellion.className = "ghost";
+    const updateRebellionCommand = () => {
+      const cost = strategyCommandCost("rebellion_action", { rebellion_action_id: rebellionSelect.value });
+      queueRebellion.textContent = `计划处理 · ${cost} 军令`;
+      queueRebellion.disabled = state.strategyBusy || !canResume || !ownCity || orderLimitReached || !rebellionSelect.children.length || commandPoints.remaining < cost;
+    };
+    updateRebellionCommand();
+    rebellionSelect.addEventListener("change", updateRebellionCommand);
+    queueRebellion.addEventListener("click", () => queueStrategyAction("rebellion_action", {
+      rebellion_action_id: rebellionSelect.value,
+      city_id: city.id,
+    }));
+    rebellion.append(queueRebellion);
+
+    const rebelForce = strategyCityRebellionForce(city);
+    if (rebelForce > 0) {
+      const rebelBattle = document.createElement("button");
+      rebelBattle.type = "button";
+      rebelBattle.className = "ghost";
+      rebelBattle.textContent = "计划清剿 · 2 军令";
+      rebelBattle.disabled = state.strategyBusy || !canResume || !ownCity || orderLimitReached || Number(city.resources?.troops || 0) < 50 || !strategyCanAffordCommand(campaign, faction, "rebellion_battle");
+      rebelBattle.addEventListener("click", () => queueStrategyAction("rebellion_battle", {
+        city_id: city.id,
+        troops: Math.min(Number(city.resources?.troops || 0), Math.max(50, rebelForce)),
+      }));
+      rebellion.append(rebelBattle);
+    }
+    if (disabledReason || orderLimitReason || noCommandReason) appendTextLine(rebellion, "strategy-command-lock", disabledReason || orderLimitReason || noCommandReason);
+    stack.append(rebellion);
+  }
+
+  const targets = strategyAttackTargetsForCity(campaign, city, faction?.id);
+  if (canAttack && targets.length) {
+    const attackSection = createStrategyCommandSection(
+      office?.office_type === "lord" ? "主公亲征" : "进攻",
+      "选择邻接目标和处理方式。主公亲征会自动由当前主公武将带队；快速用于沙盒结算，手动/AI 会生成真实格子战。"
+    );
+    const targetSelect = document.createElement("select");
+    targets.forEach((target) => {
+      const option = document.createElement("option");
+      option.value = target.id;
+      option.textContent = target.name;
+      targetSelect.append(option);
+    });
+    if (draft.attackTargetId && Array.from(targetSelect.children).some((option) => option.value === draft.attackTargetId)) {
+      targetSelect.value = draft.attackTargetId;
+    }
+    targetSelect.addEventListener("change", () => { draft.attackTargetId = targetSelect.value; });
+    attackSection.append(createStrategyField("目标", targetSelect));
+
+    const modeSelect = document.createElement("select");
+    const modeNames = {
+      manual: "手动",
+      ai_auto: "AI 自动",
+      watch_ai: "观看 AI",
+      quick: "快速",
+    };
+    (campaign.world.battle_resolution_modes || ["quick"]).forEach((mode) => {
+      const option = document.createElement("option");
+      option.value = mode;
+      option.textContent = modeNames[mode] || mode;
+      modeSelect.append(option);
+    });
+    if (draft.attackMode && Array.from(modeSelect.children).some((option) => option.value === draft.attackMode)) {
+      modeSelect.value = draft.attackMode;
+    }
+    modeSelect.addEventListener("change", () => { draft.attackMode = modeSelect.value; });
+    attackSection.append(createStrategyField("处理", modeSelect));
+
+    const heroSelect = document.createElement("select");
+    const noHeroOption = document.createElement("option");
+    noHeroOption.value = "";
+    noHeroOption.textContent = "不投入";
+    heroSelect.append(noHeroOption);
+    strategyDeployableHeroes(faction).forEach((hero) => {
+      const option = document.createElement("option");
+      option.value = hero.code;
+      option.textContent = hero.name || hero.code;
+      heroSelect.append(option);
+    });
+    if (draft.attackHeroCodes?.length) heroSelect.value = draft.attackHeroCodes[0] || "";
+    heroSelect.addEventListener("change", () => { draft.attackHeroCodes = heroSelect.value ? [heroSelect.value] : []; });
+    const heroLabel = createStrategyField("英灵", heroSelect);
+    attackSection.append(heroLabel);
+    const heroMultiPicker = createStrategyHeroDeploymentPicker(faction, draft.attackHeroCodes || []);
+    if (strategyHeroDeploymentLimit(faction) > 1) {
+      heroSelect.disabled = true;
+      heroSelect.style.display = "none";
+      heroMultiPicker.setDisabled(state.strategyBusy || !canResume || !ownCity);
+      heroLabel.append(heroMultiPicker.element);
+      heroMultiPicker.element.addEventListener("change", () => { draft.attackHeroCodes = heroMultiPicker.selectedCodes(); });
+    }
+    const selectedAttackHeroes = () => (
+      strategyHeroDeploymentLimit(faction) > 1
+        ? heroMultiPicker.selectedCodes()
+        : (heroSelect.value ? [heroSelect.value] : [])
+    );
+
+    const queueAttack = document.createElement("button");
+    queueAttack.type = "button";
+    queueAttack.className = "ghost";
+    queueAttack.textContent = "计划进攻 · 2 军令";
+    queueAttack.disabled = state.strategyBusy || !canResume || !ownCity || orderLimitReached || !strategyCanAffordCommand(campaign, faction, "declare_attack");
+    queueAttack.addEventListener("click", () => queueStrategyAction("declare_attack", {
+      source_city_id: city.id,
+      target_city_id: targetSelect.value,
+      resolution_mode: modeSelect.value,
+      attacker_hero_codes: selectedAttackHeroes(),
+    }));
+    attackSection.append(queueAttack);
+    if (disabledReason || orderLimitReason || noCommandReason) appendTextLine(attackSection, "strategy-command-lock", disabledReason || orderLimitReason || noCommandReason);
+    stack.append(attackSection);
+  }
+
+  if (!stack.children.length || !ownCity) {
+    appendTextLine(stack, "strategy-meta", ownCity ? "暂无可用军令。" : "该城市不属于你的势力；选择己方城市下达军令。");
+  }
+  card.append(stack);
+  return card;
+}
+
+function strategyGuideLines(campaign, faction, selectedCity) {
+  const lines = [];
+  if (!strategyCanResume(campaign)) {
+    const missing = strategyMissingInitialPlayerLabels(campaign);
+    lines.push(`等待真人初始玩家在线：${missing.join("、") || "当前战役尚未满足恢复条件"}`);
+    return lines;
+  }
+  const office = strategyActiveOffice(campaign);
+  const owned = (campaign?.world?.cities || []).filter((city) => city.owner_faction_id === faction?.id);
+  const managed = strategyOfficeManagedCities(campaign, office);
+  const rebellion = office?.office_type === "governor" ? managed.find((city) => strategyCityRebellionForce(city) > 0) : null;
+  if (rebellion) lines.push(`${rebellion.name} 有叛军，优先在城主府处理或清剿。`);
+  const attackSource = office?.office_type === "general"
+    ? managed.find((city) => strategyAttackTargetsForCity(campaign, city, faction?.id).length)
+    : null;
+  if (attackSource) {
+    const targetNames = strategyAttackTargetsForCity(campaign, attackSource, faction?.id).map((city) => city.name).join("、");
+    lines.push(`${attackSource.name} 可向 ${targetNames} 发起进攻。`);
+  }
+  const ritualCapacity = faction?.hero_ritual_capacity || { remaining: 0 };
+  if (Number(ritualCapacity.remaining || 0) > 0 && office?.office_type === "lord") lines.push("职位仍有空位；可选择有祭祀场且以太充足的城市举行召唤祭祀。");
+  if (office?.office_type === "governor") lines.push("先增加城市兵力，再通过兵营、马厩或靶场把兵力注册为确切单位。");
+  if (office?.office_type === "grand_general") lines.push("检查各城已注册单位和直属将军库存，处理请兵申请或直接调拨。");
+  if (office?.office_type === "general" && !Object.keys(office?.unit_inventory || {}).length) lines.push("军团没有确切单位；向直属大将军提交请兵申请。");
+  if (selectedCity && ["general", "governor"].includes(office?.office_type)) lines.push(`当前职位操作范围：${selectedCity.name}。`);
+  return lines.length ? lines : ["本月没有当前职位必须处理的紧急事项。"];
+}
+
+function renderStrategyBriefing(parent, campaign, faction) {
+  const entries = strategyMonthlyBriefing(campaign, faction).entries || [];
+  if (!entries.length) return;
+  const labels = { threat: "威胁", opportunity: "机会", rival_intent: "敌情" };
+  const grid = document.createElement("div");
+  grid.className = "strategy-briefing-grid";
+  entries.forEach((entry) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = `strategy-briefing-entry ${entry.severity || "info"}`;
+    row.disabled = !entry.city_id;
+    const label = document.createElement("span");
+    label.className = "strategy-briefing-label";
+    label.textContent = labels[entry.kind] || "局势";
+    const body = document.createElement("span");
+    body.className = "strategy-briefing-body";
+    const strong = document.createElement("strong");
+    strong.textContent = entry.title || "未明局势";
+    const detail = document.createElement("span");
+    detail.textContent = entry.detail || "";
+    body.append(strong, detail);
+    row.append(label, body);
+    if (entry.city_id) {
+      row.addEventListener("click", () => {
+        state.strategySelectedCityId = entry.city_id;
+        renderStrategyPanel();
+      });
+    }
+    grid.append(row);
+  });
+  parent.append(grid);
+}
+
+function strategyRecommendedNextStep(campaign, faction, selectedCity, isOwner) {
+  if (!strategyCanResume(campaign)) {
+    const missing = strategyMissingInitialPlayerLabels(campaign);
+    return {
+      title: "等待玩家",
+      detail: `还不能推进：${missing.join("、") || "有初始玩家未在线"}`,
+      buttonText: "",
+    };
+  }
+  const office = strategyActiveOffice(campaign);
+  const managedCityIds = new Set(strategyOfficeManagedCities(campaign, office).map((city) => city.id));
+  const storyEvent = strategyPendingStoryEvent(campaign, faction);
+  const canHandleStory = !office || (office.office_type === "governor" && managedCityIds.has(storyEvent?.city_id));
+  if (storyEvent && canHandleStory) {
+    return {
+      title: "处理突发事件",
+      detail: `${storyEvent.title}正在等待决定。不同选择会改变当前城市，并可能在以后产生后果。`,
+      buttonText: `定位 ${strategyCityName(campaign, storyEvent.city_id)}`,
+      cityId: storyEvent.city_id,
+    };
+  }
+  const owned = (campaign?.world?.cities || []).filter((city) => city.owner_faction_id === faction?.id);
+  const scopedCities = ["general", "governor"].includes(office?.office_type)
+    ? owned.filter((city) => managedCityIds.has(city.id))
+    : owned;
+  const rebellion = office?.office_type === "governor" || !office
+    ? scopedCities.find((city) => strategyCityRebellionForce(city) > 0)
+    : null;
+  if (rebellion) {
+    return {
+      title: "先稳住叛乱",
+      detail: `${rebellion.name} 有 ${strategyCityRebellionForce(rebellion)} 名叛军。选择这座城后计划处理或清剿。`,
+      buttonText: `定位 ${rebellion.name}`,
+      cityId: rebellion.id,
+    };
+  }
+  const attackSource = office?.office_type === "general" || !office
+    ? scopedCities.find((city) => strategyAttackTargetsForCity(campaign, city, faction?.id).length)
+    : null;
+  if (attackSource) {
+    const targets = strategyAttackTargetsForCity(campaign, attackSource, faction?.id);
+    return {
+      title: "可以扩张",
+      detail: `${attackSource.name} 可进攻 ${targets.map((city) => city.name).join("、")}。`,
+      buttonText: `选择 ${attackSource.name}`,
+      cityId: attackSource.id,
+    };
+  }
+  const ritualCity = owned.find((city) => Number(city.building_levels?.ritual_site || 0) > 0 && Number(city.resources?.ether || 0) >= 30);
+  if (ritualCity && Number(faction?.hero_ritual_capacity?.remaining || 0) > 0 && (!office || office.office_type === "lord")) {
+    return {
+      title: "举行祭祀",
+      detail: `${ritualCity.name}拥有足够以太和可用祭祀场，可随机召唤一名武将。`,
+      buttonText: "",
+    };
+  }
+  if (isOwner && (!office || office.office_type === "lord")) {
+    return {
+      title: "本月可结算",
+      detail: selectedCity ? `检查 ${selectedCity.name} 的军令后，可以推进到下个月。` : "没有紧急事项，可以推进到下个月。",
+      buttonText: "推进一月",
+      advance: true,
+    };
+  }
+  return {
+    title: "等待房主结算",
+    detail: "你的本月操作完成后，等待房主推进月份。",
+    buttonText: "",
+  };
+}
+
+function renderStrategyStoryEvent(parent, campaign, faction) {
+  const event = strategyPendingStoryEvent(campaign, faction);
+  if (!event) return;
+  const office = strategyActiveOffice(campaign);
+  const managedCityIds = new Set(strategyOfficeManagedCities(campaign, office).map((city) => city.id));
+  if (office && (office.office_type !== "governor" || !managedCityIds.has(event.city_id))) return;
+  const queued = (campaign?.queued_actions || []).find((action) => (
+    action.faction_id === faction?.id && action.action_type === "resolve_story_event" && action.action_key === event.id
+  ));
+  const city = strategyCityById(campaign, event.city_id);
+  const panel = document.createElement("section");
+  panel.className = "strategy-story-event";
+  const eyebrow = document.createElement("span");
+  eyebrow.className = "strategy-story-eyebrow";
+  eyebrow.textContent = `待决事件 · ${city?.name || "未知地点"}`;
+  const title = document.createElement("strong");
+  title.textContent = event.title || "突发事件";
+  panel.append(eyebrow, title);
+  appendTextLine(panel, "strategy-story-description", event.description || "");
+  appendTextLine(panel, "strategy-story-deadline", "本月底未处理将自动采用放任结果。事件选择消耗 1 点势力军令。");
+  if (queued) {
+    const selected = (event.choices || []).find((choice) => choice.id === queued.payload?.choice_id);
+    appendTextLine(panel, "strategy-story-planned", `已计划：${selected?.label || queued.payload?.choice_id || "未知选择"}（可以替换）`);
+  }
+  const choices = document.createElement("div");
+  choices.className = "strategy-story-choices";
+  (event.choices || []).forEach((choice) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = queued?.payload?.choice_id === choice.id ? "primary" : "ghost";
+    const label = document.createElement("strong");
+    label.textContent = choice.label || choice.id;
+    const preview = document.createElement("span");
+    preview.textContent = choice.preview || "";
+    button.append(label, preview);
+    button.disabled = state.strategyBusy || !strategyCanResume(campaign) || !choice.enabled || !strategyCanAffordCommand(
+      campaign,
+      faction,
+      "resolve_story_event",
+      { event_id: event.id, choice_id: choice.id },
+      event.id
+    );
+    button.addEventListener("click", () => queueStrategyAction("resolve_story_event", {
+      event_id: event.id,
+      choice_id: choice.id,
+    }));
+    choices.append(button);
+    if (!choice.enabled && choice.disabled_reason) appendTextLine(choices, "strategy-command-lock", choice.disabled_reason);
+  });
+  panel.append(choices);
+  const consequences = (campaign?.world?.scheduled_consequences || []).filter((item) => item.faction_id === faction?.id);
+  consequences.slice(0, 2).forEach((item) => appendTextLine(
+    panel,
+    "strategy-story-thread",
+    `未完影响 · 第 ${item.due_month} 月：${item.description}`
+  ));
+  parent.append(panel);
+}
+
+function renderStrategyGuide(parent, campaign, faction, selectedCity, isOwner) {
+  const guide = document.createElement("div");
+  guide.className = "strategy-guide";
+  const next = strategyRecommendedNextStep(campaign, faction, selectedCity, isOwner);
+  const head = document.createElement("div");
+  head.className = "strategy-guide-head";
+  const title = document.createElement("strong");
+  title.textContent = "本月军令";
+  const nextTitle = document.createElement("span");
+  nextTitle.textContent = `下一步：${next.title}`;
+  head.append(title, nextTitle);
+  guide.append(head);
+  appendTextLine(guide, "strategy-guide-main", next.detail);
+  renderStrategyStoryEvent(guide, campaign, faction);
+  renderStrategyBriefing(guide, campaign, faction);
+  const stepRow = document.createElement("div");
+  stepRow.className = "strategy-step-row";
+  ["看地图", "选城市", "下军令", "等房主结算"].forEach((label) => {
+    const chip = document.createElement("span");
+    chip.className = "strategy-step-chip";
+    chip.textContent = label;
+    stepRow.append(chip);
+  });
+  guide.append(stepRow);
+  strategyGuideLines(campaign, faction, selectedCity).forEach((line) => appendTextLine(guide, "strategy-meta", line));
+  const quickActions = document.createElement("div");
+  quickActions.className = "strategy-guide-actions";
+  const mapButton = document.createElement("button");
+  mapButton.type = "button";
+  mapButton.className = "ghost";
+  mapButton.textContent = "查看地图";
+  mapButton.addEventListener("click", focusStrategyMapStage);
+  const commandButton = document.createElement("button");
+  commandButton.type = "button";
+  commandButton.className = "primary";
+  commandButton.textContent = "打开军令";
+  commandButton.disabled = !selectedCity;
+  commandButton.addEventListener("click", focusStrategyCommandPanel);
+  quickActions.append(mapButton, commandButton);
+  guide.append(quickActions);
+  if (next.buttonText) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "primary";
+    button.textContent = next.buttonText;
+    button.disabled = state.strategyBusy || (next.advance && (!strategyCanResume(campaign) || !isOwner));
+    button.addEventListener("click", () => {
+      if (next.cityId) {
+        state.strategySelectedCityId = next.cityId;
+        renderStrategyPanel();
+        return;
+      }
+      if (next.advance) advanceStrategyMonth();
+    });
+    guide.append(button);
+  }
+  parent.append(guide);
+}
+
+function renderStrategyWarStateBanner(parent, campaign, canResume, isOwner) {
+  if (campaign?.status === "active" && canResume) return;
+  const banner = document.createElement("div");
+  banner.className = "strategy-war-state";
+  const text = document.createElement("strong");
+  if (campaign?.status !== "active") {
+    text.textContent = isOwner ? "战役大厅尚未锁定" : "等待房主锁定初始玩家";
+    banner.append(text);
+    appendTextLine(
+      banner,
+      "strategy-meta",
+      isOwner ? "锁定后未加入的初始势力会由 AI 操作，真人初始玩家需要在线才能继续。" : "锁定后才能进入正式战役，空席会交给 AI。"
+    );
+    if (isOwner) {
+      const lock = document.createElement("button");
+      lock.type = "button";
+      lock.className = "primary";
+      lock.textContent = "锁定并启用 AI";
+      lock.disabled = state.strategyBusy;
+      lock.addEventListener("click", () => lockStrategyCampaign(campaign.id));
+      banner.append(lock);
+    }
+  } else {
+    const missing = strategyMissingInitialPlayerLabels(campaign);
+    text.textContent = "等待初始玩家回到战役";
+    banner.append(text);
+    appendTextLine(banner, "strategy-meta", `仍缺席：${missing.join("、") || "未知玩家"}`);
+  }
+  parent.append(banner);
+}
+
+function renderStrategyOfficeSwitcher(parent, campaign, activeOffice) {
+  const offices = strategyControlledOffices(campaign);
+  if (!offices.length) return;
+  const bar = document.createElement("nav");
+  bar.className = "strategy-office-switcher";
+  bar.setAttribute("aria-label", "职位切换");
+  offices.forEach((office) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = office.id === activeOffice?.id ? "active" : "ghost";
+    button.textContent = strategyOfficeLabel(office, campaign);
+    button.dataset.officeType = office.office_type;
+    button.addEventListener("click", () => {
+      state.strategyActiveOfficeId = office.id;
+      const managedCity = strategyOfficeManagedCities(campaign, office)[0];
+      if (managedCity) state.strategySelectedCityId = managedCity.id;
+      renderStrategyPanel();
+    });
+    bar.append(button);
+  });
+  parent.append(bar);
+}
+
+function createStrategyOfficeDesk(campaign, office, canResume) {
+  const desk = document.createElement("section");
+  desk.className = "strategy-office-desk";
+  const title = document.createElement("h4");
+  title.textContent = `${strategyOfficeLabel(office, campaign)}案牍`;
+  desk.append(title);
+  const duties = (campaign?.world?.office_duties || []).filter((duty) => (
+    duty.office_id === office?.id
+      && duty.status === "pending"
+      && Number(duty.due_month || campaign?.world?.current_month) === Number(campaign?.world?.current_month)
+  ));
+  const dutyList = document.createElement("div");
+  dutyList.className = "strategy-office-duties";
+  duties.slice(0, 4).forEach((duty) => {
+    const row = document.createElement("div");
+    row.className = `strategy-office-duty priority-${duty.priority || 1}`;
+    row.textContent = STRATEGY_DUTY_LABELS[duty.duty_type] || "待办职责";
+    dutyList.append(row);
+  });
+  if (!duties.length) appendTextLine(dutyList, "strategy-meta", "本月职责已清。");
+  desk.append(dutyList);
+  const orders = (campaign?.world?.office_orders || []).filter((order) => order.issuer_office_id === office?.id || order.receiver_office_id === office?.id);
+  orders.slice(-3).reverse().forEach((order) => {
+    appendTextLine(
+      desk,
+      "strategy-office-order",
+      `${order.receiver_office_id === office?.id ? "收到" : "发出"} · ${order.objective} · ${STRATEGY_OFFICE_STATUS_LABELS[order.status] || order.status}`
+    );
+  });
+  const isRequest = ["general", "governor"].includes(office?.office_type);
+  const receiverIds = isRequest ? [office?.parent_office_id] : (office?.subordinate_office_ids || []);
+  const receivers = (campaign?.world?.offices || []).filter((item) => receiverIds.includes(item.id) && item.status === "active");
+  if (receivers.length) {
+    const controls = document.createElement("div");
+    controls.className = "strategy-office-order-controls";
+    const receiver = document.createElement("select");
+    receivers.forEach((item) => {
+      const option = document.createElement("option");
+      option.value = item.id;
+      option.textContent = strategyOfficeLabel(item, campaign);
+      receiver.append(option);
+    });
+    const orderKind = document.createElement("select");
+    [
+      ["order", "一般目标"],
+      ["attack_city", "进攻城市"],
+      ["defend_city", "防守城市"],
+    ].forEach(([value, label]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      orderKind.append(option);
+    });
+    const targetCity = document.createElement("select");
+    (campaign?.world?.cities || []).forEach((city) => {
+      const option = document.createElement("option");
+      option.value = city.id;
+      option.textContent = `${city.name} · ${strategyFactionName(campaign, city.owner_faction_id)}`;
+      targetCity.append(option);
+    });
+    orderKind.hidden = isRequest;
+    targetCity.hidden = true;
+    const syncMilitaryOrder = () => {
+      const military = !isRequest && ["attack_city", "defend_city"].includes(orderKind.value);
+      targetCity.hidden = !military;
+      if (military && office?.office_type === "lord") {
+        const grand = receivers.find((item) => item.office_type === "grand_general");
+        if (grand) receiver.value = grand.id;
+      }
+    };
+    orderKind.addEventListener("change", syncMilitaryOrder);
+    syncMilitaryOrder();
+    const objective = document.createElement("input");
+    objective.type = "text";
+    objective.maxLength = 120;
+    objective.placeholder = isRequest ? "向上级请求支援或批准" : "向直属下级下达目标";
+    const issue = document.createElement("button");
+    issue.type = "button";
+    issue.className = "primary";
+    issue.textContent = isRequest ? "提交请求" : "下达命令 · 1军令";
+    issue.disabled = state.strategyBusy || !canResume;
+    issue.addEventListener("click", () => {
+      const military = !isRequest && ["attack_city", "defend_city"].includes(orderKind.value);
+      const objectiveText = objective.value.trim() || (
+        military
+          ? `${orderKind.value === "attack_city" ? "进攻" : "防守"}${strategyCityName(campaign, targetCity.value)}`
+          : ""
+      );
+      if (!objectiveText) {
+        objective.focus();
+        return;
+      }
+      queueStrategyAction(isRequest ? "send_office_request" : "issue_office_order", {
+        receiver_office_id: receiver.value,
+        objective: objectiveText,
+        office_order_type: isRequest ? "request" : orderKind.value,
+        target_entity_id: military ? targetCity.value : "",
+        priority: 1,
+      });
+    });
+    controls.append(receiver, orderKind, targetCity, objective, issue);
+    desk.append(controls);
+  }
+  return desk;
+}
+
+function createLordHeroBindingPanel(campaign, office, canResume) {
+  const panel = document.createElement("section");
+  panel.className = "strategy-office-desk strategy-ritual-bindings";
+  const title = document.createElement("h4");
+  title.textContent = "祭祀绑定名册";
+  panel.append(title);
+  const faction = (campaign?.world?.factions || []).find((item) => item.id === office?.faction_id);
+  const capacity = faction?.hero_ritual_capacity || { maximum: 0, used: 0, remaining: 0 };
+  appendTextLine(panel, "strategy-meta", `职位承载 ${capacity.used}/${capacity.maximum} · 可继续召唤 ${capacity.remaining}`);
+  const heroes = (campaign?.world?.strategic_hero_pool || []).filter((hero) => (
+    hero.faction_id === office?.faction_id && hero.ritual_city_id && hero.office_id !== office?.id
+  ));
+  heroes.forEach((hero) => {
+    const row = document.createElement("div");
+    row.className = "strategy-hero-duty-row strategy-binding-row";
+    const identity = document.createElement("div");
+    const name = document.createElement("strong");
+    name.textContent = hero.name || hero.code;
+    identity.append(name);
+    const heldOffice = (campaign?.world?.offices || []).find((item) => item.id === hero.office_id);
+    appendTextLine(identity, "strategy-meta", `${strategyCityName(campaign, hero.ritual_city_id)}祭祀场 · ${heldOffice ? strategyOfficeLabel(heldOffice, campaign) : "待任命"}`);
+    const unbind = document.createElement("button");
+    unbind.type = "button";
+    unbind.className = "danger";
+    unbind.textContent = "解除绑定";
+    unbind.disabled = state.strategyBusy || !canResume;
+    unbind.addEventListener("click", () => queueStrategyAction("unbind_strategic_hero", { hero_code: hero.code }));
+    row.append(identity, unbind);
+    panel.append(row);
+  });
+  if (!heroes.length) appendTextLine(panel, "strategy-meta", "没有可由主公解除绑定的武将。");
+  return panel;
+}
+
+function createStrategyHeroAppointmentPanel(campaign, office, canResume) {
+  const panel = document.createElement("section");
+  panel.className = "strategy-office-desk strategy-hero-appointments";
+  const title = document.createElement("h4");
+  title.textContent = "任命武将";
+  panel.append(title);
+  const officeOrder = { grand_general: 0, general: 1, governor: 2 };
+  const offices = (campaign?.world?.offices || []).filter((item) => (
+    item.faction_id === office?.faction_id
+      && item.office_type !== "lord"
+      && item.status !== "disabled"
+  )).sort((first, second) => (
+    (officeOrder[first.office_type] ?? 9) - (officeOrder[second.office_type] ?? 9)
+      || strategyOfficeLabel(first, campaign).localeCompare(strategyOfficeLabel(second, campaign), "zh-CN")
+  ));
+  const heroes = (campaign?.world?.strategic_hero_pool || []).filter((hero) => (
+    hero.faction_id === office?.faction_id && hero.status === "serving" && !hero.office_id
+  ));
+  if (!offices.length || !heroes.length) {
+    appendTextLine(panel, "strategy-meta", heroes.length ? "当前没有可任命职位。" : "先在祭祀场召唤武将，再进行任命。");
+    return panel;
+  }
+  const controls = document.createElement("div");
+  controls.className = "strategy-office-order-controls";
+  const heroSelect = document.createElement("select");
+  heroes.forEach((hero) => {
+    const option = document.createElement("option");
+    option.value = hero.code;
+    option.textContent = `${hero.name} · ${hero.role || "武将"}`;
+    heroSelect.append(option);
+  });
+  const officeSelect = document.createElement("select");
+  offices.forEach((target) => {
+    const option = document.createElement("option");
+    option.value = target.id;
+    const holder = target.holder_type === "hero" ? ` · 现任 ${strategyHeroName(campaign, target.holder_id)}` : " · 空缺";
+    option.textContent = `${strategyOfficeLabel(target, campaign)}${holder}`;
+    officeSelect.append(option);
+  });
+  const appoint = document.createElement("button");
+  appoint.type = "button";
+  appoint.className = "primary";
+  appoint.textContent = "任命 · 1军令";
+  appoint.disabled = state.strategyBusy || !canResume;
+  appoint.addEventListener("click", () => queueStrategyAction("appoint_strategic_hero", {
+    target_office_id: officeSelect.value,
+    hero_code: heroSelect.value,
+  }));
+  controls.append(createStrategyField("武将", heroSelect), createStrategyField("任命职位", officeSelect), appoint);
+  panel.append(controls);
+  return panel;
+}
+
+function createRoleWorkspaceHeader(campaign, office, title, subtitle) {
+  const header = document.createElement("header");
+  header.className = `strategy-role-header role-${office?.office_type || "none"}`;
+  const copy = document.createElement("div");
+  appendTextLine(copy, "meta-label", strategyOfficeLabel(office, campaign));
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+  copy.append(heading);
+  appendTextLine(copy, "strategy-meta", subtitle);
+  const seal = document.createElement("strong");
+  seal.className = "strategy-role-seal";
+  seal.textContent = STRATEGY_OFFICE_LABELS[office?.office_type] || "职位";
+  header.append(copy, seal);
+  return header;
+}
+
+function createLordRitualPanel(campaign, office, faction, canResume) {
+  const panel = document.createElement("section");
+  panel.className = "strategy-office-desk strategy-lord-ritual";
+  const title = document.createElement("h4");
+  title.textContent = "举行召唤祭祀";
+  panel.append(title);
+  const capacity = faction?.hero_ritual_capacity || { maximum: 0, used: 0, remaining: 0 };
+  appendTextLine(panel, "strategy-meta", `当前职位承载 ${capacity.used}/${capacity.maximum}；每次祭祀消耗 30 城市以太。`);
+  const cities = (campaign?.world?.cities || []).filter((city) => (
+    city.owner_faction_id === faction?.id && Number(city.building_levels?.ritual_site || 0) > 0
+  ));
+  const citySelect = document.createElement("select");
+  cities.forEach((city) => {
+    const option = document.createElement("option");
+    option.value = city.id;
+    option.textContent = `${city.name} · 祭祀场 ${city.building_levels?.ritual_site || 0}级 · 以太 ${city.resources?.ether || 0}`;
+    citySelect.append(option);
+  });
+  citySelect.value = cities[0]?.id || "";
+  const issue = document.createElement("button");
+  issue.type = "button";
+  issue.className = "primary";
+  issue.textContent = "举行祭祀 · 1 军令";
+  const update = () => {
+    const city = strategyCityById(campaign, citySelect.value);
+    issue.disabled = state.strategyBusy || !canResume || !citySelect.children.length || Number(capacity.remaining || 0) < 1 || Number(city?.resources?.ether || 0) < 30;
+  };
+  citySelect.addEventListener("change", update);
+  issue.addEventListener("click", () => queueStrategyAction("perform_hero_ritual", { city_id: citySelect.value }));
+  panel.append(createStrategyField("祭祀城市", citySelect), issue);
+  update();
+  return panel;
+}
+
+function createLordTechnologyPanel(campaign, faction, canResume) {
+  const panel = document.createElement("section");
+  panel.className = "strategy-office-desk strategy-lord-tech";
+  const title = document.createElement("h4");
+  title.textContent = "国家科技树";
+  panel.append(title);
+  const branchLabels = { office: "职位", unit: "兵种", building: "建筑", military: "战术" };
+  const available = (faction?.tactic_tech_tree || []).filter((tech) => !tech.unlocked);
+  const select = document.createElement("select");
+  available.forEach((tech) => {
+    const option = document.createElement("option");
+    option.value = tech.id;
+    option.disabled = !tech.available;
+    option.textContent = `${branchLabels[tech.branch] || "战术"} · ${tech.name}${tech.available ? "" : "（前置未满足）"}`;
+    select.append(option);
+  });
+  select.value = available[0]?.id || "";
+  const detail = document.createElement("p");
+  detail.className = "strategy-meta strategy-tech-detail";
+  const unlock = document.createElement("button");
+  unlock.type = "button";
+  unlock.className = "primary";
+  unlock.textContent = "研究科技 · 1 军令";
+  const update = () => {
+    const tech = available.find((item) => item.id === select.value);
+    detail.textContent = tech ? `${tech.description} · 钱 ${tech.money_cost} / 以太 ${tech.ether_cost}` : "科技树已全部完成。";
+    unlock.disabled = state.strategyBusy || !canResume || !tech?.available || Number(faction?.resources?.money || 0) < Number(tech?.money_cost || 0) || Number(faction?.resources?.ether || 0) < Number(tech?.ether_cost || 0);
+  };
+  select.addEventListener("change", update);
+  unlock.addEventListener("click", () => queueStrategyAction("unlock_tactic_tech", { tech_id: select.value }));
+  panel.append(createStrategyField("研究项目", select), detail, unlock);
+  update();
+  return panel;
+}
+
+function createLordHeroDutyPanel(campaign, office, canResume) {
+  const panel = document.createElement("section");
+  panel.className = "strategy-office-desk strategy-hero-duty-board";
+  const title = document.createElement("h4");
+  title.textContent = "武将任务总览";
+  panel.append(title);
+  const heroes = (campaign?.world?.strategic_hero_pool || []).filter((hero) => hero.faction_id === office?.faction_id && hero.status !== "roaming");
+  const cities = (campaign?.world?.cities || []).filter((city) => city.owner_faction_id === office?.faction_id);
+  const dutyLabels = {
+    reserve: "待命",
+    administration: "辅佐内政",
+    training: "训练军队",
+    garrison: "驻守城市",
+    campaign: "随军出征",
+  };
+  heroes.forEach((hero) => {
+    const row = document.createElement("div");
+    row.className = "strategy-hero-duty-row";
+    const identity = document.createElement("div");
+    const name = document.createElement("strong");
+    name.textContent = hero.name || hero.code;
+    identity.append(name);
+    const heldOffice = (campaign?.world?.offices || []).find((entry) => entry.id === hero.office_id);
+    appendTextLine(identity, "strategy-meta", heldOffice ? strategyOfficeLabel(heldOffice, campaign) : "未任职");
+    const duty = document.createElement("select");
+    Object.entries(dutyLabels).forEach(([value, label]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      duty.append(option);
+    });
+    duty.value = hero.assignment_type || "reserve";
+    const target = document.createElement("select");
+    cities.forEach((city) => {
+      const option = document.createElement("option");
+      option.value = city.id;
+      option.textContent = city.name;
+      target.append(option);
+    });
+    target.value = hero.assignment_target_id || cities[0]?.id || "";
+    const syncTarget = () => { target.hidden = !["training", "garrison"].includes(duty.value); };
+    duty.addEventListener("change", syncTarget);
+    syncTarget();
+    const assign = document.createElement("button");
+    assign.type = "button";
+    assign.className = "ghost";
+    assign.textContent = "安排";
+    assign.disabled = state.strategyBusy || !canResume;
+    assign.addEventListener("click", () => queueStrategyAction("assign_strategic_hero_duty", {
+      hero_code: hero.code,
+      assignment_type: duty.value,
+      target_id: target.hidden ? "" : target.value,
+    }));
+    row.append(identity, duty, target, assign);
+    panel.append(row);
+  });
+  if (!heroes.length) appendTextLine(panel, "strategy-meta", "当前没有可安排的已仕官武将。");
+  return panel;
+}
+
+function createGrandGeneralMilitaryPanel(campaign, office, faction, canResume, selectedCity) {
+  const panel = document.createElement("section");
+  panel.className = "strategy-office-desk strategy-theater-command";
+  const title = document.createElement("h4");
+  title.textContent = "战区军务";
+  panel.append(title);
+  const generals = (campaign?.world?.offices || []).filter((entry) => (office?.subordinate_office_ids || []).includes(entry.id));
+  const roster = document.createElement("div");
+  roster.className = "strategy-general-roster";
+  generals.forEach((general) => {
+    const item = document.createElement("div");
+    item.className = "strategy-general-roster-item";
+    const holder = general.holder_type === "hero" ? strategyHeroName(campaign, general.holder_id) : "职位空缺";
+    appendTextLine(item, "strategy-meta", strategyOfficeLabel(general, campaign));
+    const strong = document.createElement("strong");
+    strong.textContent = holder;
+    item.append(strong);
+    appendTextLine(item, "strategy-meta", `${(general.managed_entity_ids || []).filter((id) => strategyCityById(campaign, id)).map((id) => strategyCityName(campaign, id)).join("、") || "尚未分配驻地"}`);
+    appendTextLine(item, "strategy-unit-ledger", `军团单位：${strategyRegisteredUnitsLabel(campaign, general.unit_inventory)}`);
+    roster.append(item);
+  });
+  panel.append(roster);
+  const cities = (campaign?.world?.cities || []).filter((city) => city.owner_faction_id === faction?.id);
+  const citySelect = document.createElement("select");
+  cities.forEach((city) => {
+    const option = document.createElement("option");
+    option.value = city.id;
+    option.textContent = `${city.name} · ${strategyRegisteredUnitsLabel(campaign, city.registered_units)}`;
+    citySelect.append(option);
+  });
+  citySelect.value = cities[0]?.id || "";
+  if (selectedCity && cities.some((city) => city.id === selectedCity.id)) citySelect.value = selectedCity.id;
+  const generalSelect = document.createElement("select");
+  generals.filter((general) => general.status === "active").forEach((general) => {
+    const option = document.createElement("option");
+    option.value = general.id;
+    option.textContent = `${strategyOfficeLabel(general, campaign)} · ${strategyHeroName(campaign, general.holder_id)}`;
+    generalSelect.append(option);
+  });
+  generalSelect.value = generalSelect.children[0]?.value || "";
+  const unitSelect = document.createElement("select");
+  const count = document.createElement("input");
+  count.type = "number";
+  count.min = "1";
+  count.max = "12";
+  count.value = "1";
+  const transfer = document.createElement("button");
+  transfer.type = "button";
+  transfer.className = "primary";
+  transfer.textContent = "调拨给直属将军 · 1 军令";
+  const syncUnits = () => {
+    unitSelect.innerHTML = "";
+    const city = strategyCityById(campaign, citySelect.value);
+    Object.entries(city?.registered_units || {}).filter(([, amount]) => Number(amount) > 0).forEach(([unitType, amount]) => {
+      const option = document.createElement("option");
+      option.value = unitType;
+      option.textContent = `${strategyRegisteredUnitsLabel(campaign, { [unitType]: amount })} 可调`;
+      unitSelect.append(option);
+    });
+    unitSelect.value = unitSelect.children[0]?.value || "";
+    transfer.disabled = state.strategyBusy || !canResume || !unitSelect.children.length || !generalSelect.children.length;
+  };
+  citySelect.addEventListener("change", syncUnits);
+  transfer.addEventListener("click", () => queueStrategyAction("transfer_registered_units", {
+    city_id: citySelect.value,
+    general_office_id: generalSelect.value,
+    unit_type: unitSelect.value,
+    count: Math.max(1, Number(count.value || 1)),
+  }));
+  panel.append(
+    createStrategyField("调出城市", citySelect),
+    createStrategyField("接收将军", generalSelect),
+    createStrategyField("确切兵种", unitSelect),
+    createStrategyField("数量", count),
+    transfer,
+  );
+  syncUnits();
+
+  const requests = (campaign?.world?.office_orders || []).filter((order) => (
+    order.order_type === "unit_request" && order.receiver_office_id === office?.id && order.status === "pending"
+  ));
+  if (requests.length) {
+    const requestTitle = document.createElement("h4");
+    requestTitle.textContent = "待批调兵申请";
+    panel.append(requestTitle);
+    requests.forEach((request) => {
+      const row = document.createElement("div");
+      row.className = "strategy-unit-request";
+      const general = (campaign?.world?.offices || []).find((item) => item.id === request.issuer_office_id);
+      appendTextLine(row, "strategy-meta", `${strategyOfficeLabel(general, campaign)} · ${request.objective} · ${strategyCityName(campaign, request.details?.city_id || request.target_entity_id)}`);
+      const approve = document.createElement("button");
+      approve.type = "button";
+      approve.className = "primary";
+      approve.textContent = "批准调拨";
+      approve.disabled = state.strategyBusy || !canResume;
+      approve.addEventListener("click", () => queueStrategyAction("approve_registered_unit_request", { request_id: request.id }));
+      row.append(approve);
+      panel.append(row);
+    });
+  }
+  return panel;
+}
+
+function createGeneralLogisticsPanel(campaign, office, faction, canResume) {
+  const panel = document.createElement("section");
+  panel.className = "strategy-office-desk strategy-general-logistics";
+  const title = document.createElement("h4");
+  title.textContent = "军团编制与请兵";
+  panel.append(title);
+  appendTextLine(panel, "strategy-unit-ledger strategy-unit-ledger-prominent", `当前军团：${strategyRegisteredUnitsLabel(campaign, office?.unit_inventory)}`);
+  const cities = (campaign?.world?.cities || []).filter((city) => (
+    city.owner_faction_id === faction?.id && Object.values(city.registered_units || {}).some((amount) => Number(amount) > 0)
+  ));
+  if (!cities.length) {
+    appendTextLine(panel, "strategy-meta", "己方城市暂无已注册单位；请城主先注册士兵。");
+    return panel;
+  }
+  const citySelect = document.createElement("select");
+  cities.forEach((city) => {
+    const option = document.createElement("option");
+    option.value = city.id;
+    option.textContent = `${city.name} · ${strategyRegisteredUnitsLabel(campaign, city.registered_units)}`;
+    citySelect.append(option);
+  });
+  citySelect.value = cities[0]?.id || "";
+  const unitSelect = document.createElement("select");
+  const count = document.createElement("input");
+  count.type = "number";
+  count.min = "1";
+  count.max = "12";
+  count.value = "1";
+  const request = document.createElement("button");
+  request.type = "button";
+  request.className = "primary";
+  request.textContent = "请示直属大将军";
+  const sync = () => {
+    unitSelect.innerHTML = "";
+    const city = strategyCityById(campaign, citySelect.value);
+    Object.entries(city?.registered_units || {}).filter(([, amount]) => Number(amount) > 0).forEach(([unitType, amount]) => {
+      const option = document.createElement("option");
+      option.value = unitType;
+      option.textContent = `${strategyRegisteredUnitsLabel(campaign, { [unitType]: amount })} 可申请`;
+      unitSelect.append(option);
+    });
+    unitSelect.value = unitSelect.children[0]?.value || "";
+    request.disabled = state.strategyBusy || !canResume || !unitSelect.children.length;
+  };
+  citySelect.addEventListener("change", sync);
+  request.addEventListener("click", () => queueStrategyAction("request_registered_units", {
+    city_id: citySelect.value,
+    unit_type: unitSelect.value,
+    count: Math.max(1, Number(count.value || 1)),
+  }));
+  panel.append(
+    createStrategyField("兵源城市", citySelect),
+    createStrategyField("兵种", unitSelect),
+    createStrategyField("数量", count),
+    request,
+  );
+  sync();
+  return panel;
+}
+
+function renderLordWorkspace(command, campaign, office, selectedCity, faction, canResume) {
+  command.append(createRoleWorkspaceHeader(campaign, office, "主公中枢", "统筹职位容量、国家科技、祭祀绑定和武将任务。"));
+  command.append(createStrategyOfficeDesk(campaign, office, canResume));
+  command.append(createLordTechnologyPanel(campaign, faction, canResume));
+  command.append(createLordRitualPanel(campaign, office, faction, canResume));
+  command.append(createLordHeroBindingPanel(campaign, office, canResume));
+  command.append(createStrategyHeroAppointmentPanel(campaign, office, canResume));
+  command.append(createLordHeroDutyPanel(campaign, office, canResume));
+}
+
+function renderGrandGeneralWorkspace(command, campaign, office, selectedCity, faction, canResume) {
+  command.append(createRoleWorkspaceHeader(campaign, office, "战区统帅部", "管理直属将军，把城市已注册单位调入具体军团。"));
+  command.append(createStrategyOfficeDesk(campaign, office, canResume));
+  command.append(createGrandGeneralMilitaryPanel(campaign, office, faction, canResume, selectedCity));
+}
+
+function renderGeneralWorkspace(command, campaign, office, selectedCity, faction, canResume) {
+  command.append(createRoleWorkspaceHeader(campaign, office, "军团行营", "持有确切作战单位；缺兵时必须向直属大将军请示。"));
+  command.append(createStrategyOfficeDesk(campaign, office, canResume));
+  command.append(createGeneralLogisticsPanel(campaign, office, faction, canResume));
+  const managed = strategyOfficeManagedCities(campaign, office);
+  const source = managed.find((city) => city.id === selectedCity?.id) || managed[0] || selectedCity;
+  command.append(createStrategyCityCommandCard(campaign, source, faction, canResume, office));
+}
+
+function renderGovernorWorkspace(command, campaign, office, selectedCity, faction, canResume) {
+  command.append(createRoleWorkspaceHeader(campaign, office, "城主府", "管理所辖城市的兵力增长、士兵注册、建筑、叛乱与祭祀。"));
+  command.append(createStrategyOfficeDesk(campaign, office, canResume));
+  const managedCity = strategyOfficeManagedCities(campaign, office)[0] || selectedCity;
+  command.append(createStrategyCityCommandCard(campaign, managedCity, faction, canResume, office));
+}
+
+function createStrategyHeroPathPanel(campaign) {
+  const currentHero = strategyControlledHero(campaign);
+  const isLobby = campaign?.status === "lobby";
+  const pool = campaign?.world?.strategic_hero_pool || [];
+  const availableHeroes = pool.filter((hero) => (
+    hero.status === "roaming" || hero.code === currentHero?.code
+  ));
+  const panel = document.createElement("section");
+  panel.className = "strategy-hero-path-panel";
+  const head = document.createElement("div");
+  head.className = "strategy-hero-path-head";
+  const titleBox = document.createElement("div");
+  appendTextLine(titleBox, "meta-label", isLobby ? "出身抉择" : "在野行止");
+  const title = document.createElement("h3");
+  title.textContent = currentHero ? strategyHeroName(campaign, currentHero.code) : "选择武将";
+  titleBox.append(title);
+  const seal = document.createElement("strong");
+  seal.className = `strategy-hero-status-seal ${currentHero?.status || "roaming"}`;
+  seal.textContent = currentHero?.status === "serving" ? "仕官" : "在野";
+  head.append(titleBox, seal);
+  panel.append(head);
+
+  const form = document.createElement("div");
+  form.className = "strategy-hero-path-form";
+  const heroSelect = document.createElement("select");
+  availableHeroes.forEach((hero) => {
+    const option = document.createElement("option");
+    option.value = hero.code;
+    const city = (campaign?.world?.cities || []).find((item) => item.id === hero.city_id);
+    option.textContent = `${hero.name} · ${hero.role || "武将"} · ${city?.name || "行踪不明"}`;
+    option.selected = hero.code === currentHero?.code;
+    heroSelect.append(option);
+  });
+  heroSelect.disabled = state.strategyBusy || !isLobby;
+
+  const pathSelect = document.createElement("select");
+  const pathOptions = isLobby
+    ? [
+      ["lord", "成为主公"],
+      ["roaming", "以在野身份入世"],
+      ["found", "在所在城举旗建国"],
+      ["join", "请求投靠其他主公"],
+    ]
+    : [
+      ["found", "在所在城举旗建国"],
+      ["join", "请求投靠其他主公"],
+    ];
+  pathOptions.forEach(([value, label]) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    pathSelect.append(option);
+  });
+  if (isLobby && currentHero?.status === "roaming") pathSelect.value = "roaming";
+
+  const targetSelect = document.createElement("select");
+  (campaign?.world?.factions || []).forEach((faction) => {
+    if (faction.id === currentHero?.faction_id) return;
+    const option = document.createElement("option");
+    option.value = faction.id;
+    option.textContent = `${faction.name} · 主城 ${strategyCityName(campaign, faction.capital_city_id)}`;
+    targetSelect.append(option);
+  });
+  const targetField = createStrategyField("投靠对象", targetSelect);
+  targetField.className = "strategy-hero-target-field";
+
+  const detail = document.createElement("p");
+  detail.className = "strategy-hero-path-detail";
+  const submit = document.createElement("button");
+  submit.type = "button";
+  submit.className = "primary strategy-hero-path-submit";
+  const updatePathState = () => {
+    const selectedHero = pool.find((hero) => hero.code === heroSelect.value) || currentHero;
+    const cityName = strategyCityName(campaign, selectedHero?.city_id);
+    const details = {
+      lord: "接掌分配给你的初始势力，可亲征，也可向大将军下达攻防军令。",
+      roaming: "不隶属任何势力，不可调动城市；之后可举旗建国或递交投靠请求。",
+      found: `在${cityName || "所在城"}举旗并夺取该城，成为新势力主公。`,
+      join: "向所选主公递交投靠请求；对方录用后才正式成为其麾下武将。",
+    };
+    targetField.hidden = pathSelect.value !== "join";
+    detail.textContent = details[pathSelect.value] || "";
+    submit.textContent = pathSelect.value === "join" ? "递交投靠书" : pathSelect.value === "found" ? "举旗建国" : "确认武将道路";
+    submit.disabled = state.strategyBusy || !heroSelect.value || (pathSelect.value === "join" && !targetSelect.value);
+  };
+  heroSelect.addEventListener("change", updatePathState);
+  pathSelect.addEventListener("change", updatePathState);
+  targetSelect.addEventListener("change", updatePathState);
+  submit.addEventListener("click", () => chooseStrategyHeroPath(heroSelect.value, pathSelect.value, targetSelect.value));
+  form.append(
+    createStrategyField("你所操作的武将", heroSelect),
+    createStrategyField("道路", pathSelect),
+    targetField,
+    detail,
+    submit,
+  );
+  panel.append(form);
+  updatePathState();
+  return panel;
+}
+
+function renderStrategyRoamingWorkspace(current, campaign, hero) {
+  const location = (campaign?.world?.cities || []).find((city) => city.id === hero?.city_id);
+  const warRoom = document.createElement("section");
+  warRoom.className = "strategy-war-room strategy-office-workspace HeroWorkspace strategy-roaming-workspace";
+  const hud = document.createElement("div");
+  hud.className = "strategy-war-hud";
+  [
+    ["战役", campaign.name],
+    ["月份", `第 ${campaign.world.current_month} 月`],
+    ["武将", strategyHeroName(campaign, hero?.code)],
+    ["身份", "在野"],
+    ["所在", location?.name || "行踪不明"],
+  ].forEach(([label, value]) => {
+    const item = document.createElement("div");
+    item.className = "strategy-hud-item";
+    appendTextLine(item, "meta-label", label);
+    const strong = document.createElement("strong");
+    strong.textContent = value;
+    item.append(strong);
+    hud.append(item);
+  });
+  warRoom.append(hud);
+  const main = document.createElement("div");
+  main.className = "strategy-war-main";
+  const stage = document.createElement("div");
+  stage.className = "strategy-war-stage";
+  renderStrategyMap(stage, campaign, null);
+  const command = document.createElement("aside");
+  command.className = "strategy-command-panel strategy-roaming-command";
+  command.append(createStrategyHeroPathPanel(campaign));
+  main.append(stage, command);
+  warRoom.append(main);
+  current.append(warRoom);
+}
+
+function renderStrategyWarRoom(current, campaign, faction, canResume, isOwner) {
+  const office = strategyActiveOffice(campaign);
+  const managedCities = strategyOfficeManagedCities(campaign, office);
+  let selectedCity = strategySelectedCity(campaign, faction);
+  if (["general", "governor"].includes(office?.office_type) && !managedCities.some((city) => city.id === selectedCity?.id)) {
+    selectedCity = managedCities[0] || null;
+    state.strategySelectedCityId = selectedCity?.id || "";
+  }
+  const warRoom = document.createElement("section");
+  const workspaceName = campaign?.world?.office_system?.office_types?.find((item) => item.id === office?.office_type)?.workspace;
+  warRoom.className = `strategy-war-room strategy-office-workspace ${workspaceName || "LegacyWorkspace"}`;
+
+  const hud = document.createElement("div");
+  hud.className = "strategy-war-hud";
+  const commandPoints = strategyFactionCommandPoints(campaign, faction);
+  [
+    ["战役", campaign.name],
+    ["月份", `第 ${campaign.world.current_month} 月`],
+    ["势力", faction?.name || "未绑定"],
+    ["武将", office?.holder_id ? strategyHeroName(campaign, office.holder_id) : "在野"],
+    ["军令", `${commandPoints.remaining}/${commandPoints.maximum} 可用`],
+    ["资源", faction ? `粮 ${faction.resources.food} · 钱 ${faction.resources.money} · 以太 ${faction.resources.ether} · 兵 ${faction.resources.troops}` : "未知"],
+  ].forEach(([label, value]) => {
+    const item = document.createElement("div");
+    item.className = "strategy-hud-item";
+    appendTextLine(item, "meta-label", label);
+    const strong = document.createElement("strong");
+    strong.textContent = value;
+    item.append(strong);
+    hud.append(item);
+  });
+  warRoom.append(hud);
+  renderStrategyOfficeSwitcher(warRoom, campaign, office);
+  renderStrategyWarStateBanner(warRoom, campaign, canResume, isOwner);
+
+  const tabs = document.createElement("div");
+  tabs.className = "strategy-war-tabs";
+  [
+    ["地图", focusStrategyMapStage, "primary"],
+    ["军令", focusStrategyCommandPanel, selectedCity ? "primary" : "ghost"],
+    ["卷宗", focusStrategyDossier, "ghost"],
+  ].forEach(([label, handler, className]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = className;
+    button.textContent = label;
+    if (label === "军令" && !selectedCity) button.disabled = true;
+    button.addEventListener("click", handler);
+    tabs.append(button);
+  });
+  warRoom.append(tabs);
+
+  const main = document.createElement("div");
+  main.className = "strategy-war-main";
+  const stage = document.createElement("div");
+  stage.className = "strategy-war-stage";
+  renderStrategyGuide(stage, campaign, faction, selectedCity, isOwner);
+  renderStrategyMap(stage, campaign, faction);
+
+  const command = document.createElement("aside");
+  command.className = "strategy-command-panel";
+  const commandTitle = document.createElement("h4");
+  commandTitle.textContent = office ? strategyOfficeLabel(office, campaign) : "城市军令";
+  command.append(commandTitle);
+  const workspaceRenderers = {
+    lord: renderLordWorkspace,
+    grand_general: renderGrandGeneralWorkspace,
+    general: renderGeneralWorkspace,
+    governor: renderGovernorWorkspace,
+  };
+  (workspaceRenderers[office?.office_type] || renderGovernorWorkspace)(command, campaign, office, selectedCity, faction, canResume);
+  main.append(stage, command);
+  warRoom.append(main);
+  current.append(warRoom);
+}
+
+function collapseStrategyDossier(current) {
+  if (!current || !current.children || !current.children.length) return;
+  const children = Array.from(current.children);
+  const hasWarRoom = children.some((child) => String(child.className || "").includes("strategy-war-room"));
+  if (!hasWarRoom) return;
+  const dossierChildren = children.filter((child) => {
+    const className = String(child.className || "");
+    return (
+      !className.includes("strategy-war-room") &&
+      !className.includes("strategy-status-strip") &&
+      !className.includes("strategy-campaign-actions") &&
+      !className.includes("strategy-hero-path-panel") &&
+      className !== "strategy-dossier"
+    );
+  });
+  if (!dossierChildren.length) return;
+  const details = document.createElement("details");
+  details.className = "strategy-dossier";
+  details.open = Boolean(state.strategyDossierOpen);
+  const summary = document.createElement("summary");
+  summary.textContent = "战报卷宗";
+  summary.addEventListener("click", (event) => {
+    event.preventDefault();
+    state.strategyDossierOpen = !state.strategyDossierOpen;
+    details.open = state.strategyDossierOpen;
+  });
+  details.append(summary);
+  const groups = buildStrategyDossierGroups(dossierChildren);
+  const activeTab = groups.some((group) => group.id === state.strategyDossierTab)
+    ? state.strategyDossierTab
+    : groups[0]?.id || "";
+  state.strategyDossierTab = activeTab;
+  if (groups.length > 1) {
+    const tabs = document.createElement("div");
+    tabs.className = "strategy-dossier-tabs";
+    groups.forEach((group) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = group.id === activeTab ? "primary" : "ghost";
+      button.textContent = group.label;
+      button.addEventListener("click", () => {
+        state.strategyDossierTab = group.id;
+        renderStrategyPanel();
+        focusStrategyDossier();
+      });
+      tabs.append(button);
+    });
+    details.append(tabs);
+  }
+  groups.forEach((group) => {
+    const page = document.createElement("div");
+    page.className = "strategy-dossier-page";
+    page.dataset.dossierTab = group.id;
+    page.hidden = group.id !== activeTab;
+    group.nodes.forEach((child) => page.append(child));
+    details.append(page);
+  });
+  current.append(details);
+}
+
+function buildStrategyDossierGroups(nodes) {
+  const groups = [];
+  const byId = new Map();
+  let current = null;
+  const ensureGroup = (id, label) => {
+    current = byId.get(id);
+    if (!current) {
+      current = { id, label, nodes: [] };
+      byId.set(id, current);
+      groups.push(current);
+    }
+    return current;
+  };
+  nodes.forEach((node) => {
+    if (node.tagName === "H4") {
+      const group = strategyDossierGroupForTitle(node.textContent || "");
+      ensureGroup(group.id, group.label).nodes.push(node);
+      return;
+    }
+    if (!current) ensureGroup("overview", "概况");
+    current.nodes.push(node);
+  });
+  return groups.filter((group) => group.nodes.length);
+}
+
+function strategyDossierGroupForTitle(title) {
+  if (title.includes("成员") || title.includes("邀请") || title.includes("初始玩家") || title.includes("在线状态")) {
+    return { id: "members", label: "成员" };
+  }
+  if (title.includes("行动队列") || title.includes("军令")) return { id: "orders", label: "军令" };
+  if (title.includes("目标") || title.includes("流亡") || title.includes("胜利")) return { id: "objectives", label: "目标" };
+  if (title.includes("战斗") || title.includes("战役")) return { id: "battles", label: "战斗" };
+  if (title.includes("英灵") || title.includes("武将")) return { id: "heroes", label: "英灵" };
+  if (title.includes("科技") || title.includes("战术")) return { id: "tech", label: "科技" };
+  if (title.includes("事件") || title.includes("日志")) return { id: "events", label: "事件" };
+  return { id: "other", label: "其他" };
+}
+
+function appendTextLine(parent, className, text) {
+  const node = document.createElement("div");
+  node.className = className;
+  node.textContent = text;
+  parent.append(node);
+  return node;
+}
+
+function currentStrategyBattleRoomForBattle(battle) {
+  const latest = state.strategyBattleRoom || {};
+  const battleRoomId = String(battle?.battle_room_id || "").trim().toUpperCase();
+  const latestRoomId = String(latest.room_id || "").trim().toUpperCase();
+  if (battleRoomId && latestRoomId === battleRoomId) {
+    return latest;
+  }
+  return {
+    room_id: battleRoomId,
+    invite_path: battle?.battle_room_invite_path || "",
+    player_token: "",
+  };
+}
+
+function strategyRosterManifestSummary(manifest = []) {
+  if (!Array.isArray(manifest) || !manifest.length) return "";
+  return manifest
+    .filter((row) => Number(row?.grid_units || 0) > 0)
+    .map((row) => `${row.unit_type || "单位"}×${row.grid_units}`)
+    .join(" / ");
+}
+
+function strategyCityName(campaign, cityId) {
+  const city = (campaign?.world?.cities || []).find((item) => item.id === cityId);
+  return city?.name || cityId || "未知城市";
+}
+
+function strategyCityStateLabels(city = {}) {
+  return (city.event_states || []).map((state) => {
+    const parts = String(state || "").split(":");
+    if (parts[0] === "rebellion_risk" && parts.length >= 3) {
+      return `叛乱风险 ${parts[1]} ${parts[2]}`;
+    }
+    if (parts[0] === "rebellion_force" && parts.length >= 2) {
+      return `叛军 ${parts[1]}`;
+    }
+    if (parts[0] === "rebellion_crisis") {
+      const riskIndex = parts.indexOf("risk");
+      return riskIndex >= 0 && parts[riskIndex + 1] ? `叛乱危机 ${parts[riskIndex + 1]}` : "叛乱危机";
+    }
+    if (parts[0] === "rebellion_action" && parts.length >= 2) {
+      return `本月处理 ${parts[1]}`;
+    }
+    return "";
+  }).filter(Boolean);
+}
+
+function strategyCityRebellionForce(city = {}) {
+  for (const state of city.event_states || []) {
+    const parts = String(state || "").split(":");
+    if (parts[0] !== "rebellion_force" || !parts[1]) continue;
+    const force = Number(parts[1]);
+    return Number.isFinite(force) ? Math.max(0, Math.floor(force)) : 0;
+  }
+  return 0;
+}
+
+function strategyExileActionName(campaign, actionId) {
+  const action = (campaign?.world?.exile_action_choices || []).find((item) => item.id === actionId);
+  return action?.name || actionId || "未知流亡行动";
+}
+
+function strategyRebellionActionName(campaign, actionId) {
+  const action = (campaign?.world?.rebellion_action_choices || []).find((item) => item.id === actionId);
+  return action?.name || actionId || "未知叛乱处理";
+}
+
+function strategyHeroName(campaign, heroCode) {
+  const hero = (campaign?.world?.strategic_hero_pool || []).find((item) => item.code === heroCode);
+  return hero?.name || heroCode || "未知英灵";
+}
+
+function strategyDeployableHeroes(faction) {
+  return (faction?.strategic_heroes || []).filter((hero) => hero.status === "serving");
+}
+
+function strategyHeroDeploymentLimit(faction) {
+  const value = Number(faction?.strategic_hero_deployment_limit || 1);
+  return Math.max(0, Math.floor(Number.isFinite(value) ? value : 1));
+}
+
+function createStrategyHeroDeploymentPicker(faction, selectedCodes = []) {
+  const heroes = strategyDeployableHeroes(faction);
+  const limit = strategyHeroDeploymentLimit(faction);
+  const selected = new Set((Array.isArray(selectedCodes) ? selectedCodes : []).map((code) => String(code || "")));
+
+  if (limit <= 1) {
+    const select = document.createElement("select");
+    const noHeroOption = document.createElement("option");
+    noHeroOption.value = "";
+    noHeroOption.textContent = "不投入";
+    select.append(noHeroOption);
+    heroes.forEach((hero) => {
+      const option = document.createElement("option");
+      option.value = hero.code;
+      option.textContent = hero.name || hero.code;
+      option.selected = selected.has(hero.code);
+      select.append(option);
+    });
+    return {
+      element: select,
+      selectedCodes: () => (select.value ? [select.value] : []),
+      setDisabled: (disabled) => { select.disabled = disabled; },
+    };
+  }
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "strategy-hero-picker";
+  const inputs = [];
+  heroes.forEach((hero) => {
+    const item = document.createElement("label");
+    item.className = "strategy-hero-choice";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.value = hero.code;
+    input.checked = selected.has(hero.code);
+    input.addEventListener("change", () => {
+      const checked = inputs.filter((node) => node.checked);
+      if (checked.length > limit) input.checked = false;
+    });
+    const span = document.createElement("span");
+    span.textContent = hero.name || hero.code;
+    item.append(input, span);
+    wrapper.append(item);
+    inputs.push(input);
+  });
+  return {
+    element: wrapper,
+    selectedCodes: () => inputs.filter((input) => input.checked).map((input) => input.value).slice(0, limit),
+    setDisabled: (disabled) => { inputs.forEach((input) => { input.disabled = disabled; }); },
+  };
+}
+
+function strategyQueuedActionLabel(campaign, action = {}) {
+  const payload = action.payload || {};
+  if (action.action_type === "set_city_policy") {
+    return `${strategyCityName(campaign, payload.city_id)}：方针计划为 ${payload.policy || "未知"}`;
+  }
+  if (action.action_type === "resolve_story_event") {
+    const event = (campaign?.world?.story_events || []).find((item) => item.id === payload.event_id);
+    const choice = (event?.choices || []).find((item) => item.id === payload.choice_id);
+    return `事件抉择：${event?.title || payload.event_id || "未知事件"} · ${choice?.label || payload.choice_id || "未知选项"}`;
+  }
+  if (action.action_type === "unlock_tactic_tech") {
+    const faction = (campaign?.world?.factions || []).find((item) => item.id === action.faction_id);
+    const tech = (faction?.tactic_tech_tree || []).find((item) => item.id === payload.tech_id);
+    return `解锁战术科技：${tech?.name || payload.tech_id || "未知"}`;
+  }
+  if (action.action_type === "declare_attack") {
+    const modeNames = {
+      manual: "手动",
+      ai_auto: "AI 自动",
+      watch_ai: "观看 AI",
+      quick: "快速",
+    };
+    const heroCodes = Array.isArray(payload.attacker_hero_codes) ? payload.attacker_hero_codes : [];
+    const heroes = heroCodes.length ? ` · 英灵 ${heroCodes.map((code) => strategyHeroName(campaign, code)).join(", ")}` : "";
+    return `${strategyCityName(campaign, payload.source_city_id)} → ${strategyCityName(campaign, payload.target_city_id)}：${modeNames[payload.resolution_mode] || payload.resolution_mode || "快速"}进攻${heroes}`;
+  }
+  if (action.action_type === "exile_action") {
+    const target = payload.target_city_id ? `：${strategyCityName(campaign, payload.target_city_id)}` : "";
+    return `流亡行动：${strategyExileActionName(campaign, payload.exile_action_id || payload.action_id)}${target}`;
+  }
+  if (action.action_type === "rebellion_action") {
+    return `${strategyCityName(campaign, payload.city_id || payload.target_city_id)}：叛乱处理 ${strategyRebellionActionName(campaign, payload.rebellion_action_id || payload.action_id)}`;
+  }
+  if (action.action_type === "rebellion_battle") {
+    const troops = payload.troops ? ` · 投入 ${payload.troops}` : "";
+    return `${strategyCityName(campaign, payload.city_id || payload.target_city_id)}：清剿叛军${troops}`;
+  }
+  if (action.action_type === "perform_hero_ritual") {
+    return `${strategyCityName(campaign, payload.city_id)}：举行召唤祭祀`;
+  }
+  if (action.action_type === "unbind_strategic_hero") {
+    return `解除祭祀绑定：${strategyHeroName(campaign, payload.hero_code)}`;
+  }
+  if (action.action_type === "appoint_strategic_hero") {
+    const target = (campaign?.world?.offices || []).find((office) => office.id === payload.target_office_id);
+    return `任命${strategyHeroName(campaign, payload.hero_code)}为${strategyOfficeLabel(target, campaign)}`;
+  }
+  if (action.action_type === "assign_strategic_hero_duty") {
+    const labels = { reserve: "待命", administration: "辅佐内政", training: "训练军队", garrison: "驻守城市", campaign: "随军出征" };
+    const target = payload.target_id ? ` · ${strategyCityName(campaign, payload.target_id)}` : "";
+    return `安排${strategyHeroName(campaign, payload.hero_code)}：${labels[payload.assignment_type] || payload.assignment_type}${target}`;
+  }
+  if (action.action_type === "increase_city_troops") {
+    return `${strategyCityName(campaign, payload.city_id)}：增加本城兵力`;
+  }
+  if (action.action_type === "register_city_soldiers") {
+    return `${strategyCityName(campaign, payload.city_id)}：注册 ${payload.unit_count || 1} 个士兵单位`;
+  }
+  if (action.action_type === "transfer_registered_units") {
+    const general = (campaign?.world?.offices || []).find((item) => item.id === payload.general_office_id);
+    return `${strategyCityName(campaign, payload.city_id)}：向${strategyOfficeLabel(general, campaign)}调拨 ${payload.count || 1} 个单位`;
+  }
+  if (action.action_type === "request_registered_units") {
+    return `请兵：${strategyCityName(campaign, payload.city_id)} · ${payload.count || 1} 个单位`;
+  }
+  if (action.action_type === "approve_registered_unit_request") {
+    return `批准调兵申请：${payload.request_id || "未知申请"}`;
+  }
+  if (action.action_type === "construct_city_building") {
+    const project = (campaign?.world?.building_projects || []).find((item) => item.id === payload.building_id);
+    return `${strategyCityName(campaign, payload.city_id)}：兴建${project?.name || payload.building_id}`;
+  }
+  if (action.action_type === "issue_office_order" || action.action_type === "send_office_request") {
+    const receiver = (campaign?.world?.offices || []).find((office) => office.id === payload.receiver_office_id);
+    const kind = action.action_type === "send_office_request" ? "职位请求" : "职位命令";
+    return `${kind}：${strategyOfficeLabel(receiver, campaign)} · ${payload.objective || "未填写目标"}`;
+  }
+  return action.action_type || "未知行动";
+}
+
+function renderStrategyActionQueue(current, campaign) {
+  const title = document.createElement("h4");
+  title.textContent = "本月行动队列";
+  current.append(title);
+
+  const panel = document.createElement("div");
+  panel.className = "strategy-event-list";
+  const actions = campaign?.queued_actions || [];
+  if (!actions.length) {
+    appendTextLine(panel, "strategy-meta", "暂无已提交的本月行动。");
+  } else {
+    actions.forEach((action) => {
+      const card = document.createElement("article");
+      card.className = "strategy-campaign-card";
+      const strong = document.createElement("strong");
+      strong.textContent = strategyQueuedActionLabel(campaign, action);
+      card.append(strong);
+      appendTextLine(card, "strategy-meta", `消耗 ${action.command_cost || strategyCommandCost(action.action_type, action.payload || {})} 点军令`);
+      appendTextLine(
+        card,
+        "strategy-meta",
+        `${action.username || strategyMemberLabel(campaign, action.user_id)} · ${strategyFactionName(campaign, action.faction_id)} · 第 ${action.month} 月`
+      );
+      panel.append(card);
+    });
+  }
+  current.append(panel);
+}
+
+function renderStrategyObjectivePanel(current, campaign) {
+  const status = campaign?.world?.strategic_status || {};
+  const conditions = Array.isArray(status.victory_conditions) ? status.victory_conditions : [];
+  const exiledFactions = Array.isArray(status.exiled_factions) ? status.exiled_factions : [];
+  if (!conditions.length && !exiledFactions.length) return;
+
+  const title = document.createElement("h4");
+  title.textContent = "战略目标与流亡";
+  current.append(title);
+
+  const panel = document.createElement("div");
+  panel.className = "strategy-event-list";
+  conditions.forEach((condition) => {
+    const card = document.createElement("article");
+    card.className = "strategy-campaign-card";
+    const name = document.createElement("strong");
+    name.textContent = condition.name || condition.id || "未知目标";
+    card.append(name);
+    const stateLabel = !condition.implemented ? "未开放" : condition.achieved ? "已达成" : "未达成";
+    const winnerName = condition.winner_faction_id ? strategyFactionName(campaign, condition.winner_faction_id) : "";
+    appendTextLine(card, "strategy-meta", winnerName ? `${stateLabel} · ${winnerName}` : stateLabel);
+    if (condition.description) appendTextLine(card, "strategy-meta", condition.description);
+    panel.append(card);
+  });
+  if (exiledFactions.length) {
+    const card = document.createElement("article");
+    card.className = "strategy-campaign-card";
+    const name = document.createElement("strong");
+    name.textContent = "流亡势力";
+    card.append(name);
+    appendTextLine(card, "strategy-meta", exiledFactions.map((faction) => faction.name || faction.id).join("、"));
+    panel.append(card);
+  } else {
+    const card = document.createElement("article");
+    card.className = "strategy-campaign-card";
+    const name = document.createElement("strong");
+    name.textContent = "流亡势力";
+    card.append(name);
+    appendTextLine(card, "strategy-meta", "暂无");
+    panel.append(card);
+  }
+  const faction = strategyFaction(campaign);
+  const isExiled = Boolean(faction?.id && (status.exiled_faction_ids || []).includes(faction.id));
+  const canResume = strategyCanResume(campaign);
+  if (isExiled) {
+    const card = document.createElement("article");
+    card.className = "strategy-campaign-card";
+    const name = document.createElement("strong");
+    name.textContent = "你的流亡行动";
+    card.append(name);
+    appendTextLine(card, "strategy-meta", "无城势力可以求援、募兵、潜伏联络，并在条件足够时重建据点。");
+    const actions = document.createElement("div");
+    actions.className = "strategy-campaign-actions";
+
+    const actionLabel = document.createElement("label");
+    const actionText = document.createElement("span");
+    actionText.textContent = "行动";
+    const actionSelect = document.createElement("select");
+    (campaign?.world?.exile_action_choices || []).forEach((choice) => {
+      const option = document.createElement("option");
+      option.value = choice.id;
+      option.textContent = choice.name || choice.id;
+      option.dataset.requiresTargetCity = choice.requires_target_city ? "1" : "";
+      actionSelect.append(option);
+    });
+    if (actionSelect.children.length && !actionSelect.value) actionSelect.value = actionSelect.children[0].value;
+    actionLabel.append(actionText, actionSelect);
+    actions.append(actionLabel);
+
+    const targetLabel = document.createElement("label");
+    const targetText = document.createElement("span");
+    targetText.textContent = "目标城市";
+    const targetSelect = document.createElement("select");
+    (campaign?.world?.cities || [])
+      .filter((city) => city.owner_faction_id !== faction.id)
+      .forEach((city) => {
+        const option = document.createElement("option");
+        option.value = city.id;
+        option.textContent = city.name;
+        targetSelect.append(option);
+      });
+    if (targetSelect.children.length && !targetSelect.value) targetSelect.value = targetSelect.children[0].value;
+    targetLabel.append(targetText, targetSelect);
+    actions.append(targetLabel);
+
+    const updateTargetState = () => {
+      const selectedOption = actionSelect.children[actionSelect.selectedIndex] || null;
+      const requiresTarget = selectedOption?.dataset?.requiresTargetCity === "1";
+      targetSelect.disabled = state.strategyBusy || !canResume || !requiresTarget;
+    };
+    actionSelect.addEventListener("change", updateTargetState);
+    updateTargetState();
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "primary";
+    button.textContent = "加入月度计划 · 1 军令";
+    button.disabled = state.strategyBusy || !canResume || !actionSelect.children.length || !strategyCanAffordCommand(campaign, faction, "exile_action");
+    button.addEventListener("click", () => {
+      const selectedOption = actionSelect.children[actionSelect.selectedIndex] || null;
+      const requiresTarget = selectedOption?.dataset?.requiresTargetCity === "1";
+      const payload = { exile_action_id: actionSelect.value };
+      if (requiresTarget) payload.target_city_id = targetSelect.value;
+      queueStrategyAction("exile_action", payload);
+    });
+    actions.append(button);
+    card.append(actions);
+    panel.append(card);
+  }
+  current.append(panel);
+}
+
+function renderStrategyHeroPanel(current, campaign, faction, office = strategyActiveOffice(campaign)) {
+  const heroes = Array.isArray(faction?.strategic_heroes)
+    ? faction.strategic_heroes
+    : (campaign?.world?.strategic_hero_pool || []).filter((hero) => hero.home_faction_id === faction?.id);
+  if (!heroes.length) return;
+  const canSetDefense = !office || office.office_type === "grand_general";
+
+  const title = document.createElement("h4");
+  title.textContent = "本势力武将";
+  current.append(title);
+
+  const panel = document.createElement("div");
+  panel.className = "strategy-tech-grid";
+  heroes.slice(0, 8).forEach((hero) => {
+    const card = document.createElement("article");
+    card.className = "strategy-tech-card";
+    const name = document.createElement("strong");
+    name.textContent = hero.name || hero.code;
+    card.append(name);
+    appendTextLine(card, "strategy-meta", `${hero.role || "未知职业"} · ${hero.attribute || "未知属性"} · Lv ${hero.level || 1}`);
+    if (hero.status === "sleeping") {
+      appendTextLine(card, "strategy-meta", `状态：沉睡中 · 第 ${hero.sleeping_until_month || "?"} 月恢复`);
+    } else {
+      appendTextLine(card, "strategy-meta", `状态：${hero.status === "serving" ? "仕官中" : "在野"}`);
+    }
+    if (hero.office_id) {
+      const heldOffice = (campaign?.world?.offices || []).find((item) => item.id === hero.office_id);
+      appendTextLine(card, "strategy-meta", `职位：${strategyOfficeLabel(heldOffice, campaign)}`);
+    }
+    if (hero.ritual_city_id) {
+      appendTextLine(card, "strategy-meta", `祭祀绑定：${strategyCityName(campaign, hero.ritual_city_id)}`);
+    }
+    if (hero.defender_assigned) {
+      appendTextLine(card, "strategy-meta", "防守：默认出战");
+    }
+    const actions = document.createElement("div");
+    actions.className = "strategy-tech-actions";
+    if (canSetDefense && hero.status === "serving") {
+      const defense = document.createElement("button");
+      defense.type = "button";
+      defense.className = hero.defender_assigned ? "ghost" : "primary";
+      defense.textContent = hero.defender_assigned ? "防守中" : "设为防守";
+      defense.disabled = state.strategyBusy || !strategyCanResume(campaign) || hero.defender_assigned;
+      defense.addEventListener("click", () => setStrategyDefenseHero(hero.code));
+      actions.append(defense);
+    }
+    if (actions.children.length) card.append(actions);
+    panel.append(card);
+  });
+  if (heroes.length > 8) {
+    appendTextLine(panel, "strategy-meta", `另有 ${heroes.length - 8} 名本势力英灵暂未展开。`);
+  }
+  current.append(panel);
+}
+
+function strategySideLabel(side) {
+  if (side === "attacker") return "攻方";
+  if (side === "defender") return "守方";
+  return side || "未知";
+}
+
+function strategyNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function strategyBattleResultLines(battle = {}) {
+  const result = battle.battle_result || {};
+  if (!result || typeof result !== "object" || !Object.keys(result).length) return [];
+
+  const lost = result.lost_troops_by_side || {};
+  const remaining = result.remaining_troops_by_side || {};
+  const initialGrid = result.initial_grid_units_by_side || {};
+  const survivingGrid = result.surviving_grid_units_by_side || {};
+  const lines = [
+    `结果：${strategySideLabel(result.winner_side)}胜利 · ${result.city_captured ? "攻城成功" : "守城成功"}`,
+    `损失：攻方 ${strategyNumber(lost.attacker)} · 守方 ${strategyNumber(lost.defender)}`,
+    `剩余兵力：攻方 ${strategyNumber(remaining.attacker)} · 守方 ${strategyNumber(remaining.defender)}`,
+  ];
+  if (
+    Object.prototype.hasOwnProperty.call(survivingGrid, "attacker") ||
+    Object.prototype.hasOwnProperty.call(survivingGrid, "defender") ||
+    Object.prototype.hasOwnProperty.call(initialGrid, "attacker") ||
+    Object.prototype.hasOwnProperty.call(initialGrid, "defender")
+  ) {
+    const attackerInitial = Object.prototype.hasOwnProperty.call(initialGrid, "attacker") ? strategyNumber(initialGrid.attacker) : "?";
+    const defenderInitial = Object.prototype.hasOwnProperty.call(initialGrid, "defender") ? strategyNumber(initialGrid.defender) : "?";
+    lines.push(
+      `存活单位：攻方 ${strategyNumber(survivingGrid.attacker)}/${attackerInitial} · 守方 ${strategyNumber(survivingGrid.defender)}/${defenderInitial}`
+    );
+  }
+  const strategicHeroes = result.strategic_heroes_by_side || {};
+  ["attacker", "defender"].forEach((side) => {
+    const row = strategicHeroes[side] || {};
+    const committed = Array.isArray(row.committed) ? row.committed : [];
+    const surviving = Array.isArray(row.surviving) ? row.surviving : [];
+    const sleeping = Array.isArray(row.sleeping) ? row.sleeping : [];
+    if (!committed.length && !surviving.length && !sleeping.length) return;
+    const fragments = [];
+    if (committed.length) fragments.push(`参战 ${committed.join(", ")}`);
+    if (surviving.length) fragments.push(`存活 ${surviving.join(", ")}`);
+    if (sleeping.length) fragments.push(`沉睡 ${sleeping.join(", ")}`);
+    lines.push(`英灵：${strategySideLabel(side)} ${fragments.join(" · ")}`);
+  });
+  if (result.battle_log_summary) {
+    lines.push(`摘要：${result.battle_log_summary}`);
+  }
+  return lines;
+}
+
+function renderStrategyPanel() {
+  const panel = $("strategy-panel");
+  if (!panel) return;
+  const caption = $("strategy-caption");
+  const nameInput = $("strategy-name");
+  const seedInput = $("strategy-seed");
+  const playerCountInput = $("strategy-player-count");
+  const joinCodeInput = $("strategy-join-code");
+  const createButton = $("strategy-create");
+  const joinButton = $("strategy-join");
+  const refreshButton = $("strategy-refresh");
+  const advanceButton = $("strategy-advance-month");
+  const message = $("strategy-message");
+  const list = $("strategy-campaign-list");
+  const current = $("strategy-current");
+  const roomHome = $("room-home");
+  const loggedIn = userLoggedIn();
+  const selected = state.strategyCampaign;
+  const canResume = strategyCanResume(selected);
+  const selectedIsOwner = Boolean(selected && Number(selected.owner_user_id) === Number(state.authUser?.id || 0));
+  panel.classList.toggle("is-war-room", Boolean(selected));
+  if (roomHome) roomHome.classList.toggle("strategy-war-layout", Boolean(selected));
+
+  if (caption) {
+    caption.textContent = loggedIn
+      ? "创建或恢复战役后，可以管理城市方针、解锁战术科技并推进月度结算。"
+      : "请先登录账号，战略战役会绑定到账号存档。";
+  }
+  if (nameInput) {
+    nameInput.value = state.strategyName;
+    nameInput.disabled = state.strategyBusy || !loggedIn;
+  }
+  if (seedInput) {
+    seedInput.value = state.strategySeed;
+    seedInput.disabled = state.strategyBusy || !loggedIn;
+  }
+  if (playerCountInput) {
+    playerCountInput.value = state.strategyPlayerCount;
+    playerCountInput.disabled = state.strategyBusy || !loggedIn;
+  }
+  if (joinCodeInput) {
+    joinCodeInput.value = state.strategyJoinCode;
+    joinCodeInput.disabled = state.strategyBusy || !loggedIn;
+  }
+  if (createButton) createButton.disabled = state.strategyBusy || !loggedIn;
+  if (joinButton) joinButton.disabled = state.strategyBusy || !loggedIn || !String(state.strategyJoinCode || "").trim();
+  if (refreshButton) refreshButton.disabled = state.strategyBusy || !loggedIn;
+  if (advanceButton) {
+    const office = strategyActiveOffice(selected);
+    advanceButton.disabled = state.strategyBusy || !loggedIn || !selected || !canResume || !selectedIsOwner || Boolean(office && office.office_type !== "lord");
+  }
+  if (message) message.textContent = state.strategyMessage || "";
+  if (!list || !current) return;
+
+  list.innerHTML = "";
+  current.innerHTML = "";
+  if (!loggedIn) {
+    appendTextLine(list, "strategy-meta", "登录后会显示你参与过的战役。");
+    return;
+  }
+  if (!state.strategyCampaigns.length) {
+    appendTextLine(list, "strategy-meta", "当前账号还没有战略战役。");
+  } else {
+    state.strategyCampaigns.forEach((campaign) => {
+      const card = document.createElement("article");
+      card.className = "strategy-campaign-card";
+      const campaignStatus = campaign.status === "active" ? "已锁定" : "大厅开放";
+      appendTextLine(
+        card,
+        "strategy-meta",
+        `第 ${campaign.world.current_month} 月 · ${campaign.world.cities.length} 城 · ${campaign.members.length}/${campaign.world.factions.length} 初始玩家 · ${campaignStatus}`
+      );
+      appendTextLine(card, "strategy-meta", `加入码：${campaign.join_code || "未生成"}`);
+      const title = document.createElement("strong");
+      title.textContent = campaign.name;
+      card.prepend(title);
+      const resume = campaign.resume || {};
+      if (campaign.status !== "active") {
+        appendTextLine(card, "strategy-meta", "房主锁定后，未加入的初始势力会由 AI 接管。");
+      } else {
+        const missingNames = strategyMissingInitialPlayerLabels(campaign);
+        appendTextLine(
+          card,
+          "strategy-meta",
+          resume.can_resume ? "所有真人初始玩家在线，AI 空席会自动操作。" : `等待初始玩家：${missingNames.join("、") || "未知"}`
+        );
+      }
+      const actions = document.createElement("div");
+      actions.className = "strategy-campaign-actions";
+      const enter = document.createElement("button");
+      enter.className = "primary";
+      enter.type = "button";
+      enter.textContent = campaign.status === "active" ? "继续战役" : "进入大厅";
+      enter.disabled = state.strategyBusy;
+      enter.addEventListener("click", () => enterStrategyCampaign(campaign.id));
+      actions.append(enter);
+      const leave = document.createElement("button");
+      leave.className = "ghost";
+      leave.type = "button";
+      leave.textContent = "离线";
+      leave.disabled = state.strategyBusy;
+      leave.addEventListener("click", () => leaveStrategyCampaign(campaign.id));
+      actions.append(leave);
+      if (campaign.status !== "active" && Number(campaign.owner_user_id) === Number(state.authUser?.id || 0)) {
+        const lock = document.createElement("button");
+        lock.className = "ghost";
+        lock.type = "button";
+        lock.textContent = "锁定并启用 AI";
+        lock.disabled = state.strategyBusy;
+        lock.addEventListener("click", () => lockStrategyCampaign(campaign.id));
+        actions.append(lock);
+      }
+      card.append(actions);
+      list.append(card);
+    });
+  }
+
+  if (!selected) {
+    appendTextLine(current, "strategy-meta", "选择一个战役后会显示城市、科技和事件。");
+    return;
+  }
+
+  const controlledHero = strategyControlledHero(selected);
+  const faction = strategyFaction(selected);
+  const activeOffice = strategyActiveOffice(selected);
+  const isOwner = selectedIsOwner;
+  if (controlledHero?.status === "roaming") {
+    renderStrategyRoamingWorkspace(current, selected, controlledHero);
+  } else {
+    if (selected.status === "lobby") current.append(createStrategyHeroPathPanel(selected));
+    renderStrategyWarRoom(current, selected, faction || selected.world.factions[0], canResume, isOwner);
+  }
+
+  const campaignStatus = document.createElement("div");
+  campaignStatus.className = "strategy-status-strip";
+  appendTextLine(campaignStatus, "strategy-meta", `加入码：${selected.join_code || "未生成"}`);
+  appendTextLine(campaignStatus, "strategy-meta", selected.status === "active" ? "初始玩家已锁定" : "战役大厅开放");
+  appendTextLine(
+    campaignStatus,
+    "strategy-meta",
+    isOwner
+      ? (activeOffice?.office_type === "lord" ? "房主可推进" : "房主账号 · 需由主公职位推进")
+      : "仅房主的主公职位可推进"
+  );
+  current.append(campaignStatus);
+
+  renderStrategyMembersPanel(current, selected, isOwner);
+  renderStrategyResumePanel(current, selected);
+  renderStrategyActionQueue(current, selected);
+  renderStrategyObjectivePanel(current, selected);
+  if (faction && (!activeOffice || ["lord", "grand_general"].includes(activeOffice.office_type))) {
+    renderStrategyHeroPanel(current, selected, faction, activeOffice);
+  }
+
+  if (selected.status !== "active" && isOwner) {
+    const lobbyActions = document.createElement("div");
+    lobbyActions.className = "strategy-campaign-actions";
+    const lock = document.createElement("button");
+    lock.className = "primary";
+    lock.type = "button";
+    lock.textContent = "锁定并启用 AI";
+    lock.disabled = state.strategyBusy;
+    lock.addEventListener("click", () => lockStrategyCampaign(selected.id));
+    lobbyActions.append(lock);
+    appendTextLine(lobbyActions, "strategy-meta", "锁定后加入码只允许已有真人初始玩家恢复；未加入势力会由 AI 操作。");
+    current.append(lobbyActions);
+  }
+
+  const battleRecords = (selected.world.pending_battles || []).slice(-6).reverse();
+  if (battleRecords.length && (!activeOffice || activeOffice.office_type === "general")) {
+    const battlesTitle = document.createElement("h4");
+    battlesTitle.textContent = "战斗记录";
+    current.append(battlesTitle);
+    const battles = document.createElement("div");
+    battles.className = "strategy-event-list";
+    battleRecords.forEach((battle) => {
+      const card = document.createElement("article");
+      card.className = "strategy-campaign-card";
+      const title = document.createElement("strong");
+      title.textContent = `${strategyCityName(selected, battle.source_city_id)} → ${strategyCityName(selected, battle.target_city_id)}`;
+      card.append(title);
+      const statusNames = { pending: "待处理", resolved: "已结算" };
+      appendTextLine(card, "strategy-meta", `处理方式：${battle.resolution_mode || "quick"} · 状态：${statusNames[battle.status] || battle.status}`);
+      strategyBattleResultLines(battle).forEach((line) => appendTextLine(card, "strategy-meta", line));
+      if (battle.battle_room_id) {
+        const roomInfo = currentStrategyBattleRoomForBattle(battle);
+        appendTextLine(card, "strategy-meta", `真实战斗房间：${battle.battle_room_id}`);
+        if (battle.battle_room_invite_path) {
+          appendTextLine(card, "strategy-meta", `入口：${battle.battle_room_invite_path}`);
+        }
+        const attackerSummary = strategyRosterManifestSummary(roomInfo.attacker_roster_manifest);
+        const defenderSummary = strategyRosterManifestSummary(roomInfo.defender_roster_manifest);
+        if (attackerSummary) {
+          appendTextLine(card, "strategy-meta", `攻方单位：${attackerSummary}`);
+        }
+        if (defenderSummary) {
+          appendTextLine(card, "strategy-meta", `守方单位：${defenderSummary}`);
+        }
+        const actions = document.createElement("div");
+        actions.className = "strategy-campaign-actions";
+        const open = document.createElement("button");
+        open.type = "button";
+        open.className = "primary";
+        open.textContent = battle.status === "resolved" ? "查看真实战斗" : battle.resolution_mode === "watch_ai" ? "观看 AI 战斗" : "进入真实战斗";
+        open.disabled = state.strategyBusy;
+        open.addEventListener("click", () => openStrategyBattleRoom(roomInfo));
+        actions.append(open);
+        card.append(actions);
+      } else if (battle.status === "pending") {
+        appendTextLine(card, "strategy-meta", "等待创建真实格子战房间。");
+        if (battle.defender_faction_id === faction?.id) {
+          const actions = document.createElement("div");
+          actions.className = "strategy-campaign-actions";
+          const heroLabel = document.createElement("label");
+          const heroSpan = document.createElement("span");
+          heroSpan.textContent = "本场防守";
+          const heroSelect = document.createElement("select");
+          const noHeroOption = document.createElement("option");
+          noHeroOption.value = "";
+          noHeroOption.textContent = "不投入";
+          heroSelect.append(noHeroOption);
+          strategyDeployableHeroes(faction).forEach((hero) => {
+            const option = document.createElement("option");
+            option.value = hero.code;
+            option.textContent = hero.name || hero.code;
+            heroSelect.append(option);
+          });
+          const currentDefenderHeroes = Array.isArray(battle.defender_hero_codes) ? battle.defender_hero_codes : [];
+          const currentDefenderHero = currentDefenderHeroes[0] || "";
+          heroSelect.value = currentDefenderHero;
+          heroSelect.disabled = state.strategyBusy || !canResume;
+          const heroMultiPicker = createStrategyHeroDeploymentPicker(faction, currentDefenderHeroes);
+          if (strategyHeroDeploymentLimit(faction) > 1) {
+            heroSelect.disabled = true;
+            heroSelect.style.display = "none";
+            heroMultiPicker.setDisabled(state.strategyBusy || !canResume);
+          }
+          heroLabel.append(heroSpan, heroSelect);
+          if (strategyHeroDeploymentLimit(faction) > 1) heroLabel.append(heroMultiPicker.element);
+          actions.append(heroLabel);
+          const defend = document.createElement("button");
+          defend.type = "button";
+          defend.className = "ghost";
+          defend.textContent = "设置本场防守";
+          defend.disabled = state.strategyBusy || !canResume;
+          defend.addEventListener("click", () => setStrategyBattleDefenseHero(
+            battle.id || battle.battle_id,
+            strategyHeroDeploymentLimit(faction) > 1 ? heroMultiPicker.selectedCodes() : heroSelect.value
+          ));
+          actions.append(defend);
+          card.append(actions);
+        }
+      } else if (!strategyBattleResultLines(battle).length && Array.isArray(battle.report) && battle.report.length) {
+        appendTextLine(card, "strategy-meta", `战报：${battle.report[battle.report.length - 1]}`);
+      }
+      battles.append(card);
+    });
+    current.append(battles);
+  }
+
+  if (!activeOffice || activeOffice.office_type === "lord") {
+  const techTitle = document.createElement("h4");
+  techTitle.textContent = "国家科技树";
+  current.append(techTitle);
+  const techs = document.createElement("div");
+  techs.className = "strategy-tech-grid";
+  (faction?.tactic_tech_tree || []).forEach((tech) => {
+    const card = document.createElement("article");
+    card.className = `strategy-tech-card tech-branch-${tech.branch || "military"}`;
+    const title = document.createElement("strong");
+    title.textContent = tech.name;
+    card.append(title);
+    appendTextLine(card, "meta-label", ({ office: "职位分支", unit: "兵种分支", building: "建筑分支", military: "战术分支" })[tech.branch] || "战术分支");
+    appendTextLine(card, "strategy-meta", tech.description);
+    appendTextLine(card, "strategy-meta", `费用：钱 ${tech.money_cost} · 以太 ${tech.ether_cost}`);
+    const actions = document.createElement("div");
+    actions.className = "strategy-tech-actions";
+    const queueTech = document.createElement("button");
+    queueTech.type = "button";
+    queueTech.className = tech.unlocked ? "ghost" : "primary";
+    queueTech.textContent = tech.unlocked ? "已解锁" : "加入月度计划 · 1 军令";
+    queueTech.disabled = state.strategyBusy || !canResume || tech.unlocked || !tech.available || !strategyCanAffordCommand(selected, faction, "unlock_tactic_tech");
+    queueTech.addEventListener("click", () => queueStrategyAction("unlock_tactic_tech", { tech_id: tech.id }));
+    actions.append(queueTech);
+    card.append(actions);
+    techs.append(card);
+  });
+  current.append(techs);
+  }
+
+  const eventsTitle = document.createElement("h4");
+  eventsTitle.textContent = "事件";
+  current.append(eventsTitle);
+  const events = document.createElement("div");
+  events.className = "strategy-event-list";
+  (selected.world.event_log || []).slice(-8).reverse().forEach((event) => {
+    appendTextLine(events, "strategy-event", `第 ${event.month} 月 · ${event.message}`);
+  });
+  current.append(events);
+  collapseStrategyDossier(current);
 }
 
 function renderProfileModal() {
@@ -1903,6 +5347,14 @@ function isRoomConfigControlActive() {
   return Boolean(data.seatTeam || data.seatController || data.seatQuota);
 }
 
+function isStrategyControlActive() {
+  const active = typeof document !== "undefined" ? document.activeElement : null;
+  if (!active || typeof active.closest !== "function") return false;
+  if (!active.closest("#strategy-panel")) return false;
+  const tagName = String(active.tagName || "").toUpperCase();
+  return tagName === "SELECT" || tagName === "INPUT" || tagName === "TEXTAREA";
+}
+
 function applyRoomPayload(payload, { preserveScreen = false } = {}) {
   const hadBattle = Boolean(state.liveBattle || state.battle);
   const previousScreen = state.screen;
@@ -1914,6 +5366,7 @@ function applyRoomPayload(payload, { preserveScreen = false } = {}) {
     state.rooms = payload.rooms;
   }
   state.room = payload.room || null;
+  syncStrategyCampaignFromRoomPayload(payload);
   state.liveBattle = payload.battle || null;
   if (!state.room || state.room.room_id !== previousRoomId) {
     state.lastToastLogCount = 0;
@@ -2676,7 +6129,9 @@ function enqueueFloatingToast(text) {
     expiresAt: Date.now() + 5000,
   });
   renderFloatingToasts();
-  window.setTimeout(() => {
+  const timer = window.setTimeout || (typeof setTimeout === "function" ? setTimeout : null);
+  if (typeof timer !== "function") return;
+  timer(() => {
     renderFloatingToasts();
   }, 5100);
 }
@@ -2925,12 +6380,20 @@ function renderGameOverOverlay() {
   const title = $("game-over-title");
   const text = $("game-over-text");
   const rematch = $("game-over-rematch");
+  const strategy = $("game-over-strategy");
   if (!state.battle || !isGameOver() || state.screen !== "battle") {
     overlay.classList.add("hidden");
     return;
   }
   title.textContent = "游戏结束";
-  text.textContent = `玩家 ${state.battle.winner} 已获胜。战场上的行动与连锁都已锁定。你可以回到房间大厅,或者直接重新开始选将。`;
+  text.textContent = state.strategyCampaign
+    ? `玩家 ${state.battle.winner} 已获胜。战场上的行动与连锁都已锁定，战役结算已同步。`
+    : `玩家 ${state.battle.winner} 已获胜。战场上的行动与连锁都已锁定。你可以回到房间大厅,或者直接重新开始选将。`;
+  if (strategy) {
+    const hasStrategyCampaign = Boolean(state.strategyCampaign);
+    strategy.classList.toggle("hidden", !hasStrategyCampaign);
+    strategy.disabled = !hasStrategyCampaign;
+  }
   if (rematch) {
     rematch.disabled = !Boolean(state.room?.can_rematch && state.room?.viewer_player_id !== null);
   }
@@ -3029,9 +6492,12 @@ function render() {
   ensureDraftSelection();
   ensureSelectedUnit();
   const preserveRoomConfig = isRoomConfigControlActive();
+  const preserveStrategyControl = isStrategyControlActive();
   renderScreens();
   renderNavigation();
   renderProfilePanel();
+  renderAuthPanel();
+  if (!preserveStrategyControl) renderStrategyPanel();
   renderProfileModal();
   if (!preserveRoomConfig) renderRoomPanels();
   applyRandomRoomPanelState();
@@ -3078,7 +6544,27 @@ async function refreshState({ preserveScreen = true } = {}) {
       state.replayStepIndex = 0;
       state.replayOmniscient = false;
       state.playerToken = "";
+      if (userLoggedIn()) {
+        await refreshStrategyCampaigns({ renderAfter: false });
+      } else {
+        clearStrategyState();
+      }
       syncScreen({ preferBattle: false });
+      const homeRenderSignature = JSON.stringify({
+        rooms: (state.rooms || []).map((room) => [room.room_id, room.status, room.player_count, room.is_full]),
+        campaigns: (state.strategyCampaigns || []).map((campaign) => [
+          campaign.id,
+          campaign.updated_at,
+          campaign.status,
+          campaign.world?.current_month,
+          campaign.resume?.can_resume,
+          campaign.resume?.online_initial_user_ids,
+        ]),
+        authenticatedUserId: state.authUser?.id || 0,
+        selectedCampaignId: state.strategyCampaign?.id || 0,
+      });
+      if (homeRenderSignature === lastHomeRenderSignature) return;
+      lastHomeRenderSignature = homeRenderSignature;
       render();
       return;
     }
@@ -3105,6 +6591,7 @@ async function refreshState({ preserveScreen = true } = {}) {
 }
 
 async function createRoom() {
+  if (!requireAuthForRoomEntry()) return;
   if (!state.profileReady) {
     openProfileModal();
     render();
@@ -3128,6 +6615,7 @@ async function createRoom() {
 }
 
 async function joinRoom(roomIdOverride = "") {
+  if (!requireAuthForRoomEntry()) return;
   if (!state.profileReady) {
     openProfileModal();
     render();
@@ -4073,6 +7561,79 @@ function bindEvents() {
       confirmProfile();
     }
   });
+  const authUsername = $("auth-username");
+  if (authUsername) {
+    authUsername.addEventListener("input", (event) => {
+      state.authUsername = normalizeAuthUsername(event.target.value);
+      event.target.value = state.authUsername;
+      renderAuthPanel();
+    });
+  }
+  const authPassword = $("auth-password");
+  if (authPassword) {
+    authPassword.addEventListener("input", (event) => {
+      state.authPassword = event.target.value;
+    });
+    authPassword.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        submitAuth("login");
+      }
+    });
+  }
+  const authLogin = $("auth-login");
+  if (authLogin) authLogin.addEventListener("click", () => submitAuth("login"));
+  const authRegister = $("auth-register");
+  if (authRegister) authRegister.addEventListener("click", () => submitAuth("register"));
+  const authLogout = $("auth-logout");
+  if (authLogout) authLogout.addEventListener("click", logoutAuth);
+  const strategyName = $("strategy-name");
+  if (strategyName) {
+    strategyName.addEventListener("input", (event) => {
+      state.strategyName = String(event.target.value || "").slice(0, 40);
+    });
+  }
+  const strategySeed = $("strategy-seed");
+  if (strategySeed) {
+    strategySeed.addEventListener("input", (event) => {
+      state.strategySeed = String(event.target.value || "").replace(/[^\d-]/g, "").slice(0, 12) || "1";
+      event.target.value = state.strategySeed;
+    });
+  }
+  const strategyPlayerCount = $("strategy-player-count");
+  if (strategyPlayerCount) {
+    strategyPlayerCount.addEventListener("input", (event) => {
+      const raw = String(event.target.value || "").replace(/[^\d]/g, "").slice(0, 1) || "2";
+      const value = Math.max(1, Math.min(6, Number.parseInt(raw, 10) || 2));
+      state.strategyPlayerCount = String(value);
+      event.target.value = state.strategyPlayerCount;
+    });
+  }
+  const strategyJoinCode = $("strategy-join-code");
+  if (strategyJoinCode) {
+    strategyJoinCode.addEventListener("input", (event) => {
+      state.strategyJoinCode = String(event.target.value || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+      event.target.value = state.strategyJoinCode;
+      renderStrategyPanel();
+    });
+    strategyJoinCode.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        joinStrategyCampaignByCode();
+      }
+    });
+  }
+  const strategyCreate = $("strategy-create");
+  if (strategyCreate) strategyCreate.addEventListener("click", createStrategyCampaign);
+  const strategyJoin = $("strategy-join");
+  if (strategyJoin) strategyJoin.addEventListener("click", joinStrategyCampaignByCode);
+  const strategyRefresh = $("strategy-refresh");
+  if (strategyRefresh) strategyRefresh.addEventListener("click", () => refreshStrategyCampaigns());
+  const strategyAdvance = $("strategy-advance-month");
+  if (strategyAdvance) strategyAdvance.addEventListener("click", advanceStrategyMonth);
+  const focusStrategyMode = $("focus-strategy-mode");
+  if (focusStrategyMode) focusStrategyMode.addEventListener("click", openStrategyModeEntry);
+  const focusDuelMode = $("focus-duel-mode");
+  if (focusDuelMode) focusDuelMode.addEventListener("click", openDuelModeEntry);
   $("join-room-code").addEventListener("input", (event) => {
     event.target.value = event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
     state.roomForm.joinRoomCode = event.target.value;
@@ -4254,6 +7815,7 @@ function bindEvents() {
   $("room-battle").addEventListener("click", () => setScreen("battle"));
   $("nav-draft").addEventListener("click", () => setScreen("draft"));
   $("nav-battle").addEventListener("click", () => setScreen("battle"));
+  $("game-over-strategy").addEventListener("click", returnToStrategyCampaign);
   $("game-over-back").addEventListener("click", () => setScreen("draft"));
   $("game-over-rematch").addEventListener("click", restartRoomDraft);
   $("surrender-battle").addEventListener("click", surrenderBattle);
@@ -5289,13 +8851,18 @@ function ensureDynamicUiScaffolding() {
 
 window.addEventListener("DOMContentLoaded", async () => {
   hydrateStaticLabels();
+  initializeAuthState();
   initializeProfileState();
+  await refreshAuthSession();
   syncIdentityFromUrl();
   ensureDynamicUiScaffolding();
   bindEvents();
   await refreshState({ preserveScreen: false });
   pollHandle = window.setInterval(() => {
     if (!roomQueryId()) {
+      const now = Date.now();
+      if (now < nextHomePollAt) return;
+      nextHomePollAt = now + 5000;
       refreshState({ preserveScreen: false });
       return;
     }

@@ -40,7 +40,9 @@ def resolve_pending_chain(battle) -> None:
 class BattleSmokeTests(unittest.TestCase):
     def test_excel_roster_registers_every_generated_hero(self) -> None:
         self.assertEqual(len(EXCEL_HERO_REGISTRY), 370)
-        self.assertEqual(len(HERO_REGISTRY), 388)
+        strategy_codes = {code for code in HERO_REGISTRY if code.startswith("strategy_")}
+        self.assertEqual(len(strategy_codes), 7)
+        self.assertEqual(len(HERO_REGISTRY), 395)
         public_heroes = list_heroes()
         self.assertEqual(len(public_heroes), 59)
         public_codes = {str(hero["code"]) for hero in public_heroes}
@@ -52,6 +54,7 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertIn("excel_r035", public_codes)
         self.assertIn("excel_r037", public_codes)
         self.assertNotIn("excel_r038", public_codes)
+        self.assertTrue(strategy_codes.isdisjoint(public_codes))
 
         for code in EXCEL_HERO_REGISTRY:
             unit = create_hero(code, 1)

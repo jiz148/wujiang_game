@@ -1598,6 +1598,19 @@ class GameRoom:
         self.status = "finished" if self.battle and self.battle.winner is not None else "battle"
         return steps
 
+    def run_ai_simulation_to_end(self, *, max_steps: int = 5000) -> int:
+        with self._lock:
+            if self.battle is None:
+                return 0
+            self.simulation_paused = False
+            self.pending_simulation_action = None
+            steps = self._resolve_ai_until_human_input(max_steps=max_steps)
+            if self.battle.winner is not None:
+                self.status = "finished"
+                self._ensure_replay_saved()
+            self.touch()
+            return steps
+
     def perform_action(self, token: str, payload: dict[str, Any]) -> None:
         with self._lock:
             seat = self.require_seat(token)
@@ -1780,6 +1793,33 @@ class RoomRegistry:
         with self._lock:
             room = GameRoom(self._generate_room_id(), mode=mode)
             player_id, token = room.create_host(player_name)
+            self._rooms[room.room_id] = room
+            return room, player_id, token
+
+    def create_preconfigured_battle_room(
+        self,
+        *,
+        host_name: str,
+        opponent_name: str,
+        player1_roster: list[str],
+        player2_roster: list[str],
+        start_immediately: bool = True,
+        host_becomes_ai_after_start: bool = False,
+    ) -> tuple[GameRoom, int, str]:
+        with self._lock:
+            room = GameRoom(self._generate_room_id(), mode="classic", seat_count=2)
+            player_id, token = room.create_host(host_name)
+            room.set_seat_controller(token, 2, "ai")
+            room.seats[2].name = normalize_player_name(opponent_name)
+            room.seats[1].replace_roster(list(player1_roster))
+            room.seats[2].replace_roster(list(player2_roster))
+            if start_immediately:
+                room.start_battle(token)
+            if host_becomes_ai_after_start:
+                room.seats[1].controller_type = "ai"
+                room.seats[1].token = None
+                room.seats[1].name = normalize_player_name(host_name)
+                room.touch()
             self._rooms[room.room_id] = room
             return room, player_id, token
 
