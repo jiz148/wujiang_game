@@ -104,6 +104,12 @@ class CampaignRecord:
     queued_actions: tuple[QueuedStrategyAction, ...] = ()
 
     def to_public_dict(self, *, resume_status: ResumeStatus | None = None) -> dict[str, Any]:
+        from wujiang.strategy.campaign_tutorial import campaign_tutorial_public
+        from wujiang.strategy.campaign_retrospective import campaign_retrospective_public
+        from wujiang.strategy.ai_goals import ai_strategic_goals_public
+        from wujiang.strategy.monthly_cycle import monthly_cycle_public
+        from wujiang.strategy.office_automation import office_coordination_public
+
         command_points_by_faction = {
             faction.faction_id: faction_command_points(faction.faction_id, self.queued_actions)
             for faction in self.world.factions
@@ -122,6 +128,11 @@ class CampaignRecord:
             "queued_actions": [action.to_dict() for action in self.queued_actions],
             "command_points_by_faction": command_points_by_faction,
         }
+        payload["world"]["monthly_cycle"] = monthly_cycle_public(self.world, self.queued_actions)
+        payload["world"]["campaign_tutorial"] = campaign_tutorial_public(self.world, self.queued_actions)
+        payload["world"]["campaign_retrospective"] = campaign_retrospective_public(self.world)
+        payload["world"]["ai_strategic_goals"] = ai_strategic_goals_public(self.world)
+        payload["world"]["office_coordination"] = office_coordination_public(self.world, self.queued_actions)
         if resume_status is not None:
             payload["resume"] = resume_status.to_dict()
         return payload
@@ -261,6 +272,8 @@ class StrategyStore:
         seed: int = 1,
         city_count: int = 8,
         faction_count: int = 2,
+        neutral_city_states: bool = False,
+        campaign_contract: dict[str, Any] | None = None,
     ) -> CampaignRecord:
         normalized_name = " ".join(str(name or "").strip().split())
         if len(normalized_name) < 2:
@@ -271,9 +284,22 @@ class StrategyStore:
         players_by_id: dict[int, AuthUser] = {owner.user_id: owner}
         for player in initial_players or ():
             players_by_id[int(player.user_id)] = player
+        contract = dict(campaign_contract or {})
+        if contract:
+            city_count = int(contract.get("city_count", city_count))
+            faction_count = int(contract.get("major_faction_count", faction_count))
+            neutral_city_states = int(contract.get("neutral_city_state_count", 0)) > 0
         if len(players_by_id) > faction_count:
+            if contract:
+                raise StrategyError("首个产品战役固定为 2 个主要势力，初始真人不能超过 2 名。")
             faction_count = len(players_by_id)
-        world = generate_random_world(seed=seed, city_count=city_count, faction_count=faction_count)
+        world = generate_random_world(
+            seed=seed,
+            city_count=city_count,
+            faction_count=faction_count,
+            neutral_city_states=neutral_city_states,
+            campaign_contract=contract,
+        )
         now = time.time()
 
         with self._lock:

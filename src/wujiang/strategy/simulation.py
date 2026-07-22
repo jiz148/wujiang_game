@@ -41,6 +41,9 @@ def rebellion_risk(city: City, *, food_shortage: bool = False) -> int:
         risk = max(0, risk - 10)
     if city.policy == "征兵优先" and support < 50:
         risk += 10
+    from wujiang.strategy.occupation import occupation_rebellion_modifier
+
+    risk += occupation_rebellion_modifier(city)
     return clamp(risk, 0, 100)
 
 
@@ -86,6 +89,14 @@ def _apply_policy(city: City, events: list[EventLogEntry], month: int) -> None:
         city.support_by_faction["local_autonomy"] = clamp(city.support_by_faction.get("local_autonomy", 45) + 2, 0, 100)
     elif city.policy == "搜索优先":
         ether_income += 4 * level
+
+    from wujiang.strategy.occupation import occupation_income_multiplier
+
+    occupation_multiplier = occupation_income_multiplier(city)
+    food_income = int(food_income * occupation_multiplier)
+    money_income = int(money_income * occupation_multiplier)
+    ether_income = int(ether_income * occupation_multiplier)
+    troop_growth = int(troop_growth * occupation_multiplier)
 
     city.resources.food += food_income
     city.resources.money += money_income
@@ -198,18 +209,30 @@ def advance_month(world: WorldState) -> WorldState:
     ]
 
     from wujiang.strategy.story import advance_story_events
+    from wujiang.strategy.armies import advance_army_movements, advance_army_supply
 
     next_world = advance_story_events(next_world)
+    next_world = advance_army_movements(next_world)
+    next_world = advance_army_supply(next_world)
+
+    from wujiang.strategy.occupation import apply_occupation_month_start, finish_occupation_month
+    from wujiang.strategy.rebellion import resolve_rebellion_political_outcome
 
     for city in next_world.cities:
+        apply_occupation_month_start(city, month=month, events=events)
         _apply_policy(city, events, month)
         food_shortage = _consume_city_upkeep(city, events, month)
         risk = rebellion_risk(city, food_shortage=food_shortage)
         _update_rebellion_state(city, risk, events, month)
+        resolve_rebellion_political_outcome(next_world, city, events=events, month=month)
+        finish_occupation_month(city, month=month, events=events)
 
     next_world.event_log.extend(events)
     next_world.memory_tags.append(f"month_{month}_resolved")
     next_world = record_strategic_status_events(next_world)
+    from wujiang.strategy.diplomacy import advance_diplomacy_month
+
+    next_world = advance_diplomacy_month(next_world)
     next_world = ensure_strategic_hero_system(ensure_office_system(next_world))
     next_world.validate()
     return next_world

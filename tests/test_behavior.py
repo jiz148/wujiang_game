@@ -24,13 +24,17 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from wujiang.engine.core import ActionError, DamageContext, Position, QueuedAction, ReactionWindow, StatusEffect  # noqa: E402
+from wujiang.engine.core import ActionError, DamageContext, HealContext, Position, QueuedAction, ReactionWindow, StatusEffect  # noqa: E402
 from wujiang.heroes.excel_roster import KingsInsightField, SkillDisabledStatus  # noqa: E402
 from wujiang.heroes.first_five import MedusaSummon  # noqa: E402
 from wujiang.heroes.next_five import BloodDanceLockStatus, ErasureCounterStatus  # noqa: E402
 from wujiang.heroes.registry import create_battle, create_hero  # noqa: E402
-from wujiang.strategy import StrategyStore, declare_city_attack, ensure_office_system, strategic_hero_pool_public, summon_strategic_hero  # noqa: E402
+from wujiang.strategy import StrategyStore, declare_city_attack, ensure_office_system, form_or_reinforce_army, shortest_army_route, strategic_hero_pool_public, summon_strategic_hero  # noqa: E402
+from wujiang.strategy.models import DiplomaticAgreement  # noqa: E402
+from wujiang.strategy.occupation import mark_city_captured  # noqa: E402
 from wujiang.web.auth import UserStore  # noqa: E402
+from wujiang.web.analytics import AnalyticsStore  # noqa: E402
+from wujiang.web.match_history import MatchHistoryStore  # noqa: E402
 from wujiang.web.ai import attack_payloads_for_action, build_attack_candidates, build_move_candidates, build_reaction_candidates, build_skill_candidates, choose_chain_reaction, choose_turn_action, choose_turn_bundle_action, difficulty_profile, payload_is_legal, reaction_payload_is_legal, reaction_payloads_for_option  # noqa: E402
 from wujiang.web.multiplayer import GameRoom, ROOMS, battle_state_for_viewer  # noqa: E402
 import wujiang.web.server as server_module  # noqa: E402
@@ -1250,6 +1254,8 @@ class RoomBehaviorTests(unittest.TestCase):
         SESSION.battle = None
         self.auth_tmpdir = tempfile.TemporaryDirectory()
         server_module.AUTH_STORE = UserStore(Path(self.auth_tmpdir.name) / "auth.sqlite3")
+        server_module.ANALYTICS_STORE = AnalyticsStore(Path(self.auth_tmpdir.name) / "analytics.sqlite3")
+        server_module.MATCH_HISTORY_STORE = MatchHistoryStore(Path(self.auth_tmpdir.name) / "history.sqlite3")
         server_module.STRATEGY_STORE = StrategyStore(Path(self.auth_tmpdir.name) / "strategy.sqlite3")
         self._default_session_token: str | None = None
 
@@ -1307,6 +1313,8 @@ class RoomBehaviorTests(unittest.TestCase):
             elif action_type in {"transfer_registered_units", "approve_registered_unit_request"}:
                 office_type = "grand_general"
             elif action_type == "request_registered_units":
+                office_type = "general"
+            elif action_type in {"form_army", "disband_army", "set_army_movement", "load_army_supply"}:
                 office_type = "general"
             elif action_type == "declare_attack":
                 office_type = "general"
@@ -1382,6 +1390,13 @@ class RoomBehaviorTests(unittest.TestCase):
         except HTTPError as exc:
             return exc.code, json.loads(exc.read().decode("utf-8"))
 
+    def confirm_room_ready(self, room_id: str, *player_tokens: str) -> None:
+        for player_token in player_tokens:
+            self.api_post(
+                "/api/rooms/set-ready",
+                {"room_id": room_id, "player_token": player_token, "ready": True},
+            )
+
     def test_scenario_user_can_register_login_query_and_logout(self) -> None:
         registered = self.api_post("/api/auth/register", {"username": "Alice", "password": "secret123"})
         token = registered["session_token"]
@@ -1407,6 +1422,311 @@ class RoomBehaviorTests(unittest.TestCase):
         )
         self.assertEqual(status, 401)
         self.assertIn("error", bad_login)
+
+    def test_scenario_local_analytics_records_only_allowlisted_product_events(self) -> None:
+        # Given a new anonymous visitor opens the home screen and starts the tutorial
+        session_id = "visitor-test-1"
+        self.api_post(
+            "/api/analytics/events",
+            {
+                "event_name": "home_view",
+                "anonymous_session_id": session_id,
+                "properties": {"entry_state": "anonymous", "session_token": "must-not-be-stored"},
+            },
+        )
+        self.api_post(
+            "/api/analytics/events",
+            {
+                "event_name": "first_effective_action",
+                "anonymous_session_id": session_id,
+                "properties": {"tutorial_id": "first_battle", "action_type": "move", "duration_ms": 90000},
+            },
+        )
+        self.api_post(
+            "/api/analytics/events",
+            {
+                "event_name": "action_succeeded",
+                "anonymous_session_id": session_id,
+                "properties": {"match_id": "TEST01", "mode": "tutorial", "action_type": "move"},
+            },
+        )
+        self.api_post(
+            "/api/analytics/events",
+            {
+                "event_name": "tutorial_start",
+                "anonymous_session_id": session_id,
+                "properties": {"tutorial_id": "first_battle"},
+            },
+        )
+        self.api_post(
+            "/api/analytics/events",
+            {
+                "event_name": "quick_ai_start",
+                "anonymous_session_id": session_id,
+                "properties": {"match_id": "QUICK1", "roster_code": "steady_front", "opponent_code": "ranged_pressure"},
+            },
+        )
+        self.api_post(
+            "/api/analytics/events",
+            {
+                "event_name": "match_start",
+                "anonymous_session_id": session_id,
+                "properties": {"match_id": "QUICK1", "mode": "quick_ai"},
+            },
+        )
+        for event_name, properties in (
+            ("strategy_campaign_create", {"campaign_id": "12", "scenario_id": "city_states_twelve_months_v1"}),
+            ("strategy_campaign_lock", {"campaign_id": "12"}),
+            ("strategy_campaign_enter", {"campaign_id": "12"}),
+            ("strategy_campaign_milestone", {"campaign_id": "12", "month": "3"}),
+            ("strategy_battle_trigger", {"campaign_id": "12", "month": "4", "resolution_mode": "manual"}),
+            ("strategy_campaign_complete", {"campaign_id": "12", "month": "12", "reason": "time_limit"}),
+            ("strategy_campaign_archive", {"campaign_id": "12", "month": "12"}),
+        ):
+            self.api_post(
+                "/api/analytics/events",
+                {
+                    "event_name": event_name,
+                    "anonymous_session_id": session_id,
+                    "properties": {**properties, "session_token": "must-not-be-stored"},
+                },
+            )
+        self.api_post(
+            "/api/analytics/events",
+            {
+                "event_name": "match_end",
+                "anonymous_session_id": session_id,
+                "properties": {"match_id": "QUICK1", "mode": "quick_ai", "result": "win", "duration_ms": 600000},
+            },
+        )
+        self.api_post(
+            "/api/analytics/events",
+            {
+                "event_name": "rematch_start",
+                "anonymous_session_id": session_id,
+                "properties": {"match_id": "QUICK1", "mode": "quick_ai", "duration_ms": 120000},
+            },
+        )
+        self.api_post(
+            "/api/analytics/events",
+            {
+                "event_name": "match_start",
+                "anonymous_session_id": session_id,
+                "properties": {"match_id": "QUICK2", "mode": "quick_ai"},
+            },
+        )
+
+        # When a developer opens the local funnel endpoint
+        funnel = self.api_get("/api/analytics/funnel")
+
+        # Then the funnel is countable without accepting credentials or arbitrary event names
+        by_event = {step["event"]: step for step in funnel["steps"]}
+        self.assertEqual(by_event["home_view"]["unique_sessions"], 1)
+        self.assertEqual(by_event["tutorial_start"]["unique_sessions"], 1)
+        self.assertEqual(by_event["tutorial_start"]["from_home_rate"], 1.0)
+        self.assertEqual(by_event["quick_ai_start"]["unique_sessions"], 1)
+        self.assertEqual(by_event["match_start"]["events"], 2)
+        self.assertEqual(by_event["rematch_start"]["unique_sessions"], 1)
+        self.assertEqual(by_event["strategy_campaign_create"]["events"], 1)
+        self.assertEqual(by_event["strategy_campaign_milestone"]["events"], 1)
+        self.assertEqual(by_event["strategy_battle_trigger"]["events"], 1)
+        self.assertEqual(by_event["strategy_campaign_complete"]["events"], 1)
+        self.assertEqual(by_event["strategy_campaign_archive"]["events"], 1)
+        self.assertEqual(funnel["metrics"]["first_effective_action_median_ms"], 90000)
+        self.assertEqual(funnel["metrics"]["invalid_action_rate"], 0.0)
+        self.assertEqual(funnel["metrics"]["rematch_within_10m_rate"], 1.0)
+        self.assertEqual(funnel["metrics"]["match_completion_rate"], 0.5)
+        status, error = self.api_post_error(
+            "/api/analytics/events",
+            {"event_name": "password_seen", "anonymous_session_id": session_id},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("不支持", error["error"])
+
+        # And the local review page exposes only aggregate labels and the funnel endpoint
+        with urlopen(f"http://127.0.0.1:{self.port}/analytics.html") as response:
+            dashboard = response.read().decode("utf-8")
+        self.assertIn("Phase 1 · 本地聚合数据", dashboard)
+        self.assertIn('id="analytics-summary"', dashboard)
+        self.assertNotIn("session token 的值", dashboard)
+
+    def test_scenario_quick_start_creates_a_fixed_ai_tutorial_battle(self) -> None:
+        # Given a logged-in player chooses the primary quick-start path
+        payload = self.api_post("/api/rooms/tutorial-start", {"player_name": "NewPlayer"})
+
+        # Then the server starts the fixed tutorial matchup without room configuration
+        self.assertEqual(payload["room"]["experience_kind"], "tutorial")
+        self.assertEqual(payload["room"]["status"], "battle")
+        self.assertEqual(payload["room"]["human_seat_count"], 1)
+        self.assertEqual(payload["room"]["ai_seat_count"], 1)
+        self.assertEqual(payload["room"]["tutorial"]["step_id"], "select_unit")
+        rosters = {
+            seat["player_id"]: [hero["code"] for hero in seat["hero_roster"]]
+            for seat in payload["room"]["seats"]
+        }
+        self.assertEqual(rosters, {1: ["fire_funeral"], 2: ["ellie"]})
+        self.assertIsNotNone(payload["battle"])
+
+    def test_scenario_quick_ai_start_skips_room_setup_with_beginner_two_hero_rosters(self) -> None:
+        # Given a logged-in player chooses the Phase 1 quick AI route
+        payload = self.api_post("/api/rooms/quick-ai-start", {"player_name": "ReturningPlayer"})
+
+        # Then the server immediately starts a human-versus-easy-AI 2v2 with named beginner rosters
+        self.assertEqual(payload["room"]["experience_kind"], "quick_ai")
+        self.assertEqual(payload["room"]["status"], "battle")
+        self.assertEqual(payload["room"]["human_seat_count"], 1)
+        self.assertEqual(payload["room"]["ai_seat_count"], 1)
+        self.assertEqual(payload["room"]["default_ai_difficulty"], "easy")
+        rosters = {
+            seat["player_id"]: [hero["code"] for hero in seat["hero_roster"]]
+            for seat in payload["room"]["seats"]
+        }
+        self.assertEqual(rosters, {1: ["bard", "masamune"], 2: ["elite_soldier", "excel_r139"]})
+        ai_seat = next(seat for seat in payload["room"]["seats"] if seat["is_ai"])
+        self.assertEqual(ai_seat["ai_difficulty_override"], "easy")
+        self.assertEqual(payload["quick_ai"]["player_roster_code"], "steady_front")
+        self.assertEqual(payload["quick_ai"]["opponent_roster_code"], "ranged_pressure")
+        self.assertIsNotNone(payload["battle"])
+        self.assertEqual(payload["battle"]["input_player"], 1)
+
+        # And after this QA match ends, the same endpoint can create the configured matchup again without draft
+        finished = self.api_post(
+            "/api/rooms/surrender",
+            {"room_id": payload["room"]["room_id"], "player_token": payload["player_token"]},
+        )
+        self.assertEqual(finished["room"]["status"], "finished")
+        replayed = self.api_post("/api/rooms/quick-ai-start", {"player_name": "ReturningPlayer"})
+        self.assertNotEqual(replayed["room"]["room_id"], payload["room"]["room_id"])
+        replayed_rosters = {
+            seat["player_id"]: [hero["code"] for hero in seat["hero_roster"]]
+            for seat in replayed["room"]["seats"]
+        }
+        self.assertEqual(replayed_rosters, rosters)
+        self.assertEqual(replayed["battle"]["input_player"], 1)
+
+    def test_scenario_tutorial_enforces_steps_and_restores_progress_after_refresh(self) -> None:
+        # Given the fixed tutorial has started
+        started = self.api_post("/api/rooms/tutorial-start", {"player_name": "NewPlayer"})
+        room_id = started["room"]["room_id"]
+        token = started["player_token"]
+        fire = next(unit for unit in started["battle"]["units"] if unit["name"] == "火葬者")
+        ellie = next(unit for unit in started["battle"]["units"] if unit["name"] == "艾莉")
+
+        # When the player tries to act before selecting Fire Funeral
+        status, blocked = self.api_post_error(
+            "/api/rooms/action",
+            {"room_id": room_id, "player_token": token, "session_token": self.default_session_token(), "action": {"type": "end_turn"}},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("点击火葬者", blocked["error"])
+
+        # And the player completes the guided selection and fixed move
+        selected = self.api_post(
+            "/api/rooms/tutorial-select-unit",
+            {"room_id": room_id, "player_token": token, "unit_id": fire["id"]},
+        )
+        self.assertEqual(selected["room"]["tutorial"]["step_id"], "move")
+        moved = self.api_post(
+            "/api/rooms/action",
+            {
+                "room_id": room_id,
+                "player_token": token,
+                "action": {"type": "move", "unit_id": fire["id"], "x": 4, "y": 4, "path": [{"x": 4, "y": 4}]},
+            },
+        )
+        self.assertEqual(moved["room"]["tutorial"]["step_id"], "basic_attack")
+        self.assertIsNotNone(moved["room"]["tutorial"]["first_effective_action_at"])
+
+        # Then a refresh restores the server-owned step, and the wrong action remains blocked
+        restored = self.api_get("/api/rooms/state", params={"room_id": room_id, "player_token": token})
+        self.assertEqual(restored["room"]["tutorial"]["step_id"], "basic_attack")
+        status, wrong_target = self.api_post_error(
+            "/api/rooms/action",
+            {
+                "room_id": room_id,
+                "player_token": token,
+                "session_token": self.default_session_token(),
+                "action": {"type": "skill", "unit_id": fire["id"], "skill_code": "pierce", "cells": [{"x": 5, "y": 4}, {"x": 6, "y": 4}]},
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("普通攻击", wrong_target["error"])
+
+        # And the correct basic attack advances to the active-skill lesson
+        attacked = self.api_post(
+            "/api/rooms/action",
+            {
+                "room_id": room_id,
+                "player_token": token,
+                "action": {"type": "attack", "unit_id": fire["id"], "target_unit_id": ellie["id"]},
+            },
+        )
+        self.assertEqual(attacked["room"]["tutorial"]["step_id"], "active_skill")
+
+        skilled = self.api_post(
+            "/api/rooms/action",
+            {
+                "room_id": room_id,
+                "player_token": token,
+                "action": {
+                    "type": "skill",
+                    "unit_id": fire["id"],
+                    "skill_code": "pierce",
+                    "cells": [{"x": 5, "y": 4}, {"x": 6, "y": 4}],
+                },
+            },
+        )
+        self.assertEqual(skilled["room"]["tutorial"]["step_id"], "end_turn")
+        ended = self.api_post(
+            "/api/rooms/action",
+            {"room_id": room_id, "player_token": token, "action": {"type": "end_turn"}},
+        )
+        self.assertEqual(ended["room"]["tutorial"]["step_id"], "chain_response")
+        self.assertIsNotNone(ended["battle"]["pending_chain"])
+
+        chained = self.api_post(
+            "/api/rooms/action",
+            {"room_id": room_id, "player_token": token, "action": {"type": "chain_skip"}},
+        )
+        self.assertEqual(chained["room"]["tutorial"]["step_id"], "win_objective")
+        self.assertTrue(chained["room"]["tutorial"]["can_retry_checkpoint"])
+
+        retried = self.api_post(
+            "/api/rooms/tutorial-retry",
+            {"room_id": room_id, "player_token": token},
+        )
+        self.assertEqual(retried["room"]["tutorial"]["step_id"], "win_objective")
+        self.assertEqual(retried["room"]["tutorial"]["retry_count"], 1)
+
+    def test_scenario_beginner_pool_and_recommended_roster_avoid_full_catalog_first(self) -> None:
+        # Given a player opens the first hero-selection path
+        catalog = self.api_get("/api/heroes")
+        onboarding = catalog["onboarding"]
+
+        # Then a focused ten-hero pool and three explained rosters are available
+        self.assertEqual(len(onboarding["beginner_heroes"]), 10)
+        self.assertEqual(len(onboarding["recommended_rosters"]), 3)
+        self.assertTrue(all(item["position"] and item["difficulty"] and item["summary"] for item in onboarding["beginner_heroes"]))
+        discovery = {item["code"]: item for item in onboarding["hero_discovery"]}
+        self.assertEqual(len(discovery), len(catalog["heroes"]))
+        self.assertEqual({item["difficulty"] for item in discovery.values()} - {"简单", "标准", "进阶"}, set())
+        self.assertEqual(discovery["fire_funeral"]["difficulty_source"], "curated")
+        self.assertEqual(discovery["fire_funeral"]["position"], "近中程爆发")
+        self.assertEqual(discovery["ellie"]["difficulty_source"], "estimated")
+        self.assertEqual(discovery["ellie"]["role"], "法师")
+
+        # And one click replaces the editable seat roster with the chosen recommendation
+        created = self.api_post("/api/rooms/create", {"player_name": "NewPlayer"})
+        applied = self.api_post(
+            "/api/rooms/apply-recommended-roster",
+            {
+                "room_id": created["room"]["room_id"],
+                "player_token": created["player_token"],
+                "roster_code": "steady_front",
+            },
+        )
+        viewer = next(seat for seat in applied["room"]["seats"] if seat["player_id"] == 1)
+        self.assertEqual(viewer["hero_counts"], {"bard": 1, "masamune": 1})
 
     def test_scenario_room_entry_requires_login(self) -> None:
         status, create_error = self.api_post_error("/api/rooms/create", {"player_name": "Alice"})
@@ -1440,7 +1760,8 @@ class RoomBehaviorTests(unittest.TestCase):
 
         self.assertEqual(campaign["name"], "英灵城邦")
         self.assertEqual(campaign["world"]["seed"], 90)
-        self.assertEqual(len(campaign["world"]["cities"]), 6)
+        self.assertEqual(len(campaign["world"]["cities"]), 8)
+        self.assertEqual(campaign["world"]["strategic_status"]["month_limit"], 12)
         self.assertEqual(campaign["resume"]["can_resume"], False)
         self.assertEqual(campaign["resume"]["missing_initial_user_ids"], [])
 
@@ -1465,6 +1786,786 @@ class RoomBehaviorTests(unittest.TestCase):
         left = self.api_post("/api/strategy/campaigns/leave", {"campaign_id": campaign_id})
         self.assertFalse(left["resume"]["can_resume"])
 
+    def test_scenario_first_campaign_settles_at_month_twelve_before_sandbox_continuation(self) -> None:
+        # Given the public creation path receives custom sizes from an older client
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "十二月争衡", "seed": 144, "city_count": 5, "faction_count": 4},
+        )["campaign"]
+        campaign_id = created["id"]
+        contract = created["world"]["strategic_status"]["campaign_contract"]
+        majors = [item for item in created["world"]["factions"] if item["faction_type"] == "major"]
+        neutrals = [item for item in created["world"]["factions"] if item["faction_type"] == "neutral_city_state"]
+
+        # Then the product scenario remains the declared 8-city / 12-month contract
+        self.assertEqual((len(created["world"]["cities"]), len(majors), len(neutrals)), (8, 2, 6))
+        self.assertEqual(contract["month_limit"], 12)
+        self.assertEqual(contract["expected_duration_minutes"], [60, 90])
+
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+        stored = server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, created["owner_user_id"])
+        stored.world.current_month = 11
+        server_module.STRATEGY_STORE.update_world(campaign_id, created["owner_user_id"], stored.world)
+
+        # When the host resolves the twelfth month
+        advanced = self.api_post("/api/strategy/campaigns/advance-month", {"campaign_id": campaign_id})["campaign"]
+        status = advanced["world"]["strategic_status"]
+
+        # Then a persisted assessment pauses further orders until the host chooses
+        self.assertEqual(advanced["world"]["current_month"], 12)
+        self.assertTrue(status["awaiting_conclusion_choice"])
+        self.assertEqual(status["conclusion"]["state"], "settled")
+        self.assertEqual(len(status["conclusion"]["rankings"]), 2)
+        error_status, blocked = self.api_post_error(
+            "/api/strategy/campaigns/advance-month",
+            {"campaign_id": campaign_id, "session_token": self.default_session_token()},
+        )
+        self.assertEqual(error_status, 400)
+        self.assertIn("结算", blocked["error"])
+        error_status, blocked = self.api_post_error(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "set_city_policy",
+                "payload": {},
+                "session_token": self.default_session_token(),
+            },
+        )
+        self.assertEqual(error_status, 400)
+        self.assertIn("结算", blocked["error"])
+
+        # And continuing preserves the result while reopening the monthly loop
+        continued = self.api_post(
+            "/api/strategy/campaigns/continue-sandbox",
+            {"campaign_id": campaign_id},
+        )["campaign"]
+        self.assertEqual(continued["world"]["strategic_status"]["campaign_state"], "sandbox")
+        month_thirteen = self.api_post(
+            "/api/strategy/campaigns/advance-month",
+            {"campaign_id": campaign_id},
+        )["campaign"]
+        self.assertEqual(month_thirteen["world"]["current_month"], 13)
+        self.assertEqual(month_thirteen["world"]["strategic_status"]["conclusion"]["state"], "sandbox")
+
+    def test_scenario_campaign_ends_with_readable_retrospective_and_frozen_archive(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "归档复盘战役", "seed": 245},
+        )["campaign"]
+        campaign_id = created["id"]
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+        stored = server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, created["owner_user_id"])
+        stored.world.current_month = 11
+        server_module.STRATEGY_STORE.update_world(campaign_id, created["owner_user_id"], stored.world)
+
+        settled = self.api_post(
+            "/api/strategy/campaigns/advance-month",
+            {"campaign_id": campaign_id},
+        )["campaign"]
+        retrospective = settled["world"]["campaign_retrospective"]
+
+        self.assertEqual(retrospective["concluded_month"], 12)
+        self.assertEqual(len(retrospective["faction_outcomes"]), 2)
+        self.assertTrue(all(row["outcome_label"] in {"胜利", "存续", "败北·流亡"} for row in retrospective["faction_outcomes"]))
+        self.assertTrue(any(row["month"] == 12 for row in retrospective["key_months"]))
+        self.assertIn("resolved_battles", retrospective["summary"])
+
+        archived = self.api_post(
+            "/api/strategy/campaigns/archive",
+            {"campaign_id": campaign_id},
+        )["campaign"]
+        status = archived["world"]["strategic_status"]
+        self.assertEqual(status["campaign_state"], "archived")
+        self.assertFalse(status["can_advance_month"])
+        self.assertEqual(archived["world"]["campaign_retrospective"], retrospective)
+
+        error_status, blocked = self.api_post_error(
+            "/api/strategy/campaigns/advance-month",
+            {"campaign_id": campaign_id, "session_token": self.default_session_token()},
+        )
+        self.assertEqual(error_status, 400)
+        self.assertIn("归档", blocked["error"])
+
+    def test_scenario_campaign_retrospective_ui_exposes_archive_and_all_history_sections(self) -> None:
+        app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        styles = (ROOT / "static" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('heading.textContent = "完整战役复盘"', app_source)
+        self.assertIn('title: "势力结局"', app_source)
+        self.assertIn('title: "关键月份"', app_source)
+        self.assertIn('title: "城市变化"', app_source)
+        self.assertIn('title: "战斗记录"', app_source)
+        self.assertIn('title: "角色经历"', app_source)
+        self.assertIn('archiveButton.textContent = "结束并归档战役"', app_source)
+        self.assertIn(".strategy-retrospective-section", styles)
+
+    def test_scenario_player_can_read_ai_two_month_goal_progress_and_last_action(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "AI 目标公示", "seed": 248},
+        )["campaign"]
+        campaign_id = created["id"]
+        stored = server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, created["owner_user_id"])
+        ai_city = next(city for city in stored.world.cities if city.owner_faction_id == "faction_2")
+        ai_city.resources.food = 0
+        server_module.STRATEGY_STORE.update_world(campaign_id, created["owner_user_id"], stored.world)
+        locked = self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})["campaign"]
+        visible_at_lock = next(row for row in locked["world"]["ai_strategic_goals"] if row["faction_id"] == "faction_2")
+        self.assertEqual(visible_at_lock["goal_type"], "stabilize_food")
+
+        month_two = self.api_post(
+            "/api/strategy/campaigns/advance-month",
+            {"campaign_id": campaign_id},
+        )["campaign"]
+        goal = next(row for row in month_two["world"]["ai_strategic_goals"] if row["faction_id"] == "faction_2")
+
+        self.assertEqual(goal["goal_type"], "stabilize_food")
+        self.assertEqual(goal["duration_months"], 2)
+        self.assertEqual(goal["target_city_name"], ai_city.name)
+        self.assertIn("粮", goal["title"])
+        self.assertIn("方针", goal["last_action_summary"])
+        self.assertGreaterEqual(goal["progress"], 0)
+        self.assertLessEqual(goal["progress"], 100)
+
+        month_three = self.api_post(
+            "/api/strategy/campaigns/advance-month",
+            {"campaign_id": campaign_id},
+        )["campaign"]
+        same_goal = next(row for row in month_three["world"]["ai_strategic_goals"] if row["faction_id"] == "faction_2")
+        self.assertEqual(same_goal["id"], goal["id"])
+        self.assertIn(same_goal["status"], {"active", "completed"})
+
+    def test_scenario_ai_goal_ui_explains_duration_progress_reason_and_map_target(self) -> None:
+        app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        styles = (ROOT / "static" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('title.textContent = "AI 战略动向"', app_source)
+        self.assertIn("持续 2～3 个月", app_source)
+        self.assertIn('progress.setAttribute("role", "progressbar")', app_source)
+        self.assertIn("选择原因：", app_source)
+        self.assertIn("上次行动：", app_source)
+        self.assertIn("定位 ${goal.target_city_name", app_source)
+        self.assertIn(".strategy-ai-goal-progress", styles)
+
+    def test_scenario_phase2_full_twelve_month_player_and_ai_campaign_walkthrough(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "Phase 2 十二月走查", "seed": 260},
+        )["campaign"]
+        campaign_id = created["id"]
+        owner_id = created["owner_user_id"]
+        faction_id = next(member["faction_id"] for member in created["members"] if member["user_id"] == owner_id)
+        player_heroes = [
+            hero
+            for hero in created["world"]["strategic_hero_pool"]
+            if hero["controller_type"] == "player" and hero["controller_user_id"] == owner_id
+        ]
+        self.assertEqual(len(player_heroes), 1)
+        self.assertEqual(player_heroes[0]["faction_id"], faction_id)
+        player_office = next(
+            office for office in created["world"]["offices"] if office["id"] == player_heroes[0]["office_id"]
+        )
+        self.assertEqual(player_office["office_type"], "lord")
+
+        self.api_post(
+            "/api/strategy/campaigns/guide-action",
+            {"campaign_id": campaign_id, "action": "survey_border"},
+        )
+        campaign = self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})["campaign"]
+        lord = next(
+            office
+            for office in campaign["world"]["offices"]
+            if office["faction_id"] == faction_id and office["office_type"] == "lord" and office["controller_type"] == "player"
+        )
+        governor = next(
+            office
+            for office in campaign["world"]["offices"]
+            if office["faction_id"] == faction_id and office["office_type"] == "governor"
+        )
+        capital = next(city for city in campaign["world"]["cities"] if city["owner_faction_id"] == faction_id)
+        self.assertTrue(campaign["world"]["ai_strategic_goals"])
+
+        def queue(action_type: str, payload: dict) -> dict:
+            return self.api_post(
+                "/api/strategy/campaigns/queue-action",
+                {
+                    "campaign_id": campaign_id,
+                    "action_type": action_type,
+                    "action_payload": {"issuer_office_id": lord["id"], **payload},
+                },
+            )["campaign"]
+
+        def order(objective: str, target_entity_id: str = "") -> dict:
+            return queue(
+                "issue_office_order",
+                {
+                    "receiver_office_id": governor["id"],
+                    "objective": objective,
+                    "target_entity_id": target_entity_id,
+                    "office_order_type": "order",
+                    "priority": 3,
+                },
+            )
+
+        def advance() -> dict:
+            advanced = self.api_post(
+                "/api/strategy/campaigns/advance-month",
+                {"campaign_id": campaign_id, "issuer_office_id": lord["id"]},
+            )["campaign"]
+            status = advanced["world"]["strategic_status"]
+            self.assertEqual(status["months_remaining"], max(0, 12 - advanced["world"]["current_month"]))
+            cycle = advanced["world"]["monthly_cycle"][faction_id]
+            self.assertIn("must_handle", cycle)
+            self.assertIn("advance_forecast", cycle)
+            self.assertLessEqual(
+                len(advanced["world"]["office_coordination"][faction_id]["high_consequence_decisions"]),
+                3,
+            )
+            self.assertTrue(advanced["world"]["ai_strategic_goals"])
+            return advanced
+
+        # Month 1: survey, delegate governance and event handling, then establish militia doctrine.
+        order("[引导:set_policy] 根据粮情与秩序设置首月方针", capital["id"])
+        month_one_orders = order("[引导:resolve_event] 处理本月待决事件", capital["id"])
+        queue("unlock_tactic_tech", {"tech_id": "local_militia"})
+        self.assertEqual(
+            len([action for action in month_one_orders["queued_actions"] if action["action_type"] == "issue_office_order"]),
+            2,
+        )
+        campaign = advance()
+        self.assertEqual(campaign["world"]["current_month"], 2)
+        month_one_completed_orders = [
+            office_order
+            for office_order in campaign["world"]["office_orders"]
+            if office_order["issued_month"] == 1 and office_order["status"] == "completed"
+        ]
+        self.assertEqual(len(month_one_completed_orders), 2)
+
+        # Month 2: expand office capacity, then let the AI governor perform a legal ritual.
+        queue("unlock_tactic_tech", {"tech_id": "command_staff_1"})
+        order("[引导:ritual_or_appoint] 在本城举行祭祀并补充执行力量", capital["id"])
+        campaign = advance()
+        self.assertEqual(campaign["world"]["current_month"], 3)
+        self.assertTrue(any(event["category"] == "hero_ritual_summoned" for event in campaign["world"]["event_log"]))
+
+        # Month 3: choose the weakest adjacent non-owned city and resolve one real strategic conflict.
+        cities = {city["id"]: city for city in campaign["world"]["cities"]}
+        nodes = {node["id"]: node for node in campaign["world"]["nodes"]}
+        sources = [city for city in cities.values() if city["owner_faction_id"] == faction_id]
+        attack_pairs = []
+        for source in sources:
+            connected = set(nodes[source["node_id"]]["connected_node_ids"])
+            for target in cities.values():
+                if target["node_id"] in connected and target["owner_faction_id"] != faction_id:
+                    attack_pairs.append((source, target))
+        source, target = min(
+            attack_pairs,
+            key=lambda pair: (pair[1]["resources"]["troops"] + pair[1]["defense"] * 80, pair[1]["id"]),
+        )
+        queue(
+            "declare_attack",
+            {
+                "source_city_id": source["id"],
+                "target_city_id": target["id"],
+                "resolution_mode": "quick",
+            },
+        )
+        order("[引导:resolve_event] 处理冲突前的本月事件", capital["id"])
+        campaign = advance()
+        self.assertEqual(campaign["world"]["current_month"], 4)
+        player_battles = [
+            battle
+            for battle in campaign["world"]["pending_battles"]
+            if battle["attacker_faction_id"] == faction_id and battle["status"] == "resolved"
+        ]
+        self.assertTrue(player_battles)
+        tutorial = campaign["world"]["campaign_tutorial"][faction_id]
+        self.assertTrue(tutorial["completed"], tutorial)
+
+        # Months 4–11: continue handling each visible event through the office chain and settle normally.
+        while campaign["world"]["current_month"] < 12:
+            if any(
+                event["faction_id"] == faction_id and event["status"] == "pending"
+                for event in campaign["world"]["story_events"]
+            ):
+                order("[引导:resolve_event] 处理本月持续事件", capital["id"])
+            campaign = advance()
+            if campaign["world"]["current_month"] < 12:
+                self.assertFalse(campaign["world"]["strategic_status"]["campaign_complete"])
+
+        status = campaign["world"]["strategic_status"]
+        retrospective = campaign["world"]["campaign_retrospective"]
+        self.assertTrue(status["awaiting_conclusion_choice"])
+        self.assertEqual(status["conclusion"]["reason"], "time_limit")
+        stored_final = server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, owner_id)
+        self.assertEqual(len(stored_final.world.monthly_reports), 11)
+        self.assertGreaterEqual(retrospective["summary"]["resolved_battles"], 1)
+        self.assertGreaterEqual(retrospective["summary"]["story_choices"], 1)
+        self.assertTrue(retrospective["hero_experiences"])
+        self.assertTrue(any(row["month"] == 12 for row in retrospective["key_months"]))
+
+        archived = self.api_post(
+            "/api/strategy/campaigns/archive",
+            {"campaign_id": campaign_id},
+        )["campaign"]
+        self.assertEqual(archived["world"]["strategic_status"]["campaign_state"], "archived")
+        self.assertEqual(archived["world"]["campaign_retrospective"], retrospective)
+
+    def test_scenario_phase3_full_campaign_compares_peaceful_integration_and_conquest(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "Phase 3 和平与征服走查", "seed": 3},
+        )["campaign"]
+        campaign_id = created["id"]
+        owner_id = created["owner_user_id"]
+        player_faction_id = next(member["faction_id"] for member in created["members"] if member["user_id"] == owner_id)
+        campaign = self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})["campaign"]
+        lord = next(
+            office for office in campaign["world"]["offices"]
+            if office["faction_id"] == player_faction_id and office["office_type"] == "lord" and office["controller_type"] == "player"
+        )
+        capital = next(city for city in campaign["world"]["cities"] if city["owner_faction_id"] == player_faction_id)
+        governor = next(
+            office for office in campaign["world"]["offices"]
+            if office["faction_id"] == player_faction_id
+            and office["office_type"] == "governor"
+            and capital["id"] in office["managed_entity_ids"]
+        )
+        recruit_policy = next(policy for policy in campaign["world"]["policy_choices"] if "征兵" in policy)
+
+        def queue(action_type: str, payload: dict) -> dict:
+            return self.api_post(
+                "/api/strategy/campaigns/queue-action",
+                {
+                    "campaign_id": campaign_id,
+                    "action_type": action_type,
+                    "action_payload": {"issuer_office_id": lord["id"], **payload},
+                },
+            )["campaign"]
+
+        def advance() -> dict:
+            return self.api_post(
+                "/api/strategy/campaigns/advance-month",
+                {"campaign_id": campaign_id, "issuer_office_id": lord["id"]},
+            )["campaign"]
+
+        # Month 1: the human lord gives an exact persistent recruitment policy through the office chain.
+        queue(
+            "issue_office_order",
+            {
+                "receiver_office_id": governor["id"],
+                "objective": f"将{capital['name']}设为{recruit_policy}",
+                "target_entity_id": capital["id"],
+                "office_order_type": "set_policy",
+                "city_policy": recruit_policy,
+                "priority": 3,
+            },
+        )
+        campaign = advance()
+        capital_after_order = next(city for city in campaign["world"]["cities"] if city["id"] == capital["id"])
+        self.assertEqual(capital_after_order["policy"], recruit_policy)
+
+        # Months 2–4: the player builds troops while the rival AI develops one focused peaceful route.
+        while campaign["world"]["current_month"] < 5:
+            campaign = advance()
+        self.assertTrue(any(
+            event["category"] == "neutral_diplomacy_accepted"
+            and event["related_ids"][0] == "faction_2"
+            for event in campaign["world"]["event_log"]
+        ))
+
+        # Month 5: choose the weakest adjacent target and commit 75% of the accumulated garrison.
+        cities = {city["id"]: city for city in campaign["world"]["cities"]}
+        nodes = {node["id"]: node for node in campaign["world"]["nodes"]}
+        source = cities[capital["id"]]
+        connected = set(nodes[source["node_id"]]["connected_node_ids"])
+        targets = [
+            city for city in cities.values()
+            if city["node_id"] in connected and city["owner_faction_id"] != player_faction_id
+        ]
+        target = min(
+            targets,
+            key=lambda city: (
+                city["resources"]["troops"]
+                + city["defense"] * 80
+                + city["support_by_faction"].get(city["owner_faction_id"], 50) * 3,
+                city["id"],
+            ),
+        )
+        queue(
+            "declare_attack",
+            {
+                "source_city_id": source["id"],
+                "target_city_id": target["id"],
+                "resolution_mode": "quick",
+            },
+        )
+        campaign = advance()
+        conquered = next(city for city in campaign["world"]["cities"] if city["id"] == target["id"])
+        self.assertEqual(conquered["owner_faction_id"], player_faction_id)
+        self.assertEqual(conquered["occupation_governance"]["status"], "pending")
+
+        # Month 6: govern the conquest instead of receiving a free stable city.
+        queue(
+            "choose_occupation_policy",
+            {"city_id": target["id"], "policy_id": "autonomy"},
+        )
+        campaign = advance()
+        governed = next(city for city in campaign["world"]["cities"] if city["id"] == target["id"])
+        self.assertEqual((governed["occupation_governance"]["status"], governed["occupation_governance"]["policy_id"]), ("active", "autonomy"))
+
+        # Months 7–12: both routes continue through normal settlement and reach the same final assessment.
+        while campaign["world"]["current_month"] < 12:
+            campaign = advance()
+        events = campaign["world"]["event_log"]
+        self.assertTrue(any(event["category"] == "neutral_city_state_peacefully_integrated" for event in events))
+        self.assertTrue(any(event["category"] == "occupation_settled" and target["id"] in event["related_ids"] for event in events))
+        self.assertTrue(any(event["category"] == "strategy_ai_political_decision" for event in events))
+        status = campaign["world"]["strategic_status"]
+        self.assertTrue(status["awaiting_conclusion_choice"])
+        rankings = status["conclusion"]["rankings"]
+        player_row = next(row for row in rankings if row["faction_id"] == player_faction_id)
+        ai_row = next(row for row in rankings if row["faction_id"] == "faction_2")
+        self.assertGreaterEqual(player_row["city_score"], 200)
+        self.assertGreaterEqual(ai_row["influence_score"], 25)
+        self.assertEqual(len(server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, owner_id).world.monthly_reports), 11)
+        app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('["set_policy", "设置城市方针"]', app_source)
+        self.assertIn('city_policy: policyOrder ? cityPolicy.value : ""', app_source)
+
+    def test_scenario_neutral_city_states_hold_until_a_lord_incites_them(self) -> None:
+        # Given a new strategic campaign with two major factions
+        campaign = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "中立诸邦", "seed": 7, "city_count": 6, "faction_count": 2},
+        )["campaign"]
+        factions = campaign["world"]["factions"]
+        majors = [item for item in factions if item["faction_type"] == "major"]
+        neutrals = [item for item in factions if item["faction_type"] == "neutral_city_state"]
+
+        # Then neutral one-city factions outnumber major starting cities and expose mortal governors
+        self.assertEqual(len(majors), 2)
+        self.assertEqual(len(neutrals), 6)
+        self.assertGreater(len(neutrals), len(majors))
+        self.assertTrue(all(item["governor_name"] for item in neutrals))
+        self.assertTrue(all(item["neutral_politics"]["posture"]["label"] for item in neutrals))
+        self.assertTrue(all(item["neutral_politics"]["current_need"]["label"] for item in neutrals))
+        self.assertTrue(all(item["neutral_politics"]["fear"]["label"] for item in neutrals))
+        self.assertTrue(all(item["neutral_politics"]["governor_position"]["label"] for item in neutrals))
+        self.assertTrue(all(
+            len(item["neutral_politics"]["relationships"]) == 2
+            and {relation["score"] for relation in item["neutral_politics"]["relationships"]} == {0}
+            for item in neutrals
+        ))
+        app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        style_source = (ROOT / "static" / "styles.css").read_text(encoding="utf-8")
+        self.assertIn('card.classList.add("is-neutral-city-state")', app_source)
+        self.assertIn("strategyIsNeutralCityState(campaign, selectedCity?.owner_faction_id)", app_source)
+        self.assertIn(".LordWorkspace .strategy-command-card.is-neutral-city-state", style_source)
+        self.assertTrue(all(
+            len([city for city in campaign["world"]["cities"] if city["owner_faction_id"] == item["id"]]) == 1
+            for item in neutrals
+        ))
+
+        campaign_id = campaign["id"]
+        locked = self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})["campaign"]
+        neutral = next(item for item in locked["world"]["factions"] if item["id"] == "neutral_city_state_3")
+
+        # When the player lord spends a command and money to incite a bordering city-state
+        queued = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "incite_neutral_city_state",
+                "payload": {
+                    "neutral_faction_id": neutral["id"],
+                    "target_faction_id": "faction_2",
+                },
+            },
+        )["campaign"]
+        self.assertEqual(queued["queued_actions"][-1]["command_cost"], 1)
+
+        advanced = self.api_post(
+            "/api/strategy/campaigns/advance-month",
+            {"campaign_id": campaign_id},
+        )["campaign"]
+        neutral_after = next(item for item in advanced["world"]["factions"] if item["id"] == neutral["id"])
+
+        # Then it attacks once through its governor and returns to a passive posture
+        self.assertIsNone(neutral_after["incited_against_faction_id"])
+        categories = [event["category"] for event in advanced["world"]["event_log"]]
+        self.assertIn("neutral_city_state_incited", categories)
+        self.assertIn("neutral_city_state_incitement_spent", categories)
+
+    def test_scenario_lord_replaces_one_neutral_negotiation_and_signs_non_aggression(self) -> None:
+        # Given a locked campaign and a neutral city-state bordering the player's faction
+        campaign = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "边境交涉", "seed": 7, "city_count": 8, "faction_count": 2},
+        )["campaign"]
+        campaign_id = campaign["id"]
+        locked = self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})["campaign"]
+        neutral = next(
+            item for item in locked["world"]["factions"]
+            if item["faction_type"] == "neutral_city_state"
+            and any(
+                option["id"] == "trade" and option["can_propose"]
+                for relation in item["neutral_politics"]["relationships"]
+                if relation["faction_id"] == "faction_1"
+                for option in relation["diplomacy_options"]
+            )
+        )
+
+        # When the lord replaces an aid plan with trade for the same city-state
+        aid = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "neutral_diplomacy",
+                "payload": {"neutral_faction_id": neutral["id"], "diplomacy_action_id": "aid"},
+            },
+        )
+        self.assertFalse(aid["submission"]["replaced"])
+        trade = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "neutral_diplomacy",
+                "payload": {"neutral_faction_id": neutral["id"], "diplomacy_action_id": "trade"},
+            },
+        )
+        self.assertTrue(trade["submission"]["replaced"])
+        self.assertEqual(trade["submission"]["command_points"]["used"], 1)
+        queued = [item for item in trade["campaign"]["queued_actions"] if item["action_type"] == "neutral_diplomacy"]
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0]["payload"]["diplomacy_action_id"], "trade")
+
+        settled = self.api_post(
+            "/api/strategy/campaigns/advance-month",
+            {"campaign_id": campaign_id},
+        )["campaign"]
+        neutral_after_trade = next(item for item in settled["world"]["factions"] if item["id"] == neutral["id"])
+        relation_after_trade = next(
+            item for item in neutral_after_trade["neutral_politics"]["relationships"]
+            if item["faction_id"] == "faction_1"
+        )
+        self.assertEqual(relation_after_trade["score"], 8)
+        self.assertIn("neutral_diplomacy_accepted", [item["category"] for item in settled["world"]["event_log"]])
+
+        # And when the next month proposes non-aggression, the accepted agreement is visible
+        self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "neutral_diplomacy",
+                "payload": {"neutral_faction_id": neutral["id"], "diplomacy_action_id": "non_aggression"},
+            },
+        )
+        peaceful = self.api_post(
+            "/api/strategy/campaigns/advance-month",
+            {"campaign_id": campaign_id},
+        )["campaign"]
+        peaceful_neutral = next(item for item in peaceful["world"]["factions"] if item["id"] == neutral["id"])
+        peaceful_relation = next(
+            item for item in peaceful_neutral["neutral_politics"]["relationships"]
+            if item["faction_id"] == "faction_1"
+        )
+        self.assertEqual(peaceful_relation["score"], 14)
+        self.assertTrue(any(
+            item["agreement_type"] == "non_aggression" and item["major_faction_id"] == "faction_1"
+            for item in peaceful_neutral["neutral_politics"]["agreements"]
+        ))
+        agreement = next(
+            item for item in peaceful_neutral["neutral_politics"]["agreements"]
+            if item["agreement_type"] == "non_aggression" and item["major_faction_id"] == "faction_1"
+        )
+        self.assertEqual((agreement["status"], agreement["remaining_months"]), ("active", 2))
+        self.assertEqual(next(item for item in peaceful["world"]["factions"] if item["id"] == "faction_1")["diplomatic_reputation"], 50)
+        self.assertTrue(any(
+            item["category"] == "negotiation_accepted"
+            for item in peaceful_neutral["neutral_politics"]["diplomatic_memory"]
+        ))
+
+        # Then two peaceful month ends fulfill the promise and leave a visible reputation consequence
+        for _ in range(2):
+            peaceful = self.api_post(
+                "/api/strategy/campaigns/advance-month",
+                {"campaign_id": campaign_id},
+            )["campaign"]
+        fulfilled_neutral = next(item for item in peaceful["world"]["factions"] if item["id"] == neutral["id"])
+        fulfilled = next(
+            item for item in fulfilled_neutral["neutral_politics"]["agreements"]
+            if item["agreement_type"] == "non_aggression" and item["major_faction_id"] == "faction_1"
+        )
+        self.assertEqual((fulfilled["status"], fulfilled["end_reason"]), ("ended", "fulfilled"))
+        self.assertEqual(next(item for item in peaceful["world"]["factions"] if item["id"] == "faction_1")["diplomatic_reputation"], 54)
+        self.assertTrue(any(
+            item["category"] == "agreement_fulfilled"
+            for item in fulfilled_neutral["neutral_politics"]["diplomatic_memory"]
+        ))
+
+    def test_scenario_lord_sees_every_gate_and_peacefully_integrates_a_trusted_city_state(self) -> None:
+        # Given a locked campaign where one adjacent city-state has mature trust and local support
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "和平归附", "seed": 7, "city_count": 8, "faction_count": 2},
+        )["campaign"]
+        campaign_id = created["id"]
+        owner_id = created["owner_user_id"]
+        locked = self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})["campaign"]
+        neutral_public = next(
+            item for item in locked["world"]["factions"]
+            if item["faction_type"] == "neutral_city_state"
+            and next(
+                relation for relation in item["neutral_politics"]["relationships"]
+                if relation["faction_id"] == "faction_1"
+            )["peaceful_integration"]["requirements"][1]["met"]
+        )
+        stored = server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, owner_id)
+        stored.world.current_month = 4
+        actor = next(item for item in stored.world.factions if item.faction_id == "faction_1")
+        neutral = next(item for item in stored.world.factions if item.faction_id == neutral_public["id"])
+        city = next(item for item in stored.world.cities if item.owner_faction_id == neutral.faction_id)
+        actor.resources.money = max(actor.resources.money, 200)
+        actor.resources.food = max(actor.resources.food, 200)
+        actor.diplomatic_reputation = 60
+        neutral.relations[actor.faction_id] = 60
+        neutral.influence_by_faction[actor.faction_id] = 60
+        city.support_by_faction[actor.faction_id] = 60
+        stored.world.diplomatic_agreements.append(DiplomaticAgreement(
+            agreement_id="behavior-fulfilled-integration",
+            agreement_type="non_aggression",
+            major_faction_id=actor.faction_id,
+            neutral_faction_id=neutral.faction_id,
+            started_month=1,
+            expires_month=4,
+            ended_month=4,
+            status="ended",
+            end_reason="fulfilled",
+        ))
+        server_module.STRATEGY_STORE.update_world(campaign_id, owner_id, stored.world)
+
+        # When the lord queues the publicly enabled two-command peaceful integration
+        queued = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "peaceful_integration",
+                "payload": {"neutral_faction_id": neutral.faction_id},
+            },
+        )
+        action = queued["campaign"]["queued_actions"][-1]
+        self.assertEqual((action["action_type"], action["command_cost"]), ("peaceful_integration", 2))
+        queued_neutral = next(item for item in queued["campaign"]["world"]["factions"] if item["id"] == neutral.faction_id)
+        relationship = next(item for item in queued_neutral["neutral_politics"]["relationships"] if item["faction_id"] == actor.faction_id)
+        self.assertEqual((relationship["influence"], relationship["local_support"]), (60, 60))
+        self.assertTrue(relationship["peaceful_integration"]["can_integrate"])
+
+        # Then month settlement changes ownership without a battle and preserves the political record
+        advanced = self.api_post(
+            "/api/strategy/campaigns/advance-month",
+            {"campaign_id": campaign_id},
+        )["campaign"]
+        integrated_city = next(item for item in advanced["world"]["cities"] if item["id"] == city.city_id)
+        self.assertEqual(integrated_city["owner_faction_id"], actor.faction_id)
+        self.assertGreaterEqual(integrated_city["support_by_faction"][actor.faction_id], 70)
+        self.assertIn("和平整合", integrated_city["traits"])
+        self.assertFalse(any(
+            battle["target_city_id"] == city.city_id
+            for battle in advanced["world"]["pending_battles"]
+        ))
+        self.assertIn("neutral_city_state_peacefully_integrated", [item["category"] for item in advanced["world"]["event_log"]])
+        integrated_neutral = next(item for item in advanced["world"]["factions"] if item["id"] == neutral.faction_id)
+        self.assertTrue(any(item["category"] == "peaceful_integration" for item in integrated_neutral["neutral_politics"]["diplomatic_memory"]))
+
+    def test_scenario_lord_governs_one_occupation_and_funds_resistance_in_an_enemy_occupation(self) -> None:
+        # Given two recently conquered neutral cities, one held by each major faction
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "占领政治", "seed": 7, "city_count": 8, "faction_count": 2},
+        )["campaign"]
+        campaign_id = created["id"]
+        owner_id = created["owner_user_id"]
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+        stored = server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, owner_id)
+        neutral_cities = [
+            city for city in stored.world.cities
+            if next(item for item in stored.world.factions if item.faction_id == city.owner_faction_id).is_neutral_city_state
+        ]
+        own_occupation, enemy_occupation = neutral_cities[:2]
+        own_previous, enemy_previous = own_occupation.owner_faction_id, enemy_occupation.owner_faction_id
+        own_occupation.owner_faction_id = "faction_1"
+        enemy_occupation.owner_faction_id = "faction_2"
+        mark_city_captured(
+            stored.world,
+            city_id=own_occupation.city_id,
+            previous_owner_faction_id=own_previous,
+            occupier_faction_id="faction_1",
+        )
+        mark_city_captured(
+            stored.world,
+            city_id=enemy_occupation.city_id,
+            previous_owner_faction_id=enemy_previous,
+            occupier_faction_id="faction_2",
+        )
+        own_occupation.support_by_faction["faction_1"] = 45
+        enemy_occupation.support_by_faction["faction_2"] = 45
+        next(item for item in stored.world.factions if item.faction_id == "faction_1").resources.money = 300
+        server_module.STRATEGY_STORE.update_world(campaign_id, owner_id, stored.world)
+
+        # When the lord chooses autonomy at home and funds resistance in the enemy city
+        occupation_queued = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "choose_occupation_policy",
+                "payload": {"city_id": own_occupation.city_id, "policy_id": "autonomy"},
+            },
+        )
+        self.assertEqual(occupation_queued["campaign"]["queued_actions"][-1]["command_cost"], 1)
+        own_public = next(item for item in occupation_queued["campaign"]["world"]["cities"] if item["id"] == own_occupation.city_id)
+        self.assertEqual((own_public["occupation_governance"]["status"], own_public["occupation_governance"]["income_percent"]), ("pending", 50))
+        self.assertEqual({item["id"] for item in own_public["occupation_governance"]["policy_choices"]}, {"autonomy", "integration", "garrison", "plunder"})
+
+        funding_queued = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "fund_rebellion",
+                "payload": {"city_id": enemy_occupation.city_id},
+            },
+        )
+        self.assertEqual(funding_queued["campaign"]["queued_actions"][-1]["command_cost"], 1)
+        enemy_public = next(item for item in funding_queued["campaign"]["world"]["cities"] if item["id"] == enemy_occupation.city_id)
+        self.assertTrue(enemy_public["rebellion_funding_options"]["faction_1"]["can_fund"])
+        app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("const occupationCrisis = Boolean(occupation.status", app_source)
+        self.assertIn("|| occupationCrisis", app_source)
+        self.assertIn("|| externalFundingTarget", app_source)
+        self.assertIn('cityCard.classList.add("is-political-crisis")', app_source)
+        style_source = (ROOT / "static" / "styles.css").read_text(encoding="utf-8")
+        self.assertIn(".LordWorkspace .strategy-command-card.is-political-crisis", style_source)
+
+        # Then month settlement applies both political choices and preserves their sources
+        advanced = self.api_post(
+            "/api/strategy/campaigns/advance-month",
+            {"campaign_id": campaign_id},
+        )["campaign"]
+        own_after = next(item for item in advanced["world"]["cities"] if item["id"] == own_occupation.city_id)
+        enemy_after = next(item for item in advanced["world"]["cities"] if item["id"] == enemy_occupation.city_id)
+        self.assertEqual((own_after["occupation_governance"]["status"], own_after["occupation_governance"]["policy_id"]), ("active", "autonomy"))
+        self.assertEqual(own_after["occupation_governance"]["remaining_settlements"], 2)
+        # The rival AI may immediately answer the newly funded force through the same
+        # rebellion-action rules, so the source marker/event is the durable assertion.
+        self.assertTrue(any(
+            state.startswith("rebellion_sponsor:faction_1:")
+            for state in enemy_after["event_states"]
+        ))
+        categories = [item["category"] for item in advanced["world"]["event_log"]]
+        self.assertIn("occupation_policy_selected", categories)
+        self.assertIn("rebellion_external_funding", categories)
+        self.assertIn("strategy_ai_political_decision", categories)
+
     def test_scenario_player_selects_hero_and_founds_persistent_faction(self) -> None:
         created = self.api_post(
             "/api/strategy/campaigns/create",
@@ -1488,7 +2589,7 @@ class RoomBehaviorTests(unittest.TestCase):
         member = next(item for item in founded["members"] if item["user_id"] == founded["owner_user_id"])
         capital = next(city for city in founded["world"]["cities"] if city["id"] == controlled["city_id"])
 
-        self.assertEqual(len(founded["world"]["factions"]), 3)
+        self.assertEqual(len(founded["world"]["factions"]), 9)
         self.assertEqual((controlled["status"], controlled["faction_id"]), ("serving", member["faction_id"]))
         self.assertEqual(capital["owner_faction_id"], member["faction_id"])
         self.assertEqual(
@@ -1682,17 +2783,139 @@ class RoomBehaviorTests(unittest.TestCase):
         self.assertEqual(world["current_month"], 2)
         self.assertIn("month_2_resolved", world["memory_tags"])
         self.assertTrue(any(event["category"] == "city_income" for event in world["event_log"]))
+        faction_id = next(member["faction_id"] for member in advanced["campaign"]["members"] if member["user_id"] == 1)
+        cycle = world["monthly_cycle"][faction_id]
+        self.assertNotIn("monthly_reports", world)
+        self.assertEqual(cycle["previous_month"]["month"], 2)
+        self.assertTrue(cycle["previous_month"]["city_changes"])
+        self.assertTrue(cycle["advance_forecast"]["cities"])
+        self.assertIn("战争", cycle["advance_forecast"]["disclaimer"])
+
+    def test_scenario_first_campaign_guide_can_acknowledge_border_and_skip_without_state_rewards(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "前三月引导", "seed": 922},
+        )["campaign"]
+        campaign_id = created["id"]
+        faction_id = next(member["faction_id"] for member in created["members"] if member["user_id"] == 1)
+        guide = created["world"]["campaign_tutorial"][faction_id]
+        resources_before = next(item["resources"] for item in created["world"]["factions"] if item["id"] == faction_id)
+
+        self.assertEqual((guide["completed_count"], guide["total_count"]), (0, 5))
+        self.assertEqual([step["chapter"] for step in guide["steps"][:3]], ["第一月 · 读局与治理"] * 3)
+        surveyed = self.api_post(
+            "/api/strategy/campaigns/guide-action",
+            {"campaign_id": campaign_id, "action": "survey_border"},
+        )["campaign"]
+        surveyed_guide = surveyed["world"]["campaign_tutorial"][faction_id]
+        self.assertTrue(next(step for step in surveyed_guide["steps"] if step["id"] == "survey_border")["completed"])
+
+        skipped = self.api_post(
+            "/api/strategy/campaigns/guide-action",
+            {"campaign_id": campaign_id, "action": "skip"},
+        )["campaign"]
+        skipped_guide = skipped["world"]["campaign_tutorial"][faction_id]
+        resources_after = next(item["resources"] for item in skipped["world"]["factions"] if item["id"] == faction_id)
+        self.assertTrue(skipped_guide["skipped"])
+        self.assertEqual(skipped_guide["skipped_month"], 1)
+        self.assertEqual(resources_after, resources_before)
+        self.assertNotIn("progress_by_faction", skipped["world"]["campaign_tutorial"])
+
+    def test_scenario_ai_governor_executes_lord_order_and_returns_cost_eta_and_result(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "官职自动化", "seed": 923},
+        )["campaign"]
+        campaign_id = created["id"]
+        owner_id = created["owner_user_id"]
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+        stored = server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, owner_id)
+        city = next(item for item in stored.world.cities if item.owner_faction_id == "faction_1")
+        city.resources.food = 0
+        city.support_by_faction["faction_1"] = 20
+        governor = next(item for item in stored.world.offices if item.faction_id == "faction_1" and item.office_type == "governor")
+        server_module.STRATEGY_STORE.update_world(campaign_id, owner_id, stored.world)
+
+        queued = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "issue_office_order",
+                "action_payload": {
+                    "receiver_office_id": governor.office_id,
+                    "objective": "[引导:set_policy] 处理粮食危机",
+                    "target_entity_id": city.city_id,
+                    "office_order_type": "order",
+                    "priority": 3,
+                },
+            },
+        )
+        execution = queued["submission"]["execution"]
+        self.assertEqual(execution["executor_office_id"], governor.office_id)
+        self.assertEqual(execution["command_cost"], 1)
+        self.assertEqual(execution["expected_completion_month"], 2)
+
+        advanced = self.api_post("/api/strategy/campaigns/advance-month", {"campaign_id": campaign_id})["campaign"]
+        order = advanced["world"]["office_orders"][-1]
+        feedback = advanced["world"]["office_coordination"]["faction_1"]["order_feedback"][-1]
+        self.assertEqual(order["status"], "completed")
+        self.assertIn("已由城主设为", order["details"]["result_summary"])
+        self.assertEqual(feedback["status"], "completed")
+        self.assertEqual(feedback["expected_completion_month"], 2)
+        self.assertIn("已由城主设为", feedback["result_summary"])
+
+
+    def test_scenario_strategy_queue_submission_reports_new_and_replaced_plan(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "军令反馈战役", "seed": 921, "city_count": 6, "faction_count": 2},
+        )["campaign"]
+        campaign_id = created["id"]
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        locked = self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})["campaign"]
+        faction_id = next(member["faction_id"] for member in locked["members"] if member["user_id"] == 1)
+        city = next(item for item in locked["world"]["cities"] if item["owner_faction_id"] == faction_id)
+        policies = [item for item in locked["world"]["policy_choices"] if item != city["policy"]]
+
+        first = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "set_city_policy",
+                "action_payload": {"city_id": city["id"], "policy": policies[0]},
+            },
+        )
+        second = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "set_city_policy",
+                "action_payload": {"city_id": city["id"], "policy": policies[1]},
+            },
+        )
+
+        self.assertFalse(first["submission"]["replaced"])
+        self.assertTrue(second["submission"]["replaced"])
+        self.assertEqual(second["submission"]["previous_action"]["payload"]["policy"], policies[0])
+        self.assertEqual(second["submission"]["command_points"]["remaining"], 3)
+        self.assertEqual(second["submission"]["resource_balance"], next(
+            faction["resources"] for faction in second["campaign"]["world"]["factions"] if faction["id"] == faction_id
+        ))
+        self.assertEqual(second["submission"]["affected_months"], [1, 2])
+        self.assertEqual(len(second["campaign"]["queued_actions"]), 1)
+        self.assertEqual(second["campaign"]["world"]["monthly_cycle"][faction_id]["planned_actions"][0]["payload"]["policy"], policies[1])
 
     def test_scenario_strategy_month_advance_runs_unclaimed_faction_ai(self) -> None:
         created = self.api_post(
             "/api/strategy/campaigns/create",
-            {"name": "strategy ai month", "seed": 925, "city_count": 6, "faction_count": 3},
+            {"name": "strategy ai month", "seed": 925, "city_count": 7, "faction_count": 3},
         )
         campaign_id = created["campaign"]["id"]
         campaign = server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, 1)
         high_risk_ai_city_id = ""
         for faction in campaign.world.factions:
-            if faction.faction_id in {"faction_2", "faction_3"}:
+            if faction.faction_id == "faction_2":
                 faction.resources.ether = 1000
         for city in campaign.world.cities:
             if city.owner_faction_id == "faction_2" and not high_risk_ai_city_id:
@@ -1710,7 +2933,6 @@ class RoomBehaviorTests(unittest.TestCase):
         locked = self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
         locked_members_by_faction = {member["faction_id"]: member for member in locked["campaign"]["members"]}
         self.assertEqual(locked_members_by_faction["faction_2"]["role"], "ai")
-        self.assertEqual(locked_members_by_faction["faction_3"]["role"], "ai")
         self.assertLess(locked_members_by_faction["faction_2"]["user_id"], 0)
         self.assertEqual(locked["campaign"]["resume"]["initial_user_ids"], [1])
         self.assertTrue(locked["campaign"]["resume"]["can_resume"])
@@ -1725,14 +2947,24 @@ class RoomBehaviorTests(unittest.TestCase):
 
         self.assertEqual(world["current_month"], 2)
         self.assertEqual(factions["faction_1"]["tactic_techs"], [])
-        self.assertEqual(factions["faction_2"]["tactic_techs"], ["local_militia"])
-        self.assertEqual(factions["faction_3"]["tactic_techs"], ["local_militia"])
+        # A live neutral-diplomacy route now takes precedence and reserves the legal
+        # peaceful-integration finish instead of spending that treasury on routine tech.
+        self.assertEqual(factions["faction_2"]["tactic_techs"], [])
         self.assertEqual(world["hero_recruitments"], [])
         self.assertTrue(any(tag.startswith("strategic_hero_defender:") for tag in factions["faction_2"]["memory_tags"]))
-        self.assertTrue(any(tag.startswith("strategic_hero_defender:") for tag in factions["faction_3"]["memory_tags"]))
         high_risk_ai_city = next(city for city in world["cities"] if city["id"] == high_risk_ai_city_id)
         self.assertIn("镇压", high_risk_ai_city["policy"])
-        self.assertEqual({event["related_ids"][0] for event in ai_events}, {"faction_2", "faction_3"})
+        planned_factions = {event["related_ids"][0] for event in ai_events}
+        self.assertIn("faction_2", planned_factions)
+        self.assertTrue(any(
+            event["category"] == "strategy_ai_political_decision"
+            and event["related_ids"][0] == "faction_2"
+            for event in world["event_log"]
+        ))
+        self.assertEqual(
+            {faction_id for faction_id in planned_factions if faction_id.startswith("neutral_city_state_")},
+            {faction["id"] for faction in world["factions"] if faction["faction_type"] == "neutral_city_state"},
+        )
         self.assertFalse(any(event["category"].startswith("hero_recruitment_") for event in world["event_log"]))
 
     @unittest.skip("Superseded: one hero cannot queue governor and general actions then become lord for settlement.")
@@ -2078,7 +3310,7 @@ class RoomBehaviorTests(unittest.TestCase):
     def test_scenario_strategy_queued_rebellion_action_resolves_on_month_advance(self) -> None:
         created = self.api_post(
             "/api/strategy/campaigns/create",
-            {"name": "rebellion action", "seed": 97, "city_count": 4, "faction_count": 2},
+            {"name": "rebellion action", "seed": 97, "city_count": 5, "faction_count": 2},
         )
         campaign_id = created["campaign"]["id"]
         owner_user_id = created["campaign"]["owner_user_id"]
@@ -2118,7 +3350,7 @@ class RoomBehaviorTests(unittest.TestCase):
     def test_scenario_strategy_queued_rebellion_battle_resolves_on_month_advance(self) -> None:
         created = self.api_post(
             "/api/strategy/campaigns/create",
-            {"name": "rebellion battle", "seed": 98, "city_count": 4, "faction_count": 2},
+            {"name": "rebellion battle", "seed": 98, "city_count": 5, "faction_count": 2},
         )
         campaign_id = created["campaign"]["id"]
         owner_user_id = created["campaign"]["owner_user_id"]
@@ -2196,7 +3428,7 @@ class RoomBehaviorTests(unittest.TestCase):
     def test_scenario_strategy_exiled_player_queues_exile_action_and_advances(self) -> None:
         created = self.api_post(
             "/api/strategy/campaigns/create",
-            {"name": "exile action", "seed": 96, "city_count": 4, "faction_count": 2},
+            {"name": "exile action", "seed": 96, "city_count": 5, "faction_count": 2},
         )
         campaign_id = created["campaign"]["id"]
         owner_user_id = created["campaign"]["owner_user_id"]
@@ -2213,6 +3445,12 @@ class RoomBehaviorTests(unittest.TestCase):
         faction.resources.ether = 0
         faction.resources.troops = 0
         server_module.STRATEGY_STORE.update_world(campaign_id, owner_user_id, world)
+
+        # Eliminating the last rival now opens a conclusion; the host keeps the exile story alive by continuing.
+        self.api_post(
+            "/api/strategy/campaigns/continue-sandbox",
+            {"campaign_id": campaign_id},
+        )
 
         queued = self.api_post(
             "/api/strategy/campaigns/queue-action",
@@ -2241,7 +3479,7 @@ class RoomBehaviorTests(unittest.TestCase):
     def test_scenario_strategy_player_performs_ritual_and_binds_summoned_hero(self) -> None:
         created = self.api_post(
             "/api/strategy/campaigns/create",
-            {"name": "hero summon", "seed": 97, "city_count": 4, "faction_count": 2},
+            {"name": "hero summon", "seed": 97, "city_count": 5, "faction_count": 2},
         )
         campaign_id = created["campaign"]["id"]
         self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
@@ -2376,7 +3614,7 @@ class RoomBehaviorTests(unittest.TestCase):
     def test_scenario_retired_recruitment_and_legacy_levy_actions_are_rejected(self) -> None:
         created = self.api_post(
             "/api/strategy/campaigns/create",
-            {"name": "retired actions", "seed": 215, "city_count": 4, "faction_count": 2},
+            {"name": "retired actions", "seed": 215, "city_count": 5, "faction_count": 2},
         )
         campaign_id = created["campaign"]["id"]
         self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
@@ -2451,6 +3689,208 @@ class RoomBehaviorTests(unittest.TestCase):
             [server_module.strategy_action_command_cost(action.action_type, action.payload) for action in queued.queued_actions[1:]],
             [1, 1],
         )
+
+    def test_scenario_general_forms_and_disbands_a_persistent_army_through_monthly_orders(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "persistent army", "seed": 401, "city_count": 8, "faction_count": 2},
+        )["campaign"]
+        campaign_id = created["id"]
+        owner_id = created["owner_user_id"]
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+        stored = server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, owner_id)
+        general = next(item for item in stored.world.offices if item.faction_id == "faction_1" and item.office_type == "general")
+        hero = next(item for item in stored.world.strategic_heroes if item.office_id == general.office_id)
+        city = next(item for item in stored.world.cities if item.city_id == hero.city_id)
+        general.unit_inventory = {"infantry": 2, "archer": 1}
+        city.resources.food = 1000
+        server_module.STRATEGY_STORE.update_world(campaign_id, owner_id, stored.world)
+
+        queued = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "form_army",
+                "action_payload": {
+                    "city_id": city.city_id,
+                    "unit_inventory": {"infantry": 1, "archer": 1},
+                    "supply": 100,
+                },
+            },
+        )["campaign"]
+        self.assertEqual(queued["queued_actions"][-1]["command_cost"], 1)
+        advance_status, advance_payload = self.api_post_error(
+            "/api/strategy/campaigns/advance-month",
+            {"campaign_id": campaign_id, "session_token": self.default_session_token()},
+        )
+        self.assertEqual(advance_status, 200, advance_payload)
+        formed = advance_payload["campaign"]
+        self.assertTrue(
+            formed["world"]["armies"],
+            [event for event in formed["world"]["event_log"] if event["category"] == "queued_action_failed"],
+        )
+        army = formed["world"]["armies"][0]
+        self.assertEqual((army["manpower"], army["supply"], army["morale"], army["status"]), (240, 100, 72, "garrisoned"))
+        self.assertEqual(army["unit_inventory"], {"infantry": 1, "archer": 1})
+        formed_general = next(item for item in formed["world"]["offices"] if item["id"] == general.office_id)
+        self.assertEqual(formed_general["unit_inventory"], {"infantry": 1})
+
+        disbanded_queue = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "disband_army",
+                "action_payload": {"army_id": army["id"]},
+            },
+        )["campaign"]
+        self.assertEqual(disbanded_queue["queued_actions"][-1]["command_cost"], 1)
+        disband_status, disband_payload = self.api_post_error(
+            "/api/strategy/campaigns/advance-month",
+            {"campaign_id": campaign_id, "session_token": self.default_session_token()},
+        )
+        self.assertEqual(disband_status, 200, disband_payload)
+        disbanded = disband_payload["campaign"]
+        self.assertEqual(disbanded["world"]["armies"][0]["status"], "disbanded")
+        returned_general = next(item for item in disbanded["world"]["offices"] if item["id"] == general.office_id)
+        self.assertEqual(returned_general["unit_inventory"], {"infantry": 2, "archer": 1})
+        categories = [event["category"] for event in disbanded["world"]["event_log"]]
+        self.assertIn("strategy_army_formed", categories)
+        self.assertIn("strategy_army_disbanded", categories)
+        app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('title.textContent = "持久军队"', app_source)
+        self.assertIn('queueStrategyAction("form_army"', app_source)
+
+    def test_scenario_general_orders_cross_month_route_movement_and_halts_through_http(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "army movement", "seed": 402, "city_count": 8, "faction_count": 2},
+        )["campaign"]
+        campaign_id = created["id"]
+        owner_id = created["owner_user_id"]
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+        stored = server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, owner_id)
+        general = next(item for item in stored.world.offices if item.faction_id == "faction_1" and item.office_type == "general")
+        hero = next(item for item in stored.world.strategic_heroes if item.office_id == general.office_id)
+        city = next(item for item in stored.world.cities if item.city_id == hero.city_id)
+        general.unit_inventory = {"infantry": 1}
+        city.resources.food = 500
+        formed = form_or_reinforce_army(
+            stored.world,
+            faction_id="faction_1",
+            city_id=city.city_id,
+            unit_inventory={"infantry": 1},
+            supply=100,
+            issuer_office_id=general.office_id,
+        )
+        server_module.STRATEGY_STORE.update_world(campaign_id, owner_id, formed)
+        army_id = formed.armies[0].army_id
+        routes = [
+            shortest_army_route(formed, city.node_id, node.node_id)
+            for node in formed.nodes
+            if node.node_id != city.node_id
+        ]
+        route = max(routes, key=lambda item: (len(item), item[-1]))
+        self.assertGreaterEqual(len(route), 3)
+
+        queued = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "set_army_movement",
+                "action_payload": {
+                    "army_id": army_id,
+                    "movement_order": "march",
+                    "destination_node_id": route[-1],
+                },
+            },
+        )["campaign"]
+        movement = queued["queued_actions"][-1]
+        self.assertEqual((movement["action_key"], movement["command_cost"]), (army_id, 1))
+        advance_status, advance_payload = self.api_post_error(
+            "/api/strategy/campaigns/advance-month",
+            {"campaign_id": campaign_id, "session_token": self.default_session_token()},
+        )
+        self.assertEqual(advance_status, 200, advance_payload)
+        marched = advance_payload["campaign"]
+        army = marched["world"]["armies"][0]
+        self.assertEqual((army["location_node_id"], army["route_progress_index"], army["status"]), (route[1], 1, "marching"))
+        self.assertEqual(army["route_node_ids"], route)
+        self.assertEqual(army["estimated_arrival_month"], formed.current_month + len(route) - 1)
+
+        halted_queue = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "set_army_movement",
+                "action_payload": {"army_id": army_id, "movement_order": "hold"},
+            },
+        )["campaign"]
+        self.assertEqual(halted_queue["queued_actions"][-1]["action_key"], army_id)
+        halt_status, halt_payload = self.api_post_error(
+            "/api/strategy/campaigns/advance-month",
+            {"campaign_id": campaign_id, "session_token": self.default_session_token()},
+        )
+        self.assertEqual(halt_status, 200, halt_payload)
+        halted = halt_payload["campaign"]["world"]["armies"][0]
+        self.assertEqual((halted["location_node_id"], halted["status"], halted["current_order"]), (route[1], "deployed", "hold"))
+        categories = [event["category"] for event in halt_payload["campaign"]["world"]["event_log"]]
+        self.assertIn("strategy_army_march_ordered", categories)
+        self.assertIn("strategy_army_marched", categories)
+        self.assertIn("strategy_army_march_halted", categories)
+        app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('queueStrategyAction("set_army_movement"', app_source)
+        self.assertIn("预计第 ${army.estimated_arrival_month} 月抵达", app_source)
+        self.assertIn('line.setAttribute("class", `strategy-map-route-line', app_source)
+
+    def test_scenario_general_loads_supply_and_monthly_logistics_are_public_through_http(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "army supply", "seed": 403, "city_count": 8, "faction_count": 2},
+        )["campaign"]
+        campaign_id = created["id"]
+        owner_id = created["owner_user_id"]
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+        stored = server_module.STRATEGY_STORE.get_campaign_for_user(campaign_id, owner_id)
+        general = next(item for item in stored.world.offices if item.faction_id == "faction_1" and item.office_type == "general")
+        hero = next(item for item in stored.world.strategic_heroes if item.office_id == general.office_id)
+        city = next(item for item in stored.world.cities if item.city_id == hero.city_id)
+        general.unit_inventory = {"infantry": 1}
+        city.resources.food = 500
+        formed = form_or_reinforce_army(
+            stored.world,
+            faction_id="faction_1",
+            city_id=city.city_id,
+            unit_inventory={"infantry": 1},
+            supply=50,
+            issuer_office_id=general.office_id,
+        )
+        server_module.STRATEGY_STORE.update_world(campaign_id, owner_id, formed)
+        army_id = formed.armies[0].army_id
+
+        queued = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "load_army_supply",
+                "action_payload": {"army_id": army_id, "supply": 50},
+            },
+        )["campaign"]
+        self.assertEqual((queued["queued_actions"][-1]["action_key"], queued["queued_actions"][-1]["command_cost"]), (army_id, 1))
+        status, payload = self.api_post_error(
+            "/api/strategy/campaigns/advance-month",
+            {"campaign_id": campaign_id, "session_token": self.default_session_token()},
+        )
+        self.assertEqual(status, 200, payload)
+        army = payload["campaign"]["world"]["armies"][0]
+        self.assertEqual((army["supply_line_status"], army["supply_distance"], army["monthly_supply_need"]), ("local", 0, 10))
+        self.assertEqual((army["supply"], army["last_supply_received"], army["last_supply_consumed"], army["morale"]), (100, 10, 10, 72))
+        categories = [event["category"] for event in payload["campaign"]["world"]["event_log"]]
+        self.assertIn("strategy_army_supply_loaded", categories)
+        self.assertIn("strategy_army_supplied", categories)
+        app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('queueStrategyAction("load_army_supply"', app_source)
+        self.assertIn("strategyArmySupplyStatusLabel", app_source)
+        self.assertIn("补给路径", app_source)
 
     def test_scenario_lord_hero_can_campaign_personally_and_order_grand_general(self) -> None:
         created = self.api_post(
@@ -2941,8 +4381,217 @@ class RoomBehaviorTests(unittest.TestCase):
         self.assertEqual(room_state["room"]["room_id"], room_id)
         self.assertIsNone(room_state["room"]["viewer_player_id"])
         self.assertEqual(room_state["room"]["status"], "lobby")
+        self.assertEqual(room_state["room"]["start_blocker"], "仍有开放席位未被真人或 AI 占用。")
         self.assertTrue(room_state["room"]["seats"][0]["occupied"])
         self.assertFalse(room_state["room"]["seats"][1]["occupied"])
+
+    def test_scenario_custom_room_confirms_readiness_times_out_and_restores_the_same_seat(self) -> None:
+        # Given two human players have legal rosters but have not confirmed the final room configuration
+        created = self.api_post("/api/rooms/create", {"player_name": "Alice"})
+        room_id = created["room"]["room_id"]
+        host_token = created["player_token"]
+        joined = self.api_post("/api/rooms/join", {"room_id": room_id, "player_name": "Bob"})
+        guest_token = joined["player_token"]
+        self.api_post(
+            "/api/rooms/select-hero",
+            {"room_id": room_id, "player_token": host_token, "hero_code": "bard", "delta": 1},
+        )
+        configured = self.api_post(
+            "/api/rooms/select-hero",
+            {"room_id": room_id, "player_token": guest_token, "hero_code": "ellie", "delta": 1},
+        )
+
+        self.assertTrue(configured["room"]["configuration_ready"])
+        self.assertFalse(configured["room"]["can_start"])
+        self.assertIn("确认准备", configured["room"]["start_blocker"])
+
+        # When both players confirm, only the host can start; a later roster edit revokes both confirmations
+        self.confirm_room_ready(room_id, host_token, guest_token)
+        ready_state = self.api_get("/api/rooms/state", params={"room_id": room_id, "player_token": host_token})
+        self.assertTrue(ready_state["room"]["can_start"])
+        self.assertEqual(ready_state["room"]["human_ready_count"], 2)
+        status, error = self.api_post_error(
+            "/api/rooms/start",
+            {
+                "room_id": room_id,
+                "player_token": guest_token,
+                "session_token": self.default_session_token(),
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("房主", error["error"])
+        changed = self.api_post(
+            "/api/rooms/select-hero",
+            {"room_id": room_id, "player_token": host_token, "hero_code": "bard", "delta": 1},
+        )
+        self.assertEqual(changed["room"]["human_ready_count"], 0)
+        self.confirm_room_ready(room_id, host_token, guest_token)
+        started = self.api_post("/api/rooms/start", {"room_id": room_id, "player_token": host_token})
+
+        # Then the server owns the 90-second prompt timer and publishes both players' connection state
+        self.assertEqual(started["room"]["status"], "battle")
+        self.assertTrue(started["room"]["turn_timer"]["enabled"])
+        self.assertEqual(started["room"]["turn_timer"]["duration_seconds"], 90)
+        self.assertTrue(all(seat["connection_status"] == "online" for seat in started["room"]["seats"]))
+
+        # And an expired deadline safely advances the prompt while a saved token restores the exact seat
+        room = ROOMS.get_room(room_id)
+        room.turn_deadline_at = 0
+        timed_out = self.api_get("/api/rooms/state", params={"room_id": room_id, "player_token": host_token})
+        self.assertIsNotNone(timed_out["room"]["turn_timer"]["last_timeout"])
+        room.seats[2].last_seen_at = 0
+        offline = self.api_get("/api/rooms/state", params={"room_id": room_id, "player_token": host_token})
+        self.assertEqual(offline["room"]["seats"][1]["connection_status"], "offline")
+        restored = self.api_get("/api/rooms/state", params={"room_id": room_id, "player_token": guest_token})
+        self.assertEqual(restored["room"]["viewer_player_id"], 2)
+        self.assertEqual(restored["room"]["seats"][1]["connection_status"], "online")
+
+    def test_scenario_finished_room_explains_surrender_stats_key_turns_and_mvp(self) -> None:
+        # Given a legal human match has recorded effective healing, shield pressure, and damage
+        created = self.api_post("/api/rooms/create", {"player_name": "Alice"})
+        room_id = created["room"]["room_id"]
+        host_token = created["player_token"]
+        joined = self.api_post("/api/rooms/join", {"room_id": room_id, "player_name": "Bob"})
+        guest_token = joined["player_token"]
+        self.api_post(
+            "/api/rooms/select-hero",
+            {"room_id": room_id, "player_token": host_token, "hero_code": "fire_funeral", "delta": 1},
+        )
+        self.api_post(
+            "/api/rooms/select-hero",
+            {"room_id": room_id, "player_token": guest_token, "hero_code": "ellie", "delta": 1},
+        )
+        self.confirm_room_ready(room_id, host_token, guest_token)
+        self.api_post("/api/rooms/start", {"room_id": room_id, "player_token": host_token})
+        room = ROOMS.get_room(room_id)
+        fire = primary_hero(room.battle, 1)
+        ellie = primary_hero(room.battle, 2)
+        fire.current_hp = 0.5
+        room.battle.heal(HealContext(source=fire, target=fire, amount=0.25, action_name="测试治疗"))
+        ellie.shields = 1
+        room.battle.resolve_damage(
+            DamageContext(source=fire, target=ellie, attack_power=4, raw_damage=0.25, is_skill=True, action_name="测试破盾")
+        )
+        room.battle.resolve_damage(
+            DamageContext(source=fire, target=ellie, attack_power=4, raw_damage=0.25, is_skill=True, action_name="测试伤害")
+        )
+
+        # When the guest surrenders
+        finished = self.api_post("/api/rooms/surrender", {"room_id": room_id, "player_token": guest_token})
+        summary = finished["room"]["postgame"]
+
+        # Then the server returns transparent winner, contribution, MVP, and replay-linked key-turn evidence
+        self.assertTrue(summary["available"])
+        self.assertEqual(summary["winner_team_id"], 1)
+        self.assertEqual(summary["reason_code"], "surrender")
+        self.assertIn("Bob", summary["reason_text"])
+        red = next(team for team in summary["team_stats"] if team["team_id"] == 1)
+        self.assertEqual(red["damage_dealt"], 0.25)
+        self.assertEqual(red["healing_done"], 0.25)
+        self.assertEqual(red["shields_broken"], 1)
+        self.assertEqual(summary["mvp"]["name"], "火葬者")
+        self.assertEqual(summary["mvp"]["damage_dealt"], 0.25)
+        self.assertEqual(summary["mvp"]["healing_done"], 0.25)
+        self.assertEqual(summary["mvp"]["shields_broken"], 1)
+        self.assertTrue(summary["key_turns"])
+        self.assertTrue(all(item["replay_step_index"] is not None for item in summary["key_turns"]))
+
+    def test_scenario_account_history_replay_and_same_configuration_rematch_form_a_closed_loop(self) -> None:
+        # Given two logged-in accounts finish a configured room
+        alice_token = self.default_session_token()
+        bob = self.api_post("/api/auth/register", {"username": "HistoryBob", "password": "secret123"})
+        charlie = self.api_post("/api/auth/register", {"username": "HistoryCharlie", "password": "secret123"})
+        created = self.api_post(
+            "/api/rooms/create",
+            {"player_name": "Alice", "session_token": alice_token},
+        )
+        room_id = created["room"]["room_id"]
+        host_token = created["player_token"]
+        joined = self.api_post(
+            "/api/rooms/join",
+            {"room_id": room_id, "player_name": "Bob", "session_token": bob["session_token"]},
+        )
+        guest_token = joined["player_token"]
+        self.api_post(
+            "/api/rooms/select-hero",
+            {"room_id": room_id, "player_token": host_token, "hero_code": "fire_funeral", "delta": 1},
+        )
+        self.api_post(
+            "/api/rooms/select-hero",
+            {"room_id": room_id, "player_token": guest_token, "hero_code": "ellie", "delta": 1, "session_token": bob["session_token"]},
+        )
+        self.api_post("/api/rooms/set-ready", {"room_id": room_id, "player_token": host_token, "ready": True})
+        self.api_post(
+            "/api/rooms/set-ready",
+            {"room_id": room_id, "player_token": guest_token, "ready": True, "session_token": bob["session_token"]},
+        )
+        started = self.api_post("/api/rooms/start", {"room_id": room_id, "player_token": host_token})
+        first_match_id = started["room"]["match_id"]
+        self.api_post(
+            "/api/rooms/surrender",
+            {"room_id": room_id, "player_token": guest_token, "session_token": bob["session_token"]},
+        )
+
+        # Then each participant gets one private result and a persisted replay
+        alice_history = self.api_get("/api/matches/recent", params={"session_token": alice_token})["matches"]
+        bob_history = self.api_get("/api/matches/recent", params={"session_token": bob["session_token"]})["matches"]
+        self.assertEqual([item["match_id"] for item in alice_history], [first_match_id])
+        self.assertEqual(alice_history[0]["result"], "win")
+        self.assertEqual(bob_history[0]["result"], "loss")
+        serialized_history = json.dumps(alice_history, ensure_ascii=False)
+        self.assertNotIn("session_token", serialized_history)
+        self.assertNotIn("player_token", serialized_history)
+
+        # And the same account-owned history produces non-stat mastery progress and a next goal
+        alice_progression = self.api_get(
+            "/api/progression/overview",
+            params={"session_token": alice_token},
+        )["progression"]
+        bob_progression = self.api_get(
+            "/api/progression/overview",
+            params={"session_token": bob["session_token"]},
+        )["progression"]
+        fire_progress = next(item for item in alice_progression["hero_progress"] if item["hero_code"] == "fire_funeral")
+        ellie_progress = next(item for item in bob_progression["hero_progress"] if item["hero_code"] == "ellie")
+        self.assertEqual((fire_progress["matches"], fire_progress["wins"], fire_progress["mastery_points"]), (1, 1, 2))
+        self.assertEqual((ellie_progress["matches"], ellie_progress["losses"], ellie_progress["mastery_points"]), (1, 1, 1))
+        self.assertEqual(fire_progress["mastery_level"], "初识")
+        self.assertEqual(fire_progress["next_mastery_level"], "熟练")
+        self.assertFalse(alice_progression["grants_gameplay_power"])
+        self.assertEqual(alice_progression["next_goal"]["hero_code"], "fire_funeral")
+        self.assertNotEqual(alice_progression, bob_progression)
+        anonymous_status, _ = self.api_get_error("/api/progression/overview")
+        self.assertEqual(anonymous_status, 401)
+        replay = self.api_get(
+            "/api/matches/replay",
+            params={"session_token": alice_token, "match_id": first_match_id, "step_index": "-1"},
+        )
+        self.assertTrue(replay["room"]["historical"])
+        self.assertEqual(replay["replay"]["step_index"], replay["replay"]["last_step_index"])
+        forbidden_status, _ = self.api_get_error(
+            "/api/matches/replay",
+            params={"session_token": charlie["session_token"], "match_id": first_match_id},
+        )
+        self.assertEqual(forbidden_status, 404)
+
+        # And only the host can retain the full configuration for a newly confirmed second match
+        guest_status, _ = self.api_post_error(
+            "/api/rooms/rematch",
+            {"room_id": room_id, "player_token": guest_token, "session_token": bob["session_token"]},
+        )
+        self.assertEqual(guest_status, 400)
+        rematch = self.api_post("/api/rooms/rematch", {"room_id": room_id, "player_token": host_token})
+        self.assertEqual(rematch["room"]["seats"][0]["hero_counts"], {"fire_funeral": 1})
+        self.assertEqual(rematch["room"]["seats"][1]["hero_counts"], {"ellie": 1})
+        self.assertFalse(rematch["room"]["seats"][0]["ready"])
+        self.assertFalse(rematch["room"]["seats"][1]["ready"])
+        self.api_post("/api/rooms/set-ready", {"room_id": room_id, "player_token": host_token, "ready": True})
+        self.api_post(
+            "/api/rooms/set-ready",
+            {"room_id": room_id, "player_token": guest_token, "ready": True, "session_token": bob["session_token"]},
+        )
+        second = self.api_post("/api/rooms/start", {"room_id": room_id, "player_token": host_token})
+        self.assertNotEqual(second["room"]["match_id"], first_match_id)
 
     def test_scenario_room_flows_from_lobby_to_battle_through_public_http_api(self) -> None:
         # Given two players create and join the same room
@@ -2965,6 +4614,7 @@ class RoomBehaviorTests(unittest.TestCase):
             "/api/rooms/select-hero",
             {"room_id": room_id, "player_token": guest_token, "hero_code": "undead_king_lina", "delta": 1},
         )
+        self.confirm_room_ready(room_id, host_token, guest_token)
         started = self.api_post("/api/rooms/start", {"room_id": room_id, "player_token": host_token})
 
         # Then the room enters battle and exposes the current acting unit bundle
@@ -2997,6 +4647,7 @@ class RoomBehaviorTests(unittest.TestCase):
         )
 
         # When the host starts the battle
+        self.confirm_room_ready(room_id, host_token)
         started = self.api_post("/api/rooms/start", {"room_id": room_id, "player_token": host_token})
 
         # Then the battle exposes a staged AI opening action instead of resolving it instantly
@@ -3022,7 +4673,8 @@ class RoomBehaviorTests(unittest.TestCase):
         created = self.api_post("/api/rooms/create", {"player_name": "Alice", "mode": "random"})
         room_id = created["room"]["room_id"]
         host_token = created["player_token"]
-        self.api_post("/api/rooms/join", {"room_id": room_id, "player_name": "Bob"})
+        joined = self.api_post("/api/rooms/join", {"room_id": room_id, "player_name": "Bob"})
+        guest_token = joined["player_token"]
 
         # When the host sets n and starts with a deterministic random roster
         configured = self.api_post(
@@ -3031,6 +4683,7 @@ class RoomBehaviorTests(unittest.TestCase):
         )
         roster1 = ["doomlight_dragon", "bard", "dark_human"]
         roster2 = ["rock_god", "elite_soldier", "ellie"]
+        self.confirm_room_ready(room_id, host_token, guest_token)
         with mock.patch("wujiang.web.multiplayer.random_room_hero_codes", return_value=(roster1, roster2)):
             with mock.patch("wujiang.heroes.registry.random.choice", side_effect=lambda seq: seq[-1]):
                 started = self.api_post("/api/rooms/start", {"room_id": room_id, "player_token": host_token})
@@ -3063,12 +4716,14 @@ class RoomBehaviorTests(unittest.TestCase):
         created = self.api_post("/api/rooms/create", {"player_name": "Alice", "mode": "random"})
         room_id = created["room"]["room_id"]
         host_token = created["player_token"]
-        self.api_post("/api/rooms/join", {"room_id": room_id, "player_name": "Bob"})
+        joined = self.api_post("/api/rooms/join", {"room_id": room_id, "player_name": "Bob"})
+        guest_token = joined["player_token"]
         self.api_post(
             "/api/rooms/set-random-roster-size",
             {"room_id": room_id, "player_token": host_token, "random_roster_size": 1},
         )
 
+        self.confirm_room_ready(room_id, host_token, guest_token)
         started = self.api_post("/api/rooms/start", {"room_id": room_id, "player_token": host_token})
         hero_names = [
             unit["name"]
@@ -3083,7 +4738,8 @@ class RoomBehaviorTests(unittest.TestCase):
         created = self.api_post("/api/rooms/create", {"player_name": "Alice", "mode": "random"})
         room_id = created["room"]["room_id"]
         host_token = created["player_token"]
-        self.api_post("/api/rooms/join", {"room_id": room_id, "player_name": "Bob"})
+        joined = self.api_post("/api/rooms/join", {"room_id": room_id, "player_name": "Bob"})
+        guest_token = joined["player_token"]
 
         self.api_post("/api/rooms/set-seat-count", {"room_id": room_id, "player_token": host_token, "seat_count": 4})
         self.api_post(
@@ -3107,6 +4763,7 @@ class RoomBehaviorTests(unittest.TestCase):
 
         roster1 = ["bard", "dark_human"]
         roster2 = ["doomlight_dragon", "elite_soldier"]
+        self.confirm_room_ready(room_id, host_token, guest_token)
         with mock.patch("wujiang.web.multiplayer.random_room_hero_codes", return_value=(roster1, roster2)):
             started = self.api_post("/api/rooms/start", {"room_id": room_id, "player_token": host_token})
 
@@ -3150,6 +4807,7 @@ class RoomBehaviorTests(unittest.TestCase):
             {"room_id": room_id, "player_token": host_token, "seat_id": 2, "hero_code": "elite_soldier", "delta": 1},
         )
 
+        self.confirm_room_ready(room_id, host_token)
         started = self.api_post("/api/rooms/start", {"room_id": room_id, "player_token": host_token})
         self.assertTrue(started["room"]["simulation"]["enabled"])
         self.assertTrue(started["room"]["replay"]["available"])
@@ -3824,21 +5482,266 @@ class CombatBehaviorTests(unittest.TestCase):
 
 @unittest.skipIf(quickjs is None, "quickjs is required for frontend behavior checks")
 class FrontendBehaviorTests(unittest.TestCase):
+    def test_scenario_phase2_mastery_overview_renders_next_goal_and_hero_progress(self) -> None:
+        home_source = (ROOT / "static" / "home-ui.js").read_text(encoding="utf-8")
+        ctx = quickjs.Context()
+        ctx.eval(
+            """
+            function element(id) {
+              return {
+                id, children: [], textContent: "", className: "", value: 0, max: 0,
+                append(...nodes) { this.children.push(...nodes); },
+                setAttribute(name, value) { this[name] = String(value); },
+                set innerHTML(_value) { this.children = []; },
+              };
+            }
+            const elements = {
+              "mastery-summary": element("mastery-summary"),
+              "mastery-next-goal": element("mastery-next-goal"),
+              "mastery-hero-list": element("mastery-hero-list"),
+            };
+            const document = {
+              getElementById(id) { return elements[id] || null; },
+              createElement() { return element(""); },
+            };
+            globalThis.document = document;
+            """
+        )
+        ctx.eval(home_source)
+        ctx.eval(
+            """
+            WujiangHomeUi.renderProgression({
+              document,
+              state: {
+                progressionBusy: false,
+                progressionError: "",
+                progression: {
+                  total_matches: 3, total_wins: 2, win_rate: 0.6667,
+                  next_goal: {kind: "mastery_level", message: "再获得 1 点熟练度，火葬者即可达到熟练。"},
+                  hero_progress: [{
+                    hero_code: "fire_funeral", hero_name: "火葬者", matches: 3, wins: 2,
+                    mastery_points: 5, mastery_level: "熟练", mastery_threshold: 3,
+                    next_mastery_level: "精通", next_mastery_threshold: 8, points_to_next_level: 3,
+                  }],
+                },
+              },
+            });
+            globalThis.masterySummary = elements["mastery-summary"].textContent;
+            globalThis.goalText = elements["mastery-next-goal"].children[1].textContent;
+            globalThis.heroCardCount = elements["mastery-hero-list"].children.length;
+            globalThis.heroCardTitle = elements["mastery-hero-list"].children[0].children[0].children[0].textContent;
+            """
+        )
+        self.assertEqual(ctx.eval("globalThis.masterySummary"), "3 场 · 2 胜 · 胜率 67%")
+        self.assertIn("火葬者", ctx.eval("globalThis.goalText"))
+        self.assertEqual(ctx.eval("globalThis.heroCardCount"), 1)
+        self.assertEqual(ctx.eval("globalThis.heroCardTitle"), "火葬者")
+
+    def test_scenario_p1_accessibility_feedback_and_frontend_modules_are_wired(self) -> None:
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        styles = (ROOT / "static" / "styles.css").read_text(encoding="utf-8")
+        app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        home_source = (ROOT / "static" / "home-ui.js").read_text(encoding="utf-8")
+
+        script_order = [
+            html.index('src="/home-ui.js"'),
+            html.index('src="/replay-ui.js"'),
+            html.index('src="/battle-feedback.js"'),
+            html.index('src="/app.js"'),
+        ]
+        self.assertEqual(script_order, sorted(script_order))
+        for element_id in (
+            "toggle-battle-sound",
+            "toggle-colorblind-mode",
+            "toggle-reduced-motion",
+            "open-keyboard-help",
+            "keyboard-help",
+            "combat-feedback-feed",
+            "battle-announcer",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        self.assertIn('aria-live="assertive"', html)
+        self.assertIn("prefers-reduced-motion: reduce", styles)
+        self.assertIn("body.colorblind-mode .cell.is-target", styles)
+        self.assertIn(":focus-visible", styles)
+        self.assertIn("min-height: 44px", styles)
+        self.assertIn("handleBattleKeyboard", app_source)
+        self.assertIn('event.key === "Escape"', app_source)
+        self.assertIn('key === "e"', app_source)
+        self.assertIn('event.key === "["', app_source)
+        self.assertIn('event.key === "]"', app_source)
+        self.assertIn("WujiangHomeUi?.renderRecentMatches", app_source)
+        self.assertIn('id="mastery-overview"', html)
+        self.assertIn('id="postgame-next-goal"', html)
+        self.assertIn("renderProgression", home_source)
+        self.assertIn('/api/progression/overview', app_source)
+        self.assertIn("WujiangReplayUi?.renderToolbar", app_source)
+        self.assertIn("WujiangBattleFeedback?.consume", app_source)
+
+    def test_scenario_battle_feedback_announces_defense_death_chain_and_victory(self) -> None:
+        feedback_source = (ROOT / "static" / "battle-feedback.js").read_text(encoding="utf-8")
+        home_source = (ROOT / "static" / "home-ui.js").read_text(encoding="utf-8")
+        replay_source = (ROOT / "static" / "replay-ui.js").read_text(encoding="utf-8")
+        ctx = quickjs.Context()
+        ctx.eval(
+            """
+            function classList() {
+              return { values: {}, toggle(name, active) { this.values[name] = Boolean(active); } };
+            }
+            function element(id) {
+              return {
+                id,
+                children: [],
+                dataset: {},
+                className: "",
+                classList: classList(),
+                textContent: "",
+                setAttribute(name, value) { this[name] = String(value); },
+                prepend(node) { node.parentNode = this; this.children.unshift(node); },
+                get lastElementChild() { return this.children[this.children.length - 1] || null; },
+                remove() {
+                  if (!this.parentNode) return;
+                  this.parentNode.children = this.parentNode.children.filter((child) => child !== this);
+                },
+              };
+            }
+            const elements = {
+              "combat-feedback-feed": element("combat-feedback-feed"),
+              "battle-announcer": element("battle-announcer"),
+              "toggle-battle-sound": element("toggle-battle-sound"),
+              "toggle-colorblind-mode": element("toggle-colorblind-mode"),
+              "toggle-reduced-motion": element("toggle-reduced-motion"),
+            };
+            const document = {
+              body: element("body"),
+              getElementById(id) { return elements[id] || null; },
+              createElement() { return element(""); },
+            };
+            const localStorage = {
+              value: "",
+              getItem() { return this.value || null; },
+              setItem(_key, value) { this.value = String(value); },
+            };
+            function matchMedia() { return {matches: false, addEventListener() {}}; }
+            globalThis.document = document;
+            globalThis.localStorage = localStorage;
+            globalThis.matchMedia = matchMedia;
+            """
+        )
+        ctx.eval(home_source)
+        ctx.eval(replay_source)
+        ctx.eval(feedback_source)
+        ctx.eval(
+            """
+            WujiangBattleFeedback.initialize();
+            WujiangBattleFeedback.toggle("colorblind");
+            WujiangBattleFeedback.toggle("motion");
+            const previousBattle = {
+              winner: null,
+              pending_chain: null,
+              units: [{id: "u1", name: "守卫", hp: 1, destroyed: false}],
+            };
+            const battle = {
+              winner: 1,
+              pending_chain: {current_unit_id: "u1"},
+              units: [{id: "u1", name: "守卫", hp: 0, destroyed: true}],
+            };
+            WujiangBattleFeedback.consume({
+              previousBattle,
+              battle,
+              viewerTeamId: 1,
+              replayMode: false,
+              events: [{kind: "defense", defense_reason: "shield", actor_id: "u1"}],
+            });
+            globalThis.feedbackAnnouncement = elements["battle-announcer"].textContent;
+            globalThis.feedbackCount = elements["combat-feedback-feed"].children.length;
+            globalThis.colorblindApplied = document.body.classList.values["colorblind-mode"];
+            globalThis.reduceMotionApplied = document.body.classList.values["reduce-motion"];
+            globalThis.modulesLoaded = typeof WujiangHomeUi.renderRecentMatches === "function"
+              && typeof WujiangReplayUi.renderToolbar === "function";
+            """
+        )
+
+        self.assertEqual(ctx.eval("globalThis.feedbackAnnouncement"), "战斗胜利")
+        self.assertEqual(ctx.eval("globalThis.feedbackCount"), 3)
+        self.assertTrue(ctx.eval("globalThis.colorblindApplied"))
+        self.assertTrue(ctx.eval("globalThis.reduceMotionApplied"))
+        self.assertTrue(ctx.eval("globalThis.modulesLoaded"))
+
     def test_scenario_home_entry_prioritizes_game_modes_and_hides_reference_roster(self) -> None:
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
         styles = (ROOT / "static" / "styles.css").read_text(encoding="utf-8")
         app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
 
         self.assertIn('class="mode-gateway"', html)
+        self.assertIn('id="quick-start-entry"', html)
         self.assertIn('id="focus-strategy-mode"', html)
         self.assertIn('id="focus-duel-mode"', html)
-        self.assertIn("英灵城邦战役", html)
-        self.assertIn("武将对战房间", html)
+        self.assertIn("快速开始", html)
+        self.assertIn("英灵城邦", html)
+        self.assertIn("自定义对战", html)
         self.assertIn('"mode mode"', styles)
         self.assertIn("#home-hero-cards", styles)
         self.assertIn("display: none", styles)
         self.assertIn("openStrategyModeEntry", app_source)
         self.assertIn("openDuelModeEntry", app_source)
+        self.assertIn("openQuickStartEntry", app_source)
+        self.assertIn("renderHomeFlow", app_source)
+        self.assertIn('id="toggle-full-roster"', html)
+        self.assertIn('id="recommended-rosters"', html)
+        self.assertIn('id="hero-search"', html)
+        self.assertIn('id="hero-role-filter"', html)
+        self.assertIn('id="hero-difficulty-filter"', html)
+        self.assertIn('id="team-readiness"', html)
+        self.assertIn("beginnerByCode", app_source)
+        self.assertIn("applyRecommendedRoster", app_source)
+        self.assertIn("heroMatchesFilters", app_source)
+        self.assertIn("rosterExactlyMatches", app_source)
+        self.assertIn("renderTeamReadiness", app_source)
+        self.assertIn("估算难度", app_source)
+        self.assertIn("state.room.start_blocker", app_source)
+        self.assertIn("isRoomConfigControlActive", app_source)
+        self.assertIn('id="toggle-ready"', html)
+        self.assertIn('id="room-connection-summary"', html)
+        self.assertIn('id="battle-turn-timer"', html)
+        self.assertIn("toggleRoomReady", app_source)
+        self.assertIn("renderConnectionAndTurnState", app_source)
+        self.assertIn("turn_timer", app_source)
+        self.assertIn('id="postgame-summary"', html)
+        self.assertIn('id="postgame-team-stats"', html)
+        self.assertIn('id="postgame-mvp"', html)
+        self.assertIn('id="postgame-key-turns"', html)
+        self.assertIn("renderPostgameSummary", app_source)
+        self.assertIn("loadReplayStep(Number(item.replay_step_index))", app_source)
+        self.assertIn('id="tutorial-guide"', html)
+        self.assertIn("filterTutorialActions", app_source)
+        self.assertIn("renderTutorialGuide", app_source)
+        self.assertIn("completeTutorialUnitSelection", app_source)
+        self.assertIn('id="resume-tutorial"', html)
+        self.assertIn('id="start-quick-ai"', html)
+        self.assertIn("LAST_TUTORIAL_ROOM_KEY", app_source)
+        self.assertIn("refreshResumableTutorial", app_source)
+        self.assertIn("resumeTutorialBattle", app_source)
+        self.assertIn("继续未完成教学", app_source)
+        self.assertIn("重新开始教学", app_source)
+        self.assertIn("startQuickAiBattle", app_source)
+        self.assertIn("同阵容再来一局", app_source)
+        self.assertIn("同配置再来一局", app_source)
+        self.assertIn('recordProductEvent("rematch_start"', app_source)
+        self.assertIn('id="recent-matches-panel"', html)
+        self.assertIn('id="refresh-recent-matches"', html)
+        self.assertIn("refreshRecentMatches", app_source)
+        self.assertIn("openRecentReplay", app_source)
+        self.assertIn('state.historicalMatchId ? "/api/matches/replay"', app_source)
+        self.assertIn(".recent-match-card", styles)
+        self.assertIn('id="action-forecast"', html)
+        self.assertIn("renderActionForecast", app_source)
+        self.assertIn("estimatedSummaryDamage", app_source)
+        self.assertIn("explainInvalidBoardChoice", app_source)
+        self.assertIn("资源消耗", app_source)
+        self.assertIn("预计效果", app_source)
+        self.assertIn("最终站位", app_source)
+        self.assertIn("影响单位", app_source)
         self.assertIn("focusAuthGateForMode(\"英灵城邦战役\")", app_source)
         self.assertIn("focusAuthGateForMode(\"武将对战房间\")", app_source)
         self.assertIn(".strategy-war-tabs", styles)
@@ -3870,6 +5773,20 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertIn(".strategy-map-routes-drawer", styles)
         self.assertIn("scroll-margin-top: 76px", styles)
         self.assertIn("transform: translate(-50%, -50%)", styles)
+
+    def test_scenario_local_analytics_dashboard_has_empty_error_and_refresh_states(self) -> None:
+        html = (ROOT / "static" / "analytics.html").read_text(encoding="utf-8")
+        app_source = (ROOT / "static" / "analytics.js").read_text(encoding="utf-8")
+        styles = (ROOT / "static" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('id="refresh-analytics"', html)
+        self.assertIn('id="analytics-status"', html)
+        self.assertIn('id="analytics-funnel"', html)
+        self.assertIn('fetch("/api/analytics/funnel")', app_source)
+        self.assertIn("目前还没有事件样本", app_source)
+        self.assertIn("无法读取内测数据", app_source)
+        self.assertIn("真实玩家样本仍需按内测清单判定有效性", app_source)
+        self.assertIn(".analytics-summary", styles)
 
     def test_scenario_room_directory_renders_and_primary_join_button_starts_join_flow(self) -> None:
         app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
@@ -4215,6 +6132,64 @@ class FrontendBehaviorTests(unittest.TestCase):
                       ],
                     },
                   },
+                  monthly_cycle: {
+                    faction_1: {
+                      previous_month: {
+                        from_month: 1,
+                        month: 2,
+                        city_changes: [
+                          { city_name: "晨星城", owner_before: "faction_1", owner_after: "faction_1", owner_changed: false, resource_delta: { food: 120, money: 70, ether: 12, troops: 30 }, support_delta: 2 },
+                        ],
+                        important_events: [{ message: "晨星城平稳度过上月。" }],
+                      },
+                      must_handle: ["晨星城叛乱风险 80（正式叛乱）。", "待决事件：行会争端；月末未处理将自动放任。"],
+                      advance_forecast: {
+                        target_month: 3,
+                        cities: [
+                          { city_name: "晨星城", policy: "征兵优先", food_upkeep: 17, resource_delta: { food: 95, money: 70, ether: 12, troops: 73 }, support_delta: -2, rebellion_risk: 80, rebellion_stage: "正式叛乱" },
+                        ],
+                        disclaimer: "经济、维护与叛乱按当前已知状态确定性预测；战争、事件结果和 AI 决策不在预测内。",
+                      },
+                      planned_actions: [
+                        { action_type: "set_city_policy", payload: { city_id: "city_1", policy: "征兵优先" }, affected_months: [2, 3] },
+                      ],
+                    },
+                  },
+                  campaign_tutorial: {
+                    faction_1: {
+                      id: "first_three_months_v1",
+                      enabled: true,
+                      skipped: false,
+                      completed: false,
+                      completed_count: 1,
+                      total_count: 5,
+                      current_month: 2,
+                      guide_period_ended: false,
+                      skip_explanation: "跳过只会隐藏前三个月的情境目标；不会获得或失去资源，不会替你下令，也不会跳过战略月份。",
+                      steps: [
+                        { id: "survey_border", month: 1, chapter: "第一月 · 读局与治理", title: "查看边境", detail: "确认相邻城邦。", action_kind: "map", completed: false, timing: "overdue" },
+                        { id: "set_policy", month: 1, chapter: "第一月 · 读局与治理", title: "设置城市方针", detail: "提交城市方针。", action_kind: "city_command", completed: true, timing: "completed" },
+                        { id: "resolve_event", month: 1, chapter: "第一月 · 读局与治理", title: "处理待决事件", detail: "主动选择事件。", action_kind: "story", completed: false, timing: "overdue" },
+                        { id: "ritual_or_appoint", month: 2, chapter: "第二月 · 建立执行力量", title: "祭祀或任命", detail: "举行祭祀或任命武将。", action_kind: "organization", completed: false, timing: "active" },
+                        { id: "prepare_conflict", month: 3, chapter: "第三月 · 准备冲突", title: "准备一次边境冲突", detail: "按官职完成军事准备。", action_kind: "conflict", completed: false, timing: "upcoming" },
+                      ],
+                    },
+                  },
+                  office_coordination: {
+                    faction_1: {
+                      high_consequence_decisions: [
+                        { kind: "story", title: "决定待决事件", detail: "月底未处理将自动采用放任结果。", city_id: "city_1", planned: false },
+                        { kind: "threat", title: "晨星城边境承压", detail: "决定是否调整防务。", city_id: "city_1", planned: true },
+                      ],
+                      routine_maintenance: [
+                        { city_id: "city_1", city_name: "晨星城", policy: "稳定优先", executor_office_id: "office:faction_1:governor:city_1", mode: "ai_emergency" },
+                      ],
+                      order_feedback: [
+                        { status: "completed", issuer_office_id: "office:faction_1:lord", executor_office_id: "office:faction_1:governor:city_1", objective: "处理粮食危机", command_cost: 1, expected_completion_month: 2, result_summary: "晨星城已由城主设为粮食优先。" },
+                      ],
+                      automation_rule: "默认方针持续生效；AI 官职只在缺粮或叛乱风险下自动调整一座城，并且只能使用玩家计划后剩余的军令。",
+                    },
+                  },
                   policy_choices: ["稳定优先", "征兵优先", "金钱优先"],
                   rebellion_action_choices: [
                     { id: "appease", name: "安抚民心", description: "提升支持度", requires_target_city: true },
@@ -4488,6 +6463,17 @@ class FrontendBehaviorTests(unittest.TestCase):
               if (actionType === "rebellion_battle") globalThis.queuedRebellionBattlePayload = JSON.stringify(payload);
               if (actionType === "resolve_story_event") globalThis.queuedStoryPayload = JSON.stringify(payload);
             };
+            globalThis.guideActions = [];
+            updateStrategyCampaignGuide = async function (action) {
+              globalThis.guideActions.push(action);
+              return true;
+            };
+            const guideBorderButton = findButtonByText(document.elements["strategy-current"], "查看边境");
+            globalThis.hasGuideBorderButton = Boolean(guideBorderButton);
+            if (guideBorderButton) guideBorderButton.listeners.click[0]();
+            const guideSkipButton = findButtonByText(document.elements["strategy-current"], "跳过情境引导");
+            globalThis.hasGuideSkipButton = Boolean(guideSkipButton);
+            if (guideSkipButton) guideSkipButton.listeners.click[0]();
             const storyChoiceButton = findButtonContainingText(document.elements["strategy-current"], "出资调停");
             globalThis.hasStoryChoiceButton = Boolean(storyChoiceButton);
             if (storyChoiceButton) storyChoiceButton.listeners.click[0]();
@@ -4561,6 +6547,44 @@ class FrontendBehaviorTests(unittest.TestCase):
             globalThis.selectedCityAfterMapClick = state.strategySelectedCityId;
             globalThis.strategyTextAfterMapClick = collectText(document.elements["strategy-current"]);
             globalThis.strategyCampaignCount = document.elements["strategy-campaign-list"].children.length;
+            const originalStrategicStatus = state.strategyCampaign.world.strategic_status;
+            state.strategyCampaign.world.strategic_status = {
+              ...originalStrategicStatus,
+              campaign_contract: {
+                id: "city_states_twelve_months_v1",
+                name: "十二月城邦争衡",
+                city_count: 8,
+                major_faction_count: 2,
+                neutral_city_state_count: 6,
+                month_limit: 12,
+                expected_duration_minutes: [60, 90],
+              },
+              month_limit: 12,
+              months_remaining: 0,
+              campaign_state: "settled",
+              awaiting_conclusion_choice: true,
+              can_advance_month: false,
+              conclusion: {
+                state: "settled",
+                reason: "time_limit",
+                result_label: "十二月评议",
+                concluded_month: 12,
+                winner_faction_ids: ["faction_1"],
+                rankings: [
+                  { rank: 1, faction_id: "faction_1", faction_name: "第一势力", total_score: 400, city_score: 200, support_score: 75, survival_score: 100, battle_score: 25, mainline_score: 0 },
+                  { rank: 2, faction_id: "faction_2", faction_name: "第二势力", total_score: 25, city_score: 0, support_score: 0, survival_score: 25, battle_score: 0, mainline_score: 0 },
+                ],
+              },
+            };
+            continueStrategySandbox = function () { globalThis.continueSandboxClicked = true; };
+            renderStrategyPanel();
+            globalThis.settledStrategyText = collectText(document.elements["strategy-current"]);
+            globalThis.settledAdvanceDisabled = document.elements["strategy-advance-month"].disabled;
+            const continueSandboxButton = findButtonByText(document.elements["strategy-current"], "保留结算并继续沙盒");
+            globalThis.hasContinueSandboxButton = Boolean(continueSandboxButton);
+            if (continueSandboxButton) continueSandboxButton.listeners.click[0]();
+            state.strategyCampaign.world.strategic_status = originalStrategicStatus;
+            renderStrategyPanel();
             const originalStatus = state.strategyCampaign.status;
             const originalResume = state.strategyCampaign.resume;
             lockStrategyCampaign = function (campaignId) { globalThis.warStateLockCampaignId = campaignId; };
@@ -4667,6 +6691,27 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertIn("晨星城叛军集结", ctx.eval("globalThis.strategyText"))
         self.assertIn("雾港城防线薄弱", ctx.eval("globalThis.strategyText"))
         self.assertIn("斥候推测：第二势力准备进攻", ctx.eval("globalThis.strategyText"))
+        self.assertIn("月度决策", ctx.eval("globalThis.strategyText"))
+        self.assertIn("前三个月战役引导", ctx.eval("globalThis.strategyText"))
+        self.assertIn("本月关键决策", ctx.eval("globalThis.strategyText"))
+        self.assertIn("优先处理 2 项高后果决定", ctx.eval("globalThis.strategyText"))
+        self.assertIn("常规维护 · 1 座城市", ctx.eval("globalThis.strategyText"))
+        self.assertIn("AI 官职只在缺粮或叛乱风险下自动调整一座城", ctx.eval("globalThis.strategyText"))
+        self.assertIn("命令与请求回执", ctx.eval("globalThis.strategyText"))
+        self.assertIn("1 军令 · 预计第 2 月", ctx.eval("globalThis.strategyText"))
+        self.assertIn("晨星城已由城主设为粮食优先", ctx.eval("globalThis.strategyText"))
+        self.assertIn("第一月 · 读局与治理 · 查看边境", ctx.eval("globalThis.strategyText"))
+        self.assertIn("第二月 · 建立执行力量 · 祭祀或任命", ctx.eval("globalThis.strategyText"))
+        self.assertIn("第三月 · 准备冲突", ctx.eval("globalThis.strategyText"))
+        self.assertIn("不会获得或失去资源", ctx.eval("globalThis.strategyText"))
+        self.assertTrue(ctx.eval("globalThis.hasGuideBorderButton"))
+        self.assertTrue(ctx.eval("globalThis.hasGuideSkipButton"))
+        self.assertEqual(json.loads(ctx.eval("JSON.stringify(globalThis.guideActions)")), ["survey_border", "skip"])
+        self.assertIn("上月发生了什么", ctx.eval("globalThis.strategyText"))
+        self.assertIn("本月必须处理什么", ctx.eval("globalThis.strategyText"))
+        self.assertIn("推进后预计发生什么", ctx.eval("globalThis.strategyText"))
+        self.assertIn("粮 +95（维护 17）", ctx.eval("globalThis.strategyText"))
+        self.assertIn("行动队列：1 项", ctx.eval("globalThis.strategyText"))
         self.assertIn("下一步：处理突发事件", ctx.eval("globalThis.strategyText"))
         self.assertIn("行会争端", ctx.eval("globalThis.strategyText"))
         self.assertIn("本月底未处理将自动采用放任结果", ctx.eval("globalThis.strategyText"))
@@ -4821,6 +6866,12 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertIn("加入月度计划", ctx.eval("globalThis.strategyText"))
         self.assertFalse(ctx.eval("globalThis.advanceDisabled"))
         self.assertFalse(ctx.eval("globalThis.firstSelectDisabled"))
+        self.assertTrue(ctx.eval("globalThis.settledAdvanceDisabled"))
+        self.assertTrue(ctx.eval("globalThis.hasContinueSandboxButton"))
+        self.assertTrue(ctx.eval("globalThis.continueSandboxClicked"))
+        self.assertIn("十二月城邦争衡", ctx.eval("globalThis.settledStrategyText"))
+        self.assertIn("第 1 名 第一势力：400 分", ctx.eval("globalThis.settledStrategyText"))
+        self.assertIn("等待房主选择", ctx.eval("globalThis.settledStrategyText"))
 
         ctx.eval(
             """
@@ -4971,6 +7022,11 @@ class FrontendBehaviorTests(unittest.TestCase):
             };
             state.strategyActiveOfficeId = "office:faction_1:lord";
             renderStrategyPanel();
+            const tutorialStoryDelegation = findButtonByText(document.elements["strategy-current"], "处理事件");
+            globalThis.hasTutorialStoryDelegation = Boolean(tutorialStoryDelegation);
+            if (tutorialStoryDelegation) tutorialStoryDelegation.listeners.click[0]();
+            globalThis.tutorialDelegationType = globalThis.roleActionType;
+            globalThis.tutorialDelegationPayload = globalThis.roleActionPayload;
             globalThis.hasLordWorkspace = Boolean(findByClass(document.elements["strategy-current"], "LordWorkspace"));
             globalThis.hasOfficeSwitcher = Boolean(findByClass(document.elements["strategy-current"], "strategy-office-switcher"));
             globalThis.lordCanOrder = Boolean(findButtonByText(document.elements["strategy-current"], "下达命令 · 1军令"));
@@ -5035,6 +7091,9 @@ class FrontendBehaviorTests(unittest.TestCase):
             """
         )
         self.assertTrue(ctx.eval("globalThis.hasLordWorkspace"))
+        self.assertTrue(ctx.eval("globalThis.hasTutorialStoryDelegation"))
+        self.assertEqual(ctx.eval("globalThis.tutorialDelegationType"), "issue_office_order")
+        self.assertTrue(json.loads(ctx.eval("globalThis.tutorialDelegationPayload"))["objective"].startswith("[引导:resolve_event]"))
         self.assertTrue(ctx.eval("globalThis.hasOfficeSwitcher"))
         self.assertTrue(ctx.eval("globalThis.lordCanOrder"))
         self.assertTrue(ctx.eval("globalThis.lordCanSummon"))
@@ -7261,6 +9320,7 @@ class FrontendBehaviorTests(unittest.TestCase):
 
     def test_scenario_replay_toolbar_reflects_live_and_replay_state(self) -> None:
         app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        replay_source = (ROOT / "static" / "replay-ui.js").read_text(encoding="utf-8")
         ctx = quickjs.Context()
         ctx.eval(
             """
@@ -7366,6 +9426,7 @@ class FrontendBehaviorTests(unittest.TestCase):
             const sessionStorage = storageFactory();
             """
         )
+        ctx.eval(replay_source)
         ctx.eval(app_source)
         ctx.eval(
             """

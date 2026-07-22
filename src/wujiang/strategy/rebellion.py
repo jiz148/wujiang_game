@@ -9,6 +9,8 @@ from wujiang.strategy.models import City, EventLogEntry, Faction, StrategyError,
 
 REBELLION_FORCE_PREFIX = "rebellion_force:"
 MIN_REBELLION_BATTLE_TROOPS = 50
+REBELLION_FUNDING_MONEY_COST = 60
+REBELLION_FUNDING_TROOPS = 120
 
 
 def _clamp(value: int, minimum: int, maximum: int) -> int:
@@ -82,6 +84,21 @@ REBELLION_ACTIONS: tuple[RebellionAction, ...] = (
         city_troop_cost=120,
         owner_support_delta=4,
         local_autonomy_delta=-10,
+    ),
+    RebellionAction(
+        action_id="negotiate",
+        name="与叛乱派谈判",
+        description="支付金钱换取阶段性停火，提高支持但让自治派保留影响。",
+        money_cost=60,
+        owner_support_delta=10,
+        local_autonomy_delta=8,
+    ),
+    RebellionAction(
+        action_id="grant_autonomy",
+        name="授予地方自治",
+        description="切换自治方针并大幅削弱叛军，以长期收入让渡换取停火。",
+        owner_support_delta=12,
+        local_autonomy_delta=20,
     ),
 )
 
@@ -248,6 +265,12 @@ def apply_rebellion_action(
             max(0, previous_force - action.city_troop_cost * 2),
             month=next_world.current_month,
         )
+    elif action.action_id == "negotiate" and previous_force > 0:
+        set_rebellion_force_troops(city, previous_force * 60 // 100, month=next_world.current_month)
+    elif action.action_id == "grant_autonomy":
+        city.policy = "自治优先"
+        if previous_force > 0:
+            set_rebellion_force_troops(city, previous_force * 30 // 100, month=next_world.current_month)
 
     city.event_states = [
         state
@@ -277,3 +300,136 @@ def apply_rebellion_action(
         )
     next_world.validate()
     return next_world
+
+
+def rebellion_funding_option(world: WorldState, *, sponsor_faction_id: str, city_id: str) -> dict[str, Any]:
+    city = _city(world, city_id)
+    sponsor = _faction(world, sponsor_faction_id)
+    owner = _faction(world, city.owner_faction_id)
+    from wujiang.strategy.simulation import rebellion_risk
+
+    risk = rebellion_risk(city, food_shortage=False)
+    eligible_crisis = bool(city.occupation.get("status") in {"pending", "active"} or rebellion_force_troops(city) > 0 or risk >= 45)
+    blocked = ""
+    if sponsor.is_neutral_city_state:
+        blocked = "中立城邦不能资助外部叛乱。"
+    elif city.owner_faction_id == sponsor.faction_id:
+        blocked = "不能资助本势力城市内的叛乱。"
+    elif owner.is_neutral_city_state:
+        blocked = "外部资助只能针对主要势力控制的城市。"
+    elif sponsor.resources.money < REBELLION_FUNDING_MONEY_COST:
+        blocked = f"势力金钱不足 {REBELLION_FUNDING_MONEY_COST}。"
+    elif not eligible_crisis:
+        blocked = "该城市尚未进入占领期、叛乱危机或正式叛乱。"
+    return {
+        "id": "fund_rebellion",
+        "name": "外部资助叛乱",
+        "description": "秘密输送资金与组织力量，增加叛军并提高本势力在当地的支持。",
+        "command_cost": 1,
+        "money_cost": REBELLION_FUNDING_MONEY_COST,
+        "rebel_troop_delta": REBELLION_FUNDING_TROOPS,
+        "can_fund": not blocked,
+        "blocked_reason": blocked,
+        "rebellion_risk": risk,
+    }
+
+
+def validate_rebellion_funding(world: WorldState, *, sponsor_faction_id: str, city_id: str) -> None:
+    option = rebellion_funding_option(world, sponsor_faction_id=sponsor_faction_id, city_id=city_id)
+    if not option["can_fund"]:
+        raise StrategyError(str(option["blocked_reason"]))
+
+
+def apply_rebellion_funding(world: WorldState, *, sponsor_faction_id: str, city_id: str) -> WorldState:
+    validate_rebellion_funding(world, sponsor_faction_id=sponsor_faction_id, city_id=city_id)
+    next_world = _clone_world(world)
+    city = _city(next_world, city_id)
+    sponsor = _faction(next_world, sponsor_faction_id)
+    owner_id = city.owner_faction_id
+    sponsor.resources.money -= REBELLION_FUNDING_MONEY_COST
+    previous_force = rebellion_force_troops(city)
+    set_rebellion_force_troops(city, previous_force + REBELLION_FUNDING_TROOPS, month=next_world.current_month)
+    city.support_by_faction[sponsor.faction_id] = _clamp(city.support_by_faction.get(sponsor.faction_id, 35) + 10, 0, 100)
+    city.support_by_faction[owner_id] = _clamp(city.support_by_faction.get(owner_id, 50) - 8, 0, 100)
+    city.support_by_faction["local_autonomy"] = _clamp(city.support_by_faction.get("local_autonomy", 45) + 8, 0, 100)
+    city.event_states = [
+        state for state in city.event_states
+        if not state.startswith(f"rebellion_sponsor:{sponsor.faction_id}:")
+    ]
+    city.event_states.append(f"rebellion_sponsor:{sponsor.faction_id}:month:{next_world.current_month}")
+    next_world.event_log.append(EventLogEntry(
+        month=next_world.current_month,
+        category="rebellion_external_funding",
+        message=f"{sponsor.name}向{city.name}的反抗力量提供外部资助，叛军 {previous_force}->{rebellion_force_troops(city)}。",
+        related_ids=[sponsor.faction_id, owner_id, city.city_id],
+    ))
+    next_world.memory_tags.append(f"rebellion:funded:{next_world.current_month}:{sponsor.faction_id}:{city.city_id}")
+    next_world.validate()
+    return next_world
+
+
+def _rebellion_sponsor_ids(city: City) -> set[str]:
+    return {
+        parts[1]
+        for state in city.event_states
+        if state.startswith("rebellion_sponsor:")
+        for parts in [state.split(":")]
+        if len(parts) >= 2 and parts[1]
+    }
+
+
+def resolve_rebellion_political_outcome(
+    world: WorldState,
+    city: City,
+    *,
+    events: list[EventLogEntry],
+    month: int,
+) -> None:
+    rebel_force = rebellion_force_troops(city)
+    old_owner_id = city.owner_faction_id
+    owner_support = _clamp(city.support_by_faction.get(old_owner_id, 50), 0, 100)
+    if rebel_force <= 0 or owner_support > 15 or rebel_force < city.resources.troops:
+        return
+    sponsors = _rebellion_sponsor_ids(city)
+    candidates = []
+    for faction in world.factions:
+        if faction.is_neutral_city_state or faction.faction_id == old_owner_id:
+            continue
+        support = _clamp(city.support_by_faction.get(faction.faction_id, 35), 0, 100)
+        threshold = 60 if faction.faction_id in sponsors else 70
+        if support >= threshold:
+            candidates.append((support, faction.faction_id))
+    if candidates:
+        _, new_owner_id = max(candidates, key=lambda item: (item[0], item[1]))
+        city.owner_faction_id = new_owner_id
+        city.support_by_faction[new_owner_id] = max(65, city.support_by_faction.get(new_owner_id, 35))
+        set_rebellion_force_troops(city, 0, month=month)
+        city.occupation.update({"status": "ended", "outcome": "rebellion_defection", "ended_month": month})
+        city.event_states = [state for state in city.event_states if not state.startswith("rebellion_sponsor:")]
+        events.append(EventLogEntry(
+            month=month,
+            category="rebellion_defection",
+            message=f"{city.name}的叛乱派获得地方支持后倒戈，城市由{old_owner_id}转投{new_owner_id}。",
+            related_ids=[city.city_id, old_owner_id, new_owner_id],
+        ))
+        world.memory_tags.append(f"rebellion:defection:{month}:{city.city_id}:{new_owner_id}")
+        return
+
+    autonomy = _clamp(city.support_by_faction.get("local_autonomy", 45), 0, 100)
+    previous_owner_id = str(city.occupation.get("previous_owner_faction_id") or "")
+    previous_owner = next((item for item in world.factions if item.faction_id == previous_owner_id), None)
+    if autonomy < 80 or previous_owner is None or not previous_owner.is_neutral_city_state:
+        return
+    city.owner_faction_id = previous_owner.faction_id
+    city.support_by_faction[previous_owner.faction_id] = max(65, city.support_by_faction.get(previous_owner.faction_id, 35))
+    previous_owner.capital_city_id = city.city_id
+    set_rebellion_force_troops(city, 0, month=month)
+    city.occupation.update({"status": "ended", "outcome": "autonomy_restored", "ended_month": month})
+    city.event_states = [state for state in city.event_states if not state.startswith("rebellion_sponsor:")]
+    events.append(EventLogEntry(
+        month=month,
+        category="rebellion_autonomy_restored",
+        message=f"{city.name}的自治派驱逐{old_owner_id}，{previous_owner.name}恢复自治。",
+        related_ids=[city.city_id, old_owner_id, previous_owner.faction_id],
+    ))
+    world.memory_tags.append(f"rebellion:autonomy:{month}:{city.city_id}:{previous_owner.faction_id}")

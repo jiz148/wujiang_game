@@ -10,7 +10,16 @@ from wujiang.strategy.simulation import clamp, owner_support
 
 BATTLE_RESOLUTION_MODES = {"manual", "ai_auto", "watch_ai", "quick"}
 MIN_ATTACK_TROOPS = 50
+ATTACK_COMMITMENT_NUMERATOR = 3
+ATTACK_COMMITMENT_DENOMINATOR = 4
 REGISTERED_UNIT_TROOP_VALUES = {"infantry": 100, "archer": 140, "cavalry": 180}
+
+
+def city_attack_commitment(troops: int) -> int:
+    available = max(0, int(troops))
+    if available < MIN_ATTACK_TROOPS:
+        return 0
+    return max(MIN_ATTACK_TROOPS, available * ATTACK_COMMITMENT_NUMERATOR // ATTACK_COMMITMENT_DENOMINATOR)
 
 
 def _clone_world(world: WorldState) -> WorldState:
@@ -189,7 +198,7 @@ def declare_city_attack(
 
     attacker_registered_units = _commit_registered_units(attacker_office.unit_inventory) if attacker_office else {}
     defender_registered_units = _commit_registered_units(target.registered_units)
-    attacker_troops = max(MIN_ATTACK_TROOPS, source.resources.troops // 3) if source.resources.troops >= MIN_ATTACK_TROOPS else 0
+    attacker_troops = city_attack_commitment(source.resources.troops)
     defender_troops = target.resources.troops
     source.resources.troops -= attacker_troops
     battle = PendingBattle(
@@ -248,6 +257,9 @@ def attach_battle_room(
             related_ids=[battle.battle_id, battle.battle_room_id],
         )
     )
+    from wujiang.strategy.objectives import record_strategic_status_events
+
+    next_world = record_strategic_status_events(next_world)
     next_world.validate()
     return next_world
 
@@ -340,6 +352,7 @@ def _apply_battle_outcome(
             f"defender {surviving_grid_units_by_team.get(2, 0)}/{defender_initial_grid_units}."
         )
     if attacker_wins:
+        previous_owner_faction_id = target.owner_faction_id
         if attacker_remaining_from_room is None:
             attacker_losses = min(battle.attacker_troops, max(10, defender_score // 3))
             defender_losses = min(target.resources.troops, max(20, battle.attacker_troops // 2))
@@ -361,6 +374,14 @@ def _apply_battle_outcome(
             target.support_by_faction.get(battle.defender_faction_id, 50) - 18,
             0,
             100,
+        )
+        from wujiang.strategy.occupation import mark_city_captured
+
+        mark_city_captured(
+            next_world,
+            city_id=target.city_id,
+            previous_owner_faction_id=previous_owner_faction_id,
+            occupier_faction_id=battle.attacker_faction_id,
         )
         battle.winner_faction_id = battle.attacker_faction_id
         battle.report.extend(

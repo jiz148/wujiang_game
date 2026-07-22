@@ -16,6 +16,10 @@ from wujiang.strategy import (
     StrategyError,
     StrategyStore,
     advance_month,
+    apply_neutral_diplomacy_action,
+    apply_peaceful_integration,
+    apply_occupation_policy,
+    apply_rebellion_funding,
     apply_office_order,
     appoint_strategic_hero_to_office,
     assign_strategic_hero_duty,
@@ -24,6 +28,11 @@ from wujiang.strategy import (
     apply_rebellion_action,
     apply_rebellion_battle,
     apply_strategy_ai_monthly_actions,
+    form_or_reinforce_army,
+    disband_army,
+    halt_army_march,
+    load_army_supply,
+    order_army_march,
     apply_exile_action,
     attach_battle_room,
     choose_player_hero_path,
@@ -35,9 +44,12 @@ from wujiang.strategy import (
     request_registered_units,
     approve_registered_unit_request,
     construct_city_building,
+    continue_campaign_as_sandbox,
     resolve_battle_room_result as resolve_strategy_battle_room_result,
     resolve_story_event,
     resolve_action_office,
+    first_campaign_contract,
+    require_campaign_orders_open,
     set_battle_defender_hero,
     set_city_policy,
     set_strategic_defender_hero,
@@ -47,16 +59,29 @@ from wujiang.strategy import (
     validate_rebellion_action,
     validate_rebellion_battle,
     validate_story_event_choice,
+    validate_neutral_diplomacy_action,
+    validate_peaceful_integration,
+    validate_occupation_policy,
+    validate_rebellion_funding,
 )
 from wujiang.strategy.command import faction_command_points, strategy_action_command_cost
+from wujiang.strategy.neutral_city_states import (
+    incite_neutral_city_state,
+    validate_neutral_city_state_incitement,
+)
 from wujiang.web.auth import AuthError, AuthUser, UserStore
+from wujiang.web.analytics import AnalyticsError, AnalyticsStore
+from wujiang.web.match_history import MatchHistoryError, MatchHistoryStore
 from wujiang.web.multiplayer import DEFAULT_ROOM_MODE, ROOMS, RoomError, battle_state_for_viewer
+from wujiang.web.onboarding import onboarding_payload, quick_ai_match_payload, recommended_roster_hero_codes
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 STATIC_ROOT = PROJECT_ROOT / "static"
 PUBLIC_BASE_URL: str | None = None
 AUTH_STORE = UserStore()
+ANALYTICS_STORE = AnalyticsStore()
+MATCH_HISTORY_STORE = MatchHistoryStore()
 STRATEGY_STORE = StrategyStore()
 CITY_MONTHLY_ORDER_LIMIT = 2
 
@@ -198,7 +223,7 @@ def strategy_city_for_order(campaign, city_id: str, faction_id: str):
 
 
 def strategy_action_city_id(action_type: str, payload: dict[str, Any]) -> str:
-    if action_type in {"set_city_policy", "rebellion_action", "rebellion_battle"}:
+    if action_type in {"set_city_policy", "rebellion_action", "rebellion_battle", "choose_occupation_policy", "fund_rebellion"}:
         return str(payload.get("city_id") or payload.get("target_city_id") or "").strip()
     if action_type == "declare_attack":
         return str(payload.get("source_city_id") or "").strip()
@@ -209,6 +234,7 @@ def strategy_action_city_id(action_type: str, payload: dict[str, Any]) -> str:
         "transfer_registered_units",
         "request_registered_units",
         "construct_city_building",
+        "form_army",
     }:
         return str(payload.get("city_id") or "").strip()
     return ""
@@ -330,6 +356,54 @@ def normalize_strategy_action_payload(campaign, user_id: int, action_type: str, 
         policy = str(payload.get("policy") or "").strip()
         normalized_payload = {"city_id": city_id, "policy": policy}
         set_city_policy(campaign.world, faction_id=faction_id, city_id=city_id, policy=policy)
+        return finalize(city_id, normalized_payload)
+    if normalized_type == "incite_neutral_city_state":
+        neutral_faction_id = str(payload.get("neutral_faction_id") or "").strip()
+        target_faction_id = str(payload.get("target_faction_id") or "").strip()
+        normalized_payload = {
+            "neutral_faction_id": neutral_faction_id,
+            "target_faction_id": target_faction_id,
+        }
+        validate_neutral_city_state_incitement(
+            campaign.world,
+            instigator_faction_id=faction_id,
+            neutral_faction_id=neutral_faction_id,
+            target_faction_id=target_faction_id,
+        )
+        return finalize(f"{neutral_faction_id}:{target_faction_id}", normalized_payload)
+    if normalized_type == "neutral_diplomacy":
+        neutral_faction_id = str(payload.get("neutral_faction_id") or "").strip()
+        diplomacy_action_id = str(payload.get("diplomacy_action_id") or payload.get("action_id") or "").strip()
+        normalized_payload = {
+            "neutral_faction_id": neutral_faction_id,
+            "diplomacy_action_id": diplomacy_action_id,
+        }
+        validate_neutral_diplomacy_action(
+            campaign.world,
+            actor_faction_id=faction_id,
+            neutral_faction_id=neutral_faction_id,
+            action_id=diplomacy_action_id,
+        )
+        return finalize(neutral_faction_id, normalized_payload)
+    if normalized_type == "peaceful_integration":
+        neutral_faction_id = str(payload.get("neutral_faction_id") or "").strip()
+        normalized_payload = {"neutral_faction_id": neutral_faction_id}
+        validate_peaceful_integration(
+            campaign.world,
+            actor_faction_id=faction_id,
+            neutral_faction_id=neutral_faction_id,
+        )
+        return finalize(neutral_faction_id, normalized_payload)
+    if normalized_type == "choose_occupation_policy":
+        city_id = str(payload.get("city_id") or "").strip()
+        policy_id = str(payload.get("policy_id") or "").strip()
+        normalized_payload = {"city_id": city_id, "policy_id": policy_id}
+        validate_occupation_policy(campaign.world, faction_id=faction_id, city_id=city_id, policy_id=policy_id)
+        return finalize(city_id, normalized_payload)
+    if normalized_type == "fund_rebellion":
+        city_id = str(payload.get("city_id") or "").strip()
+        normalized_payload = {"city_id": city_id}
+        validate_rebellion_funding(campaign.world, sponsor_faction_id=faction_id, city_id=city_id)
         return finalize(city_id, normalized_payload)
     if normalized_type == "resolve_story_event":
         event_id = str(payload.get("event_id") or "").strip()
@@ -471,6 +545,80 @@ def normalize_strategy_action_payload(campaign, user_id: int, action_type: str, 
             issuer_office_id=normalized_payload["issuer_office_id"],
         )
         return normalized_type, action_key, normalized_payload
+    if normalized_type == "form_army":
+        city_id = str(payload.get("city_id") or "").strip()
+        raw_units = payload.get("unit_inventory")
+        if not isinstance(raw_units, dict):
+            raise StrategyError("编军单位必须是兵种数量对象。")
+        unit_inventory = {
+            str(unit_type): int(count or 0)
+            for unit_type, count in raw_units.items()
+            if int(count or 0) != 0
+        }
+        supply = int(payload.get("supply") or 0)
+        normalized_payload = {"city_id": city_id, "unit_inventory": unit_inventory, "supply": supply}
+        _, action_key, normalized_payload = finalize(requested_office_id or city_id, normalized_payload)
+        form_or_reinforce_army(
+            campaign.world,
+            faction_id=faction_id,
+            city_id=city_id,
+            unit_inventory=unit_inventory,
+            supply=supply,
+            issuer_office_id=normalized_payload["issuer_office_id"],
+        )
+        return normalized_type, action_key, normalized_payload
+    if normalized_type == "disband_army":
+        army_id = str(payload.get("army_id") or "").strip()
+        normalized_payload = {"army_id": army_id}
+        _, action_key, normalized_payload = finalize(army_id, normalized_payload)
+        disband_army(
+            campaign.world,
+            faction_id=faction_id,
+            army_id=army_id,
+            issuer_office_id=normalized_payload["issuer_office_id"],
+        )
+        return normalized_type, action_key, normalized_payload
+    if normalized_type == "set_army_movement":
+        army_id = str(payload.get("army_id") or "").strip()
+        movement_order = str(payload.get("movement_order") or "march").strip().lower()
+        destination_node_id = str(payload.get("destination_node_id") or "").strip()
+        if movement_order not in {"march", "hold"}:
+            raise StrategyError("军队移动命令必须是行军或停止。")
+        normalized_payload = {
+            "army_id": army_id,
+            "movement_order": movement_order,
+            "destination_node_id": destination_node_id if movement_order == "march" else "",
+        }
+        _, action_key, normalized_payload = finalize(army_id, normalized_payload)
+        if movement_order == "march":
+            order_army_march(
+                campaign.world,
+                faction_id=faction_id,
+                army_id=army_id,
+                destination_node_id=destination_node_id,
+                issuer_office_id=normalized_payload["issuer_office_id"],
+            )
+        else:
+            halt_army_march(
+                campaign.world,
+                faction_id=faction_id,
+                army_id=army_id,
+                issuer_office_id=normalized_payload["issuer_office_id"],
+            )
+        return normalized_type, action_key, normalized_payload
+    if normalized_type == "load_army_supply":
+        army_id = str(payload.get("army_id") or "").strip()
+        supply = int(payload.get("supply") or 0)
+        normalized_payload = {"army_id": army_id, "supply": supply}
+        _, action_key, normalized_payload = finalize(army_id, normalized_payload)
+        load_army_supply(
+            campaign.world,
+            faction_id=faction_id,
+            army_id=army_id,
+            supply=supply,
+            issuer_office_id=normalized_payload["issuer_office_id"],
+        )
+        return normalized_type, action_key, normalized_payload
     if normalized_type == "appoint_strategic_hero":
         target_office_id = str(payload.get("target_office_id") or "").strip()
         hero_code = str(payload.get("hero_code") or "").strip()
@@ -555,8 +703,9 @@ def normalize_strategy_action_payload(campaign, user_id: int, action_type: str, 
             if normalized_type == "send_office_request"
             else str(payload.get("office_order_type") or "order").strip()
         )
-        if office_order_type not in {"order", "request", "attack_city", "defend_city"}:
+        if office_order_type not in {"order", "request", "attack_city", "defend_city", "set_policy"}:
             raise StrategyError("职位命令类型无效。")
+        city_policy = str(payload.get("city_policy") or "").strip()
         normalized_payload = {
             "receiver_office_id": receiver_office_id,
             "objective": objective,
@@ -564,9 +713,15 @@ def normalize_strategy_action_payload(campaign, user_id: int, action_type: str, 
             "priority": priority,
             "deadline_month": deadline_month,
             "office_order_type": office_order_type,
+            "city_policy": city_policy,
         }
+        queued_office_order_count = sum(
+            1
+            for action in campaign.queued_actions
+            if action.action_type in {"issue_office_order", "send_office_request"}
+        )
         _, action_key, normalized_payload = finalize(
-            f"{receiver_office_id}:{len(campaign.world.office_orders) + 1}",
+            f"{receiver_office_id}:{len(campaign.world.office_orders) + queued_office_order_count + 1}",
             normalized_payload,
         )
         apply_office_order(
@@ -578,6 +733,7 @@ def normalize_strategy_action_payload(campaign, user_id: int, action_type: str, 
             target_entity_id=target_entity_id,
             priority=priority,
             deadline_month=deadline_month,
+            details={"policy": city_policy} if office_order_type == "set_policy" else None,
         )
         return normalized_type, action_key, normalized_payload
     raise StrategyError("Unknown strategy action type.")
@@ -604,6 +760,39 @@ def apply_strategy_action_queue(campaign):
                     faction_id=faction_id,
                     city_id=str(payload.get("city_id") or ""),
                     policy=str(payload.get("policy") or ""),
+                )
+            elif action.action_type == "incite_neutral_city_state":
+                next_world = incite_neutral_city_state(
+                    next_world,
+                    instigator_faction_id=faction_id,
+                    neutral_faction_id=str(payload.get("neutral_faction_id") or ""),
+                    target_faction_id=str(payload.get("target_faction_id") or ""),
+                )
+            elif action.action_type == "neutral_diplomacy":
+                next_world = apply_neutral_diplomacy_action(
+                    next_world,
+                    actor_faction_id=faction_id,
+                    neutral_faction_id=str(payload.get("neutral_faction_id") or ""),
+                    action_id=str(payload.get("diplomacy_action_id") or ""),
+                )
+            elif action.action_type == "peaceful_integration":
+                next_world = apply_peaceful_integration(
+                    next_world,
+                    actor_faction_id=faction_id,
+                    neutral_faction_id=str(payload.get("neutral_faction_id") or ""),
+                )
+            elif action.action_type == "choose_occupation_policy":
+                next_world = apply_occupation_policy(
+                    next_world,
+                    faction_id=faction_id,
+                    city_id=str(payload.get("city_id") or ""),
+                    policy_id=str(payload.get("policy_id") or ""),
+                )
+            elif action.action_type == "fund_rebellion":
+                next_world = apply_rebellion_funding(
+                    next_world,
+                    sponsor_faction_id=faction_id,
+                    city_id=str(payload.get("city_id") or ""),
                 )
             elif action.action_type == "resolve_story_event":
                 next_world = resolve_story_event(
@@ -694,6 +883,46 @@ def apply_strategy_action_queue(campaign):
                     request_id=str(payload.get("request_id") or ""),
                     issuer_office_id=office.office_id,
                 )
+            elif action.action_type == "form_army":
+                next_world = form_or_reinforce_army(
+                    next_world,
+                    faction_id=faction_id,
+                    city_id=str(payload.get("city_id") or ""),
+                    unit_inventory=dict(payload.get("unit_inventory") or {}),
+                    supply=int(payload.get("supply") or 0),
+                    issuer_office_id=office.office_id,
+                )
+            elif action.action_type == "disband_army":
+                next_world = disband_army(
+                    next_world,
+                    faction_id=faction_id,
+                    army_id=str(payload.get("army_id") or ""),
+                    issuer_office_id=office.office_id,
+                )
+            elif action.action_type == "set_army_movement":
+                if str(payload.get("movement_order") or "march") == "hold":
+                    next_world = halt_army_march(
+                        next_world,
+                        faction_id=faction_id,
+                        army_id=str(payload.get("army_id") or ""),
+                        issuer_office_id=office.office_id,
+                    )
+                else:
+                    next_world = order_army_march(
+                        next_world,
+                        faction_id=faction_id,
+                        army_id=str(payload.get("army_id") or ""),
+                        destination_node_id=str(payload.get("destination_node_id") or ""),
+                        issuer_office_id=office.office_id,
+                    )
+            elif action.action_type == "load_army_supply":
+                next_world = load_army_supply(
+                    next_world,
+                    faction_id=faction_id,
+                    army_id=str(payload.get("army_id") or ""),
+                    supply=int(payload.get("supply") or 0),
+                    issuer_office_id=office.office_id,
+                )
             elif action.action_type == "appoint_strategic_hero":
                 next_world = appoint_strategic_hero_to_office(
                     next_world,
@@ -755,6 +984,7 @@ def apply_strategy_action_queue(campaign):
                         if payload.get("deadline_month") not in {None, ""}
                         else None
                     ),
+                    details={"policy": str(payload.get("city_policy") or "")} if str(payload.get("office_order_type") or "") == "set_policy" else None,
                 )
             else:
                 raise StrategyError("Unknown strategy action type.")
@@ -796,6 +1026,7 @@ def create_strategy_battle_room(
         player2_roster=rosters.defender.roster,
         start_immediately=True,
         host_becomes_ai_after_start=resolution_mode in {"watch_ai", "ai_auto"},
+        host_account_user_id=auth_user.user_id,
     )
     return {
         "room_id": room.room_id,
@@ -931,11 +1162,118 @@ def sync_finished_strategy_battle_room(room) -> dict[str, Any] | None:
 
 
 def room_state_with_strategy_sync(room, player_token: str | None, *, base_url: str | None) -> dict[str, Any]:
+    record_finished_room_history(room)
     state = room.serialize_state(player_token, base_url=base_url)
     strategy_campaign = sync_finished_strategy_battle_room(room)
     if strategy_campaign is not None:
         state["strategy_campaign"] = strategy_campaign
     return state
+
+
+def record_finished_room_history(room) -> bool:
+    if getattr(room, "status", None) != "finished" or getattr(room, "battle", None) is None:
+        return False
+    room._ensure_replay_saved()
+    replay = getattr(room, "replay", None)
+    if replay is None or not replay.saved_path or not replay.finished_at:
+        return False
+    participants_by_user: dict[int, dict[str, Any]] = {}
+    winner_team_id = int(getattr(room.battle, "winner", 0) or 0)
+    for seat in sorted(room.seats.values(), key=lambda item: item.player_id):
+        if not seat.is_human or seat.account_user_id is None:
+            continue
+        user_id = int(seat.account_user_id)
+        participants_by_user.setdefault(
+            user_id,
+            {
+                "user_id": user_id,
+                "seat_id": seat.player_id,
+                "team_id": seat.team_id,
+                "result": "win" if seat.team_id == winner_team_id else "loss",
+            },
+        )
+    if not participants_by_user:
+        return False
+    summary = room.serialize_summary()
+    postgame = summary.get("postgame") or {}
+    return MATCH_HISTORY_STORE.record_match(
+        match={
+            "match_id": replay.match_id,
+            "room_id": room.room_id,
+            "mode": room.mode,
+            "mode_name": summary.get("mode_name"),
+            "experience_kind": room.experience_kind,
+            "created_at": replay.created_at,
+            "finished_at": replay.finished_at,
+            "winner_team_id": winner_team_id,
+            "reason_code": postgame.get("reason_code"),
+            "reason_text": postgame.get("reason_text"),
+            "duration_seconds": postgame.get("duration_seconds"),
+            "mvp_name": (postgame.get("mvp") or {}).get("name"),
+            "replay_path": replay.saved_path,
+            "replay_step_count": replay.step_count,
+            "postgame": postgame,
+            "seats": summary.get("seats") or [],
+        },
+        participants=list(participants_by_user.values()),
+    )
+
+
+def historical_replay_payload(user_id: int, match_id: str, step_index: Any) -> dict[str, Any]:
+    history = MATCH_HISTORY_STORE.get_for_user(user_id, match_id)
+    replay_path = Path(str(history.pop("replay_path") or ""))
+    resolved_path = replay_path.resolve() if replay_path.is_absolute() else (PROJECT_ROOT / replay_path).resolve()
+    replay_root = (PROJECT_ROOT / "replays").resolve()
+    if replay_root not in resolved_path.parents or not resolved_path.is_file():
+        raise MatchHistoryError("这场对局的回放文件不可用。")
+    try:
+        saved = json.loads(resolved_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MatchHistoryError("这场对局的回放文件无法读取。") from exc
+    steps = saved.get("steps") if isinstance(saved.get("steps"), list) else []
+    if not steps:
+        raise MatchHistoryError("这场对局没有可播放的回放步骤。")
+    try:
+        requested_index = int(step_index)
+    except (TypeError, ValueError):
+        requested_index = len(steps) - 1
+    if requested_index < 0:
+        requested_index = len(steps) - 1
+    resolved_index = max(0, min(requested_index, len(steps) - 1))
+    battle = steps[resolved_index].get("omniscient_battle") or {}
+    room = {
+        "room_id": history["room_id"],
+        "match_id": history["match_id"],
+        "status": "finished",
+        "mode": history["mode"],
+        "mode_name": history["mode_name"],
+        "experience_kind": history["experience_kind"],
+        "historical": True,
+        "viewer_player_id": None,
+        "viewer_team_id": history["viewer_team_id"],
+        "viewer_is_host": False,
+        "can_rematch": False,
+        "seats": history["seats"],
+        "postgame": history["postgame"],
+        "replay": {
+            "available": True,
+            "step_count": len(steps),
+            "last_step_index": len(steps) - 1,
+            "finished": True,
+            "can_use_omniscient": True,
+        },
+    }
+    return {
+        "heroes": list_heroes(),
+        "room": room,
+        "battle": battle,
+        "match": history,
+        "replay": {
+            **room["replay"],
+            "step_index": resolved_index,
+            "omniscient": True,
+        },
+    }
 
 
 def extract_room_action(payload: dict[str, Any]) -> dict[str, Any]:
@@ -956,12 +1294,14 @@ class WujiangHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
         if parsed.path == "/api/heroes":
+            heroes = list_heroes()
             json_response(
                 self,
                 HTTPStatus.OK,
                 {
-                    "heroes": list_heroes(),
+                    "heroes": heroes,
                     "rooms": ROOMS.list_rooms(base_url=request_base_url(self)),
+                    "onboarding": onboarding_payload(heroes),
                 },
             )
             return
@@ -976,6 +1316,41 @@ class WujiangHandler(BaseHTTPRequestHandler):
                 auth_error_response(self, exc)
                 return
             json_response(self, HTTPStatus.OK, {"user": user.to_public_dict()})
+            return
+        if parsed.path == "/api/analytics/funnel":
+            json_response(self, HTTPStatus.OK, ANALYTICS_STORE.funnel())
+            return
+        if parsed.path == "/api/matches/recent":
+            try:
+                user = authenticated_user_from_request(self, query=query)
+                matches = MATCH_HISTORY_STORE.list_recent(user.user_id)
+            except AuthError as exc:
+                auth_error_response(self, exc)
+                return
+            json_response(self, HTTPStatus.OK, {"matches": matches})
+            return
+        if parsed.path == "/api/progression/overview":
+            try:
+                user = authenticated_user_from_request(self, query=query)
+                progression = MATCH_HISTORY_STORE.progression_overview(user.user_id)
+            except AuthError as exc:
+                auth_error_response(self, exc)
+                return
+            json_response(self, HTTPStatus.OK, {"progression": progression})
+            return
+        if parsed.path == "/api/matches/replay":
+            try:
+                user = authenticated_user_from_request(self, query=query)
+                match_id = (query.get("match_id") or [""])[0]
+                step_index = (query.get("step_index") or ["-1"])[0]
+                payload = historical_replay_payload(user.user_id, match_id, step_index)
+            except AuthError as exc:
+                auth_error_response(self, exc)
+                return
+            except MatchHistoryError as exc:
+                json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                return
+            json_response(self, HTTPStatus.OK, payload)
             return
         if parsed.path == "/api/strategy/campaigns":
             try:
@@ -1100,6 +1475,19 @@ class WujiangHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/api/analytics/events":
+            try:
+                event_id = ANALYTICS_STORE.record(
+                    str(payload.get("event_name") or ""),
+                    str(payload.get("anonymous_session_id") or ""),
+                    payload.get("properties"),
+                )
+            except (AnalyticsError, TypeError, ValueError) as exc:
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            json_response(self, HTTPStatus.CREATED, {"accepted": True, "event_id": event_id})
+            return
+
         if parsed.path == "/api/auth/login":
             try:
                 user, session_token = AUTH_STORE.authenticate(
@@ -1128,8 +1516,8 @@ class WujiangHandler(BaseHTTPRequestHandler):
                     owner=auth_user,
                     name=str(payload.get("name") or "新战役"),
                     seed=int(payload.get("seed", 1)),
-                    city_count=int(payload.get("city_count", 8)),
-                    faction_count=int(payload.get("faction_count", 2)),
+                    neutral_city_states=True,
+                    campaign_contract=first_campaign_contract(),
                 )
                 resume_status = STRATEGY_STORE.mark_online(campaign.campaign_id, auth_user)
                 campaign = STRATEGY_STORE.get_campaign_for_user(campaign.campaign_id, auth_user.user_id)
@@ -1170,6 +1558,12 @@ class WujiangHandler(BaseHTTPRequestHandler):
                 assert auth_user is not None
                 campaign_id = int(payload.get("campaign_id"))
                 campaign = STRATEGY_STORE.lock_initial_players(campaign_id, auth_user.user_id)
+                from wujiang.strategy.ai_goals import ensure_ai_strategic_goal
+
+                for member in campaign.members:
+                    if str(getattr(member, "role", "")).lower() == "ai":
+                        ensure_ai_strategic_goal(campaign.world, member.faction_id)
+                campaign = STRATEGY_STORE.update_world(campaign_id, auth_user.user_id, campaign.world)
                 resume_status = STRATEGY_STORE.mark_online(campaign.campaign_id, auth_user)
                 campaign = STRATEGY_STORE.get_campaign_for_user(campaign.campaign_id, auth_user.user_id)
             except (TypeError, ValueError) as exc:
@@ -1261,6 +1655,8 @@ class WujiangHandler(BaseHTTPRequestHandler):
                 assert auth_user is not None
                 campaign_id = int(payload.get("campaign_id"))
                 campaign = STRATEGY_STORE.get_campaign_for_user(campaign_id, auth_user.user_id)
+                if campaign.status == "active":
+                    require_campaign_orders_open(campaign.world)
                 path = str(payload.get("path") or "")
                 if campaign.status != "lobby" and path == "lord":
                     raise StrategyError("战役开始后不能直接接任既有势力主公。", status=HTTPStatus.CONFLICT)
@@ -1296,6 +1692,34 @@ class WujiangHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/api/strategy/campaigns/guide-action":
+            try:
+                assert auth_user is not None
+                campaign_id = int(payload.get("campaign_id"))
+                campaign = STRATEGY_STORE.get_campaign_for_user(campaign_id, auth_user.user_id)
+                faction_id = campaign_member_faction_id(campaign, auth_user.user_id)
+                from wujiang.strategy.campaign_tutorial import update_campaign_tutorial
+
+                next_world = update_campaign_tutorial(
+                    campaign.world,
+                    faction_id=faction_id,
+                    action=str(payload.get("action") or ""),
+                )
+                campaign = STRATEGY_STORE.update_world(campaign_id, auth_user.user_id, next_world)
+                resume_status = STRATEGY_STORE.resume_status(campaign_id)
+            except (TypeError, ValueError):
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": "战役 ID 必须是整数。"})
+                return
+            except StrategyError as exc:
+                strategy_error_response(self, exc)
+                return
+            json_response(
+                self,
+                HTTPStatus.OK,
+                {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+            )
+            return
+
         if parsed.path == "/api/strategy/campaigns/advance-month":
             try:
                 assert auth_user is not None
@@ -1303,24 +1727,39 @@ class WujiangHandler(BaseHTTPRequestHandler):
                 resume_status = STRATEGY_STORE.require_can_resume(campaign_id, auth_user.user_id)
                 campaign = STRATEGY_STORE.get_campaign_for_user(campaign_id, auth_user.user_id)
                 require_campaign_owner(campaign, auth_user.user_id)
-                require_strategy_action_office(
-                    campaign,
-                    user_id=auth_user.user_id,
-                    action_type="advance_month",
-                    payload=payload,
-                )
+                require_campaign_orders_open(campaign.world)
                 action_month = campaign.world.current_month
+                previous_world = campaign.world
+                command_remaining_by_faction = {
+                    faction.faction_id: faction_command_points(faction.faction_id, campaign.queued_actions)["remaining"]
+                    for faction in campaign.world.factions
+                }
                 next_world, battle_rooms = apply_strategy_action_queue(campaign)
                 controlled_faction_ids = {
                     member.faction_id
                     for member in campaign.members
                     if str(getattr(member, "role", "")).lower() != "ai" and int(member.user_id) > 0
                 }
+                from wujiang.strategy.office_automation import apply_player_office_automation
+
+                next_world = apply_player_office_automation(
+                    next_world,
+                    controlled_faction_ids=controlled_faction_ids,
+                    queued_actions=campaign.queued_actions,
+                    command_remaining_by_faction=command_remaining_by_faction,
+                )
                 next_world = apply_strategy_ai_monthly_actions(
                     next_world,
                     controlled_faction_ids=controlled_faction_ids,
                 )
                 next_world = advance_month(next_world)
+                from wujiang.strategy.monthly_cycle import record_monthly_report
+
+                next_world = record_monthly_report(
+                    previous_world,
+                    next_world,
+                    resolved_actions=campaign.queued_actions,
+                )
                 campaign = STRATEGY_STORE.update_world(campaign_id, auth_user.user_id, next_world)
                 STRATEGY_STORE.mark_queued_actions_resolved(campaign_id, auth_user.user_id, action_month)
                 campaign = STRATEGY_STORE.get_campaign_for_user(campaign_id, auth_user.user_id)
@@ -1340,11 +1779,58 @@ class WujiangHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/api/strategy/campaigns/continue-sandbox":
+            try:
+                assert auth_user is not None
+                campaign_id = int(payload.get("campaign_id"))
+                resume_status = STRATEGY_STORE.require_can_resume(campaign_id, auth_user.user_id)
+                campaign = STRATEGY_STORE.get_campaign_for_user(campaign_id, auth_user.user_id)
+                require_campaign_owner(campaign, auth_user.user_id)
+                next_world = continue_campaign_as_sandbox(campaign.world)
+                campaign = STRATEGY_STORE.update_world(campaign_id, auth_user.user_id, next_world)
+            except (TypeError, ValueError) as exc:
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": "战役 ID 必须是整数。"})
+                return
+            except StrategyError as exc:
+                strategy_error_response(self, exc)
+                return
+            json_response(
+                self,
+                HTTPStatus.OK,
+                {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+            )
+            return
+
+        if parsed.path == "/api/strategy/campaigns/archive":
+            try:
+                assert auth_user is not None
+                campaign_id = int(payload.get("campaign_id"))
+                resume_status = STRATEGY_STORE.require_can_resume(campaign_id, auth_user.user_id)
+                campaign = STRATEGY_STORE.get_campaign_for_user(campaign_id, auth_user.user_id)
+                require_campaign_owner(campaign, auth_user.user_id)
+                from wujiang.strategy.campaign_retrospective import archive_campaign
+
+                next_world = archive_campaign(campaign.world)
+                campaign = STRATEGY_STORE.update_world(campaign_id, auth_user.user_id, next_world)
+            except (TypeError, ValueError):
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": "战役 ID 必须是整数。"})
+                return
+            except StrategyError as exc:
+                strategy_error_response(self, exc)
+                return
+            json_response(
+                self,
+                HTTPStatus.OK,
+                {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+            )
+            return
+
         if parsed.path == "/api/strategy/campaigns/queue-action":
             try:
                 assert auth_user is not None
                 campaign_id = int(payload.get("campaign_id"))
                 campaign = STRATEGY_STORE.get_campaign_for_user(campaign_id, auth_user.user_id)
+                require_campaign_orders_open(campaign.world)
                 action_type, action_key, action_payload = normalize_strategy_action_payload(
                     campaign,
                     auth_user.user_id,
@@ -1366,6 +1852,17 @@ class WujiangHandler(BaseHTTPRequestHandler):
                     action_key=action_key,
                     payload=action_payload,
                 )
+                previous_action = next(
+                    (
+                        action
+                        for action in campaign.queued_actions
+                        if action.user_id == auth_user.user_id
+                        and action.month == campaign.world.current_month
+                        and action.action_type == action_type
+                        and action.action_key == action_key
+                    ),
+                    None,
+                )
                 campaign = STRATEGY_STORE.queue_action(
                     campaign_id=campaign_id,
                     user=auth_user,
@@ -1382,7 +1879,36 @@ class WujiangHandler(BaseHTTPRequestHandler):
             json_response(
                 self,
                 HTTPStatus.OK,
-                {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+                {
+                    "campaign": campaign.to_public_dict(resume_status=resume_status),
+                    "submission": {
+                        "replaced": previous_action is not None,
+                        "previous_action": previous_action.to_dict() if previous_action is not None else None,
+                        "command_points": faction_command_points(
+                            campaign_member_faction_id(campaign, auth_user.user_id),
+                            campaign.queued_actions,
+                        ),
+                        "resource_balance": next(
+                            faction.resources.to_dict()
+                            for faction in campaign.world.factions
+                            if faction.faction_id == campaign_member_faction_id(campaign, auth_user.user_id)
+                        ),
+                        "affected_months": [campaign.world.current_month, campaign.world.current_month + 1],
+                        **(
+                            {
+                                "execution": {
+                                    "issuer_office_id": str(action_payload.get("issuer_office_id") or ""),
+                                    "executor_office_id": str(action_payload.get("receiver_office_id") or ""),
+                                    "command_cost": strategy_action_command_cost(action_type, action_payload),
+                                    "expected_completion_month": campaign.world.current_month + 1,
+                                    "result_summary": "推进月份时送达接收职位并生成执行回执。",
+                                }
+                            }
+                            if action_type in {"issue_office_order", "send_office_request"}
+                            else {}
+                        ),
+                    },
+                },
             )
             return
 
@@ -1394,6 +1920,7 @@ class WujiangHandler(BaseHTTPRequestHandler):
                 policy = str(payload.get("policy") or "")
                 resume_status = STRATEGY_STORE.require_can_resume(campaign_id, auth_user.user_id)
                 campaign = STRATEGY_STORE.get_campaign_for_user(campaign_id, auth_user.user_id)
+                require_campaign_orders_open(campaign.world)
                 faction_id = campaign_member_faction_id(campaign, auth_user.user_id)
                 require_strategy_action_office(
                     campaign,
@@ -1428,6 +1955,7 @@ class WujiangHandler(BaseHTTPRequestHandler):
                 hero_code = str(payload.get("hero_code") or "")
                 resume_status = STRATEGY_STORE.require_can_resume(campaign_id, auth_user.user_id)
                 campaign = STRATEGY_STORE.get_campaign_for_user(campaign_id, auth_user.user_id)
+                require_campaign_orders_open(campaign.world)
                 faction_id = campaign_member_faction_id(campaign, auth_user.user_id)
                 require_strategy_action_office(
                     campaign,
@@ -1462,6 +1990,7 @@ class WujiangHandler(BaseHTTPRequestHandler):
                 hero_codes = strategy_defender_hero_codes_from_payload(payload)
                 resume_status = STRATEGY_STORE.require_can_resume(campaign_id, auth_user.user_id)
                 campaign = STRATEGY_STORE.get_campaign_for_user(campaign_id, auth_user.user_id)
+                require_campaign_orders_open(campaign.world)
                 faction_id = campaign_member_faction_id(campaign, auth_user.user_id)
                 require_strategy_action_office(
                     campaign,
@@ -1496,6 +2025,7 @@ class WujiangHandler(BaseHTTPRequestHandler):
                 tech_id = str(payload.get("tech_id") or "")
                 resume_status = STRATEGY_STORE.require_can_resume(campaign_id, auth_user.user_id)
                 campaign = STRATEGY_STORE.get_campaign_for_user(campaign_id, auth_user.user_id)
+                require_campaign_orders_open(campaign.world)
                 faction_id = campaign_member_faction_id(campaign, auth_user.user_id)
                 require_strategy_action_office(
                     campaign,
@@ -1527,6 +2057,7 @@ class WujiangHandler(BaseHTTPRequestHandler):
                 resolution_mode = str(payload.get("resolution_mode") or "quick")
                 resume_status = STRATEGY_STORE.require_can_resume(campaign_id, auth_user.user_id)
                 campaign = STRATEGY_STORE.get_campaign_for_user(campaign_id, auth_user.user_id)
+                require_campaign_orders_open(campaign.world)
                 faction_id = campaign_member_faction_id(campaign, auth_user.user_id)
                 attack_office = require_strategy_action_office(
                     campaign,
@@ -1572,7 +2103,11 @@ class WujiangHandler(BaseHTTPRequestHandler):
             player_name = payload.get("player_name") or auth_user.username
             room_mode = payload.get("mode", DEFAULT_ROOM_MODE)
             try:
-                room, player_id, player_token = ROOMS.create_room(str(player_name), str(room_mode or DEFAULT_ROOM_MODE))
+                room, player_id, player_token = ROOMS.create_room(
+                    str(player_name),
+                    str(room_mode or DEFAULT_ROOM_MODE),
+                    account_user_id=auth_user.user_id,
+                )
             except RoomError as exc:
                 json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
@@ -1582,13 +2117,95 @@ class WujiangHandler(BaseHTTPRequestHandler):
             json_response(self, HTTPStatus.OK, response)
             return
 
+        if parsed.path == "/api/rooms/tutorial-start":
+            assert auth_user is not None
+            player_name = payload.get("player_name") or auth_user.username
+            try:
+                room, player_id, player_token = ROOMS.create_room(
+                    str(player_name),
+                    "classic",
+                    account_user_id=auth_user.user_id,
+                )
+                room.experience_kind = "tutorial"
+                room.select_hero(player_token, "fire_funeral", 1, seat_id=1)
+                room.set_seat_controller(player_token, 2, "ai")
+                room.select_hero(player_token, "ellie", 1, seat_id=2)
+                room.start_battle(player_token)
+                room.configure_tutorial()
+            except RoomError as exc:
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            response = room.serialize_state(player_token, base_url=request_base_url(self))
+            response["player_token"] = player_token
+            response["joined_player_id"] = player_id
+            json_response(self, HTTPStatus.OK, response)
+            return
+
+        if parsed.path == "/api/rooms/quick-ai-start":
+            assert auth_user is not None
+            player_name = payload.get("player_name") or auth_user.username
+            config = quick_ai_match_payload()
+            try:
+                room, player_id, player_token = ROOMS.create_preconfigured_battle_room(
+                    host_name=str(player_name),
+                    opponent_name=str(config["opponent_name"]),
+                    player1_roster=list(config["player_hero_codes"]),
+                    player2_roster=list(config["opponent_hero_codes"]),
+                    start_immediately=True,
+                    ai_difficulty=str(config["ai_difficulty"]),
+                    host_account_user_id=auth_user.user_id,
+                )
+                room.experience_kind = "quick_ai"
+                room.resolve_ai_until_human_input()
+                room.touch()
+            except RoomError as exc:
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            response = room.serialize_state(player_token, base_url=request_base_url(self))
+            response["player_token"] = player_token
+            response["joined_player_id"] = player_id
+            response["quick_ai"] = config
+            json_response(self, HTTPStatus.OK, response)
+            return
+
+        if parsed.path == "/api/rooms/tutorial-select-unit":
+            try:
+                room = ROOMS.get_room(str(payload.get("room_id") or ""))
+                room.tutorial_select_unit(
+                    str(payload.get("player_token") or ""),
+                    str(payload.get("unit_id") or ""),
+                )
+            except RoomError as exc:
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            json_response(
+                self,
+                HTTPStatus.OK,
+                room.serialize_state(str(payload.get("player_token") or ""), base_url=request_base_url(self)),
+            )
+            return
+
+        if parsed.path == "/api/rooms/tutorial-retry":
+            try:
+                room = ROOMS.get_room(str(payload.get("room_id") or ""))
+                room.retry_tutorial_checkpoint(str(payload.get("player_token") or ""))
+            except RoomError as exc:
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            json_response(
+                self,
+                HTTPStatus.OK,
+                room.serialize_state(str(payload.get("player_token") or ""), base_url=request_base_url(self)),
+            )
+            return
+
         if parsed.path == "/api/rooms/join":
             assert auth_user is not None
             room_id = payload.get("room_id", "")
             player_name = payload.get("player_name") or auth_user.username
             try:
                 room = ROOMS.get_room(str(room_id))
-                player_id, player_token = room.join(str(player_name))
+                player_id, player_token = room.join(str(player_name), account_user_id=auth_user.user_id)
             except RoomError as exc:
                 room = None
                 try:
@@ -1628,6 +2245,27 @@ class WujiangHandler(BaseHTTPRequestHandler):
                 if room is not None:
                     error_payload["state"] = room.serialize_state(str(player_token or ""), base_url=request_base_url(self))
                 json_response(self, HTTPStatus.BAD_REQUEST, error_payload)
+                return
+            json_response(
+                self,
+                HTTPStatus.OK,
+                room_state_with_strategy_sync(room, str(player_token or ""), base_url=request_base_url(self)),
+            )
+            return
+
+        if parsed.path == "/api/rooms/apply-recommended-roster":
+            room_id = payload.get("room_id", "")
+            player_token = payload.get("player_token")
+            seat_id = payload.get("seat_id")
+            hero_codes = recommended_roster_hero_codes(str(payload.get("roster_code") or ""))
+            if hero_codes is None:
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": "推荐阵容不存在。"})
+                return
+            try:
+                room = ROOMS.get_room(str(room_id))
+                room.set_roster(str(player_token or ""), hero_codes, seat_id=seat_id)
+            except RoomError as exc:
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
             json_response(
                 self,
@@ -1713,12 +2351,36 @@ class WujiangHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/api/rooms/set-ready":
+            room_id = payload.get("room_id", "")
+            player_token = payload.get("player_token")
+            try:
+                room = ROOMS.get_room(str(room_id))
+                room.set_ready(str(player_token or ""), bool(payload.get("ready", True)))
+            except RoomError as exc:
+                room = None
+                try:
+                    room = ROOMS.get_room(str(room_id))
+                except RoomError:
+                    pass
+                error_payload: dict[str, Any] = {"error": str(exc)}
+                if room is not None:
+                    error_payload["state"] = room.serialize_state(str(player_token or ""), base_url=request_base_url(self))
+                json_response(self, HTTPStatus.BAD_REQUEST, error_payload)
+                return
+            json_response(
+                self,
+                HTTPStatus.OK,
+                room_state_with_strategy_sync(room, str(player_token or ""), base_url=request_base_url(self)),
+            )
+            return
+
         if parsed.path == "/api/rooms/start":
             room_id = payload.get("room_id", "")
             player_token = payload.get("player_token")
             try:
                 room = ROOMS.get_room(str(room_id))
-                room.start_battle(str(player_token or ""))
+                room.start_battle(str(player_token or ""), require_confirmation=True)
             except RoomError as exc:
                 room = None
                 try:
@@ -1853,6 +2515,7 @@ class WujiangHandler(BaseHTTPRequestHandler):
             player_token = payload.get("player_token")
             try:
                 room = ROOMS.get_room(str(room_id))
+                record_finished_room_history(room)
                 room.restart_lobby(str(player_token or ""))
             except RoomError as exc:
                 room = None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+from typing import Any
 
 from wujiang.strategy.models import City, EventLogEntry, Faction, MapNode, ResourceBundle, StrategyError, WorldState
 
@@ -29,6 +30,11 @@ CITY_TROOP_FEATURES = (
     "城墙工兵",
 )
 
+NEUTRAL_GOVERNOR_NAMES = (
+    "顾临川", "陆怀安", "沈砚", "苏明远", "裴照", "温行舟",
+    "谢云岚", "林朔", "闻人策", "白景澄", "萧长宁", "叶知秋",
+)
+
 
 def _city_name(index: int) -> str:
     base = CITY_NAME_PARTS[(index - 1) % len(CITY_NAME_PARTS)]
@@ -48,6 +54,8 @@ def generate_random_world(
     seed: int,
     city_count: int = 8,
     faction_count: int = 2,
+    neutral_city_states: bool = False,
+    campaign_contract: dict[str, Any] | None = None,
 ) -> WorldState:
     if city_count < 2:
         raise StrategyError("随机战略地图至少需要 2 座城市。")
@@ -55,9 +63,16 @@ def generate_random_world(
         raise StrategyError("随机战略地图至少需要 1 个势力。")
     if faction_count > city_count:
         raise StrategyError("势力数量不能超过城市数量。")
+    if neutral_city_states and city_count - faction_count <= faction_count:
+        raise StrategyError("中立城邦数量必须多于玩家与主要 AI 的起始城市总数。")
 
     rng = random.Random(int(seed))
-    faction_ids = [f"faction_{index}" for index in range(1, faction_count + 1)]
+    major_faction_ids = [f"faction_{index}" for index in range(1, faction_count + 1)]
+    neutral_faction_ids = [
+        f"neutral_city_state_{index}"
+        for index in range(faction_count + 1, city_count + 1)
+    ] if neutral_city_states else []
+    faction_ids = [*major_faction_ids, *neutral_faction_ids]
     nodes: list[MapNode] = []
     cities: list[City] = []
     connections: dict[str, set[str]] = {}
@@ -95,19 +110,43 @@ def generate_random_world(
         node.connected_node_ids = sorted(connections[node.node_id])
 
     factions: list[Faction] = []
-    for index, faction_id in enumerate(faction_ids, start=1):
+    for index, faction_id in enumerate(major_faction_ids, start=1):
         factions.append(
             Faction(
                 faction_id=faction_id,
                 name=f"第{index}势力",
                 is_ai=index != 1,
                 capital_city_id=f"city_{index}",
-                resources=ResourceBundle(food=300, money=250, population=0, ether=50, troops=200),
+                resources=ResourceBundle(food=300, money=300, population=0, ether=50, troops=200),
+                faction_type="major",
             )
         )
 
+    if neutral_city_states:
+        for index in range(faction_count + 1, city_count + 1):
+            faction_id = f"neutral_city_state_{index}"
+            city_name = _city_name(index)
+            governor_name = NEUTRAL_GOVERNOR_NAMES[(index - faction_count - 1) % len(NEUTRAL_GOVERNOR_NAMES)]
+            factions.append(
+                Faction(
+                    faction_id=faction_id,
+                    name=f"{city_name}城邦",
+                    is_ai=True,
+                    capital_city_id=f"city_{index}",
+                    resources=ResourceBundle(food=160, money=120, population=0, ether=0, troops=120),
+                    faction_type="neutral_city_state",
+                    governor_name=governor_name,
+                    relations={major_faction_id: 0 for major_faction_id in major_faction_ids},
+                    influence_by_faction={major_faction_id: 0 for major_faction_id in major_faction_ids},
+                )
+            )
+
     for index in range(1, city_count + 1):
-        owner_faction_id = faction_ids[(index - 1) % faction_count]
+        owner_faction_id = (
+            major_faction_ids[index - 1]
+            if index <= faction_count
+            else (f"neutral_city_state_{index}" if neutral_city_states else major_faction_ids[(index - 1) % faction_count])
+        )
         level = 1 + (1 if index <= faction_count else rng.randint(0, 2))
         population = rng.randint(800, 1800) * level
         troops = rng.randint(180, 420) * level
@@ -127,11 +166,12 @@ def generate_random_world(
                     troops=troops,
                 ),
                 defense=rng.randint(2, 6) + level,
+                governor_id=(f"officer:neutral_city_state_{index}:governor" if neutral_city_states and index > faction_count else None),
                 buildings=["政厅", "fields", "barracks", "ritual_site"],
                 building_levels={"fields": 1, "barracks": 1, "ritual_site": 1},
                 support_by_faction=_support_for_owner(faction_ids, owner_faction_id),
                 local_factions=["local_autonomy"],
-                traits=["主城候选"] if index <= faction_count else [],
+                traits=(["主城候选"] if index <= faction_count else (["中立城邦"] if neutral_city_states else [])),
                 troop_features=[troop_feature],
             )
         )
@@ -151,6 +191,7 @@ def generate_random_world(
             )
         ],
         memory_tags=["campaign_started"],
+        campaign_contract=dict(campaign_contract or {}),
     )
     from wujiang.strategy.story import open_monthly_story_events
 

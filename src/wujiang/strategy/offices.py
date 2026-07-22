@@ -44,6 +44,8 @@ OFFICE_PERMISSIONS = {
         "temporary_takeover",
         "lead_army",
         "declare_attack",
+        "handle_rebellion",
+        "manage_occupation",
     ),
     "grand_general": (
         "manage_theater",
@@ -77,6 +79,7 @@ OFFICE_PERMISSIONS = {
         "increase_city_troops",
         "register_city_soldiers",
         "manage_buildings",
+        "manage_occupation",
     ),
 }
 
@@ -104,6 +107,15 @@ ACTION_PERMISSION = {
     "rebellion_action": "handle_rebellion",
     "rebellion_battle": "handle_rebellion",
     "declare_attack": "declare_attack",
+    "form_army": "command_army",
+    "disband_army": "command_army",
+    "set_army_movement": "command_army",
+    "load_army_supply": "command_army",
+    "incite_neutral_city_state": "diplomacy",
+    "neutral_diplomacy": "diplomacy",
+    "peaceful_integration": "diplomacy",
+    "choose_occupation_policy": "manage_occupation",
+    "fund_rebellion": "diplomacy",
     "exile_action": "exile_action",
     "issue_office_order": "issue_order",
     "send_office_request": "send_request",
@@ -187,6 +199,35 @@ def ensure_office_system(world: WorldState, members: Iterable[Any] | None = None
     active_ids: set[str] = set()
 
     for faction in sorted(next_world.factions, key=lambda item: item.faction_id):
+        if faction.is_neutral_city_state:
+            owned_cities = sorted(
+                (city for city in next_world.cities if city.owner_faction_id == faction.faction_id),
+                key=lambda city: city.city_id,
+            )
+            for city in owned_cities:
+                governor_id = office_id(faction.faction_id, "governor", city.city_id)
+                governor = _upsert_office(
+                    offices,
+                    Office(
+                        office_id=governor_id,
+                        faction_id=faction.faction_id,
+                        office_type="governor",
+                        holder_id=f"officer:{faction.faction_id}:governor",
+                        holder_type="officer",
+                        controller_type="ai",
+                        managed_entity_ids=[city.city_id],
+                        permissions=[*OFFICE_PERMISSIONS["governor"], "declare_attack"],
+                        duties=list(OFFICE_DUTY_TYPES["governor"]),
+                    ),
+                )
+                governor.controller_type = "ai"
+                governor.controller_user_id = None
+                governor.holder_id = f"officer:{faction.faction_id}:governor"
+                governor.holder_type = "officer"
+                governor.permissions = [*OFFICE_PERMISSIONS["governor"], "declare_attack"]
+                city.governor_id = governor.office_id
+                active_ids.add(governor_id)
+            continue
         lord_id = office_id(faction.faction_id, "lord")
         existing_lord = offices.get(lord_id)
         if existing_lord is not None and existing_lord.holder_type == "hero":
@@ -382,6 +423,8 @@ def office_action_entity_id(action_type: str, payload: dict[str, Any]) -> str:
         "transfer_registered_units",
         "request_registered_units",
         "construct_city_building",
+        "choose_occupation_policy",
+        "form_army",
     }:
         return str(payload.get("city_id") or payload.get("target_city_id") or "")
     if action_type == "declare_attack":
@@ -425,7 +468,7 @@ def resolve_action_office(
         and (
             not entity_id
             or (
-                action_type in {"declare_attack", "perform_hero_ritual", "transfer_registered_units", "request_registered_units"}
+                action_type in {"declare_attack", "perform_hero_ritual", "transfer_registered_units", "request_registered_units", "choose_occupation_policy", "rebellion_action", "rebellion_battle", "form_army"}
                 and office.office_type in {"lord", "grand_general", "general"}
             )
             or not office.managed_entity_ids
@@ -461,7 +504,16 @@ def ai_office_for_action(
         and (
             not entity_id
             or (
-                action_type in {"declare_attack", "perform_hero_ritual", "transfer_registered_units", "request_registered_units"}
+                action_type in {
+                    "declare_attack",
+                    "perform_hero_ritual",
+                    "transfer_registered_units",
+                    "request_registered_units",
+                    "choose_occupation_policy",
+                    "rebellion_action",
+                    "rebellion_battle",
+                    "form_army",
+                }
                 and office.office_type in {"lord", "grand_general", "general"}
             )
             or not office.managed_entity_ids
@@ -481,6 +533,7 @@ def apply_office_order(
     target_entity_id: str = "",
     priority: int = 1,
     deadline_month: int | None = None,
+    details: dict[str, Any] | None = None,
 ) -> WorldState:
     next_world = _clone_world(world)
     issuer = next((office for office in next_world.offices if office.office_id == str(issuer_office_id)), None)
@@ -502,6 +555,17 @@ def apply_office_order(
         target_city = next((city for city in next_world.cities if city.city_id == str(target_entity_id)), None)
         if target_city is None:
             raise StrategyError("攻防命令必须指定有效目标城市。")
+    if normalized_type == "set_policy":
+        if (issuer.office_type, receiver.office_type) != ("lord", "governor"):
+            raise StrategyError("城市方针命令只能由主公下达给直属城主。")
+        target_city = next((city for city in next_world.cities if city.city_id == str(target_entity_id)), None)
+        policy = str((details or {}).get("policy") or "")
+        from wujiang.strategy.simulation import POLICIES
+
+        if target_city is None or target_city.owner_faction_id != issuer.faction_id or target_city.city_id not in receiver.managed_entity_ids:
+            raise StrategyError("城市方针命令必须指定该城主管辖的己方城市。")
+        if policy not in POLICIES:
+            raise StrategyError("城市方针命令指定了未知方针。")
     objective_text = str(objective or "").strip()
     if not objective_text:
         raise StrategyError("职位命令必须填写目标。")
@@ -517,6 +581,7 @@ def apply_office_order(
             priority=max(1, min(3, int(priority))),
             issued_month=next_world.current_month,
             deadline_month=int(deadline_month) if deadline_month is not None else None,
+            details=dict(details or {}),
         )
     )
     next_world.event_log.append(

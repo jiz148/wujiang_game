@@ -58,6 +58,30 @@ const state = {
   floatingToasts: [],
   lastToastLogCount: 0,
   aiPreview: null,
+  homeFlow: "",
+  quickStartBusy: false,
+  resumableTutorial: null,
+  tutorialResumeError: "",
+  onboarding: {beginner_heroes: [], recommended_rosters: [], hero_discovery: []},
+  showFullRoster: false,
+  heroSearchQuery: "",
+  heroRoleFilter: "",
+  heroDifficultyFilter: "",
+  connectionLostAt: 0,
+  reconnectedAt: 0,
+  lastTurnTimeoutAt: 0,
+  tutorialGuideCollapsed: false,
+  tutorialHistoryOffset: 0,
+  tutorialCompletionRecorded: false,
+  lastCompletedMatch: null,
+  recentMatches: [],
+  recentMatchesBusy: false,
+  recentMatchesError: "",
+  progression: null,
+  progressionBusy: false,
+  progressionError: "",
+  historicalMatchId: "",
+  lastHistorySyncMatchId: "",
 };
 
 const ROOM_TOKEN_PREFIX = "wujiang-room-token:";
@@ -65,6 +89,10 @@ const ROOM_NAME_PREFIX = "wujiang-room-name:";
 const PROFILE_NAME_KEY = "wujiang-profile-name";
 const PROFILE_READY_KEY = "wujiang-profile-ready";
 const AUTH_TOKEN_KEY = "wujiang-auth-token";
+const ANALYTICS_SESSION_KEY = "wujiang-analytics-session";
+const LAST_TUTORIAL_ROOM_KEY = "wujiang-last-tutorial-room";
+const RECORDED_MATCH_ENDS_KEY = "wujiang-recorded-match-ends";
+const LAST_COMPLETED_MATCH_KEY = "wujiang-last-completed-match";
 let pollHandle = null;
 let nextHomePollAt = 0;
 let lastHomeRenderSignature = "";
@@ -74,6 +102,7 @@ let battleVfxCleanupHandle = 0;
 let boardDragState = null;
 let boardDragSuppressUntil = 0;
 let tooltipHideHandle = 0;
+let keyboardHelpReturnFocus = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -187,6 +216,48 @@ function hoveredUnit() {
 
 function effectiveSidebarPanel() {
   return state.rightRailCollapsed ? "" : "logs";
+}
+
+function analyticsSessionId() {
+  let sessionId = localStorage.getItem(ANALYTICS_SESSION_KEY) || "";
+  if (!sessionId) {
+    sessionId = globalThis.crypto?.randomUUID?.()
+      || `visitor-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+    localStorage.setItem(ANALYTICS_SESSION_KEY, sessionId);
+  }
+  return sessionId;
+}
+
+async function recordProductEvent(eventName, properties = {}) {
+  try {
+    await fetchJson("/api/analytics/events", {
+      method: "POST",
+      body: JSON.stringify({
+        event_name: eventName,
+        anonymous_session_id: analyticsSessionId(),
+        properties,
+      }),
+    });
+  } catch (_error) {
+    // Analytics must never block the player path.
+  }
+}
+
+function recordStrategyEventOnce(campaign, suffix, eventName, properties = {}) {
+  if (!campaign?.id) return;
+  const key = `wujiang-strategy-analytics-${campaign.id}-${suffix}`;
+  if (localStorage.getItem(key)) return;
+  localStorage.setItem(key, "1");
+  recordProductEvent(eventName, { campaign_id: String(campaign.id), ...properties });
+}
+
+function recordStrategyConclusionIfNeeded(campaign) {
+  const conclusion = campaign?.world?.strategic_status?.conclusion;
+  if (!conclusion?.state) return;
+  recordStrategyEventOnce(campaign, "complete", "strategy_campaign_complete", {
+    month: String(conclusion.concluded_month || campaign.world?.current_month || ""),
+    reason: conclusion.reason || "unknown",
+  });
 }
 
 function toggleSidebarPanel(panel) {
@@ -460,13 +531,117 @@ function focusAuthGateForMode(modeLabel = "游戏") {
 }
 
 function openStrategyModeEntry() {
+  state.homeFlow = "strategy";
+  render();
   if (focusAuthGateForMode("英灵城邦战役")) return;
   focusDraftTarget("#strategy-panel");
 }
 
 function openDuelModeEntry() {
+  state.homeFlow = "custom";
+  render();
   if (focusAuthGateForMode("武将对战房间")) return;
   focusDraftTarget(".room-home-grid");
+}
+
+function openQuickStartEntry() {
+  state.homeFlow = "quick";
+  recordProductEvent("quick_start_click", {
+    entry_state: userLoggedIn() ? "logged_in" : "anonymous",
+  });
+  render();
+  if (focusAuthGateForMode("新手教学")) return;
+  focusDraftTarget("#quick-start-panel");
+}
+
+function renderHomeFlow() {
+  const flow = state.homeFlow;
+  const authCard = document.querySelector(".auth-card");
+  const quickPanel = $("quick-start-panel");
+  const strategyPanel = $("strategy-panel");
+  const customSections = document.querySelectorAll(".home-custom-section");
+  const tutorialButton = $("start-tutorial");
+  const quickAiButton = $("start-quick-ai");
+  const resumeButton = $("resume-tutorial");
+  const resumeNote = $("tutorial-resume-note");
+  const canResume = Boolean(state.resumableTutorial);
+  if (authCard) authCard.classList.toggle("hidden", !flow || userLoggedIn());
+  if (quickPanel) quickPanel.classList.toggle("hidden", flow !== "quick");
+  if (strategyPanel) strategyPanel.classList.toggle("hidden", flow !== "strategy");
+  customSections.forEach((node) => node.classList.toggle("hidden", flow !== "custom"));
+  if (tutorialButton) {
+    tutorialButton.disabled = state.quickStartBusy || !userLoggedIn();
+    tutorialButton.textContent = state.quickStartBusy
+      ? "正在准备教学..."
+      : (canResume ? "重新开始教学" : "进入新手教学");
+    tutorialButton.classList.remove("primary");
+    tutorialButton.classList.add("ghost");
+  }
+  if (quickAiButton) {
+    quickAiButton.disabled = state.quickStartBusy || !userLoggedIn();
+    quickAiButton.textContent = state.quickStartBusy ? "正在准备对战..." : "快速 AI 对战";
+  }
+  if (resumeButton) {
+    resumeButton.classList.toggle("hidden", !canResume);
+    resumeButton.disabled = state.quickStartBusy || !userLoggedIn();
+    resumeButton.textContent = state.quickStartBusy ? "正在恢复教学..." : "继续未完成教学";
+  }
+  if (resumeNote) {
+    if (canResume) {
+      const stepTitle = state.resumableTutorial.step_title || "上次步骤";
+      resumeNote.textContent = `发现未完成教学：${stepTitle}。你可以继续当前进度，也可以重新开始。`;
+    } else if (state.tutorialResumeError) {
+      resumeNote.textContent = state.tutorialResumeError;
+    } else {
+      resumeNote.textContent = "固定阵容和地图，依次练习选中、移动、普攻、技能、连锁响应和结束回合。";
+    }
+  }
+}
+
+function clearResumableTutorial() {
+  state.resumableTutorial = null;
+  state.tutorialResumeError = "";
+  localStorage.removeItem(LAST_TUTORIAL_ROOM_KEY);
+}
+
+async function refreshResumableTutorial() {
+  const roomId = String(localStorage.getItem(LAST_TUTORIAL_ROOM_KEY) || "").trim();
+  if (!roomId) {
+    state.resumableTutorial = null;
+    state.tutorialResumeError = "";
+    return;
+  }
+  const identity = loadStoredIdentity(roomId);
+  if (!identity.token) {
+    clearResumableTutorial();
+    return;
+  }
+  try {
+    const query = new URLSearchParams({room_id: roomId, player_token: identity.token});
+    const payload = await fetchJson(`/api/rooms/state?${query.toString()}`);
+    const room = payload.room || {};
+    const tutorial = room.tutorial || null;
+    const resumable = room.experience_kind === "tutorial"
+      && Boolean(tutorial)
+      && !tutorial.completed_at
+      && !payload.battle?.winner
+      && room.viewer_player_id !== null
+      && room.viewer_player_id !== undefined;
+    if (!resumable) {
+      clearResumableTutorial();
+      return;
+    }
+    state.resumableTutorial = {
+      room_id: roomId,
+      player_token: identity.token,
+      step_id: tutorial.step_id || "",
+      step_title: tutorial.step?.title || tutorial.step_title || "上次步骤",
+    };
+    state.tutorialResumeError = "";
+  } catch (_error) {
+    state.resumableTutorial = null;
+    state.tutorialResumeError = "暂时无法检查上次教学进度；你仍可重新开始，稍后也可以再次检查。";
+  }
 }
 
 function normalizeAuthUsername(username) {
@@ -482,6 +657,10 @@ function clearAuthSession(message = "") {
   state.authUser = null;
   state.authPassword = "";
   state.authMessage = message;
+  state.recentMatches = [];
+  state.recentMatchesError = "";
+  state.progression = null;
+  state.progressionError = "";
   clearStrategyState();
   localStorage.removeItem(AUTH_TOKEN_KEY);
 }
@@ -512,6 +691,58 @@ async function refreshAuthSession() {
   }
 }
 
+async function refreshRecentMatches({renderAfter = true} = {}) {
+  if (!userLoggedIn()) {
+    state.recentMatches = [];
+    state.recentMatchesError = "";
+    if (renderAfter) renderRecentMatches();
+    return;
+  }
+  if (state.recentMatchesBusy) return;
+  state.recentMatchesBusy = true;
+  state.recentMatchesError = "";
+  if (renderAfter) renderRecentMatches();
+  try {
+    const payload = await fetchJson("/api/matches/recent");
+    state.recentMatches = payload.matches || [];
+  } catch (error) {
+    state.recentMatchesError = error.error || "读取最近战绩失败。";
+  } finally {
+    state.recentMatchesBusy = false;
+    await refreshProgression({renderAfter: false});
+    if (renderAfter) renderRecentMatches();
+  }
+}
+
+async function refreshProgression({renderAfter = true} = {}) {
+  if (!userLoggedIn()) {
+    state.progression = null;
+    state.progressionError = "";
+    if (renderAfter) renderRecentMatches();
+    return;
+  }
+  if (state.progressionBusy) return;
+  state.progressionBusy = true;
+  state.progressionError = "";
+  if (renderAfter) renderRecentMatches();
+  try {
+    const payload = await fetchJson("/api/progression/overview");
+    state.progression = payload.progression || null;
+    trackAnalytics("progression_view", {
+      source: state.screen === "battle" ? "postgame" : "home",
+      empty_state: !Number(state.progression?.total_matches || 0),
+    });
+  } catch (error) {
+    state.progressionError = error.error || "读取武将熟练度失败。";
+  } finally {
+    state.progressionBusy = false;
+    if (renderAfter) {
+      if (state.screen === "battle") renderPostgameSummary();
+      else renderRecentMatches();
+    }
+  }
+}
+
 async function submitAuth(mode) {
   if (state.authBusy) return;
   const username = normalizeAuthUsername(state.authUsername);
@@ -532,6 +763,7 @@ async function submitAuth(mode) {
     saveAuthSession(payload.session_token, payload.user);
     state.authUsername = "";
     state.authMessage = mode === "register" ? "注册成功，已登录。" : "登录成功。";
+    await refreshRecentMatches({renderAfter: false});
     await refreshStrategyCampaigns({ renderAfter: false });
   } catch (error) {
     state.authMessage = error.error || "账号操作失败。";
@@ -659,18 +891,19 @@ function focusStrategyDossier() {
 async function createStrategyCampaign() {
   const name = String(state.strategyName || "英灵城邦").trim() || "英灵城邦";
   const seed = Number.parseInt(state.strategySeed || "1", 10) || 1;
-  const playerCount = Math.max(1, Math.min(6, Number.parseInt(state.strategyPlayerCount || "2", 10) || 2));
   const payload = await strategyPost("/api/strategy/campaigns/create", {
     name,
     seed,
-    city_count: 8,
-    faction_count: playerCount,
   });
   if (!payload) {
     renderStrategyPanel();
     return;
   }
   state.strategyCampaign = payload.campaign;
+  recordProductEvent("strategy_campaign_create", {
+    campaign_id: String(payload.campaign.id),
+    scenario_id: payload.campaign.world?.campaign_contract?.id || "legacy_sandbox",
+  });
   state.strategyMessage = "战役大厅已创建。可以分享加入码；房主锁定后，空席会由 AI 接管。";
   await refreshStrategyCampaigns({ renderAfter: false });
   render();
@@ -722,6 +955,26 @@ async function chooseStrategyHeroPath(heroCode, path, targetFactionId = "") {
   focusStrategyWarRoom();
 }
 
+async function updateStrategyCampaignGuide(action) {
+  if (!state.strategyCampaign) return false;
+  const payload = await strategyPost("/api/strategy/campaigns/guide-action", {
+    campaign_id: state.strategyCampaign.id,
+    action,
+  });
+  if (!payload) {
+    renderStrategyPanel();
+    return false;
+  }
+  state.strategyCampaign = payload.campaign;
+  if (action === "survey_border") {
+    state.strategyMessage = "已完成引导目标：查看边境。";
+  } else if (action === "skip") {
+    state.strategyMessage = "已跳过前三个月情境引导；战役规则、资源和月份均未改变。";
+  }
+  render();
+  return true;
+}
+
 async function lockStrategyCampaign(campaignId) {
   const payload = await strategyPost("/api/strategy/campaigns/lock", { campaign_id: campaignId });
   if (!payload) {
@@ -729,6 +982,7 @@ async function lockStrategyCampaign(campaignId) {
     return;
   }
   state.strategyCampaign = payload.campaign;
+  recordProductEvent("strategy_campaign_lock", { campaign_id: String(payload.campaign.id) });
   state.strategyMessage = strategyCanResume(payload.campaign)
     ? "初始玩家已锁定，空席由 AI 接管，战役可以继续。"
     : "初始玩家已锁定，等待所有真人初始玩家在线。";
@@ -756,6 +1010,7 @@ async function enterStrategyCampaign(campaignId) {
     return;
   }
   state.strategyCampaign = payload.campaign;
+  recordProductEvent("strategy_campaign_enter", { campaign_id: String(payload.campaign.id) });
   state.strategyMessage = strategyCanResume(payload.campaign) ? "战役已就绪。" : "已进入战役，等待初始玩家到齐。";
   await refreshStrategyCampaigns({ renderAfter: false });
   render();
@@ -782,6 +1037,7 @@ async function advanceStrategyMonth() {
     renderStrategyPanel();
     return;
   }
+  const queuedBattles = (state.strategyCampaign.queued_actions || []).filter((action) => action.action_type === "city_attack");
   const payload = await strategyPost("/api/strategy/campaigns/advance-month", {
     campaign_id: state.strategyCampaign.id,
     issuer_office_id: state.strategyActiveOfficeId,
@@ -791,11 +1047,63 @@ async function advanceStrategyMonth() {
     return;
   }
   state.strategyCampaign = payload.campaign;
-  state.strategyMessage = `已推进到第 ${payload.campaign.world.current_month} 月。`;
+  const status = payload.campaign?.world?.strategic_status || {};
+  const reachedMonth = Number(payload.campaign?.world?.current_month || 0);
+  queuedBattles.forEach((action, index) => {
+    recordStrategyEventOnce(payload.campaign, `battle-${action.id || action.action_key || `${reachedMonth}-${index}`}`, "strategy_battle_trigger", {
+      month: String(action.month || Math.max(1, reachedMonth - 1)),
+      resolution_mode: action.payload?.resolution_mode || "quick",
+    });
+  });
+  if ([3, 6, 9, 12].includes(reachedMonth)) {
+    recordStrategyEventOnce(payload.campaign, `month-${reachedMonth}`, "strategy_campaign_milestone", {
+      month: String(reachedMonth),
+    });
+  }
+  recordStrategyConclusionIfNeeded(payload.campaign);
+  state.strategyMessage = status.awaiting_conclusion_choice
+    ? `第 ${payload.campaign.world.current_month} 月结算完成，战役已进入${status.conclusion?.result_label || "评议"}。`
+    : `已推进到第 ${payload.campaign.world.current_month} 月。`;
   state.strategyBattleRoom = (payload.battle_rooms || []).slice(-1)[0] || state.strategyBattleRoom;
   if (state.strategyBattleRoom?.player_token) {
     saveStoredIdentity(state.strategyBattleRoom.room_id, state.strategyBattleRoom.player_token, effectiveProfileName());
   }
+  await refreshStrategyCampaigns({ renderAfter: false });
+  render();
+}
+
+async function continueStrategySandbox() {
+  if (!state.strategyCampaign) return;
+  const payload = await strategyPost("/api/strategy/campaigns/continue-sandbox", {
+    campaign_id: state.strategyCampaign.id,
+  });
+  if (!payload) {
+    renderStrategyPanel();
+    return;
+  }
+  state.strategyCampaign = payload.campaign;
+  recordStrategyEventOnce(payload.campaign, "continue-sandbox", "strategy_campaign_continue_sandbox", {
+    month: String(payload.campaign.world?.current_month || ""),
+  });
+  state.strategyMessage = "已保留战役评议结果，并转入自由沙盒。";
+  await refreshStrategyCampaigns({ renderAfter: false });
+  render();
+}
+
+async function archiveStrategyCampaign() {
+  if (!state.strategyCampaign) return;
+  const payload = await strategyPost("/api/strategy/campaigns/archive", {
+    campaign_id: state.strategyCampaign.id,
+  });
+  if (!payload) {
+    renderStrategyPanel();
+    return;
+  }
+  state.strategyCampaign = payload.campaign;
+  recordStrategyEventOnce(payload.campaign, "archive", "strategy_campaign_archive", {
+    month: String(payload.campaign.world?.current_month || ""),
+  });
+  state.strategyMessage = "战役已结束归档；结局与完整复盘已冻结保存。";
   await refreshStrategyCampaigns({ renderAfter: false });
   render();
 }
@@ -882,6 +1190,12 @@ async function declareStrategyAttack(sourceCityId, targetCityId, resolutionMode,
     return;
   }
   state.strategyCampaign = payload.campaign;
+  recordProductEvent("strategy_battle_trigger", {
+    campaign_id: String(payload.campaign.id),
+    month: String(payload.campaign.world?.current_month || ""),
+    resolution_mode: resolutionMode || "quick",
+  });
+  recordStrategyConclusionIfNeeded(payload.campaign);
   state.strategyBattleRoom = payload.battle_room || null;
   if (payload.battle_room?.player_token) {
     saveStoredIdentity(payload.battle_room.room_id, payload.battle_room.player_token, effectiveProfileName());
@@ -911,10 +1225,23 @@ async function queueStrategyAction(actionType, actionPayload) {
     return;
   }
   state.strategyCampaign = payload.campaign;
-  state.strategyMessage = "已加入本月行动队列。";
+  const submission = payload.submission || {};
+  const points = submission.command_points || strategyFactionCommandPoints(payload.campaign);
+  const resources = submission.resource_balance || {};
+  const balance = `粮 ${resources.food ?? "?"} · 钱 ${resources.money ?? "?"} · 以太 ${resources.ether ?? "?"} · 兵 ${resources.troops ?? "?"}`;
+  const affected = (submission.affected_months || []).map((month) => `第 ${month} 月`).join("、");
+  state.strategyMessage = submission.replaced
+    ? `已替换原计划；剩余军令 ${points.remaining}/${points.maximum}，当前资源 ${balance}，影响 ${affected || "本次月结"}。`
+    : `已加入本月计划；剩余军令 ${points.remaining}/${points.maximum}，当前资源 ${balance}，影响 ${affected || "本次月结"}。`;
+  if (submission.execution) {
+    const executor = (state.strategyCampaign?.world?.offices || []).find((office) => office.id === submission.execution.executor_office_id);
+    state.strategyMessage += ` 执行者：${strategyOfficeLabel(executor, state.strategyCampaign)}；成本 ${submission.execution.command_cost} 军令；预计第 ${submission.execution.expected_completion_month} 月回执。`;
+  }
   await refreshStrategyCampaigns({ renderAfter: false });
   const queuedAction = (state.strategyCampaign?.queued_actions || []).slice(-1)[0];
-  enqueueFloatingToast(queuedAction ? `军令已记录：${strategyQueuedActionLabel(state.strategyCampaign, queuedAction)}` : "军令已记录。");
+  enqueueFloatingToast(queuedAction
+    ? `${submission.replaced ? "计划已替换" : "军令已记录"}：${strategyQueuedActionLabel(state.strategyCampaign, queuedAction)}`
+    : (submission.replaced ? "计划已替换。" : "军令已记录。"));
   render();
 }
 
@@ -1008,6 +1335,22 @@ function syncIdentityFromUrl() {
 }
 
 function setScreen(screen, { renderAfter = true } = {}) {
+  if (screen !== "battle" && state.historicalMatchId) {
+    state.historicalMatchId = "";
+    state.room = null;
+    state.battle = null;
+    state.liveBattle = null;
+    state.replayMode = false;
+    state.replayStepIndex = 0;
+    state.replayOmniscient = false;
+    state.playerToken = "";
+    state.screen = "draft";
+    clearActionSelection();
+    syncLocation("draft", "");
+    refreshRecentMatches({renderAfter: false}).then(() => render());
+    if (renderAfter) render();
+    return;
+  }
   const next = screen === "battle" && hasBattle() ? "battle" : "draft";
   state.screen = next;
   clearActionSelection();
@@ -1227,13 +1570,46 @@ function displayActions() {
       preview: { cells: [], target_unit_ids: [], secondary_cells: [], requires_target: false },
       available: true,
     });
-    return reactions;
+    return filterTutorialActions(reactions);
   }
-  return (bundle.actions.actions || []).filter((action) => {
+  return filterTutorialActions((bundle.actions.actions || []).filter((action) => {
     if (!action.available) return false;
     if (action.kind === "move" || action.kind === "attack") return true;
     return action.timing === "active";
-  });
+  }));
+}
+
+function tutorialState() {
+  return state.room?.experience_kind === "tutorial" ? state.room?.tutorial || null : null;
+}
+
+function filterTutorialActions(actions) {
+  const tutorial = tutorialState();
+  if (!tutorial) return actions;
+  const stepId = tutorial.step_id;
+  let filtered = actions;
+  if (stepId === "select_unit" || stepId === "end_turn") filtered = [];
+  else if (stepId === "move") filtered = actions.filter((action) => action.code === "move");
+  else if (stepId === "basic_attack") filtered = actions.filter((action) => action.kind === "attack");
+  else if (stepId === "active_skill") {
+    filtered = actions.filter((action) => action.code === "pierce").map((action) => ({
+      ...action,
+      preview: {
+        ...(action.preview || {}),
+        cells: [{x: 5, y: 4}, {x: 6, y: 4}],
+        selection: {mode: "pattern_cells", patterns: [[{x: 5, y: 4}, {x: 6, y: 4}]], ordered: false},
+      },
+    }));
+  }
+  else if (stepId === "chain_response") filtered = actions.filter((action) => action.kind === "chain_skip" || action.timing === "reaction");
+  if (stepId !== "move") return filtered;
+  return filtered.map((action) => ({
+    ...action,
+    preview: {
+      ...(action.preview || {}),
+      cells: [{x: 4, y: 4}],
+    },
+  }));
 }
 
 function actionByCode(code) {
@@ -1315,6 +1691,7 @@ function clearBattleVfx() {
 }
 
 function battleVfxDuration(event) {
+  if (globalThis.WujiangBattleFeedback?.reducedMotion()) return 160;
   if (!event) return 700;
   if (event.kind === "attack") return 620;
   if (event.kind === "defense") return 760;
@@ -2368,6 +2745,16 @@ function renderProfilePanel() {
   if (joinButton) joinButton.disabled = !userLoggedIn() || !state.profileReady || !String(joinCode?.value || "").trim();
 }
 
+function connectionStatusLabel(status) {
+  return ({online: "在线", unstable: "连接不稳", offline: "已掉线", ai: "AI 在线", open: "开放"})[status] || "未知";
+}
+
+function readyStateLabel(seat) {
+  if (!seat?.occupied) return "未占用";
+  if (seat.is_ai) return "自动准备";
+  return seat.ready ? "已准备" : "未准备";
+}
+
 function renderAuthPanel() {
   const display = $("auth-display-name");
   const note = $("auth-display-note");
@@ -2382,8 +2769,8 @@ function renderAuthPanel() {
   const loggedIn = Boolean(state.authUser);
   display.textContent = loggedIn ? state.authUser.username : "未登录";
   note.textContent = loggedIn
-    ? "账号已可用于后续战略模式存档归属；当前房间测试仍沿用房间席位 token。"
-    : "注册或登录后，后续战略模式存档可以绑定到这个账号。当前房间测试仍可临时使用。";
+    ? "已登录。昵称用于游戏内显示；房间席位凭据只用于断线后恢复当前席位。"
+    : "所有可玩模式都需要登录；昵称只用于游戏内显示，不能代替账号身份。";
   message.textContent = state.authMessage || "";
   username.value = state.authUsername;
   password.value = state.authPassword;
@@ -2395,6 +2782,42 @@ function renderAuthPanel() {
   login.classList.toggle("hidden", loggedIn);
   register.classList.toggle("hidden", loggedIn);
   logout.classList.toggle("hidden", !loggedIn);
+}
+
+function recentMatchRosterText(match) {
+  return globalThis.WujiangHomeUi?.rosterText(match) || "";
+}
+
+function renderRecentMatches() {
+  globalThis.WujiangHomeUi?.renderRecentMatches({
+    document,
+    state,
+    loggedIn: userLoggedIn(),
+    onOpenReplay: openRecentReplay,
+  });
+}
+
+async function openRecentReplay(matchId) {
+  if (!matchId || !userLoggedIn()) return;
+  try {
+    const query = new URLSearchParams({match_id: matchId, step_index: "-1"});
+    const payload = await fetchJson(`/api/matches/replay?${query.toString()}`);
+    state.historicalMatchId = matchId;
+    state.playerToken = "";
+    applyRoomPayload(payload, {preserveScreen: false});
+    state.historicalMatchId = matchId;
+    state.replayMode = true;
+    state.replayStepIndex = Number(payload.replay?.step_index || 0);
+    state.replayOmniscient = true;
+    state.battle = payload.battle || null;
+    state.screen = "battle";
+    syncLocation("battle", "");
+    syncSelectedUnitAfterStateChange();
+    render();
+  } catch (error) {
+    state.recentMatchesError = error.error || "历史回放加载失败。";
+    renderRecentMatches();
+  }
 }
 
 function strategyMember(campaign = state.strategyCampaign) {
@@ -2497,9 +2920,27 @@ function strategyMonthlyBriefing(campaign = state.strategyCampaign, faction = st
   return campaign?.world?.monthly_briefings?.[faction?.id] || { entries: [] };
 }
 
+function strategyMonthlyCycle(campaign = state.strategyCampaign, faction = strategyFaction(campaign)) {
+  return campaign?.world?.monthly_cycle?.[faction?.id] || {
+    previous_month: null,
+    must_handle: [],
+    advance_forecast: { cities: [] },
+    planned_actions: [],
+  };
+}
+
+function strategyCampaignGuide(campaign = state.strategyCampaign, faction = strategyFaction(campaign)) {
+  return campaign?.world?.campaign_tutorial?.[faction?.id] || null;
+}
+
+function strategyOfficeCoordination(campaign = state.strategyCampaign, faction = strategyFaction(campaign)) {
+  return campaign?.world?.office_coordination?.[faction?.id] || null;
+}
+
 function strategyCommandCost(actionType, payload = {}) {
   if (["send_office_request", "request_registered_units", "approve_registered_unit_request", "assign_strategic_hero_duty"].includes(actionType)) return 0;
   if (actionType === "declare_attack" || actionType === "rebellion_battle") return 2;
+  if (actionType === "peaceful_integration") return 2;
   if (actionType === "rebellion_action" && (payload.rebellion_action_id || payload.action_id) === "suppress") return 2;
   return 1;
 }
@@ -2548,6 +2989,29 @@ function strategyCitiesAreAdjacent(campaign, firstCityId, secondCityId) {
 function strategyFactionName(campaign, factionId) {
   const faction = (campaign?.world?.factions || []).find((item) => item.id === factionId);
   return faction?.name || factionId || "未归属";
+}
+
+function strategyFactionById(campaign, factionId) {
+  return (campaign?.world?.factions || []).find((item) => item.id === factionId) || null;
+}
+
+function strategyIsNeutralCityState(campaign, factionId) {
+  return strategyFactionById(campaign, factionId)?.faction_type === "neutral_city_state";
+}
+
+function strategyNeutralIncitementTargets(campaign, city, currentFactionId) {
+  const node = (campaign?.world?.nodes || []).find((item) => item.id === city?.node_id);
+  const citiesByNode = new Map((campaign?.world?.cities || []).map((item) => [item.node_id, item]));
+  const factionIds = new Set(
+    (node?.connected_node_ids || [])
+      .map((nodeId) => citiesByNode.get(nodeId)?.owner_faction_id)
+      .filter((factionId) => (
+        factionId
+        && factionId !== currentFactionId
+        && !strategyIsNeutralCityState(campaign, factionId)
+      ))
+  );
+  return (campaign?.world?.factions || []).filter((item) => factionIds.has(item.id));
 }
 
 function strategyMemberLabel(campaign, userId) {
@@ -2691,6 +3155,24 @@ function strategyMapNodeId(node) {
   return node?.id || node?.node_id || "";
 }
 
+function strategyNodeName(campaign, nodeId) {
+  const node = (campaign?.world?.nodes || []).find((item) => strategyMapNodeId(item) === nodeId);
+  const city = (campaign?.world?.cities || []).find((item) => item.node_id === nodeId);
+  return city?.name || node?.name || nodeId || "未知节点";
+}
+
+function strategyArmyStatusLabel(status) {
+  return ({ garrisoned: "驻扎", deployed: "部署", marching: "行军", engaged: "交战", besieging: "围城", retreating: "撤退", disbanded: "已解散", destroyed: "已覆灭" })[status] || status;
+}
+
+function strategyArmyOrderLabel(order) {
+  return ({ hold: "待命", march: "行军", intercept: "拦截", reinforce: "增援", retreat: "撤退", besiege: "围城" })[order] || order;
+}
+
+function strategyArmySupplyStatusLabel(status) {
+  return ({ unassessed: "待首次月结", local: "本地", open: "畅通", strained: "吃紧", severed: "已切断", none: "无来源" })[status] || status;
+}
+
 function createStrategySvgElement(tagName) {
   if (document.createElementNS) {
     return document.createElementNS("http://www.w3.org/2000/svg", tagName);
@@ -2725,6 +3207,11 @@ function strategyCanResume(campaign) {
   const missing = Array.isArray(resume.missing_initial_user_ids) ? resume.missing_initial_user_ids : null;
   const initial = Array.isArray(resume.initial_user_ids) ? resume.initial_user_ids : [];
   return Boolean(active && missing && missing.length === 0 && initial.length);
+}
+
+function strategyCanIssueOrders(campaign) {
+  if (!strategyCanResume(campaign)) return false;
+  return campaign?.world?.strategic_status?.can_advance_month !== false;
 }
 
 function strategyCityOrderLimitReached(campaign, cityId) {
@@ -2803,6 +3290,7 @@ function strategyMapNodePositions(nodes) {
 function strategyCityMapClass(city, campaign, faction, selectedCityId) {
   const classes = ["strategy-map-node"];
   if (city.owner_faction_id === faction?.id) classes.push("is-owned");
+  else if (strategyIsNeutralCityState(campaign, city.owner_faction_id)) classes.push("is-city-state");
   else if (city.owner_faction_id) classes.push("is-enemy");
   else classes.push("is-neutral");
   if (city.id === selectedCityId) classes.push("is-selected");
@@ -2823,6 +3311,30 @@ function renderStrategyMap(current, campaign, faction) {
   const citiesByNodeId = new Map(cities.map((city) => [city.node_id, city]));
   const positions = strategyMapNodePositions(nodes);
   const selectedCityId = strategySelectedCity(campaign, faction)?.id || "";
+  const activeArmies = (campaign?.world?.armies || []).filter((army) => !["disbanded", "destroyed"].includes(army.status));
+  const armiesByNodeId = new Map();
+  activeArmies.forEach((army) => {
+    const rows = armiesByNodeId.get(army.location_node_id) || [];
+    rows.push(army);
+    armiesByNodeId.set(army.location_node_id, rows);
+  });
+  const activeArmyRouteKeys = new Set();
+  const armySupplyRouteKeys = new Set();
+  const armySupplyRiskRouteKeys = new Set();
+  activeArmies.filter((army) => army.status === "marching").forEach((army) => {
+    const route = army.route_node_ids || [];
+    for (let index = Number(army.route_progress_index || 0); index < route.length - 1; index += 1) {
+      activeArmyRouteKeys.add([route[index], route[index + 1]].sort().join("::"));
+    }
+  });
+  activeArmies.filter((army) => army.faction_id === faction?.id).forEach((army) => {
+    const route = army.supply_line_node_ids || [];
+    for (let index = 0; index < route.length - 1; index += 1) {
+      const key = [route[index], route[index + 1]].sort().join("::");
+      armySupplyRouteKeys.add(key);
+      if (["strained", "severed", "none"].includes(army.supply_line_status)) armySupplyRiskRouteKeys.add(key);
+    }
+  });
 
   const header = document.createElement("div");
   header.className = "strategy-map-header";
@@ -2835,6 +3347,7 @@ function renderStrategyMap(current, campaign, faction) {
   [
     ["己方", "is-owned"],
     ["敌方", "is-enemy"],
+    ["中立城邦", "is-city-state"],
     ["选中", "is-selected"],
     ["警报", "has-rebellion"],
   ].forEach(([label, className]) => {
@@ -2877,7 +3390,7 @@ function renderStrategyMap(current, campaign, faction) {
         line.setAttribute("y1", String(sourcePos.y));
         line.setAttribute("x2", String(targetPos.x));
         line.setAttribute("y2", String(targetPos.y));
-        line.className = "strategy-map-route-line";
+        line.setAttribute("class", `strategy-map-route-line${armySupplyRouteKeys.has(key) ? " is-supply-route" : ""}${armySupplyRiskRouteKeys.has(key) ? " is-supply-risk" : ""}${activeArmyRouteKeys.has(key) ? " is-army-route" : ""}`);
         routeLayer.append(line);
       }
       const route = document.createElement("div");
@@ -2920,7 +3433,10 @@ function renderStrategyMap(current, campaign, faction) {
     const strong = document.createElement("strong");
     strong.textContent = city.name;
     const factionLine = document.createElement("span");
-    factionLine.textContent = strategyFactionName(campaign, city.owner_faction_id);
+    const cityFaction = strategyFactionById(campaign, city.owner_faction_id);
+    factionLine.textContent = cityFaction?.faction_type === "neutral_city_state"
+      ? `${cityFaction.name} · 城主 ${cityFaction.governor_name || "无名"}`
+      : strategyFactionName(campaign, city.owner_faction_id);
     const statLine = document.createElement("span");
     statLine.textContent = `兵${city.resources?.troops || 0} / 防${city.defense || 0}`;
     card.append(strong, factionLine, statLine);
@@ -2937,6 +3453,14 @@ function renderStrategyMap(current, campaign, faction) {
       plan.textContent = `军令 x${queuedActions.length}`;
       card.append(plan);
     }
+    (armiesByNodeId.get(city.node_id) || []).forEach((army) => {
+      const badge = document.createElement("span");
+      badge.className = `strategy-map-army${army.faction_id === faction?.id ? " is-owned" : ""}`;
+      badge.textContent = army.status === "marching"
+        ? `军队 · 行军 ${Number(army.route_progress_index || 0)}/${Math.max(1, (army.route_node_ids || []).length - 1)} · 补给${strategyArmySupplyStatusLabel(army.supply_line_status)}`
+        : `军队 · ${strategyArmyStatusLabel(army.status)} · 补给${strategyArmySupplyStatusLabel(army.supply_line_status)}`;
+      card.append(badge);
+    });
     const adjacentCities = (node?.connected_node_ids || [])
       .map((nodeId) => citiesByNodeId.get(nodeId))
       .filter(Boolean);
@@ -2960,6 +3484,12 @@ function renderStrategyMap(current, campaign, faction) {
     const strong = document.createElement("strong");
     strong.textContent = node.name || nodeId;
     card.append(strong);
+    (armiesByNodeId.get(nodeId) || []).forEach((army) => {
+      const badge = document.createElement("span");
+      badge.className = `strategy-map-army${army.faction_id === faction?.id ? " is-owned" : ""}`;
+      badge.textContent = `军队 · ${strategyArmyStatusLabel(army.status)} · 补给${strategyArmySupplyStatusLabel(army.supply_line_status)}`;
+      card.append(badge);
+    });
     appendTextLine(card, "strategy-map-hidden-text", `节点 ${nodeId} · ${node.type || "地形"}`);
     canvas.append(card);
   });
@@ -2974,6 +3504,21 @@ function renderStrategyMap(current, campaign, faction) {
     routeDrawer.open = state.strategyRouteIntelOpen;
   });
   routeDrawer.append(routeSummary, routeList);
+  activeArmies.filter((army) => army.status === "marching").forEach((army) => {
+    appendTextLine(
+      routeList,
+      "strategy-map-army-route-summary",
+      `军队 ${army.id}：${(army.route_node_ids || []).map((nodeId) => strategyNodeName(campaign, nodeId)).join(" → ")} · 预计第 ${army.estimated_arrival_month} 月抵达`,
+    );
+  });
+  activeArmies.filter((army) => army.faction_id === faction?.id).forEach((army) => {
+    const source = strategyCityById(campaign, army.supply_source_city_id);
+    appendTextLine(
+      routeList,
+      "strategy-map-army-supply-summary",
+      `补给 ${army.id}：${strategyArmySupplyStatusLabel(army.supply_line_status)} · ${source?.name || "无来源"} · 距离 ${army.supply_distance ?? "—"} · 月需 ${strategyNumber(army.monthly_supply_need)}`,
+    );
+  });
   map.append(canvas, routeDrawer);
   current.append(map);
 }
@@ -3086,14 +3631,203 @@ function createStrategyCityCommandCard(campaign, city, faction, canResume, offic
   const stack = document.createElement("div");
   stack.className = "strategy-command-stack";
   const ownCity = city.owner_faction_id === faction?.id;
+  const cityFaction = strategyFactionById(campaign, city.owner_faction_id);
+  const neutralCityState = cityFaction?.faction_type === "neutral_city_state";
+  if (neutralCityState) card.classList.add("is-neutral-city-state");
   const disabledReason = strategyCommandDisabledReason(canResume, ownCity);
   const orderLimitReason = orderLimitReached ? `本城本月军令已满（${orderCount}/${orderLimit}）。` : "";
   const commandPoints = strategyFactionCommandPoints(campaign, faction);
   const noCommandReason = commandPoints.remaining <= 0 ? "本势力本月军令已用尽。" : "";
 
   const canGovern = !office || office.office_type === "governor";
+  const canHandleRebellion = !office || ["lord", "governor"].includes(office.office_type);
+  const canManageOccupation = !office || ["lord", "governor"].includes(office.office_type);
   const canRitual = !office || ["lord", "governor"].includes(office.office_type);
   const canAttack = !office || ["lord", "general"].includes(office.office_type);
+
+  if (neutralCityState) {
+    const politics = cityFaction.neutral_politics || {};
+    const currentRelation = (politics.relationships || []).find((item) => item.faction_id === faction?.id);
+    const neutral = createStrategyCommandSection(
+      "中立城邦",
+      "城主只经营与防守，不会主动扩张；其政治立场由本城处境实时变化。"
+    );
+    appendTextLine(neutral, "strategy-meta", `城主：${cityFaction.governor_name || "无名"} · 姿态：${politics.posture?.label || (cityFaction.incited_against_faction_id ? "已受教唆" : "中立守备")}`);
+    if (politics.current_need) appendTextLine(neutral, "strategy-meta", `当前诉求：${politics.current_need.label} · ${politics.current_need.summary}`);
+    if (politics.fear) appendTextLine(neutral, "strategy-meta", `恐惧来源：${politics.fear.label} · ${politics.fear.summary}`);
+    if (politics.governor_position) appendTextLine(neutral, "strategy-meta", `城主立场：${politics.governor_position.label} · ${politics.governor_position.summary}`);
+    if (currentRelation) {
+      appendTextLine(neutral, "strategy-meta", `对我方关系：${currentRelation.score > 0 ? "+" : ""}${currentRelation.score}（${currentRelation.label}）· ${currentRelation.governor_view}`);
+      appendTextLine(neutral, "strategy-meta", `我方影响力：${Number(currentRelation.influence || 0)}/100 · 当地支持：${Number(currentRelation.local_support || 0)}/100`);
+    }
+    if (faction) appendTextLine(neutral, "strategy-meta", `我方外交信誉：${Number(faction.diplomatic_reputation ?? 50)}/100${Number(faction.diplomatic_reputation ?? 50) < 30 ? " · 城主不再相信新的保护或停战承诺" : ""}`);
+    const agreements = (politics.agreements || []).filter((item) => item.major_faction_id === faction?.id);
+    if (agreements.length) appendTextLine(neutral, "strategy-meta", `协议记录：${agreements.map((item) => {
+      const label = item.label || item.agreement_type;
+      if (item.status === "active") return `${label}（剩余 ${item.remaining_months} 月）`;
+      return `${label}（${item.end_reason_label || item.status}）`;
+    }).join("、")}`);
+    const diplomaticMemory = (politics.diplomatic_memory || []).filter((item) => item.major_faction_id === faction?.id).slice(-3).reverse();
+    diplomaticMemory.forEach((item) => appendTextLine(neutral, "strategy-meta", `外交记忆 · 第 ${item.month} 月：${item.summary}`));
+    const diplomacyOptions = currentRelation?.diplomacy_options || [];
+    if (diplomacyOptions.length) {
+      const diplomacySelect = document.createElement("select");
+      diplomacyOptions.forEach((option) => {
+        const item = document.createElement("option");
+        item.value = option.id;
+        item.textContent = `${option.name} · 预计${option.expected_response}`;
+        diplomacySelect.append(item);
+      });
+      const diplomacyPreview = document.createElement("p");
+      diplomacyPreview.className = "strategy-meta";
+      const propose = document.createElement("button");
+      propose.type = "button";
+      propose.className = "primary";
+      const syncDiplomacy = () => {
+        const option = diplomacyOptions.find((item) => item.id === diplomacySelect.value) || diplomacyOptions[0];
+        const costs = Object.entries(option?.resource_cost || {}).filter(([, value]) => Number(value) > 0).map(([key, value]) => `${{money: "钱", food: "粮", troops: "兵"}[key] || key} ${value}`);
+        diplomacyPreview.textContent = `${option?.response_reason || ""} ${option?.direct_effect || ""}${costs.length ? ` · 接受时成本：${costs.join(" / ")}` : ""}`;
+        propose.textContent = `${option?.name || "提出交涉"} · 1 军令`;
+        propose.disabled = (
+          state.strategyBusy
+          || !canResume
+          || office?.office_type !== "lord"
+          || !option?.can_propose
+          || !strategyCanAffordCommand(campaign, faction, "neutral_diplomacy")
+        );
+      };
+      diplomacySelect.addEventListener("change", syncDiplomacy);
+      propose.addEventListener("click", () => queueStrategyAction("neutral_diplomacy", {
+        neutral_faction_id: cityFaction.id,
+        diplomacy_action_id: diplomacySelect.value,
+      }));
+      neutral.append(createStrategyField("普通交涉", diplomacySelect), diplomacyPreview, propose);
+      syncDiplomacy();
+      if (office?.office_type !== "lord") appendTextLine(neutral, "strategy-command-lock", "只有主公可签署普通外交交涉。");
+    }
+    const integration = currentRelation?.peaceful_integration;
+    if (integration) {
+      const integrationRequirements = (integration.requirements || []).map((item) => `${item.met ? "✓" : "○"}${item.label} ${item.current}/${item.required}`).join(" · ");
+      appendTextLine(neutral, "strategy-meta", `和平整合门槛：${integrationRequirements}`);
+      const integrate = document.createElement("button");
+      integrate.type = "button";
+      integrate.className = "primary";
+      integrate.textContent = "和平整合 · 100 钱 / 80 粮 / 2 军令";
+      integrate.disabled = (
+        state.strategyBusy
+        || !canResume
+        || office?.office_type !== "lord"
+        || !integration.can_integrate
+        || !strategyCanAffordCommand(campaign, faction, "peaceful_integration")
+      );
+      integrate.addEventListener("click", () => queueStrategyAction("peaceful_integration", {
+        neutral_faction_id: cityFaction.id,
+      }));
+      neutral.append(integrate);
+      if (!integration.can_integrate) appendTextLine(neutral, "strategy-command-lock", integration.blocked_reason || "尚未达到和平整合门槛。");
+      if (office?.office_type !== "lord") appendTextLine(neutral, "strategy-command-lock", "只有主公可提出和平整合。");
+    }
+    if (cityFaction.incited_against_faction_id) {
+      appendTextLine(neutral, "strategy-meta", `当前目标：${strategyFactionName(campaign, cityFaction.incited_against_faction_id)} · 教唆者：${strategyFactionName(campaign, cityFaction.incited_by_faction_id)}`);
+    }
+    const targets = strategyNeutralIncitementTargets(campaign, city, faction?.id);
+    if (office?.office_type === "lord" && targets.length) {
+      const targetSelect = document.createElement("select");
+      targets.forEach((target) => {
+        const option = document.createElement("option");
+        option.value = target.id;
+        option.textContent = target.name;
+        targetSelect.append(option);
+      });
+      neutral.append(createStrategyField("教唆目标", targetSelect));
+      const incite = document.createElement("button");
+      incite.type = "button";
+      incite.className = "primary";
+      incite.textContent = "教唆出兵 · 60 金钱 · 1 军令";
+      incite.disabled = (
+        state.strategyBusy
+        || !canResume
+        || Number(faction?.resources?.money || 0) < 60
+        || Number(campaign?.world?.current_month || 0) < Number(currentRelation?.incitement_cooldown_until_month || 0)
+        || !strategyCanAffordCommand(campaign, faction, "incite_neutral_city_state")
+      );
+      incite.addEventListener("click", () => queueStrategyAction("incite_neutral_city_state", {
+        neutral_faction_id: cityFaction.id,
+        target_faction_id: targetSelect.value,
+      }));
+      neutral.append(incite);
+      if (Number(faction?.resources?.money || 0) < 60) appendTextLine(neutral, "strategy-command-lock", "势力金钱不足 60。 ");
+      if (Number(campaign?.world?.current_month || 0) < Number(currentRelation?.incitement_cooldown_until_month || 0)) appendTextLine(neutral, "strategy-command-lock", `教唆冷却至第 ${currentRelation.incitement_cooldown_until_month} 月。`);
+    } else if (office?.office_type !== "lord") {
+      appendTextLine(neutral, "strategy-command-lock", "只有主公可执行教唆。 ");
+    } else {
+      appendTextLine(neutral, "strategy-command-lock", "该城邦当前没有接壤的可教唆目标。 ");
+    }
+    stack.append(neutral);
+  }
+
+  const occupation = city.occupation_governance || {};
+  if (ownCity && occupation.status && occupation.status !== "ended") {
+    const occupationSection = createStrategyCommandSection(
+      "占领治理",
+      occupation.status === "pending" ? "武力夺城后的统治方式尚未决定；拖延会减半产出并提高叛乱风险。" : "占领政策会持续影响三次月结，之后进入常态治理。"
+    );
+    appendTextLine(occupationSection, "strategy-meta", `状态：${occupation.status === "pending" ? "政策待定" : occupation.status === "active" ? "政策执行中" : "已稳定"} · 前统治者：${strategyFactionName(campaign, occupation.previous_owner_faction_id)}`);
+    appendTextLine(occupationSection, "strategy-meta", `当前政策：${occupation.policy_label || "待选择"} · 产出 ${Number(occupation.income_percent || 100)}% · 叛乱风险 ${Number(occupation.rebellion_modifier || 0) >= 0 ? "+" : ""}${Number(occupation.rebellion_modifier || 0)}${occupation.remaining_settlements != null ? ` · 剩余 ${occupation.remaining_settlements} 次月结` : ""}`);
+    const occupationChoices = occupation.policy_choices || [];
+    if (occupationChoices.length) {
+      const occupationSelect = document.createElement("select");
+      occupationChoices.forEach((choice) => {
+        const option = document.createElement("option");
+        option.value = choice.id;
+        option.textContent = choice.name;
+        occupationSelect.append(option);
+      });
+      const occupationPreview = document.createElement("p");
+      occupationPreview.className = "strategy-meta";
+      const chooseOccupation = document.createElement("button");
+      chooseOccupation.type = "button";
+      chooseOccupation.className = "primary";
+      const syncOccupation = () => {
+        const choice = occupationChoices.find((item) => item.id === occupationSelect.value) || occupationChoices[0];
+        const costs = [choice?.money_cost ? `钱 ${choice.money_cost}` : "", choice?.food_cost ? `粮 ${choice.food_cost}` : "", choice?.minimum_garrison ? `守军至少 ${choice.minimum_garrison}` : ""].filter(Boolean);
+        occupationPreview.textContent = `${choice?.summary || ""} · 产出 ${choice?.income_percent || 100}% · 叛乱风险 ${Number(choice?.rebellion_modifier || 0) >= 0 ? "+" : ""}${Number(choice?.rebellion_modifier || 0)}${costs.length ? ` · ${costs.join(" / ")}` : ""}${choice?.blocked_reason ? ` · ${choice.blocked_reason}` : ""}`;
+        chooseOccupation.textContent = `选择${choice?.name || "占领政策"} · 1 军令`;
+        chooseOccupation.disabled = state.strategyBusy || !canResume || !canManageOccupation || !choice?.can_choose || orderLimitReached || !strategyCanAffordCommand(campaign, faction, "choose_occupation_policy", {}, city.id);
+      };
+      occupationSelect.addEventListener("change", syncOccupation);
+      chooseOccupation.addEventListener("click", () => queueStrategyAction("choose_occupation_policy", {
+        city_id: city.id,
+        policy_id: occupationSelect.value,
+      }));
+      occupationSection.append(createStrategyField("占领政策", occupationSelect), occupationPreview, chooseOccupation);
+      syncOccupation();
+    }
+    if (!canManageOccupation) appendTextLine(occupationSection, "strategy-command-lock", "只有主公或本城城主可决定占领政策。");
+    stack.append(occupationSection);
+  }
+
+  const funding = city.rebellion_funding_options?.[faction?.id];
+  const fundingRelevant = !ownCity && funding && (occupation.status || strategyCityRebellionForce(city) > 0 || Number(funding.rebellion_risk || 0) >= 45);
+  const lordPoliticalCrisisView = office?.office_type === "lord" && !neutralCityState && (
+    (occupation.status && occupation.status !== "ended")
+    || (ownCity && strategyCityRebellionForce(city) > 0)
+    || fundingRelevant
+  );
+  if (fundingRelevant) {
+    const fundingSection = createStrategyCommandSection("外部资助", "资助敌城反抗力量可能推动自治或倒戈，但会留下明确的世界记忆。");
+    appendTextLine(fundingSection, "strategy-meta", `消耗 60 金钱 · 叛军 +${funding.rebel_troop_delta || 120} · 我方当地支持 +10 · 当前叛乱风险 ${funding.rebellion_risk || 0}`);
+    const fund = document.createElement("button");
+    fund.type = "button";
+    fund.className = "ghost danger";
+    fund.textContent = "资助叛乱 · 60 钱 / 1 军令";
+    fund.disabled = state.strategyBusy || !canResume || office?.office_type !== "lord" || !funding.can_fund || orderLimitReached || !strategyCanAffordCommand(campaign, faction, "fund_rebellion", {}, city.id);
+    fund.addEventListener("click", () => queueStrategyAction("fund_rebellion", { city_id: city.id }));
+    fundingSection.append(fund);
+    if (funding.blocked_reason) appendTextLine(fundingSection, "strategy-command-lock", funding.blocked_reason);
+    if (office?.office_type !== "lord") appendTextLine(fundingSection, "strategy-command-lock", "只有主公可批准外部资助。");
+    stack.append(fundingSection);
+  }
 
   if (canGovern) {
   const governance = createStrategyCommandSection("治理", "调整城市本月方针。想稳住局势就选稳定，准备扩张就选征兵。");
@@ -3126,7 +3860,7 @@ function createStrategyCityCommandCard(campaign, city, faction, canResume, offic
   stack.append(governance);
   }
 
-  if (canRitual && ownCity) {
+  if (canRitual && ownCity && !lordPoliticalCrisisView) {
     const ritual = createStrategyCommandSection("召唤祭祀", "祭祀随机召唤一名未绑定武将，并永久记录本城祭祀场为保存位置。");
     const ritualLevel = Number(city.building_levels?.ritual_site || 0);
     const capacity = faction?.hero_ritual_capacity || { maximum: 0, used: 0, remaining: 0 };
@@ -3205,7 +3939,7 @@ function createStrategyCityCommandCard(campaign, city, faction, canResume, offic
     stack.append(building);
   }
 
-  if (canGovern && (campaign?.world?.rebellion_action_choices || []).length) {
+  if (canHandleRebellion && (campaign?.world?.rebellion_action_choices || []).length) {
     const rebellion = createStrategyCommandSection(
       "叛乱",
       strategyCityRebellionForce(city) > 0 ? "城内已有叛军。处理民心可以减压，清剿会直接消耗兵力。" : "提前处理叛乱风险，避免正式叛军扩大。"
@@ -3258,7 +3992,7 @@ function createStrategyCityCommandCard(campaign, city, faction, canResume, offic
   }
 
   const targets = strategyAttackTargetsForCity(campaign, city, faction?.id);
-  if (canAttack && targets.length) {
+  if (canAttack && !lordPoliticalCrisisView && targets.length) {
     const attackSection = createStrategyCommandSection(
       office?.office_type === "lord" ? "主公亲征" : "进攻",
       "选择邻接目标和处理方式。主公亲征会自动由当前主公武将带队；快速用于沙盒结算，手动/AI 会生成真实格子战。"
@@ -3349,6 +4083,15 @@ function createStrategyCityCommandCard(campaign, city, faction, canResume, offic
 
 function strategyGuideLines(campaign, faction, selectedCity) {
   const lines = [];
+  const status = campaign?.world?.strategic_status || {};
+  if (status.campaign_state === "archived") {
+    lines.push("战役已经结束归档；结局与完整复盘已冻结，可在战报卷宗中随时查看。");
+    return lines;
+  }
+  if (status.awaiting_conclusion_choice) {
+    lines.push(`战役已进入${status.conclusion?.result_label || "结算"}，等待房主决定结束或继续沙盒。`);
+    return lines;
+  }
   if (!strategyCanResume(campaign)) {
     const missing = strategyMissingInitialPlayerLabels(campaign);
     lines.push(`等待真人初始玩家在线：${missing.join("、") || "当前战役尚未满足恢复条件"}`);
@@ -3408,7 +4151,76 @@ function renderStrategyBriefing(parent, campaign, faction) {
   parent.append(grid);
 }
 
+function renderStrategyAIGoals(parent, campaign, faction) {
+  const goals = (campaign?.world?.ai_strategic_goals || []).filter((goal) => goal.faction_id !== faction?.id);
+  if (!goals.length) return;
+  const panel = document.createElement("section");
+  panel.className = "strategy-ai-goals";
+  const title = document.createElement("strong");
+  title.textContent = "AI 战略动向";
+  panel.append(title);
+  appendTextLine(panel, "strategy-meta", "这些目标由公开的资源、地理和威胁决定，持续 2～3 个月；不代表 AI 获得额外资源或跳过合法条件。");
+  goals.forEach((goal) => {
+    const card = document.createElement("article");
+    card.className = `strategy-ai-goal ${goal.status || "active"}`;
+    const head = document.createElement("div");
+    head.className = "strategy-ai-goal-head";
+    const name = document.createElement("strong");
+    name.textContent = `${goal.faction_name} · ${goal.title}`;
+    const timing = document.createElement("span");
+    timing.textContent = goal.status === "completed"
+      ? "本月已完成"
+      : `第 ${goal.start_month}～${goal.end_month} 月 · 剩余 ${goal.months_remaining} 月`;
+    head.append(name, timing);
+    card.append(head);
+    appendTextLine(card, "strategy-meta", goal.rationale || "根据当前局势选择。 ");
+    const progress = document.createElement("div");
+    progress.className = "strategy-ai-goal-progress";
+    progress.setAttribute("role", "progressbar");
+    progress.setAttribute("aria-label", `${goal.faction_name}${goal.title}进度`);
+    progress.setAttribute("aria-valuemin", "0");
+    progress.setAttribute("aria-valuemax", "100");
+    progress.setAttribute("aria-valuenow", String(goal.progress || 0));
+    const fill = document.createElement("span");
+    fill.style.width = `${Math.max(0, Math.min(100, Number(goal.progress || 0)))}%`;
+    progress.append(fill);
+    card.append(progress);
+    appendTextLine(card, "strategy-meta", `进度 ${goal.progress || 0}% · ${goal.progress_label || "等待行动"}`);
+    appendTextLine(card, "strategy-meta", `上次行动：${goal.last_action_summary || "尚无"}`);
+    if (goal.change_reason) appendTextLine(card, "strategy-ai-goal-reason", `选择原因：${goal.change_reason}`);
+    if (goal.target_city_id) {
+      const locate = document.createElement("button");
+      locate.type = "button";
+      locate.className = "ghost compact";
+      locate.textContent = `定位 ${goal.target_city_name || strategyCityName(campaign, goal.target_city_id)}`;
+      locate.addEventListener("click", () => {
+        state.strategySelectedCityId = goal.target_city_id;
+        renderStrategyPanel();
+        focusStrategyMapStage();
+      });
+      card.append(locate);
+    }
+    panel.append(card);
+  });
+  parent.append(panel);
+}
+
 function strategyRecommendedNextStep(campaign, faction, selectedCity, isOwner) {
+  const status = campaign?.world?.strategic_status || {};
+  if (status.campaign_state === "archived") {
+    return {
+      title: "战役已归档",
+      detail: "本次战役不再接受军令或推进月份；请在战报卷宗查看完整复盘。",
+      buttonText: "",
+    };
+  }
+  if (status.awaiting_conclusion_choice) {
+    return {
+      title: status.conclusion?.result_label || "战役结算",
+      detail: isOwner ? "查看完整复盘后，选择结束归档或保留结局继续沙盒。" : "等待房主决定结束归档或继续自由沙盒。",
+      buttonText: "",
+    };
+  }
   if (!strategyCanResume(campaign)) {
     const missing = strategyMissingInitialPlayerLabels(campaign);
     return {
@@ -3514,7 +4326,7 @@ function renderStrategyStoryEvent(parent, campaign, faction) {
     const preview = document.createElement("span");
     preview.textContent = choice.preview || "";
     button.append(label, preview);
-    button.disabled = state.strategyBusy || !strategyCanResume(campaign) || !choice.enabled || !strategyCanAffordCommand(
+    button.disabled = state.strategyBusy || !strategyCanIssueOrders(campaign) || !choice.enabled || !strategyCanAffordCommand(
       campaign,
       faction,
       "resolve_story_event",
@@ -3541,6 +4353,8 @@ function renderStrategyStoryEvent(parent, campaign, faction) {
 function renderStrategyGuide(parent, campaign, faction, selectedCity, isOwner) {
   const guide = document.createElement("div");
   guide.className = "strategy-guide";
+  renderStrategyCampaignTutorial(guide, campaign, faction, selectedCity);
+  renderStrategyOfficeCoordination(guide, campaign, faction);
   const next = strategyRecommendedNextStep(campaign, faction, selectedCity, isOwner);
   const head = document.createElement("div");
   head.className = "strategy-guide-head";
@@ -3553,6 +4367,7 @@ function renderStrategyGuide(parent, campaign, faction, selectedCity, isOwner) {
   appendTextLine(guide, "strategy-guide-main", next.detail);
   renderStrategyStoryEvent(guide, campaign, faction);
   renderStrategyBriefing(guide, campaign, faction);
+  renderStrategyAIGoals(guide, campaign, faction);
   const stepRow = document.createElement("div");
   stepRow.className = "strategy-step-row";
   ["看地图", "选城市", "下军令", "等房主结算"].forEach((label) => {
@@ -3583,7 +4398,7 @@ function renderStrategyGuide(parent, campaign, faction, selectedCity, isOwner) {
     button.type = "button";
     button.className = "primary";
     button.textContent = next.buttonText;
-    button.disabled = state.strategyBusy || (next.advance && (!strategyCanResume(campaign) || !isOwner));
+    button.disabled = state.strategyBusy || (next.advance && (!strategyCanIssueOrders(campaign) || !isOwner));
     button.addEventListener("click", () => {
       if (next.cityId) {
         state.strategySelectedCityId = next.cityId;
@@ -3595,6 +4410,196 @@ function renderStrategyGuide(parent, campaign, faction, selectedCity, isOwner) {
     guide.append(button);
   }
   parent.append(guide);
+}
+
+function renderStrategyOfficeCoordination(parent, campaign, faction) {
+  const coordination = strategyOfficeCoordination(campaign, faction);
+  if (!coordination) return;
+  const panel = document.createElement("section");
+  panel.className = "strategy-office-coordination";
+  const title = document.createElement("strong");
+  title.textContent = "本月关键决策";
+  panel.append(title);
+  const decisions = coordination.high_consequence_decisions || [];
+  appendTextLine(panel, "strategy-meta", `优先处理 ${decisions.length} 项高后果决定；常规维护由持续方针或 AI 官职承担。`);
+  decisions.forEach((decision, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = decision.planned ? "strategy-decision planned" : "strategy-decision ghost";
+    const number = document.createElement("span");
+    number.textContent = decision.planned ? "✓" : String(index + 1);
+    const body = document.createElement("span");
+    const strong = document.createElement("strong");
+    strong.textContent = decision.title;
+    const detail = document.createElement("span");
+    detail.textContent = decision.planned ? `${decision.detail}（已安排）` : decision.detail;
+    body.append(strong, detail);
+    button.append(number, body);
+    button.disabled = !decision.city_id;
+    button.addEventListener("click", () => {
+      state.strategySelectedCityId = decision.city_id;
+      renderStrategyPanel();
+      focusStrategyCommandPanel();
+    });
+    panel.append(button);
+  });
+
+  const routine = document.createElement("details");
+  routine.className = "strategy-routine-maintenance";
+  const summary = document.createElement("summary");
+  summary.textContent = `常规维护 · ${(coordination.routine_maintenance || []).length} 座城市`;
+  routine.append(summary);
+  appendTextLine(routine, "strategy-meta", coordination.automation_rule || "默认方针持续生效。 ");
+  (coordination.routine_maintenance || []).forEach((item) => {
+    const executor = (campaign?.world?.offices || []).find((office) => office.id === item.executor_office_id);
+    appendTextLine(
+      routine,
+      "strategy-meta",
+      `${item.city_name} · ${item.policy} · ${item.mode === "ai_emergency" ? `${strategyOfficeLabel(executor, campaign)}在生存危机时自动干预` : "沿用默认方针"}`
+    );
+  });
+  panel.append(routine);
+
+  const feedback = coordination.order_feedback || [];
+  if (feedback.length) {
+    const feedbackTitle = document.createElement("strong");
+    feedbackTitle.textContent = "命令与请求回执";
+    panel.append(feedbackTitle);
+    feedback.slice(-4).reverse().forEach((item) => {
+      const issuer = (campaign?.world?.offices || []).find((office) => office.id === item.issuer_office_id);
+      const executor = (campaign?.world?.offices || []).find((office) => office.id === item.executor_office_id);
+      appendTextLine(
+        panel,
+        "strategy-order-feedback",
+        `${strategyOfficeLabel(issuer, campaign)} → ${strategyOfficeLabel(executor, campaign)} · ${item.command_cost} 军令 · 预计第 ${item.expected_completion_month} 月 · ${STRATEGY_OFFICE_STATUS_LABELS[item.status] || "已计划"}：${item.result_summary}`
+      );
+    });
+  }
+  parent.append(panel);
+}
+
+function renderStrategyCampaignTutorial(parent, campaign, faction, selectedCity) {
+  const tutorial = strategyCampaignGuide(campaign, faction);
+  if (!tutorial?.enabled) return;
+  if (tutorial.skipped) {
+    appendTextLine(parent, "strategy-tutorial-compact", `前三个月引导已于第 ${tutorial.skipped_month || "?"} 月跳过；普通战役规则与资源不变。`);
+    return;
+  }
+  if (tutorial.completed) {
+    appendTextLine(parent, "strategy-tutorial-compact complete", `前三个月战役引导完成 · ${tutorial.completed_count}/${tutorial.total_count}`);
+    return;
+  }
+
+  const panel = document.createElement("section");
+  panel.className = "strategy-campaign-tutorial";
+  const head = document.createElement("div");
+  head.className = "strategy-campaign-tutorial-head";
+  const title = document.createElement("strong");
+  title.textContent = "前三个月战役引导";
+  const progress = document.createElement("span");
+  progress.textContent = `${tutorial.completed_count}/${tutorial.total_count} 已完成`;
+  head.append(title, progress);
+  panel.append(head);
+  appendTextLine(
+    panel,
+    "strategy-meta",
+    tutorial.guide_period_ended
+      ? "前三个月已经结束；未完成目标仍可补做，也可以跳过引导。"
+      : "情境目标只帮助你走完第一场战役，不会锁住月份或改变普通规则。"
+  );
+
+  (tutorial.steps || []).forEach((step) => {
+    const row = document.createElement("div");
+    row.className = `strategy-campaign-tutorial-step ${step.timing || "upcoming"}`;
+    const marker = document.createElement("span");
+    marker.className = "strategy-campaign-tutorial-marker";
+    marker.textContent = step.completed ? "✓" : step.timing === "upcoming" ? String(step.month) : "○";
+    const body = document.createElement("div");
+    const stepTitle = document.createElement("strong");
+    stepTitle.textContent = `${step.chapter} · ${step.title}`;
+    body.append(stepTitle);
+    appendTextLine(body, "strategy-meta", step.detail);
+    row.append(marker, body);
+    if (!step.completed && step.timing !== "upcoming") {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "ghost";
+      const labels = {
+        map: "查看边境",
+        city_command: "打开城市治理",
+        story: "处理事件",
+        organization: "查看祭祀与任命",
+        conflict: "准备边境冲突",
+      };
+      button.textContent = labels[step.action_kind] || "前往处理";
+      button.disabled = state.strategyBusy || !strategyCanIssueOrders(campaign) && step.action_kind !== "map";
+      button.addEventListener("click", async () => {
+        if (step.action_kind === "map") {
+          const updated = await updateStrategyCampaignGuide("survey_border");
+          if (updated) focusStrategyMapStage();
+          return;
+        }
+        const office = strategyActiveOffice(campaign);
+        const story = strategyPendingStoryEvent(campaign, faction);
+        const owned = (campaign?.world?.cities || []).filter((city) => city.owner_faction_id === faction?.id);
+        const border = owned.find((city) => strategyAttackTargetsForCity(campaign, city, faction?.id).length);
+        const targetCityId = step.action_kind === "story" ? story?.city_id : step.action_kind === "conflict" ? border?.id : selectedCity?.id || owned[0]?.id;
+        const canDirectlyHandle = (
+          ["city_command", "story"].includes(step.action_kind) && office?.office_type === "governor"
+        ) || (
+          step.action_kind === "organization" && ["lord", "governor"].includes(office?.office_type)
+        ) || step.action_kind === "conflict";
+        if (!canDirectlyHandle && ["city_command", "story", "organization"].includes(step.action_kind)) {
+          const receiver = strategyTutorialDelegateOffice(campaign, office, targetCityId);
+          if (receiver) {
+            const goalId = step.action_kind === "city_command" ? "set_policy" : step.action_kind === "story" ? "resolve_event" : "ritual_or_appoint";
+            const objective = step.action_kind === "city_command"
+              ? "安排城主检查粮食与民心并设置城市方针"
+              : step.action_kind === "story"
+                ? `处理${story?.title || "本地待决事件"}，避免月底放任`
+                : "安排一次召唤祭祀或向主公申请任命武将";
+            queueStrategyAction(office?.office_type === "lord" ? "issue_office_order" : "send_office_request", {
+              receiver_office_id: receiver.id,
+              objective: `[引导:${goalId}] ${objective}`,
+              target_entity_id: targetCityId || "",
+              priority: 3,
+              deadline_month: campaign.world.current_month,
+              office_order_type: "order",
+            });
+            return;
+          }
+        }
+        if (targetCityId) state.strategySelectedCityId = targetCityId;
+        renderStrategyPanel();
+        focusStrategyCommandPanel();
+      });
+      row.append(button);
+    }
+    panel.append(row);
+  });
+
+  appendTextLine(panel, "strategy-tutorial-skip-note", tutorial.skip_explanation || "跳过不会改变战役规则。 ");
+  const skip = document.createElement("button");
+  skip.type = "button";
+  skip.className = "ghost strategy-tutorial-skip";
+  skip.textContent = "跳过情境引导";
+  skip.disabled = state.strategyBusy;
+  skip.addEventListener("click", () => updateStrategyCampaignGuide("skip"));
+  panel.append(skip);
+  parent.append(panel);
+}
+
+function strategyTutorialDelegateOffice(campaign, office, cityId = "") {
+  const offices = campaign?.world?.offices || [];
+  if (!office) return null;
+  if (office.office_type === "lord") {
+    return offices.find((candidate) => (
+      candidate.parent_office_id === office.id
+      && candidate.office_type === "governor"
+      && (!cityId || (candidate.managed_entity_ids || []).includes(cityId))
+    )) || null;
+  }
+  return offices.find((candidate) => candidate.id === office.parent_office_id) || null;
 }
 
 function renderStrategyWarStateBanner(parent, campaign, canResume, isOwner) {
@@ -3677,7 +4682,7 @@ function createStrategyOfficeDesk(campaign, office, canResume) {
     appendTextLine(
       desk,
       "strategy-office-order",
-      `${order.receiver_office_id === office?.id ? "收到" : "发出"} · ${order.objective} · ${STRATEGY_OFFICE_STATUS_LABELS[order.status] || order.status}`
+      `${order.receiver_office_id === office?.id ? "收到" : "发出"} · ${order.objective} · ${STRATEGY_OFFICE_STATUS_LABELS[order.status] || order.status}${order.details?.result_summary ? ` · ${order.details.result_summary}` : ""}`
     );
   });
   const isRequest = ["general", "governor"].includes(office?.office_type);
@@ -3698,6 +4703,7 @@ function createStrategyOfficeDesk(campaign, office, canResume) {
       ["order", "一般目标"],
       ["attack_city", "进攻城市"],
       ["defend_city", "防守城市"],
+      ["set_policy", "设置城市方针"],
     ].forEach(([value, label]) => {
       const option = document.createElement("option");
       option.value = value;
@@ -3709,19 +4715,43 @@ function createStrategyOfficeDesk(campaign, office, canResume) {
       const option = document.createElement("option");
       option.value = city.id;
       option.textContent = `${city.name} · ${strategyFactionName(campaign, city.owner_faction_id)}`;
+      option.dataset.ownerFactionId = city.owner_faction_id;
       targetCity.append(option);
+    });
+    const cityPolicy = document.createElement("select");
+    (campaign?.world?.policy_choices || []).forEach((policy) => {
+      const option = document.createElement("option");
+      option.value = policy;
+      option.textContent = policy;
+      cityPolicy.append(option);
     });
     orderKind.hidden = isRequest;
     targetCity.hidden = true;
+    cityPolicy.hidden = true;
     const syncMilitaryOrder = () => {
       const military = !isRequest && ["attack_city", "defend_city"].includes(orderKind.value);
-      targetCity.hidden = !military;
+      const policyOrder = !isRequest && orderKind.value === "set_policy";
+      targetCity.hidden = !(military || policyOrder);
+      cityPolicy.hidden = !policyOrder;
+      Array.from(targetCity.children).forEach((option) => {
+        option.disabled = policyOrder && option.dataset.ownerFactionId !== office?.faction_id;
+      });
       if (military && office?.office_type === "lord") {
         const grand = receivers.find((item) => item.office_type === "grand_general");
         if (grand) receiver.value = grand.id;
       }
+      if (policyOrder && office?.office_type === "lord") {
+        const governor = receivers.find((item) => item.id === receiver.value && item.office_type === "governor")
+          || receivers.find((item) => item.office_type === "governor");
+        if (governor) {
+          receiver.value = governor.id;
+          const governedCityId = governor.managed_entity_ids?.[0];
+          if (governedCityId) targetCity.value = governedCityId;
+        }
+      }
     };
     orderKind.addEventListener("change", syncMilitaryOrder);
+    receiver.addEventListener("change", syncMilitaryOrder);
     syncMilitaryOrder();
     const objective = document.createElement("input");
     objective.type = "text";
@@ -3734,10 +4764,13 @@ function createStrategyOfficeDesk(campaign, office, canResume) {
     issue.disabled = state.strategyBusy || !canResume;
     issue.addEventListener("click", () => {
       const military = !isRequest && ["attack_city", "defend_city"].includes(orderKind.value);
+      const policyOrder = !isRequest && orderKind.value === "set_policy";
       const objectiveText = objective.value.trim() || (
         military
           ? `${orderKind.value === "attack_city" ? "进攻" : "防守"}${strategyCityName(campaign, targetCity.value)}`
-          : ""
+          : policyOrder
+            ? `将${strategyCityName(campaign, targetCity.value)}设为${cityPolicy.value}`
+            : ""
       );
       if (!objectiveText) {
         objective.focus();
@@ -3747,11 +4780,12 @@ function createStrategyOfficeDesk(campaign, office, canResume) {
         receiver_office_id: receiver.value,
         objective: objectiveText,
         office_order_type: isRequest ? "request" : orderKind.value,
-        target_entity_id: military ? targetCity.value : "",
+        target_entity_id: military || policyOrder ? targetCity.value : "",
+        city_policy: policyOrder ? cityPolicy.value : "",
         priority: 1,
       });
     });
-    controls.append(receiver, orderKind, targetCity, objective, issue);
+    controls.append(receiver, orderKind, targetCity, cityPolicy, objective, issue);
     desk.append(controls);
   }
   return desk;
@@ -4152,8 +5186,158 @@ function createGeneralLogisticsPanel(campaign, office, faction, canResume) {
   return panel;
 }
 
+function createGeneralArmyPanel(campaign, office, faction, canResume) {
+  const panel = document.createElement("section");
+  panel.className = "strategy-office-desk strategy-army-form";
+  const title = document.createElement("h4");
+  title.textContent = "持久军队";
+  panel.append(title);
+  const armies = (campaign?.world?.armies || []).filter((army) => (
+    army.commander_office_id === office?.id && !["disbanded", "destroyed"].includes(army.status)
+  ));
+  const army = armies[0];
+  if (army) {
+    appendTextLine(panel, "strategy-unit-ledger strategy-unit-ledger-prominent", `现役 ${army.id} · ${strategyRegisteredUnitsLabel(campaign, army.unit_inventory)}`);
+    appendTextLine(panel, "strategy-meta", `兵员 ${strategyNumber(army.manpower)} · 粮草 ${strategyNumber(army.supply)}/${strategyNumber(army.supply_capacity)} · 士气 ${strategyNumber(army.morale)}`);
+    appendTextLine(panel, "strategy-meta", `状态 ${strategyArmyStatusLabel(army.status)} · 命令 ${strategyArmyOrderLabel(army.current_order)} · 当前位置 ${strategyNodeName(campaign, army.location_node_id)}`);
+    const supplySource = strategyCityById(campaign, army.supply_source_city_id);
+    appendTextLine(panel, "strategy-army-supply", `补给线 ${strategyArmySupplyStatusLabel(army.supply_line_status)} · 来源 ${supplySource?.name || "无"} · 距离 ${army.supply_distance ?? "—"} · 月需 ${strategyNumber(army.monthly_supply_need)}`);
+    appendTextLine(panel, "strategy-meta", `上月接收 ${strategyNumber(army.last_supply_received)} / 消耗 ${strategyNumber(army.last_supply_consumed)}${Number(army.starvation_months || 0) ? ` · 已连续断粮 ${strategyNumber(army.starvation_months)} 月` : ""}`);
+    if ((army.supply_line_node_ids || []).length) {
+      appendTextLine(panel, "strategy-army-supply-route", `补给路径：${army.supply_line_node_ids.map((nodeId) => strategyNodeName(campaign, nodeId)).join(" → ")}`);
+    }
+    if ((army.route_node_ids || []).length) {
+      appendTextLine(panel, "strategy-army-route", `路线：${army.route_node_ids.map((nodeId) => strategyNodeName(campaign, nodeId)).join(" → ")}`);
+      appendTextLine(panel, "strategy-meta", `进度 ${Number(army.route_progress_index || 0)}/${Math.max(0, army.route_node_ids.length - 1)} · 预计第 ${army.estimated_arrival_month} 月抵达`);
+    }
+  } else {
+    appendTextLine(panel, "strategy-meta", "尚未编成现役军队。单位与粮草会从将军库存和驻城真实转入。");
+  }
+
+  const inventory = office?.unit_inventory || {};
+  const unitInputs = {};
+  let defaultsAssigned = false;
+  Object.entries(inventory).filter(([, amount]) => Number(amount) > 0).forEach(([unitType, amount]) => {
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "0";
+    input.max = String(amount);
+    input.value = defaultsAssigned ? "0" : "1";
+    defaultsAssigned = true;
+    unitInputs[unitType] = input;
+    panel.append(createStrategyField(`${strategyRegisteredUnitsLabel(campaign, { [unitType]: amount })} 转入`, input));
+  });
+  const cities = (campaign?.world?.cities || []).filter((city) => city.owner_faction_id === faction?.id);
+  const citySelect = document.createElement("select");
+  cities.forEach((city) => {
+    const option = document.createElement("option");
+    option.value = city.id;
+    option.textContent = `${city.name} · 可装粮 ${strategyNumber(city.resources?.food)}`;
+    citySelect.append(option);
+  });
+  if (army?.home_city_id && cities.some((city) => city.id === army.home_city_id)) citySelect.value = army.home_city_id;
+  const supply = document.createElement("input");
+  supply.type = "number";
+  supply.min = "50";
+  supply.value = "50";
+  const form = document.createElement("button");
+  form.type = "button";
+  form.className = "primary";
+  form.textContent = army ? "补充军队 · 1 军令" : "编成军队 · 1 军令";
+  form.disabled = state.strategyBusy || !canResume || !cities.length || !Object.keys(unitInputs).length || Boolean(army && army.status !== "garrisoned");
+  form.addEventListener("click", () => queueStrategyAction("form_army", {
+    city_id: citySelect.value,
+    unit_inventory: Object.fromEntries(Object.entries(unitInputs).map(([unitType, input]) => [unitType, Math.max(0, Number(input.value || 0))])),
+    supply: Math.max(0, Number(supply.value || 0)),
+  }));
+  panel.append(createStrategyField("编军城市", citySelect), createStrategyField("装载粮草", supply), form);
+
+  if (army) {
+    const currentCity = (campaign?.world?.cities || []).find((city) => (
+      city.node_id === army.location_node_id && city.owner_faction_id === faction?.id
+    ));
+    const loadSupply = document.createElement("input");
+    loadSupply.type = "number";
+    const maximumLoad = Math.max(0, Math.min(
+      Number(currentCity?.resources?.food || 0),
+      Number(army.supply_capacity || 0) - Number(army.supply || 0),
+    ));
+    loadSupply.min = maximumLoad > 0 ? "1" : "0";
+    loadSupply.max = String(maximumLoad);
+    loadSupply.value = maximumLoad > 0 ? String(Math.min(50, maximumLoad)) : "0";
+    const load = document.createElement("button");
+    load.type = "button";
+    load.className = "primary";
+    load.textContent = "驻城装粮 · 1 军令";
+    load.disabled = state.strategyBusy || !canResume || army.status !== "garrisoned" || Number(loadSupply.max || 0) <= 0;
+    load.addEventListener("click", () => queueStrategyAction("load_army_supply", {
+      army_id: army.id,
+      supply: Math.max(1, Number(loadSupply.value || 1)),
+    }));
+    panel.append(createStrategyField(`携行补给（可装 ${loadSupply.max}）`, loadSupply), load);
+    const destination = document.createElement("select");
+    (campaign?.world?.nodes || []).filter((node) => strategyMapNodeId(node) !== army.location_node_id).forEach((node) => {
+      const option = document.createElement("option");
+      option.value = strategyMapNodeId(node);
+      option.textContent = strategyNodeName(campaign, option.value);
+      destination.append(option);
+    });
+    if (army.destination_node_id && army.destination_node_id !== army.location_node_id) destination.value = army.destination_node_id;
+    const march = document.createElement("button");
+    march.type = "button";
+    march.className = "primary";
+    march.textContent = army.status === "marching" ? "改道 · 1 军令" : "下达行军 · 1 军令";
+    march.disabled = state.strategyBusy || !canResume || !destination.children.length || !["garrisoned", "deployed", "marching"].includes(army.status);
+    march.addEventListener("click", () => queueStrategyAction("set_army_movement", {
+      army_id: army.id,
+      movement_order: "march",
+      destination_node_id: destination.value,
+    }));
+    panel.append(createStrategyField("行军目的地", destination), march);
+    if (army.status === "marching") {
+      const halt = document.createElement("button");
+      halt.type = "button";
+      halt.className = "ghost";
+      halt.textContent = "停止行军 · 1 军令";
+      halt.disabled = state.strategyBusy || !canResume;
+      halt.addEventListener("click", () => queueStrategyAction("set_army_movement", {
+        army_id: army.id,
+        movement_order: "hold",
+      }));
+      panel.append(halt);
+    }
+    const disband = document.createElement("button");
+    disband.type = "button";
+    disband.className = "ghost";
+    disband.textContent = "解散并归库 · 1 军令";
+    disband.disabled = state.strategyBusy || !canResume || army.status !== "garrisoned";
+    disband.addEventListener("click", () => queueStrategyAction("disband_army", { army_id: army.id }));
+    panel.append(disband);
+  }
+  return panel;
+}
+
 function renderLordWorkspace(command, campaign, office, selectedCity, faction, canResume) {
   command.append(createRoleWorkspaceHeader(campaign, office, "主公中枢", "统筹职位容量、国家科技、祭祀绑定和武将任务。"));
+  const occupation = selectedCity?.occupation_governance || {};
+  const funding = selectedCity?.rebellion_funding_options?.[faction?.id];
+  const occupationCrisis = Boolean(occupation.status && occupation.status !== "ended");
+  const ownRebellion = selectedCity?.owner_faction_id === faction?.id && strategyCityRebellionForce(selectedCity) > 0;
+  const externalFundingTarget = selectedCity?.owner_faction_id !== faction?.id && Boolean(funding) && (
+    occupationCrisis || strategyCityRebellionForce(selectedCity) > 0 || Number(funding.rebellion_risk || 0) >= 45
+  );
+  if (
+    strategyIsNeutralCityState(campaign, selectedCity?.owner_faction_id)
+    || occupationCrisis
+    || ownRebellion
+    || externalFundingTarget
+  ) {
+    const cityCard = createStrategyCityCommandCard(campaign, selectedCity, faction, canResume, office);
+    if (!strategyIsNeutralCityState(campaign, selectedCity?.owner_faction_id)) {
+      cityCard.classList.add("is-political-crisis");
+    }
+    command.append(cityCard);
+  }
   command.append(createStrategyOfficeDesk(campaign, office, canResume));
   command.append(createLordTechnologyPanel(campaign, faction, canResume));
   command.append(createLordRitualPanel(campaign, office, faction, canResume));
@@ -4164,6 +5348,9 @@ function renderLordWorkspace(command, campaign, office, selectedCity, faction, c
 
 function renderGrandGeneralWorkspace(command, campaign, office, selectedCity, faction, canResume) {
   command.append(createRoleWorkspaceHeader(campaign, office, "战区统帅部", "管理直属将军，把城市已注册单位调入具体军团。"));
+  if (strategyIsNeutralCityState(campaign, selectedCity?.owner_faction_id)) {
+    command.append(createStrategyCityCommandCard(campaign, selectedCity, faction, canResume, office));
+  }
   command.append(createStrategyOfficeDesk(campaign, office, canResume));
   command.append(createGrandGeneralMilitaryPanel(campaign, office, faction, canResume, selectedCity));
 }
@@ -4171,6 +5358,7 @@ function renderGrandGeneralWorkspace(command, campaign, office, selectedCity, fa
 function renderGeneralWorkspace(command, campaign, office, selectedCity, faction, canResume) {
   command.append(createRoleWorkspaceHeader(campaign, office, "军团行营", "持有确切作战单位；缺兵时必须向直属大将军请示。"));
   command.append(createStrategyOfficeDesk(campaign, office, canResume));
+  command.append(createGeneralArmyPanel(campaign, office, faction, canResume));
   command.append(createGeneralLogisticsPanel(campaign, office, faction, canResume));
   const managed = strategyOfficeManagedCities(campaign, office);
   const source = managed.find((city) => city.id === selectedCity?.id) || managed[0] || selectedCity;
@@ -4377,6 +5565,7 @@ function renderStrategyWarRoom(current, campaign, faction, canResume, isOwner) {
   const stage = document.createElement("div");
   stage.className = "strategy-war-stage";
   renderStrategyGuide(stage, campaign, faction, selectedCity, isOwner);
+  renderStrategyMonthlyCycle(stage, campaign, faction);
   renderStrategyMap(stage, campaign, faction);
 
   const command = document.createElement("aside");
@@ -4394,6 +5583,68 @@ function renderStrategyWarRoom(current, campaign, faction, canResume, isOwner) {
   main.append(stage, command);
   warRoom.append(main);
   current.append(warRoom);
+}
+
+function renderStrategyMonthlyCycle(current, campaign, faction) {
+  const cycle = strategyMonthlyCycle(campaign, faction);
+  const section = document.createElement("section");
+  section.className = "strategy-monthly-cycle strategy-campaign-card";
+  const title = document.createElement("h4");
+  title.textContent = "月度决策";
+  section.append(title);
+
+  const previousTitle = document.createElement("strong");
+  previousTitle.textContent = "上月发生了什么";
+  section.append(previousTitle);
+  const previous = cycle.previous_month;
+  if (!previous) {
+    appendTextLine(section, "strategy-meta", "战役首月，尚无上月结算记录。");
+  } else {
+    const changes = previous.city_changes || [];
+    const events = previous.important_events || [];
+    if (!changes.length && !events.length) appendTextLine(section, "strategy-meta", `第 ${previous.month} 月没有与你势力直接相关的重大变化。`);
+    changes.slice(0, 4).forEach((change) => {
+      const delta = change.resource_delta || {};
+      const owner = change.owner_changed ? `，归属由${strategyFactionName(campaign, change.owner_before)}变为${strategyFactionName(campaign, change.owner_after)}` : "";
+      appendTextLine(
+        section,
+        "strategy-meta",
+        `${change.city_name}：粮 ${delta.food >= 0 ? "+" : ""}${delta.food || 0}、钱 ${delta.money >= 0 ? "+" : ""}${delta.money || 0}、兵 ${delta.troops >= 0 ? "+" : ""}${delta.troops || 0}、民心 ${change.support_delta >= 0 ? "+" : ""}${change.support_delta || 0}${owner}`
+      );
+    });
+    events.slice(0, 3).forEach((event) => appendTextLine(section, "strategy-meta", event.message));
+  }
+
+  const mustTitle = document.createElement("strong");
+  mustTitle.textContent = "本月必须处理什么";
+  section.append(mustTitle);
+  const mustHandle = cycle.must_handle || [];
+  if (!mustHandle.length) appendTextLine(section, "strategy-meta", "没有迫在眉睫的危机，可以围绕战役目标主动规划。");
+  mustHandle.slice(0, 3).forEach((item) => appendTextLine(section, "strategy-meta", `• ${item}`));
+
+  const forecastTitle = document.createElement("strong");
+  forecastTitle.textContent = "推进后预计发生什么";
+  section.append(forecastTitle);
+  const forecast = cycle.advance_forecast || {};
+  (forecast.cities || []).forEach((city) => {
+    const delta = city.resource_delta || {};
+    appendTextLine(
+      section,
+      "strategy-meta",
+      `${city.city_name}（${city.policy}）：粮 ${delta.food >= 0 ? "+" : ""}${delta.food || 0}（维护 ${city.food_upkeep || 0}）、钱 ${delta.money >= 0 ? "+" : ""}${delta.money || 0}、以太 ${delta.ether >= 0 ? "+" : ""}${delta.ether || 0}、兵 ${delta.troops >= 0 ? "+" : ""}${delta.troops || 0}；民心 ${city.support_delta >= 0 ? "+" : ""}${city.support_delta || 0}，叛乱 ${city.rebellion_risk || 0}（${city.rebellion_stage || "安全"}）`
+    );
+  });
+  const planned = cycle.planned_actions || [];
+  if (planned.length) {
+    appendTextLine(section, "strategy-meta", `行动队列：${planned.length} 项；均在城市月结前执行。`);
+    planned.slice(0, 4).forEach((action) => {
+      appendTextLine(section, "strategy-meta", `• ${strategyQueuedActionLabel(campaign, action)} → 第 ${(action.affected_months || []).join(" / ")} 月`);
+    });
+  } else {
+    appendTextLine(section, "strategy-meta", "行动队列为空；将按当前方针直接月结。");
+  }
+  appendTextLine(section, "strategy-meta", forecast.disclaimer || "战争和未知事件结果不会提前泄露。");
+  current.append(section);
 }
 
 function collapseStrategyDossier(current) {
@@ -4530,7 +5781,7 @@ function strategyCityName(campaign, cityId) {
 }
 
 function strategyCityStateLabels(city = {}) {
-  return (city.event_states || []).map((state) => {
+  const labels = (city.event_states || []).map((state) => {
     const parts = String(state || "").split(":");
     if (parts[0] === "rebellion_risk" && parts.length >= 3) {
       return `叛乱风险 ${parts[1]} ${parts[2]}`;
@@ -4547,6 +5798,10 @@ function strategyCityStateLabels(city = {}) {
     }
     return "";
   }).filter(Boolean);
+  const occupation = city.occupation_governance || city.occupation || {};
+  if (occupation.status === "pending") labels.push("占领政策待定");
+  if (occupation.status === "active") labels.push(`占领政策 ${occupation.policy_label || occupation.policy_id || "执行中"}`);
+  return labels;
 }
 
 function strategyCityRebellionForce(city = {}) {
@@ -4640,6 +5895,16 @@ function strategyQueuedActionLabel(campaign, action = {}) {
   if (action.action_type === "set_city_policy") {
     return `${strategyCityName(campaign, payload.city_id)}：方针计划为 ${payload.policy || "未知"}`;
   }
+  if (action.action_type === "neutral_diplomacy") {
+    const neutral = strategyFactionById(campaign, payload.neutral_faction_id);
+    const relation = neutral?.neutral_politics?.relationships?.find((item) => item.faction_id === action.faction_id);
+    const option = relation?.diplomacy_options?.find((item) => item.id === payload.diplomacy_action_id);
+    return `中立交涉：${neutral?.name || payload.neutral_faction_id || "未知城邦"} · ${option?.name || payload.diplomacy_action_id || "未知行动"}`;
+  }
+  if (action.action_type === "peaceful_integration") {
+    const neutral = (campaign?.world?.factions || []).find((item) => item.id === payload.neutral_faction_id);
+    return `和平整合：${neutral?.name || payload.neutral_faction_id || "未知城邦"}`;
+  }
   if (action.action_type === "resolve_story_event") {
     const event = (campaign?.world?.story_events || []).find((item) => item.id === payload.event_id);
     const choice = (event?.choices || []).find((item) => item.id === payload.choice_id);
@@ -4671,6 +5936,14 @@ function strategyQueuedActionLabel(campaign, action = {}) {
   if (action.action_type === "rebellion_battle") {
     const troops = payload.troops ? ` · 投入 ${payload.troops}` : "";
     return `${strategyCityName(campaign, payload.city_id || payload.target_city_id)}：清剿叛军${troops}`;
+  }
+  if (action.action_type === "choose_occupation_policy") {
+    const city = (campaign?.world?.cities || []).find((item) => item.id === payload.city_id);
+    const choice = (city?.occupation_governance?.policy_choices || []).find((item) => item.id === payload.policy_id);
+    return `${strategyCityName(campaign, payload.city_id)}：占领政策 ${choice?.name || payload.policy_id}`;
+  }
+  if (action.action_type === "fund_rebellion") {
+    return `${strategyCityName(campaign, payload.city_id)}：外部资助叛乱`;
   }
   if (action.action_type === "perform_hero_ritual") {
     return `${strategyCityName(campaign, payload.city_id)}：举行召唤祭祀`;
@@ -4744,8 +6017,66 @@ function renderStrategyActionQueue(current, campaign) {
   current.append(panel);
 }
 
+function appendStrategyRetrospective(card, campaign, retrospective) {
+  if (!retrospective?.version) return;
+  const heading = document.createElement("h4");
+  heading.className = "strategy-retrospective-title";
+  heading.textContent = "完整战役复盘";
+  card.append(heading);
+
+  const summary = retrospective.summary || {};
+  appendTextLine(
+    card,
+    "strategy-meta strategy-retrospective-summary",
+    `共 ${summary.resolved_battles || 0} 场城市战（${summary.grid_battles || 0} 场真实格子战）· ${summary.cities_changed_hands || 0} 次城市易主 · ${summary.story_choices || 0} 次事件抉择`
+  );
+
+  const sections = [
+    {
+      title: "势力结局",
+      rows: retrospective.faction_outcomes || [],
+      line: (row) => `${row.outcome_label} · ${row.faction_name} · 第 ${row.rank || "-"} 名 / ${row.total_score || 0} 分。${row.summary || ""}`,
+    },
+    {
+      title: "关键月份",
+      rows: retrospective.key_months || [],
+      line: (row) => `第 ${row.month} 月 · ${(row.events || [row.headline]).join("；")}`,
+    },
+    {
+      title: "城市变化",
+      rows: retrospective.city_changes || [],
+      line: (row) => `第 ${row.month} 月 · ${row.city_name}：${row.owner_before_name} → ${row.owner_after_name}`,
+    },
+    {
+      title: "战斗记录",
+      rows: retrospective.battles || [],
+      line: (row) => `第 ${row.month} 月 · ${row.source_city_name} → ${row.target_city_name} · ${row.grid_battle ? "真实格子战" : "快速结算"} · ${row.winner_faction_name}获胜`,
+    },
+    {
+      title: "角色经历",
+      rows: retrospective.hero_experiences || [],
+      line: (row) => `${strategyHeroName(campaign, row.hero_code)} · ${row.office_label || "未任职"} · 参战 ${row.battle_appearances || 0} / 胜 ${row.battle_wins || 0} · ${row.faction_name || "无所属"}`,
+    },
+  ];
+  sections.forEach((section, index) => {
+    const details = document.createElement("details");
+    details.className = "strategy-retrospective-section";
+    if (index < 2) details.open = true;
+    const summaryNode = document.createElement("summary");
+    summaryNode.textContent = `${section.title}（${section.rows.length}）`;
+    details.append(summaryNode);
+    if (!section.rows.length) {
+      appendTextLine(details, "strategy-meta", "本次战役没有相关记录。 ");
+    } else {
+      section.rows.slice(0, 12).forEach((row) => appendTextLine(details, "strategy-meta", section.line(row)));
+    }
+    card.append(details);
+  });
+}
+
 function renderStrategyObjectivePanel(current, campaign) {
   const status = campaign?.world?.strategic_status || {};
+  const contract = status.campaign_contract || {};
   const conditions = Array.isArray(status.victory_conditions) ? status.victory_conditions : [];
   const exiledFactions = Array.isArray(status.exiled_factions) ? status.exiled_factions : [];
   if (!conditions.length && !exiledFactions.length) return;
@@ -4756,6 +6087,21 @@ function renderStrategyObjectivePanel(current, campaign) {
 
   const panel = document.createElement("div");
   panel.className = "strategy-event-list";
+  if (contract.id) {
+    const card = document.createElement("article");
+    card.className = "strategy-campaign-card";
+    const name = document.createElement("strong");
+    name.textContent = contract.name || "限时战役";
+    card.append(name);
+    const duration = Array.isArray(contract.expected_duration_minutes) ? contract.expected_duration_minutes.join("～") : "60～90";
+    const monthText = status.campaign_state === "sandbox"
+      ? `第 ${campaign.world.current_month} 月 · 已转入自由沙盒`
+      : `第 ${campaign.world.current_month}/${contract.month_limit} 月 · 剩余 ${status.months_remaining} 月`;
+    appendTextLine(card, "strategy-meta", monthText);
+    appendTextLine(card, "strategy-meta", `${contract.city_count} 城 · ${contract.major_faction_count} 个主要势力 · ${contract.neutral_city_state_count} 个中立城邦 · 预计 ${duration} 分钟`);
+      appendTextLine(card, "strategy-meta", "已开放：统一、消灭主要敌对势力、十二月评议、中立政治档案与基础外交；正式军队、世界主线和圣物祭坛仍在后续 Phase。");
+    panel.append(card);
+  }
   conditions.forEach((condition) => {
     const card = document.createElement("article");
     card.className = "strategy-campaign-card";
@@ -4785,9 +6131,48 @@ function renderStrategyObjectivePanel(current, campaign) {
     appendTextLine(card, "strategy-meta", "暂无");
     panel.append(card);
   }
+  const conclusion = status.conclusion || {};
+  if (conclusion.state) {
+    const card = document.createElement("article");
+    card.className = "strategy-campaign-card";
+    const name = document.createElement("strong");
+    name.textContent = conclusion.result_label || "战役结算";
+    card.append(name);
+    const conclusionStateLabels = { settled: "等待房主选择", sandbox: "已继续沙盒", archived: "已结束归档" };
+    appendTextLine(card, "strategy-meta", `结算月份：第 ${conclusion.concluded_month} 月 · ${conclusionStateLabels[conclusion.state] || conclusion.state}`);
+    const rankings = Array.isArray(conclusion.rankings) ? conclusion.rankings : [];
+    rankings.forEach((row) => {
+      appendTextLine(
+        card,
+        "strategy-meta",
+        `第 ${row.rank} 名 ${row.faction_name || strategyFactionName(campaign, row.faction_id)}：${row.total_score} 分（城市 ${row.city_score} / 民心 ${row.support_score} / 存续 ${row.survival_score} / 战斗 ${row.battle_score} / 城邦影响 ${row.influence_score || 0} / 主线 ${row.mainline_score}）`
+      );
+    });
+    appendStrategyRetrospective(card, campaign, campaign.world?.campaign_retrospective || conclusion.retrospective);
+    if (status.awaiting_conclusion_choice && Number(campaign.owner_user_id) === Number(state.authUser?.id || 0)) {
+      const actions = document.createElement("div");
+      actions.className = "strategy-campaign-actions";
+      const continueButton = document.createElement("button");
+      continueButton.type = "button";
+      continueButton.className = "primary";
+      continueButton.textContent = "保留结算并继续沙盒";
+      continueButton.disabled = state.strategyBusy || !strategyCanResume(campaign);
+      continueButton.addEventListener("click", continueStrategySandbox);
+      actions.append(continueButton);
+      const archiveButton = document.createElement("button");
+      archiveButton.type = "button";
+      archiveButton.className = "ghost danger";
+      archiveButton.textContent = "结束并归档战役";
+      archiveButton.disabled = state.strategyBusy || !strategyCanResume(campaign);
+      archiveButton.addEventListener("click", archiveStrategyCampaign);
+      actions.append(archiveButton);
+      card.append(actions);
+    }
+    panel.append(card);
+  }
   const faction = strategyFaction(campaign);
   const isExiled = Boolean(faction?.id && (status.exiled_faction_ids || []).includes(faction.id));
-  const canResume = strategyCanResume(campaign);
+  const canResume = strategyCanIssueOrders(campaign);
   if (isExiled) {
     const card = document.createElement("article");
     card.className = "strategy-campaign-card";
@@ -4898,7 +6283,7 @@ function renderStrategyHeroPanel(current, campaign, faction, office = strategyAc
       defense.type = "button";
       defense.className = hero.defender_assigned ? "ghost" : "primary";
       defense.textContent = hero.defender_assigned ? "防守中" : "设为防守";
-      defense.disabled = state.strategyBusy || !strategyCanResume(campaign) || hero.defender_assigned;
+      defense.disabled = state.strategyBusy || !strategyCanIssueOrders(campaign) || hero.defender_assigned;
       defense.addEventListener("click", () => setStrategyDefenseHero(hero.code));
       actions.append(defense);
     }
@@ -4985,6 +6370,7 @@ function renderStrategyPanel() {
   const loggedIn = userLoggedIn();
   const selected = state.strategyCampaign;
   const canResume = strategyCanResume(selected);
+  const canIssueOrders = strategyCanIssueOrders(selected);
   const selectedIsOwner = Boolean(selected && Number(selected.owner_user_id) === Number(state.authUser?.id || 0));
   panel.classList.toggle("is-war-room", Boolean(selected));
   if (roomHome) roomHome.classList.toggle("strategy-war-layout", Boolean(selected));
@@ -5003,8 +6389,8 @@ function renderStrategyPanel() {
     seedInput.disabled = state.strategyBusy || !loggedIn;
   }
   if (playerCountInput) {
-    playerCountInput.value = state.strategyPlayerCount;
-    playerCountInput.disabled = state.strategyBusy || !loggedIn;
+    playerCountInput.value = "2";
+    playerCountInput.disabled = true;
   }
   if (joinCodeInput) {
     joinCodeInput.value = state.strategyJoinCode;
@@ -5015,7 +6401,7 @@ function renderStrategyPanel() {
   if (refreshButton) refreshButton.disabled = state.strategyBusy || !loggedIn;
   if (advanceButton) {
     const office = strategyActiveOffice(selected);
-    advanceButton.disabled = state.strategyBusy || !loggedIn || !selected || !canResume || !selectedIsOwner || Boolean(office && office.office_type !== "lord");
+    advanceButton.disabled = state.strategyBusy || !loggedIn || !selected || !canIssueOrders || !selectedIsOwner || Boolean(office && office.office_type !== "lord");
   }
   if (message) message.textContent = state.strategyMessage || "";
   if (!list || !current) return;
@@ -5036,7 +6422,7 @@ function renderStrategyPanel() {
       appendTextLine(
         card,
         "strategy-meta",
-        `第 ${campaign.world.current_month} 月 · ${campaign.world.cities.length} 城 · ${campaign.members.length}/${campaign.world.factions.length} 初始玩家 · ${campaignStatus}`
+        `第 ${campaign.world.current_month}${campaign.world.strategic_status?.month_limit ? `/${campaign.world.strategic_status.month_limit}` : ""} 月 · ${campaign.world.cities.length} 城 · ${campaign.members.length}/${campaign.world.factions.length} 初始玩家 · ${campaignStatus}`
       );
       appendTextLine(card, "strategy-meta", `加入码：${campaign.join_code || "未生成"}`);
       const title = document.createElement("strong");
@@ -5096,7 +6482,7 @@ function renderStrategyPanel() {
     renderStrategyRoamingWorkspace(current, selected, controlledHero);
   } else {
     if (selected.status === "lobby") current.append(createStrategyHeroPathPanel(selected));
-    renderStrategyWarRoom(current, selected, faction || selected.world.factions[0], canResume, isOwner);
+    renderStrategyWarRoom(current, selected, faction || selected.world.factions[0], canIssueOrders, isOwner);
   }
 
   const campaignStatus = document.createElement("div");
@@ -5342,7 +6728,13 @@ function shouldShowLobbyPanel() {
 function isRoomConfigControlActive() {
   const active = typeof document !== "undefined" ? document.activeElement : null;
   if (!active || !hasRoom() || state.room?.status !== "lobby") return false;
-  if (active.id === "room-seat-count-input" || active.id === "random-roster-size-input") return true;
+  if (
+    active.id === "room-seat-count-input"
+    || active.id === "random-roster-size-input"
+    || active.id === "hero-search"
+    || active.id === "hero-role-filter"
+    || active.id === "hero-difficulty-filter"
+  ) return true;
   const data = active.dataset || {};
   return Boolean(data.seatTeam || data.seatController || data.seatQuota);
 }
@@ -5366,6 +6758,25 @@ function applyRoomPayload(payload, { preserveScreen = false } = {}) {
     state.rooms = payload.rooms;
   }
   state.room = payload.room || null;
+  state.historicalMatchId = state.room?.historical ? String(state.room.match_id || state.historicalMatchId || "") : "";
+  const finishedMatchId = !state.room?.historical && state.room?.status === "finished" ? String(state.room.match_id || "") : "";
+  if (finishedMatchId && finishedMatchId !== state.lastHistorySyncMatchId) {
+    state.lastHistorySyncMatchId = finishedMatchId;
+    refreshRecentMatches({renderAfter: false}).then(() => render());
+  }
+  if (state.connectionLostAt) {
+    state.reconnectedAt = Date.now();
+    state.connectionLostAt = 0;
+    enqueueFloatingToast("连接已恢复，已按原席位同步当前房间和战场。", "connection-restored");
+  }
+  const timeoutAt = Number(state.room?.turn_timer?.last_timeout?.occurred_at || 0);
+  if (timeoutAt > state.lastTurnTimeoutAt) {
+    if (state.lastTurnTimeoutAt > 0) {
+      const timeout = state.room.turn_timer.last_timeout;
+      enqueueFloatingToast(`${timeout.player_name || `席位 ${timeout.seat_id}`} 操作超时，系统已继续推进对局。`, `timeout-${timeoutAt}`);
+    }
+    state.lastTurnTimeoutAt = timeoutAt;
+  }
   syncStrategyCampaignFromRoomPayload(payload);
   state.liveBattle = payload.battle || null;
   if (!state.room || state.room.room_id !== previousRoomId) {
@@ -5421,8 +6832,49 @@ function applyRoomPayload(payload, { preserveScreen = false } = {}) {
   syncScreen({ preferBattle: autoEnterBattle || (preserveScreen && previousScreen === "battle") });
   syncSelectedUnitAfterStateChange();
   syncBattleVfxState({ hadBattle, boardChanged: Boolean(state.liveBattle) && nextBoardKey !== previousBoardKey });
+  const previousVisualEventId = maxVisualEventId(previousBattle?.visual_events || []);
+  const feedbackEvents = previousBattle && previousRoomId === state.room?.room_id
+    ? visualEvents().filter((event) => Number(event?.id || 0) > previousVisualEventId)
+    : [];
+  globalThis.WujiangBattleFeedback?.consume({
+    previousBattle: previousRoomId === state.room?.room_id ? previousBattle : null,
+    battle: state.liveBattle,
+    events: feedbackEvents,
+    viewerTeamId: viewerTeamId(),
+    replayMode: isReplayMode(),
+  });
   syncFloatingToasts(previousBattle, state.liveBattle);
   syncAiPreview(previousBattle, state.liveBattle);
+  trackQuickAiMatchEnd();
+}
+
+function loadRecordedMatchEnds() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(RECORDED_MATCH_ENDS_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed.map((item) => String(item || "")).filter(Boolean) : [];
+  } catch (_error) {
+    return [];
+  }
+}
+
+function trackQuickAiMatchEnd() {
+  const roomId = String(state.room?.room_id || "");
+  if (!roomId || state.room?.experience_kind !== "quick_ai" || !state.battle?.winner || viewerTeamId() === null) return;
+  const recorded = loadRecordedMatchEnds();
+  const completedAt = Date.now();
+  const completedMatch = {room_id: roomId, completed_at: completedAt, mode: "quick_ai"};
+  state.lastCompletedMatch = completedMatch;
+  localStorage.setItem(LAST_COMPLETED_MATCH_KEY, JSON.stringify(completedMatch));
+  if (recorded.includes(roomId)) return;
+  recorded.push(roomId);
+  localStorage.setItem(RECORDED_MATCH_ENDS_KEY, JSON.stringify(recorded.slice(-40)));
+  const createdAtMs = Number(state.room?.created_at || 0) * 1000;
+  recordProductEvent("match_end", {
+    match_id: roomId,
+    mode: "quick_ai",
+    result: Number(state.battle.winner) === Number(viewerTeamId()) ? "win" : "loss",
+    duration_ms: createdAtMs > 0 ? Math.max(0, completedAt - createdAtMs) : 0,
+  });
 }
 
 function availableRoomModes() {
@@ -5445,6 +6897,7 @@ function renderScreens() {
 function renderNavigation() {
   const canResume = hasBattle();
   $("nav-draft").classList.toggle("hidden", state.screen !== "battle" || !hasRoom());
+  $("nav-draft").textContent = state.historicalMatchId ? "返回战绩" : "房间大厅";
   $("nav-battle").classList.toggle("hidden", !(state.screen === "draft" && canResume));
   $("copy-invite-top").classList.toggle("hidden", !state.room?.invite_url);
   $("edit-profile").classList.toggle("hidden", state.screen === "battle");
@@ -5782,6 +7235,14 @@ function renderBoard() {
       if (aiPreviewKeys.has(key)) cell.classList.add("is-ai-preview");
       if (aiCurrentKey && aiCurrentKey === key) cell.classList.add("is-ai-current");
       if (cellEffects.length) cell.classList.add("has-field-effect");
+      const cellLabels = [`第 ${y + 1} 行，第 ${x + 1} 列`];
+      cellLabels.push(occupant ? `${occupant.name}，队伍 ${occupant.player_id}` : "空格");
+      if (preview.cellKeys.has(key)) cellLabels.push("可选范围");
+      if (occupant && preview.targetIds.has(occupant.id)) cellLabels.push("可选目标");
+      if (unitOccupiedCells(selected).some((cellPosition) => cellPosition.x === x && cellPosition.y === y)) cellLabels.push("当前选择");
+      if (cellEffects.length) cellLabels.push(`战场状态：${cellEffects.map((effect) => effect.name).join("、")}`);
+      cell.setAttribute?.("aria-label", cellLabels.join("；"));
+      if (typeof cell.setAttribute !== "function") cell.ariaLabel = cellLabels.join("；");
 
       if (cellEffects.length) {
         const markerStack = document.createElement("div");
@@ -5912,6 +7373,60 @@ function renderActionPanel() {
     });
     panel.append(btn);
   });
+}
+
+function estimatedSummaryDamage(attackPower, defense) {
+  const attack = Number(attackPower || 0);
+  const guard = Number(defense || 0);
+  if (attack > guard) return 1;
+  return 1 / (2 ** Math.max(guard - attack + 1, 1));
+}
+
+function previewAffectedUnits(action) {
+  if (!action) return [];
+  const ids = new Set(action.preview?.target_unit_ids || []);
+  (action.preview?.cells || []).forEach((cell) => {
+    unitsAtCell(Number(cell.x), Number(cell.y)).forEach((unit) => ids.add(unit.id));
+  });
+  return [...ids].map((id) => unitById(id)).filter(Boolean);
+}
+
+function renderActionForecast() {
+  const panel = $("action-forecast");
+  if (!panel) return;
+  const action = selectedAction();
+  if (!action) {
+    panel.className = "action-forecast is-empty";
+    panel.textContent = tutorialState()?.step_id === "select_unit"
+      ? "先点击火葬者；选择行动后，这里会显示消耗、目标、预计效果和最终站位。"
+      : "选择一个行动后，这里会显示消耗、合法目标、预计效果和最终站位。";
+    return;
+  }
+  panel.className = "action-forecast";
+  const actor = selectedUnit();
+  const targets = previewAffectedUnits(action);
+  const targetNames = targets.length ? targets.map((unit) => unit.name).join("、") : "选择目标后确认";
+  const mana = actionManaLabel(action) || "不消耗魔力";
+  let effect = action.description || "按行动说明结算";
+  if (action.kind === "attack" && actor && targets.length) {
+    const estimates = targets.map((target) => `${target.name} 约 ${trimNumber(estimatedSummaryDamage(actor.stats.attack, target.stats.defense))} 血`);
+    effect = `${estimates.join("；")}（护盾、连锁、免疫和多格命中会改变实际结果）`;
+  } else if (action.kind === "move") {
+    effect = "移动本身不造成伤害；路径上的进入/穿过效果仍会正常触发。";
+  }
+  const path = stagedMovePath(action);
+  const destination = path[path.length - 1];
+  const finalPosition = action.kind === "move"
+    ? (destination ? `(${destination.x + 1}, ${destination.y + 1})` : "选择路径后显示")
+    : (actor ? `保持在 (${actor.x + 1}, ${actor.y + 1})` : "不改变站位");
+  panel.innerHTML = `
+    <strong>${actionLabel(action)}</strong>
+    <div class="action-forecast-row"><span>资源消耗</span><span>${mana} · ${actionLimitLabel(action)}</span></div>
+    <div class="action-forecast-row"><span>合法目标</span><span>${targetNames}</span></div>
+    <div class="action-forecast-row"><span>预计效果</span><span>${effect}</span></div>
+    <div class="action-forecast-row"><span>最终站位</span><span>${finalPosition}</span></div>
+    <div class="action-forecast-row"><span>影响单位</span><span>${targets.length ? `${targets.length} 个：${targetNames}` : "随当前高亮范围更新"}</span></div>
+  `;
 }
 
 function renderActionWheel() {
@@ -6375,18 +7890,121 @@ function renderLogs() {
   });
 }
 
+function formatPostgameValue(value) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number)) return "0";
+  return Number.isInteger(number) ? String(number) : String(Math.round(number * 1000) / 1000);
+}
+
+function renderPostgameSummary() {
+  const panel = $("postgame-summary");
+  const summary = state.room?.postgame || {available: false};
+  if (!panel) return;
+  panel.classList.toggle("hidden", !summary.available);
+  if (!summary.available) return;
+  $("postgame-reason").textContent = `${summary.winner_team_name}获胜：${summary.reason_text}`;
+  $("postgame-meta").textContent = `${Number(summary.completed_turns || 0)} 个武将回合 · ${Number(summary.duration_seconds || 0)} 秒`;
+  $("postgame-formula").textContent = `综合贡献：${summary.mvp_formula}`;
+
+  const teamStats = $("postgame-team-stats");
+  teamStats.innerHTML = "";
+  (summary.team_stats || []).forEach((team) => {
+    const card = document.createElement("article");
+    card.className = `postgame-team-card ${Number(team.team_id) === Number(summary.winner_team_id) ? "is-winner" : ""}`;
+    const title = document.createElement("strong");
+    title.textContent = `${team.team_name}${Number(team.team_id) === Number(summary.winner_team_id) ? " · 胜方" : ""}`;
+    const line = document.createElement("span");
+    line.textContent = `伤害 ${formatPostgameValue(team.damage_dealt)} · 治疗 ${formatPostgameValue(team.healing_done)} · 承伤 ${formatPostgameValue(team.damage_taken)} · 击破 ${team.kills || 0} · 破盾 ${team.shields_broken || 0} · 连锁 ${team.chain_reactions || 0}`;
+    card.append(title, line);
+    teamStats.append(card);
+  });
+
+  const mvpPanel = $("postgame-mvp");
+  mvpPanel.innerHTML = "";
+  if (summary.mvp) {
+    const title = document.createElement("strong");
+    title.textContent = `本局 MVP · ${summary.mvp.name}（综合贡献 ${formatPostgameValue(summary.mvp.contribution_score)}）`;
+    const detail = document.createElement("span");
+    detail.textContent = summary.mvp.explanation || "按本局实际贡献计算。";
+    mvpPanel.append(title, detail);
+  } else {
+    mvpPanel.textContent = "本局没有足够数据生成 MVP。";
+  }
+
+  const nextGoal = $("postgame-next-goal");
+  if (nextGoal) {
+    nextGoal.innerHTML = "";
+    const title = document.createElement("strong");
+    title.textContent = "下一修炼目标";
+    const detail = document.createElement("span");
+    detail.textContent = state.progressionError
+      || state.progression?.next_goal?.message
+      || (state.progressionBusy ? "正在更新本局后的熟练度..." : "返回首页可查看完整武将熟练度。 ");
+    nextGoal.append(title, detail);
+  }
+
+  const heroBody = $("postgame-hero-stats");
+  heroBody.innerHTML = "";
+  (summary.hero_stats || []).forEach((hero) => {
+    const row = document.createElement("tr");
+    const values = [
+      `${hero.name}${hero.owner_name ? ` · ${hero.owner_name}` : ""}`,
+      formatPostgameValue(hero.damage_dealt),
+      formatPostgameValue(hero.healing_done),
+      formatPostgameValue(hero.damage_taken),
+      String(hero.kills || 0),
+      String(hero.shields_broken || 0),
+      String(hero.chain_reactions || 0),
+    ];
+    values.forEach((value) => {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.append(cell);
+    });
+    heroBody.append(row);
+  });
+
+  const keyTurns = $("postgame-key-turns");
+  keyTurns.innerHTML = "";
+  (summary.key_turns || []).forEach((item) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "postgame-key-turn";
+    const title = document.createElement("strong");
+    title.textContent = `第 ${item.turn_index} 个武将回合 · ${item.title}`;
+    const detail = document.createElement("span");
+    detail.textContent = `${item.detail}${item.replay_step_index != null ? ` · 回放步骤 ${item.replay_step_index}` : ""}`;
+    button.append(title, detail);
+    button.disabled = item.replay_step_index == null || !state.room?.replay?.available;
+    button.addEventListener("click", () => loadReplayStep(Number(item.replay_step_index)));
+    keyTurns.append(button);
+  });
+  if (!(summary.key_turns || []).length) {
+    const empty = document.createElement("span");
+    empty.textContent = "本局没有可标记的关键回合。";
+    keyTurns.append(empty);
+  }
+}
+
 function renderGameOverOverlay() {
   const overlay = $("game-over-overlay");
   const title = $("game-over-title");
   const text = $("game-over-text");
   const rematch = $("game-over-rematch");
   const strategy = $("game-over-strategy");
-  if (!state.battle || !isGameOver() || state.screen !== "battle") {
+  if (!state.battle || !isGameOver() || state.screen !== "battle" || isReplayMode()) {
     overlay.classList.add("hidden");
     return;
   }
+  renderPostgameSummary();
   title.textContent = "游戏结束";
-  text.textContent = state.strategyCampaign
+  const tutorial = tutorialState();
+  if (tutorial) {
+    title.textContent = state.battle.winner === 1 ? "教学完成" : "这次没有获胜";
+    text.textContent = state.battle.winner === 1
+      ? "你已经完成固定新手战斗。可以再次练习，或返回首页选择其他模式。"
+      : "可以从自由战斗检查点继续，不需要重新完成前面的教学步骤。";
+  } else text.textContent = state.strategyCampaign
     ? `玩家 ${state.battle.winner} 已获胜。战场上的行动与连锁都已锁定，战役结算已同步。`
     : `玩家 ${state.battle.winner} 已获胜。战场上的行动与连锁都已锁定。你可以回到房间大厅,或者直接重新开始选将。`;
   if (strategy) {
@@ -6396,6 +8014,14 @@ function renderGameOverOverlay() {
   }
   if (rematch) {
     rematch.disabled = !Boolean(state.room?.can_rematch && state.room?.viewer_player_id !== null);
+    if (tutorial) {
+      rematch.disabled = state.battle.winner !== 1 && !tutorial.can_retry_checkpoint;
+      rematch.textContent = state.battle.winner === 1 ? "再次开始教学" : "从检查点重试";
+    } else if (state.room?.experience_kind === "quick_ai") {
+      rematch.textContent = "同阵容再来一局";
+    } else {
+      rematch.textContent = state.room?.viewer_is_host ? "同配置再来一局" : "等待房主再开一局";
+    }
   }
   overlay.classList.remove("hidden");
 }
@@ -6497,6 +8123,8 @@ function render() {
   renderNavigation();
   renderProfilePanel();
   renderAuthPanel();
+  renderHomeFlow();
+  renderRecentMatches();
   if (!preserveStrategyControl) renderStrategyPanel();
   renderProfileModal();
   if (!preserveRoomConfig) renderRoomPanels();
@@ -6505,6 +8133,7 @@ function render() {
   renderRoomListActive();
   renderHeroCards();
   renderHeader();
+  renderConnectionAndTurnState();
   renderBoardZoomControls();
   renderMessage();
   renderBattleEffects();
@@ -6514,20 +8143,25 @@ function render() {
   renderSidebarPanels();
   renderSelectedCard();
   renderActionPanel();
+  renderActionForecast();
   renderUnitStrip();
   renderChainPanel();
   renderLogs();
   renderFloatingToasts();
   renderGameOverOverlay();
   renderReplayToolbar();
+  renderTutorialGuide();
   renderRoomActionButtons();
   renderTargetCancelButton();
   renderTargetCompleteButton();
-  $("end-turn").disabled = !canInteract() || isChainMode() || isRespawnMode();
+  const tutorialStepId = tutorialState()?.step_id;
+  $("end-turn").disabled = !canInteract() || isChainMode() || isRespawnMode()
+    || Boolean(tutorialStepId && !["end_turn", "win_objective"].includes(tutorialStepId));
   $("skip-chain").disabled = !canInteract() || !isChainMode();
 }
 
 async function refreshState({ preserveScreen = true } = {}) {
+  if (state.historicalMatchId) return;
   if (refreshInFlight) return;
   refreshInFlight = true;
   try {
@@ -6537,6 +8171,7 @@ async function refreshState({ preserveScreen = true } = {}) {
       const payload = await fetchJson("/api/heroes");
       state.heroes = payload.heroes;
       state.rooms = payload.rooms || [];
+      state.onboarding = payload.onboarding || state.onboarding;
       state.room = null;
       state.battle = null;
       state.liveBattle = null;
@@ -6544,6 +8179,7 @@ async function refreshState({ preserveScreen = true } = {}) {
       state.replayStepIndex = 0;
       state.replayOmniscient = false;
       state.playerToken = "";
+      await refreshResumableTutorial();
       if (userLoggedIn()) {
         await refreshStrategyCampaigns({ renderAfter: false });
       } else {
@@ -6562,6 +8198,10 @@ async function refreshState({ preserveScreen = true } = {}) {
         ]),
         authenticatedUserId: state.authUser?.id || 0,
         selectedCampaignId: state.strategyCampaign?.id || 0,
+        resumableTutorial: state.resumableTutorial
+          ? [state.resumableTutorial.room_id, state.resumableTutorial.step_id]
+          : null,
+        tutorialResumeError: state.tutorialResumeError,
       });
       if (homeRenderSignature === lastHomeRenderSignature) return;
       lastHomeRenderSignature = homeRenderSignature;
@@ -6582,6 +8222,7 @@ async function refreshState({ preserveScreen = true } = {}) {
     } else if (!roomQueryId()) {
       $("lobby-caption").textContent = error.error || "加载英雄列表失败。";
     } else {
+      if (!state.connectionLostAt) state.connectionLostAt = Date.now();
       render();
       $("message").textContent = error.error || "连接中断，正在保留当前房间身份等待重新同步。";
     }
@@ -6708,7 +8349,7 @@ async function restartRoomDraft() {
       applyRoomPayload(payload, { preserveScreen: false });
       render();
     }
-    $("room-message").textContent = error.error || "重新开始选将失败。";
+    $("room-message").textContent = error.error || "同配置再战准备失败。";
   }
 }
 
@@ -7010,6 +8651,148 @@ function renderRoomListActive() {
   });
 }
 
+async function startTutorialBattle() {
+  if (state.quickStartBusy) return;
+  if (!requireAuthForRoomEntry()) return;
+  if (!state.profileReady) {
+    openProfileModal();
+    render();
+    return;
+  }
+  state.quickStartBusy = true;
+  render();
+  try {
+    const payload = await fetchJson("/api/rooms/tutorial-start", {
+      method: "POST",
+      body: JSON.stringify({player_name: effectiveProfileName()}),
+    });
+    state.playerToken = payload.player_token;
+    saveStoredIdentity(payload.room.room_id, payload.player_token, payload.room.viewer_name || effectiveProfileName());
+    localStorage.setItem(LAST_TUTORIAL_ROOM_KEY, payload.room.room_id);
+    state.resumableTutorial = null;
+    state.tutorialResumeError = "";
+    syncLocation("battle", payload.room.room_id);
+    applyRoomPayload(payload, {preserveScreen: false});
+    await recordProductEvent("tutorial_start", {tutorial_id: "first_battle"});
+    await recordProductEvent("match_start", {match_id: payload.room.room_id, mode: "tutorial"});
+    render();
+  } catch (error) {
+    enqueueFloatingToast(error.error || "新手教学创建失败，请重试。");
+  } finally {
+    state.quickStartBusy = false;
+    render();
+  }
+}
+
+async function startQuickAiBattle({rematch = false} = {}) {
+  if (state.quickStartBusy) return;
+  if (!requireAuthForRoomEntry()) return;
+  if (!state.profileReady) {
+    openProfileModal();
+    render();
+    return;
+  }
+  let previousMatch = state.lastCompletedMatch;
+  if (!previousMatch) {
+    try {
+      previousMatch = JSON.parse(localStorage.getItem(LAST_COMPLETED_MATCH_KEY) || "null");
+    } catch (_error) {
+      previousMatch = null;
+    }
+  }
+  state.quickStartBusy = true;
+  render();
+  try {
+    const payload = await fetchJson("/api/rooms/quick-ai-start", {
+      method: "POST",
+      body: JSON.stringify({player_name: effectiveProfileName()}),
+    });
+    state.playerToken = payload.player_token;
+    saveStoredIdentity(payload.room.room_id, payload.player_token, payload.room.viewer_name || effectiveProfileName());
+    syncLocation("battle", payload.room.room_id);
+    applyRoomPayload(payload, {preserveScreen: false});
+    await recordProductEvent("quick_ai_start", {
+      match_id: payload.room.room_id,
+      roster_code: payload.quick_ai?.player_roster_code || "steady_front",
+      opponent_code: payload.quick_ai?.opponent_roster_code || "ranged_pressure",
+    });
+    await recordProductEvent("match_start", {match_id: payload.room.room_id, mode: "quick_ai"});
+    if (rematch && previousMatch?.room_id) {
+      await recordProductEvent("rematch_start", {
+        match_id: previousMatch.room_id,
+        mode: "quick_ai",
+        duration_ms: Math.max(0, Date.now() - Number(previousMatch.completed_at || Date.now())),
+      });
+    }
+    render();
+  } catch (error) {
+    enqueueFloatingToast(error.error || "快速 AI 对战创建失败，请重试。");
+  } finally {
+    state.quickStartBusy = false;
+    render();
+  }
+}
+
+async function resumeTutorialBattle() {
+  if (state.quickStartBusy || !state.resumableTutorial) return;
+  if (!requireAuthForRoomEntry()) return;
+  const remembered = {...state.resumableTutorial};
+  state.quickStartBusy = true;
+  render();
+  try {
+    const query = new URLSearchParams({
+      room_id: remembered.room_id,
+      player_token: remembered.player_token,
+    });
+    const payload = await fetchJson(`/api/rooms/state?${query.toString()}`);
+    const tutorial = payload.room?.tutorial;
+    if (payload.room?.experience_kind !== "tutorial" || !tutorial || tutorial.completed_at || payload.battle?.winner) {
+      clearResumableTutorial();
+      throw {error: "这场教学已经结束，请重新开始教学。"};
+    }
+    if (payload.room.viewer_player_id === null || payload.room.viewer_player_id === undefined) {
+      clearResumableTutorial();
+      throw {error: "上次教学的席位凭据已失效，请重新开始教学。"};
+    }
+    state.playerToken = remembered.player_token;
+    syncLocation("battle", remembered.room_id);
+    applyRoomPayload(payload, {preserveScreen: false});
+    await recordProductEvent("tutorial_step", {
+      tutorial_id: "first_battle",
+      step_id: tutorial.step_id,
+      status: "resumed",
+    });
+    render();
+  } catch (error) {
+    state.tutorialResumeError = error.error || "恢复教学失败；你可以重试或重新开始。";
+    enqueueFloatingToast(state.tutorialResumeError);
+  } finally {
+    state.quickStartBusy = false;
+    render();
+  }
+}
+
+async function completeTutorialUnitSelection(unitId) {
+  if (tutorialState()?.step_id !== "select_unit" || !unitId) return;
+  try {
+    const previousStep = tutorialState()?.step_id;
+    const payload = await fetchJson("/api/rooms/tutorial-select-unit", {
+      method: "POST",
+      body: JSON.stringify({
+        room_id: state.room?.room_id,
+        player_token: state.playerToken,
+        unit_id: unitId,
+      }),
+    });
+    applyRoomPayload(payload, {preserveScreen: true});
+    await recordProductEvent("tutorial_step", {tutorial_id: "first_battle", step_id: previousStep, status: "completed"});
+    await recordProductEvent("tutorial_step", {tutorial_id: "first_battle", step_id: tutorialState()?.step_id, status: "started"});
+    render();
+  } catch (error) {
+    $("message").textContent = error.error || "请点击你控制的火葬者。";
+  }
+}
+
 function renderResumePanel() {
   const panel = $("resume-room-panel");
   const text = $("resume-room-text");
@@ -7101,18 +8884,14 @@ function leaveReplayMode({ renderAfter = true } = {}) {
 
 async function loadReplayStep(stepIndex, { omniscient = state.replayOmniscient } = {}) {
   if (!hasRoom() || !replayMeta().available) return;
-  const query = new URLSearchParams({
-    room_id: state.room.room_id,
-    step_index: String(Math.max(0, Number(stepIndex) || 0)),
-  });
-  if (state.playerToken) {
-    query.set("player_token", state.playerToken);
-  }
-  if (omniscient) {
-    query.set("omniscient", "1");
-  }
+  const query = state.historicalMatchId
+    ? new URLSearchParams({match_id: state.historicalMatchId, step_index: String(Math.max(0, Number(stepIndex) || 0))})
+    : new URLSearchParams({room_id: state.room.room_id, step_index: String(Math.max(0, Number(stepIndex) || 0))});
+  if (!state.historicalMatchId && state.playerToken) query.set("player_token", state.playerToken);
+  if (!state.historicalMatchId && omniscient) query.set("omniscient", "1");
   try {
-    const payload = await fetchJson(`/api/rooms/replay?${query.toString()}`);
+    const endpoint = state.historicalMatchId ? "/api/matches/replay" : "/api/rooms/replay";
+    const payload = await fetchJson(`${endpoint}?${query.toString()}`);
     state.replayMode = true;
     state.replayStepIndex = Number(payload.replay?.step_index || 0);
     state.replayOmniscient = Boolean(payload.replay?.omniscient);
@@ -7151,6 +8930,7 @@ async function controlSimulation(action, speed = null) {
 }
 
 async function performAction(payload) {
+  const previousTutorial = tutorialState();
   try {
     const response = await fetchJson("/api/rooms/action", {
       method: "POST",
@@ -7161,6 +8941,23 @@ async function performAction(payload) {
       }),
     });
     applyRoomPayload(response);
+    recordProductEvent("action_succeeded", {
+      match_id: state.room?.room_id || "",
+      mode: tutorialState() ? "tutorial" : state.room?.mode || "room",
+      action_type: payload.type || "unknown",
+    });
+    const currentTutorial = tutorialState();
+    if (previousTutorial && currentTutorial && previousTutorial.step_id !== currentTutorial.step_id) {
+      recordProductEvent("tutorial_step", {tutorial_id: "first_battle", step_id: previousTutorial.step_id, status: "completed"});
+      recordProductEvent("tutorial_step", {tutorial_id: "first_battle", step_id: currentTutorial.step_id, status: "started"});
+      if (!previousTutorial.first_effective_action_at && currentTutorial.first_effective_action_at) {
+        recordProductEvent("first_effective_action", {
+          tutorial_id: "first_battle",
+          action_type: payload.type,
+          duration_ms: Math.max(0, Math.round((currentTutorial.first_effective_action_at - currentTutorial.started_at) * 1000)),
+        });
+      }
+    }
     clearActionSelection();
     render();
   } catch (error) {
@@ -7169,7 +8966,131 @@ async function performAction(payload) {
       render();
     }
     $("message").textContent = error.error || "执行失败。";
+    recordProductEvent("invalid_action", {
+      match_id: state.room?.room_id || "",
+      mode: tutorialState() ? "tutorial" : state.room?.mode || "room",
+      action_type: payload.type || "unknown",
+      reason: error.error || "rejected",
+    });
   }
+}
+
+async function toggleRoomReady() {
+  const seat = currentRoomSeat();
+  if (!hasRoom() || !state.playerToken || !seat?.is_human || state.room.status !== "lobby") return;
+  try {
+    const payload = await fetchJson("/api/rooms/set-ready", {
+      method: "POST",
+      body: JSON.stringify({
+        room_id: state.room.room_id,
+        player_token: state.playerToken,
+        ready: !seat.ready,
+      }),
+    });
+    applyRoomPayload(payload, { preserveScreen: true });
+    render();
+  } catch (error) {
+    if (error.state) {
+      applyRoomPayload(error.state, { preserveScreen: true });
+      render();
+    }
+    $("room-message").textContent = error.error || "准备状态更新失败。";
+  }
+}
+
+const TUTORIAL_STEP_LABELS = {
+  select_unit: "选中你的武将",
+  move: "向敌人靠近",
+  basic_attack: "进行普通攻击",
+  active_skill: "使用主动技能",
+  end_turn: "结束当前回合",
+  chain_response: "完成一次连锁响应",
+  win_objective: "独立赢下教学战",
+};
+
+function renderTutorialGuide() {
+  const guide = $("tutorial-guide");
+  if (!guide) return;
+  const tutorial = tutorialState();
+  guide.classList.toggle("hidden", !tutorial);
+  if (!tutorial) return;
+  const ids = Object.keys(TUTORIAL_STEP_LABELS);
+  const currentIndex = Math.max(0, ids.indexOf(tutorial.step_id));
+  const reviewIndex = Math.max(0, currentIndex - state.tutorialHistoryOffset);
+  const reviewId = ids[reviewIndex];
+  const reviewing = state.tutorialHistoryOffset > 0;
+  $("tutorial-step-count").textContent = `步骤 ${currentIndex + 1}/${ids.length}`;
+  $("tutorial-objective").textContent = tutorial.completed_at ? "教学完成" : "目标：击败艾莉";
+  $("tutorial-title").textContent = reviewing ? `回顾：${TUTORIAL_STEP_LABELS[reviewId]}` : tutorial.step.title;
+  $("tutorial-instruction").textContent = reviewing
+    ? "这是已经完成的步骤说明；战局不会回滚。点击当前步骤可回到正在进行的目标。"
+    : tutorial.step.instruction;
+  guide.classList.toggle("is-collapsed", state.tutorialGuideCollapsed);
+  $("tutorial-back-note").disabled = currentIndex === 0;
+  $("tutorial-back-note").textContent = reviewing ? "当前步骤" : "上一步说明";
+  $("tutorial-retry").disabled = tutorial.step_id !== "win_objective" || !tutorial.can_retry_checkpoint;
+  $("tutorial-skip-note").textContent = state.tutorialGuideCollapsed ? "展开说明" : "跳过说明";
+  if (tutorial.completed_at && !state.tutorialCompletionRecorded) {
+    state.tutorialCompletionRecorded = true;
+    const durationMs = Math.max(0, Math.round((tutorial.completed_at - tutorial.started_at) * 1000));
+    recordProductEvent("tutorial_complete", {tutorial_id: "first_battle", duration_ms: durationMs});
+    recordProductEvent("match_end", {match_id: state.room.room_id, mode: "tutorial", result: "win", duration_ms: durationMs});
+  }
+}
+
+async function retryTutorialStep() {
+  const tutorial = tutorialState();
+  if (!tutorial) return;
+  clearActionSelection();
+  if (!tutorial.can_retry_checkpoint) {
+    $("message").textContent = "本步战局仍然有效，请按金色提示重新操作。";
+    render();
+    return;
+  }
+  try {
+    const payload = await fetchJson("/api/rooms/tutorial-retry", {
+      method: "POST",
+      body: JSON.stringify({room_id: state.room.room_id, player_token: state.playerToken}),
+    });
+    applyRoomPayload(payload, {preserveScreen: false});
+    recordProductEvent("tutorial_step", {tutorial_id: "first_battle", step_id: tutorial.step_id, status: "retried"});
+    render();
+  } catch (error) {
+    $("message").textContent = error.error || "无法恢复教学检查点。";
+  }
+}
+
+function exitTutorial() {
+  const tutorial = tutorialState();
+  if (!tutorial) return;
+  recordProductEvent("tutorial_exit", {
+    tutorial_id: "first_battle",
+    step_id: tutorial.step_id,
+    reason: "player_exit",
+    duration_ms: Math.max(0, Math.round((Date.now() / 1000 - tutorial.started_at) * 1000)),
+  });
+  state.room = null;
+  state.battle = null;
+  state.liveBattle = null;
+  state.playerToken = "";
+  state.screen = "draft";
+  state.homeFlow = "quick";
+  syncLocation("draft", "");
+  refreshState({preserveScreen: false});
+}
+
+function restartFromGameOver() {
+  const tutorial = tutorialState();
+  if (!tutorial) {
+    if (state.room?.experience_kind === "quick_ai") {
+      startQuickAiBattle({rematch: true});
+      return;
+    }
+    restartRoomDraft();
+    return;
+  }
+  if (state.battle?.winner === 1) startTutorialBattle();
+  else retryTutorialStep();
 }
 
 function onActionClick(action) {
@@ -7240,6 +9161,19 @@ function attackTargetIdAtCell(action, x, y, occupant) {
     .map((unit) => unit.id)[0] || "";
 }
 
+function explainInvalidBoardChoice(action, occupant = null) {
+  let reason = "该格不属于当前行动的合法范围，请选择高亮格。";
+  if (action?.kind === "move") reason = "该格无法作为移动路径的下一步：可能超出剩余速度、被单位阻挡或会让完整身形越界。";
+  else if (action?.kind === "attack") reason = occupant
+    ? "该单位不在当前攻击范围或合法直线上。"
+    : "这里没有可攻击的单位，请点击高亮目标。";
+  else if (action?.kind === "skill") reason = occupant
+    ? "该单位不是此技能当前可选择的合法目标。"
+    : "该格不符合技能的范围、方向或形状要求。";
+  $("message").textContent = reason;
+  enqueueFloatingToast(reason);
+}
+
 function onBoardClick(x, y, occupant) {
   if (!canInteract()) {
     clearActionSelection();
@@ -7299,6 +9233,7 @@ function onBoardClick(x, y, occupant) {
     state.selectedUnitId = occupant?.id || "";
     if (occupant) state.sidebarExpanded = "info";
     clearActionSelection();
+    if (occupant) completeTutorialUnitSelection(occupant.id);
     render();
     return;
   }
@@ -7351,6 +9286,7 @@ function onBoardClick(x, y, occupant) {
       render();
       return;
     }
+    explainInvalidBoardChoice(action, occupant);
     return;
   }
 
@@ -7391,7 +9327,10 @@ function onBoardClick(x, y, occupant) {
   }
 
   if (multiUnitSelection(action)) {
-    if (!(occupant && canUseUnit)) return;
+    if (!(occupant && canUseUnit)) {
+      explainInvalidBoardChoice(action, occupant);
+      return;
+    }
     const chosenIds = stagedMultiTargetIds(action);
     const maxTargets = Number(multiUnitSelection(action)?.max_targets || chosenIds.length + 1);
     if (chosenIds.includes(occupant.id)) {
@@ -7444,7 +9383,10 @@ function onBoardClick(x, y, occupant) {
 
   if (isChainMode()) {
     if (!actionNeedsTarget(action)) return;
-    if (!canUseCell && !canUseUnit) return;
+    if (!canUseCell && !canUseUnit) {
+      explainInvalidBoardChoice(action, occupant);
+      return;
+    }
     const payload = {
       type: "chain_react",
       unit_id: state.selectedUnitId,
@@ -7463,10 +9405,7 @@ function onBoardClick(x, y, occupant) {
   }
 
   if (!canUseCell && !canUseUnit) {
-    clearActionSelection();
-    state.selectedUnitId = occupant?.id || "";
-    if (occupant) state.sidebarExpanded = "info";
-    render();
+    explainInvalidBoardChoice(action, occupant);
     return;
   }
 
@@ -7482,7 +9421,10 @@ function onBoardClick(x, y, occupant) {
 
   if (action.kind === "attack") {
     const targetUnitId = attackTargetIdAtCell(action, x, y, occupant);
-    if (!targetUnitId) return;
+    if (!targetUnitId) {
+      explainInvalidBoardChoice(action, occupant);
+      return;
+    }
     performAction({
       type: "attack",
       unit_id: state.selectedUnitId,
@@ -7518,7 +9460,10 @@ function onBoardClick(x, y, occupant) {
       render();
       return;
     }
-    if (!canUseCell) return;
+    if (!canUseCell) {
+      explainInvalidBoardChoice(action, occupant);
+      return;
+    }
     performAction({
       type: "skill",
       unit_id: state.selectedUnitId,
@@ -7550,6 +9495,69 @@ function onBoardClick(x, y, occupant) {
       y,
     });
   }
+}
+
+function keyboardHelpIsOpen() {
+  return Boolean($("keyboard-help") && !$("keyboard-help").classList.contains("hidden"));
+}
+
+function openKeyboardHelp() {
+  const panel = $("keyboard-help");
+  if (!panel) return;
+  keyboardHelpReturnFocus = document.activeElement;
+  panel.classList.remove("hidden");
+  $("close-keyboard-help")?.focus();
+}
+
+function closeKeyboardHelp() {
+  const panel = $("keyboard-help");
+  if (!panel) return;
+  panel.classList.add("hidden");
+  keyboardHelpReturnFocus?.focus?.();
+  keyboardHelpReturnFocus = null;
+}
+
+function eventComesFromTextControl(event) {
+  const target = event.target;
+  if (!target || typeof target.closest !== "function") return false;
+  return Boolean(target.closest("input, select, textarea, [contenteditable='true']"));
+}
+
+function clickEnabledControl(id) {
+  const control = $(id);
+  if (!control || control.disabled || control.classList.contains("hidden")) return false;
+  control.click();
+  return true;
+}
+
+function handleBattleKeyboard(event) {
+  if (eventComesFromTextControl(event)) return;
+  if (event.key === "?" || (event.key === "/" && event.shiftKey)) {
+    event.preventDefault();
+    if (keyboardHelpIsOpen()) closeKeyboardHelp();
+    else openKeyboardHelp();
+    return;
+  }
+  if (keyboardHelpIsOpen()) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeKeyboardHelp();
+    } else if (event.key === "Tab") {
+      event.preventDefault();
+      $("close-keyboard-help")?.focus();
+    }
+    return;
+  }
+  if (state.screen !== "battle") return;
+  const key = String(event.key || "").toLowerCase();
+  let handled = false;
+  if (event.key === "Escape") handled = clickEnabledControl("cancel-targeting");
+  else if (event.key === "Enter") handled = clickEnabledControl("complete-targeting");
+  else if (key === "e") handled = clickEnabledControl("end-turn");
+  else if (event.key === "[") handled = clickEnabledControl("replay-step-back");
+  else if (event.key === "]") handled = clickEnabledControl("replay-step-forward");
+  else if (event.code === "Space" || event.key === " ") handled = clickEnabledControl("replay-pause");
+  if (handled) event.preventDefault();
 }
 
 function bindEvents() {
@@ -7634,6 +9642,72 @@ function bindEvents() {
   if (focusStrategyMode) focusStrategyMode.addEventListener("click", openStrategyModeEntry);
   const focusDuelMode = $("focus-duel-mode");
   if (focusDuelMode) focusDuelMode.addEventListener("click", openDuelModeEntry);
+  const quickStartEntry = $("quick-start-entry");
+  if (quickStartEntry) quickStartEntry.addEventListener("click", openQuickStartEntry);
+  const startTutorial = $("start-tutorial");
+  if (startTutorial) startTutorial.addEventListener("click", startTutorialBattle);
+  const startQuickAi = $("start-quick-ai");
+  if (startQuickAi) startQuickAi.addEventListener("click", () => startQuickAiBattle());
+  const refreshRecent = $("refresh-recent-matches");
+  if (refreshRecent) refreshRecent.addEventListener("click", () => refreshRecentMatches());
+  $("toggle-battle-sound")?.addEventListener("click", () => globalThis.WujiangBattleFeedback?.toggle("sound"));
+  $("toggle-colorblind-mode")?.addEventListener("click", () => globalThis.WujiangBattleFeedback?.toggle("colorblind"));
+  $("toggle-reduced-motion")?.addEventListener("click", () => {
+    globalThis.WujiangBattleFeedback?.toggle("motion");
+    clearBattleVfx();
+  });
+  $("open-keyboard-help")?.addEventListener("click", openKeyboardHelp);
+  $("close-keyboard-help")?.addEventListener("click", closeKeyboardHelp);
+  $("keyboard-help")?.addEventListener("click", (event) => {
+    if (event.target === $("keyboard-help")) closeKeyboardHelp();
+  });
+  document.addEventListener("keydown", handleBattleKeyboard);
+  const resumeTutorial = $("resume-tutorial");
+  if (resumeTutorial) resumeTutorial.addEventListener("click", resumeTutorialBattle);
+  const tutorialBack = $("tutorial-back-note");
+  if (tutorialBack) tutorialBack.addEventListener("click", () => {
+    state.tutorialHistoryOffset = state.tutorialHistoryOffset > 0 ? 0 : 1;
+    renderTutorialGuide();
+  });
+  const tutorialRetry = $("tutorial-retry");
+  if (tutorialRetry) tutorialRetry.addEventListener("click", retryTutorialStep);
+  const tutorialSkip = $("tutorial-skip-note");
+  if (tutorialSkip) tutorialSkip.addEventListener("click", () => {
+    state.tutorialGuideCollapsed = !state.tutorialGuideCollapsed;
+    const tutorial = tutorialState();
+    if (tutorial) recordProductEvent("tutorial_step", {tutorial_id: "first_battle", step_id: tutorial.step_id, status: "skipped"});
+    renderTutorialGuide();
+  });
+  const tutorialExit = $("tutorial-exit");
+  if (tutorialExit) tutorialExit.addEventListener("click", exitTutorial);
+  const toggleFullRoster = $("toggle-full-roster");
+  if (toggleFullRoster) toggleFullRoster.addEventListener("click", () => {
+    state.showFullRoster = !state.showFullRoster;
+    renderHeroCards();
+  });
+  const heroSearch = $("hero-search");
+  if (heroSearch) heroSearch.addEventListener("input", (event) => {
+    state.heroSearchQuery = String(event.target.value || "");
+    renderHeroCards();
+  });
+  const heroRoleFilter = $("hero-role-filter");
+  if (heroRoleFilter) heroRoleFilter.addEventListener("change", (event) => {
+    state.heroRoleFilter = String(event.target.value || "");
+    renderHeroCards();
+  });
+  const heroDifficultyFilter = $("hero-difficulty-filter");
+  if (heroDifficultyFilter) heroDifficultyFilter.addEventListener("change", (event) => {
+    state.heroDifficultyFilter = String(event.target.value || "");
+    renderHeroCards();
+  });
+  const clearHeroFilters = $("clear-hero-filters");
+  if (clearHeroFilters) clearHeroFilters.addEventListener("click", () => {
+    state.heroSearchQuery = "";
+    state.heroRoleFilter = "";
+    state.heroDifficultyFilter = "";
+    renderHeroCards();
+    $("hero-search")?.focus();
+  });
   $("join-room-code").addEventListener("input", (event) => {
     event.target.value = event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
     state.roomForm.joinRoomCode = event.target.value;
@@ -7694,6 +9768,7 @@ function bindEvents() {
   $("leave-room").addEventListener("click", leaveRoom);
   $("delete-room").addEventListener("click", deleteRoom);
   $("start-room").addEventListener("click", startRoomBattle);
+  $("toggle-ready").addEventListener("click", toggleRoomReady);
   $("copy-invite").addEventListener("click", copyInviteLink);
   $("copy-invite-top").addEventListener("click", copyInviteLink);
   $("board-zoom-out").addEventListener("click", () => {
@@ -7716,7 +9791,8 @@ function bindEvents() {
     loadReplayStep(nextIndex);
   });
   $("replay-live").addEventListener("click", () => {
-    leaveReplayMode();
+    if (state.historicalMatchId) setScreen("draft");
+    else leaveReplayMode();
   });
   $("replay-pause").addEventListener("click", () => {
     if (!simulationMeta().can_control) return;
@@ -7817,7 +9893,7 @@ function bindEvents() {
   $("nav-battle").addEventListener("click", () => setScreen("battle"));
   $("game-over-strategy").addEventListener("click", returnToStrategyCampaign);
   $("game-over-back").addEventListener("click", () => setScreen("draft"));
-  $("game-over-rematch").addEventListener("click", restartRoomDraft);
+  $("game-over-rematch").addEventListener("click", restartFromGameOver);
   $("surrender-battle").addEventListener("click", surrenderBattle);
   $("end-turn").addEventListener("click", () => {
     if (!canInteract()) return;
@@ -8009,6 +10085,23 @@ function bindEvents() {
     const y = Number(cell.dataset.y);
     onBoardClick(x, y, activeOccupantAt(x, y));
   });
+  $("board").addEventListener("keydown", (event) => {
+    const cell = event.target?.closest?.(".cell");
+    if (!cell) return;
+    const direction = {
+      ArrowLeft: [-1, 0],
+      ArrowRight: [1, 0],
+      ArrowUp: [0, -1],
+      ArrowDown: [0, 1],
+    }[event.key];
+    if (!direction) return;
+    const nextX = Number(cell.dataset.x) + direction[0];
+    const nextY = Number(cell.dataset.y) + direction[1];
+    const next = $("board").querySelector(`.cell[data-x="${nextX}"][data-y="${nextY}"]`);
+    if (!next) return;
+    event.preventDefault();
+    next.focus();
+  });
   window.addEventListener("hashchange", () => {
     syncScreen({ preferBattle: Boolean(state.battle) });
     render();
@@ -8121,6 +10214,139 @@ function renderBoardZoomControls() {
   zoomReset.disabled = Math.abs(zoom - 1) < 0.01;
 }
 
+function heroDiscoveryByCode() {
+  return new Map((state.onboarding?.hero_discovery || []).map((item) => [item.code, item]));
+}
+
+function normalizedHeroSearch(value) {
+  return String(value || "").trim().toLocaleLowerCase("zh-CN");
+}
+
+function heroMatchesFilters(hero, discovery, beginner) {
+  if (state.heroRoleFilter && String(discovery?.role || hero.role || "") !== state.heroRoleFilter) return false;
+  if (state.heroDifficultyFilter && String(discovery?.difficulty || "") !== state.heroDifficultyFilter) return false;
+  const query = normalizedHeroSearch(state.heroSearchQuery);
+  if (!query) return true;
+  const haystack = [
+    hero.name,
+    hero.code,
+    hero.role,
+    hero.attribute,
+    hero.race,
+    hero.raw_skill_text,
+    hero.raw_trait_text,
+    discovery?.position,
+    discovery?.difficulty,
+    beginner?.mechanics,
+    beginner?.summary,
+  ].map((value) => normalizedHeroSearch(value)).join(" ");
+  return haystack.includes(query);
+}
+
+function rosterExactlyMatches(seat, heroCodes) {
+  if (!seat || !Array.isArray(heroCodes)) return false;
+  const expected = new Map();
+  heroCodes.forEach((code) => expected.set(code, (expected.get(code) || 0) + 1));
+  const selected = Object.entries(seat.hero_counts || {}).filter(([, count]) => Number(count) > 0);
+  if (selected.length !== expected.size) return false;
+  return selected.every(([code, count]) => Number(count) === Number(expected.get(code) || 0));
+}
+
+function renderTeamReadiness(discoveryByCode) {
+  const panel = $("team-readiness");
+  if (!panel) return;
+  const visible = Boolean(hasRoom() && state.room?.status === "lobby");
+  panel.classList.toggle("hidden", !visible);
+  if (!visible) return;
+  panel.replaceChildren();
+  panel.classList.toggle("is-ready", Boolean(state.room.can_start));
+  panel.classList.toggle("is-blocked", !state.room.can_start);
+
+  const title = document.createElement("strong");
+  title.textContent = state.room.can_start
+    ? "全部真人已确认，房主可以开局"
+    : (state.room.configuration_ready ? "阵容合法，等待真人确认准备" : "阵容尚未满足开局规则");
+  panel.append(title);
+
+  const teams = new Map();
+  (state.room.seats || []).forEach((seat) => {
+    const current = teams.get(Number(seat.team_id)) || {name: seat.team_name, heroes: 0, occupied: 0};
+    current.heroes += seatHeroTotalCount(seat);
+    if (seat.occupied) current.occupied += 1;
+    teams.set(Number(seat.team_id), current);
+  });
+  const teamLine = document.createElement("span");
+  teamLine.textContent = [...teams.values()]
+    .map((team) => `${team.name}：${team.heroes} 名武将 / ${team.occupied} 个已占席位`)
+    .join("；");
+  panel.append(teamLine);
+
+  const ruleLine = document.createElement("span");
+  ruleLine.textContent = state.room.can_start
+    ? "硬性规则与开局确认均已通过；阵容结构建议不会阻止开局。"
+    : (state.room.start_blocker || "请继续补齐席位和双方阵容。");
+  panel.append(ruleLine);
+
+  const editingSeat = editableRoomSeat();
+  const selectedCodes = Object.entries(editingSeat?.hero_counts || {})
+    .filter(([, count]) => Number(count) > 0)
+    .map(([code]) => code);
+  if (selectedCodes.length >= 2) {
+    const roles = new Set(selectedCodes.map((code) => discoveryByCode.get(code)?.role || state.heroes.find((hero) => hero.code === code)?.role));
+    const hasFront = ["勇者", "骑士", "剑士", "狂战"].some((role) => roles.has(role));
+    const hasSupport = ["贤者", "术士"].some((role) => roles.has(role));
+    const advice = document.createElement("span");
+    advice.textContent = hasFront && hasSupport
+      ? `结构建议：${seatIdentityLabel(editingSeat)} 已同时包含前排与辅助定位。`
+      : `结构建议：${seatIdentityLabel(editingSeat)} ${hasFront ? "已有前排，可考虑加入贤者或术士" : "可考虑加入勇者、骑士、剑士或狂战前排"}。`;
+    panel.append(advice);
+  }
+}
+
+function renderConnectionAndTurnState() {
+  const lobbyPanel = $("room-connection-summary");
+  const battlePanel = $("battle-connection-summary");
+  const timerPanel = $("battle-turn-timer");
+  const panels = [lobbyPanel, battlePanel].filter(Boolean);
+  panels.forEach((panel) => { panel.innerHTML = ""; });
+  if (!state.room) {
+    if (lobbyPanel) lobbyPanel.classList.add("hidden");
+    if (battlePanel) battlePanel.classList.add("hidden");
+    if (timerPanel) timerPanel.classList.add("hidden");
+    return;
+  }
+  const humanSeats = (state.room.seats || []).filter((seat) => seat.is_human);
+  panels.forEach((panel) => {
+    panel.classList.toggle("hidden", humanSeats.length === 0);
+    humanSeats.forEach((seat) => {
+      const item = document.createElement("span");
+      const status = String(seat.connection_status || "offline");
+      item.className = `connection-seat is-${status}`;
+      item.textContent = `${seat.name || `席位 ${seat.player_id}`}：${connectionStatusLabel(status)} · ${readyStateLabel(seat)}`;
+      panel.append(item);
+    });
+    if (state.connectionLostAt) {
+      const warning = document.createElement("strong");
+      warning.textContent = "当前浏览器连接中断，正在保留原席位并自动重连。";
+      panel.append(warning);
+    }
+  });
+  if (!timerPanel) return;
+  const timer = state.room.turn_timer || {};
+  const remaining = Number(timer.remaining_seconds);
+  const visible = Boolean(state.battle && timer.enabled && Number.isFinite(remaining));
+  timerPanel.classList.toggle("hidden", !visible);
+  timerPanel.classList.toggle("is-urgent", visible && remaining <= 30 && remaining > 10);
+  timerPanel.classList.toggle("is-critical", visible && remaining <= 10);
+  if (!visible) {
+    timerPanel.textContent = state.room?.experience_kind === "tutorial" ? "教学模式不启用强制倒计时。" : "";
+    return;
+  }
+  const promptLabel = ({turn: "回合操作", chain: "连锁响应", respawn: "复活落点"})[timer.prompt_kind] || "当前操作";
+  const ownerLabel = Number(timer.prompt_seat_id) === Number(viewerPlayerId()) ? "你的" : `席位 ${timer.prompt_seat_id} 的`;
+  timerPanel.textContent = `${ownerLabel}${promptLabel}：${Math.max(0, remaining)} 秒`;
+}
+
 function renderHeroCards() {
   const homeCards = $("home-hero-cards");
   const lobbyCards = $("hero-cards");
@@ -8132,13 +10358,66 @@ function renderHeroCards() {
   homeCards.innerHTML = "";
   lobbyCards.innerHTML = "";
 
-  state.heroes.forEach((hero) => {
+  const beginnerByCode = new Map((state.onboarding?.beginner_heroes || []).map((item) => [item.code, item]));
+  const discoveryByCode = heroDiscoveryByCode();
+  const selectedCodes = new Set(Object.keys(editingSeat?.hero_counts || {}));
+  const searchInput = $("hero-search");
+  const roleFilter = $("hero-role-filter");
+  const difficultyFilter = $("hero-difficulty-filter");
+  if (searchInput && searchInput.value !== state.heroSearchQuery) searchInput.value = state.heroSearchQuery;
+  if (roleFilter) {
+    const roles = [...new Set(state.heroes.map((hero) => String(hero.role || "未分类")))].sort((a, b) => a.localeCompare(b, "zh-CN"));
+    roleFilter.innerHTML = "";
+    const allRoles = document.createElement("option");
+    allRoles.value = "";
+    allRoles.textContent = "全部定位";
+    roleFilter.append(allRoles);
+    roles.forEach((role) => {
+      const option = document.createElement("option");
+      option.value = role;
+      option.textContent = role;
+      roleFilter.append(option);
+    });
+    roleFilter.value = state.heroRoleFilter;
+  }
+  if (difficultyFilter) difficultyFilter.value = state.heroDifficultyFilter;
+  const filtersActive = Boolean(
+    normalizedHeroSearch(state.heroSearchQuery)
+    || state.heroRoleFilter
+    || state.heroDifficultyFilter
+  );
+  const discoveryPool = (state.showFullRoster || randomMode || filtersActive)
+    ? state.heroes
+    : state.heroes.filter((hero) => beginnerByCode.has(hero.code) || selectedCodes.has(hero.code));
+  const visibleHeroes = discoveryPool.filter((hero) => heroMatchesFilters(hero, discoveryByCode.get(hero.code), beginnerByCode.get(hero.code)));
+  const toggle = $("toggle-full-roster");
+  if (toggle) toggle.textContent = state.showFullRoster ? "只看新手武将" : `查看完整武将库（${state.heroes.length}）`;
+  const filterResult = $("hero-filter-result");
+  if (filterResult) {
+    filterResult.textContent = filtersActive
+      ? `在完整武将库中找到 ${visibleHeroes.length} / ${state.heroes.length} 名武将。`
+      : `当前显示 ${visibleHeroes.length} 名${state.showFullRoster ? "公开" : "新手优先"}武将。`;
+  }
+  const filterEmpty = $("hero-filter-empty");
+  if (filterEmpty) filterEmpty.classList.toggle("hidden", visibleHeroes.length > 0);
+  renderTeamReadiness(discoveryByCode);
+
+  visibleHeroes.forEach((hero) => {
+    const beginner = beginnerByCode.get(hero.code);
+    const discovery = discoveryByCode.get(hero.code) || {position: hero.role, difficulty: "未评级", difficulty_source: "estimated"};
+    const difficultySource = discovery.difficulty_source === "estimated"
+      ? `<span class="hero-difficulty-estimated">估算难度 · 可在后续人工评级中调整</span>`
+      : `<span class="hero-difficulty-estimated">人工评级</span>`;
+    const discoverySummary = beginner
+      ? `<div class="beginner-summary"><strong>${discovery.position} · ${discovery.difficulty}</strong>${difficultySource}<span>${beginner.summary}</span><span>主要机制：${beginner.mechanics}</span></div>`
+      : `<div class="beginner-summary"><strong>${discovery.position} · ${discovery.difficulty}</strong>${difficultySource}</div>`;
     const homeCard = document.createElement("article");
     homeCard.className = "hero-card";
     homeCard.innerHTML = `
       <h3>${hero.name}</h3>
       <div class="meta">${hero.role} / ${hero.attribute} / ${hero.race} / 等级 ${hero.level}</div>
       <div class="meta">攻 ${hero.stats.attack} · 守 ${hero.stats.defense} · 速 ${hero.stats.speed} · 范 ${hero.stats.attack_range} · 魔 ${hero.stats.mana}</div>
+      ${discoverySummary}
       <div class="text"><strong>技能:</strong>${hero.raw_skill_text}</div>
       <div class="text"><strong>特性:</strong>${hero.raw_trait_text}</div>
     `;
@@ -8153,6 +10432,9 @@ function renderHeroCards() {
       <h3>${hero.name}</h3>
       <div class="meta">${hero.role} / ${hero.attribute} / ${hero.race} / 等级 ${hero.level}</div>
       <div class="meta">攻 ${hero.stats.attack} · 守 ${hero.stats.defense} · 速 ${hero.stats.speed} · 范 ${hero.stats.attack_range} · 魔 ${hero.stats.mana}</div>
+      ${beginner
+        ? `<div class="beginner-summary"><strong>${discovery.position} · ${discovery.difficulty}</strong>${difficultySource}<span>${beginner.summary}</span><span>推荐队友：${beginner.teammates.map((code) => state.heroes.find((item) => item.code === code)?.name || code).join("、")}</span></div>`
+        : discoverySummary}
       <div class="text"><strong>技能:</strong>${hero.raw_skill_text}</div>
       <div class="text"><strong>特性:</strong>${hero.raw_trait_text}</div>
       <div class="text"><strong>当前选择:</strong>${selectionText}</div>
@@ -8181,6 +10463,24 @@ function renderHeroCards() {
     lobbyCard.append(counter);
     lobbyCards.append(lobbyCard);
   });
+
+  const recommended = $("recommended-rosters");
+  if (recommended) {
+    recommended.innerHTML = "";
+    (state.onboarding?.recommended_rosters || []).forEach((roster) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "recommended-roster ghost";
+      const names = roster.hero_codes.map((code) => state.heroes.find((hero) => hero.code === code)?.name || code);
+      const applied = rosterExactlyMatches(editingSeat, roster.hero_codes);
+      button.classList.toggle("is-applied", applied);
+      button.setAttribute("aria-pressed", applied ? "true" : "false");
+      button.innerHTML = `<strong>${roster.name}${applied ? " · 已应用" : ""}</strong><span>${names.join(" + ")}</span><small>${roster.summary}</small>`;
+      button.disabled = !canSelect;
+      button.addEventListener("click", () => applyRecommendedRoster(roster.code, editingSeat?.player_id));
+      recommended.append(button);
+    });
+  }
 }
 
 function renderRoomPanels() {
@@ -8196,6 +10496,7 @@ function renderRoomPanels() {
   const caption = $("lobby-caption");
   const copyInvite = $("copy-invite");
   const roomBattle = $("room-battle");
+  const toggleReady = $("toggle-ready");
   const startRoom = $("start-room");
   const leaveRoomBtn = $("leave-room");
   const deleteRoomBtn = $("delete-room");
@@ -8239,6 +10540,7 @@ function renderRoomPanels() {
     deleteRoomBtn.classList.add("hidden");
     copyInvite.classList.add("hidden");
     roomBattle.classList.add("hidden");
+    if (toggleReady) toggleReady.classList.add("hidden");
     startRoom.classList.add("hidden");
     joinRoomButton.disabled = !state.profileReady || !String($("join-room-code").value || "").trim();
     return;
@@ -8297,6 +10599,7 @@ function renderRoomPanels() {
     deleteRoomBtn.disabled = !state.room.viewer_is_host;
     copyInvite.classList.remove("hidden");
     roomBattle.classList.toggle("hidden", !hasBattle());
+    if (toggleReady) toggleReady.classList.add("hidden");
     startRoom.classList.add("hidden");
     joinRoomButton.disabled = !state.profileReady || !String($("join-room-code").value || "").trim();
     return;
@@ -8329,10 +10632,20 @@ function renderRoomPanels() {
   roomBattle.classList.toggle("hidden", !hasBattle());
   roomBattle.disabled = !hasBattle();
   roomBattle.textContent = "进入战场";
-  startRoom.classList.toggle("hidden", !(state.room.viewer_player_id !== null && ["lobby", "finished"].includes(state.room.status)));
+  if (toggleReady) {
+    const canShowReady = Boolean(viewerSeat?.is_human && state.room.status === "lobby");
+    toggleReady.textContent = viewerSeat?.ready ? "取消准备" : "确认准备";
+    toggleReady.className = viewerSeat?.ready ? "primary" : "ghost";
+    toggleReady.classList.toggle("hidden", !canShowReady);
+    toggleReady.disabled = !viewerSeat?.ready && !state.room.configuration_ready;
+  }
+  const canShowStart = state.room.status === "finished"
+    ? state.room.viewer_player_id !== null
+    : Boolean(state.room.viewer_is_host && state.room.status === "lobby");
+  startRoom.classList.toggle("hidden", !canShowStart);
   startRoom.disabled = state.room.status === "lobby" ? !state.room.can_start : !state.room.can_rematch;
   startRoom.textContent = state.room.status === "finished"
-    ? "重新开始选将"
+    ? (state.room.viewer_is_host ? "同配置再来一局" : "等待房主再开一局")
     : (isRandomRoomMode() ? "开始随机对局" : "开始对局");
 
   const roomMessage = $("room-message");
@@ -8343,7 +10656,7 @@ function renderRoomPanels() {
         : `房间 ${state.room.room_id} 的对局正在进行中。你当前是观战身份；如果你是原玩家，请先把昵称改回原来的名字再恢复席位。`;
     } else {
       roomMessage.textContent = isGameOver()
-        ? `房间 ${state.room.room_id} 的本局对战已经结束。你可以进入战场查看终局盘面，或直接重新开始选将再来一局。`
+        ? `房间 ${state.room.room_id} 的本局对战已经结束。你可以查看终局；房主可保留当前配置发起下一局，双方重新确认准备。`
         : `房间 ${state.room.room_id} 的对局正在进行中。点击“进入战场”即可查看并继续操作。`;
     }
   } else if (state.room.viewer_player_id === null) {
@@ -8425,6 +10738,7 @@ function renderRoomPanels() {
       <div class="seat-note">${seat.name || "尚未加入"}</div>
       <div class="seat-hero"><strong>当前阵容:</strong>${heroLabel}</div>
       <div class="seat-note">${seat.occupied ? `已配置 ${seatHeroTotalCount(seat)} 个武将` : "等待朋友加入或由房主改成 AI"}</div>
+      ${seat.occupied ? `<div class="seat-note ready-state ${seat.ready ? "is-ready" : ""}">${readyStateLabel(seat)} · ${connectionStatusLabel(seat.connection_status)}</div>` : ""}
       ${controls.length ? `<div class="seat-controls">${controls.join("")}</div>` : ""}
     `;
     const teamSelect = card.querySelector(`[data-seat-team="${seat.player_id}"]`);
@@ -8571,6 +10885,25 @@ async function selectRoomHero(heroCode, delta = 1, seatId = null) {
   }
 }
 
+async function applyRecommendedRoster(rosterCode, seatId = null) {
+  if (!hasRoom() || !state.playerToken) return;
+  try {
+    const payload = await fetchJson("/api/rooms/apply-recommended-roster", {
+      method: "POST",
+      body: JSON.stringify({
+        room_id: state.room.room_id,
+        player_token: state.playerToken,
+        roster_code: rosterCode,
+        seat_id: seatId != null ? Number(seatId) : undefined,
+      }),
+    });
+    applyRoomPayload(payload, {preserveScreen: true});
+    render();
+  } catch (error) {
+    $("room-message").textContent = error.error || "应用推荐阵容失败。";
+  }
+}
+
 function ensureSelectedUnit() {
   const action = selectedAction();
   if (!state.battle) {
@@ -8588,6 +10921,10 @@ function ensureSelectedUnit() {
   if (isGameOver()) {
     if (unitById(state.selectedUnitId)) return;
     state.selectedUnitId = allUnits()[0]?.id || "";
+    return;
+  }
+  if (tutorialState()?.step_id === "select_unit") {
+    state.selectedUnitId = "";
     return;
   }
   if (!state.selectedUnitId) {
@@ -8726,57 +11063,13 @@ function renderHeader() {
 }
 
 function renderReplayToolbar() {
-  const toolbar = $("replay-toolbar");
-  if (!toolbar) return;
-  const replay = replayMeta();
-  const simulation = simulationMeta();
-  const visible = hasBattle() && replay.available;
-  toolbar.classList.toggle("hidden", !visible);
-  if (!visible) return;
-  const lastIndex = Number(replay.last_step_index || 0);
-  const liveIndex = Number(simulation.live_step_index || 0);
-  const currentIndex = isReplayMode()
-    ? Math.max(0, Math.min(lastIndex, Number(state.replayStepIndex || 0)))
-    : Math.max(0, Math.min(lastIndex, liveIndex));
-  const back = $("replay-step-back");
-  const pause = $("replay-pause");
-  const live = $("replay-live");
-  const forward = $("replay-step-forward");
-  const speed = $("replay-speed");
-  const omniscient = $("replay-omniscient");
-  const timeline = $("replay-timeline");
-  const status = $("replay-status");
-  if (speed) {
-    speed.value = String(simulation.speed || 1);
-    speed.disabled = !state.room?.viewer_is_host;
-  }
-  if (omniscient) {
-    omniscient.checked = Boolean(state.replayOmniscient);
-    omniscient.disabled = !replay.can_use_omniscient;
-  }
-  if (timeline) {
-    timeline.max = String(lastIndex);
-    timeline.value = String(currentIndex);
-    timeline.disabled = !replay.available;
-  }
-  if (back) back.disabled = currentIndex <= 0;
-  if (forward) forward.disabled = currentIndex >= lastIndex;
-  if (live) live.disabled = !isReplayMode();
-  if (pause) {
-    pause.textContent = simulation.paused ? "▶" : "II";
-    pause.disabled = !simulation.can_control;
-  }
-  if (status) {
-    if (isReplayMode()) {
-      status.textContent = `\u56de\u653e ${currentIndex}/${lastIndex}`;
-    } else if (simulation.enabled) {
-      status.textContent = simulation.paused
-        ? `\u5df2\u6682\u505c ${liveIndex}/${lastIndex}`
-        : `\u5b9e\u65f6 ${liveIndex}/${lastIndex}`;
-    } else {
-      status.textContent = `\u672c\u5c40 ${currentIndex}/${lastIndex}`;
-    }
-  }
+  globalThis.WujiangReplayUi?.renderToolbar({
+    document,
+    state,
+    replay: replayMeta(),
+    simulation: simulationMeta(),
+    replayMode: isReplayMode(),
+  });
 }
 
 function ensureDynamicUiScaffolding() {
@@ -8854,9 +11147,14 @@ window.addEventListener("DOMContentLoaded", async () => {
   initializeAuthState();
   initializeProfileState();
   await refreshAuthSession();
+  recordProductEvent("home_view", {
+    entry_state: state.authUser ? "logged_in" : "anonymous",
+  });
   syncIdentityFromUrl();
   ensureDynamicUiScaffolding();
+  globalThis.WujiangBattleFeedback?.initialize();
   bindEvents();
+  await refreshRecentMatches({renderAfter: false});
   await refreshState({ preserveScreen: false });
   pollHandle = window.setInterval(() => {
     if (!roomQueryId()) {

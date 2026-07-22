@@ -17,6 +17,8 @@ from wujiang.web.ai import (
     choose_turn_bundle_action,
 )
 from wujiang.web.replay import ReplayRecorder
+from wujiang.web.postgame import build_postgame_summary
+from wujiang.web.tutorial import TUTORIAL_ID, next_tutorial_step_id, tutorial_step
 
 
 ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -32,6 +34,9 @@ DEFAULT_AI_DIFFICULTY = "standard"
 AI_DIFFICULTIES = {"easy", "standard", "aggressive"}
 DEFAULT_SIMULATION_SPEED = 1.0
 SIMULATION_SPEED_OPTIONS = (0.5, 1.0, 2.0, 4.0)
+ROOM_ONLINE_WINDOW_SECONDS = 5.0
+ROOM_UNSTABLE_WINDOW_SECONDS = 20.0
+ROOM_TURN_TIMEOUT_SECONDS = 90.0
 STALE_QUEUED_ACTOR_LOG_MARKER = "行动者已不在战场"
 ROOM_MODES: dict[str, dict[str, str]] = {
     "classic": {
@@ -366,6 +371,8 @@ class PlayerSeat:
     ai_difficulty_override: Optional[str] = None
     joined_at: Optional[float] = None
     last_seen_at: Optional[float] = None
+    ready: bool = False
+    account_user_id: Optional[int] = None
 
     @property
     def occupied(self) -> bool:
@@ -387,7 +394,7 @@ class PlayerSeat:
     def hero_total_count(self) -> int:
         return sum(max(int(count), 0) for count in self.hero_counts.values())
 
-    def claim(self, player_name: str) -> str:
+    def claim(self, player_name: str, *, account_user_id: Optional[int] = None) -> str:
         if not self.can_join:
             raise RoomError(f"席位 {self.player_id} 当前不能加入。")
         self.controller_type = "human"
@@ -395,6 +402,8 @@ class PlayerSeat:
         self.name = normalize_player_name(player_name)
         self.joined_at = time.time()
         self.last_seen_at = self.joined_at
+        self.ready = False
+        self.account_user_id = int(account_user_id) if account_user_id is not None else None
         return self.token
 
     def set_ai(self) -> None:
@@ -405,6 +414,8 @@ class PlayerSeat:
         self.name = f"AI {self.player_id}"
         self.joined_at = time.time()
         self.last_seen_at = self.joined_at
+        self.ready = False
+        self.account_user_id = None
 
     def set_open(self) -> None:
         self.controller_type = "open"
@@ -415,6 +426,8 @@ class PlayerSeat:
         self.ai_difficulty_override = None
         self.joined_at = None
         self.last_seen_at = None
+        self.ready = False
+        self.account_user_id = None
 
     def clear_roster(self) -> None:
         self.hero_counts.clear()
@@ -431,12 +444,26 @@ class PlayerSeat:
         if self.is_human:
             self.last_seen_at = time.time()
 
+    def connection_status(self, *, now: Optional[float] = None) -> str:
+        if self.is_ai:
+            return "ai"
+        if not self.is_human or self.last_seen_at is None:
+            return "open"
+        age = max(0.0, (time.time() if now is None else now) - self.last_seen_at)
+        if age <= ROOM_ONLINE_WINDOW_SECONDS:
+            return "online"
+        if age <= ROOM_UNSTABLE_WINDOW_SECONDS:
+            return "unstable"
+        return "offline"
+
     def matches_name(self, player_name: str) -> bool:
         return self.is_human and self.name == normalize_player_name(player_name)
 
-    def reclaim(self, player_name: str) -> str:
+    def reclaim(self, player_name: str, *, account_user_id: Optional[int] = None) -> str:
         if not self.matches_name(player_name) or not self.token:
             raise RoomError("无法用该昵称恢复这个席位。")
+        if self.account_user_id is not None and int(account_user_id or 0) != self.account_user_id:
+            raise RoomError("这个席位属于另一个登录账号，无法恢复。")
         self.mark_seen()
         return self.token
 
@@ -484,6 +511,12 @@ class PlayerSeat:
             )
         single_hero_code = self.single_hero_code()
         single_hero = heroes_by_code.get(single_hero_code or "")
+        now = time.time()
+        last_seen_age_seconds = (
+            max(0, int(now - self.last_seen_at))
+            if self.is_human and self.last_seen_at is not None
+            else None
+        )
         return {
             "player_id": self.player_id,
             "team_id": self.team_id,
@@ -503,6 +536,9 @@ class PlayerSeat:
             "random_quota": self.random_quota,
             "ai_difficulty_override": self.ai_difficulty_override,
             "is_host": self.player_id == host_player_id,
+            "ready": self.is_ai or (self.is_human and self.ready),
+            "connection_status": self.connection_status(now=now),
+            "last_seen_age_seconds": last_seen_age_seconds,
         }
 
 
@@ -510,6 +546,9 @@ class GameRoom:
     def __init__(self, room_id: str, *, mode: str = DEFAULT_ROOM_MODE, seat_count: int = MIN_ROOM_SEAT_COUNT) -> None:
         self.room_id = normalize_room_id(room_id)
         self.mode = normalize_room_mode(mode)
+        self.experience_kind = "custom"
+        self.tutorial_state: Optional[dict[str, Any]] = None
+        self.tutorial_checkpoint: Optional[Battle] = None
         self.random_roster_size = DEFAULT_RANDOM_ROSTER_SIZE
         self.default_ai_difficulty = DEFAULT_AI_DIFFICULTY
         self.host_player_id = 1
@@ -517,12 +556,18 @@ class GameRoom:
         self._reset_random_quotas_to_defaults()
         self.battle: Optional[Battle] = None
         self.replay: Optional[ReplayRecorder] = None
+        self.match_number = 0
+        self.current_match_id: Optional[str] = None
         self.simulation_paused = False
         self.simulation_speed = DEFAULT_SIMULATION_SPEED
         self.simulation_last_advanced_at: Optional[float] = None
         self.pending_simulation_action: Optional[dict[str, Any]] = None
         self.last_action_id = 0
         self.last_action_meta: Optional[dict[str, Any]] = None
+        self.turn_prompt_key: Optional[str] = None
+        self.turn_prompt_started_at: Optional[float] = None
+        self.turn_deadline_at: Optional[float] = None
+        self.last_turn_timeout: Optional[dict[str, Any]] = None
         self.status = "lobby"
         self.version = 0
         self.created_at = time.time()
@@ -541,6 +586,146 @@ class GameRoom:
     def touch(self) -> None:
         self.version += 1
         self.updated_at = time.time()
+
+    def invalidate_readiness(self) -> None:
+        for seat in self.seats.values():
+            if seat.is_human:
+                seat.ready = False
+
+    def configure_tutorial(self) -> None:
+        with self._lock:
+            if self.battle is None:
+                raise RoomError("教学战斗尚未创建。")
+            fire = next((unit for unit in self.battle.player_units(1) if unit.hero_code == "fire_funeral"), None)
+            ellie = next((unit for unit in self.battle.player_units(2) if unit.hero_code == "ellie"), None)
+            if fire is None or ellie is None:
+                raise RoomError("教学固定阵容不完整。")
+            fire.position = Position(3, 4)
+            ellie.position = Position(6, 4)
+            self.battle.configure_turn_order([fire.unit_id, ellie.unit_id], starting_index=0)
+            self.battle.active_turn_unit_id = fire.unit_id
+            self.experience_kind = "tutorial"
+            self.tutorial_state = {
+                "tutorial_id": TUTORIAL_ID,
+                "step_id": "select_unit",
+                "completed_step_ids": [],
+                "started_at": time.time(),
+                "first_effective_action_at": None,
+                "completed_at": None,
+                "retry_count": 0,
+            }
+            self.tutorial_checkpoint = None
+            self.replay = ReplayRecorder(self.room_id, self.mode, match_id=self.current_match_id)
+            self._record_replay_step("tutorial_start")
+            self.touch()
+
+    def tutorial_public_state(self) -> Optional[dict[str, Any]]:
+        if self.tutorial_state is None:
+            return None
+        step_id = str(self.tutorial_state["step_id"])
+        return {
+            **self.tutorial_state,
+            "step": tutorial_step(step_id),
+            "can_retry_checkpoint": self.tutorial_checkpoint is not None,
+        }
+
+    def _tutorial_advance(self, completed_step_id: str) -> None:
+        if self.tutorial_state is None or self.tutorial_state["step_id"] != completed_step_id:
+            return
+        completed = self.tutorial_state["completed_step_ids"]
+        if completed_step_id not in completed:
+            completed.append(completed_step_id)
+        self.tutorial_state["step_id"] = next_tutorial_step_id(completed_step_id)
+
+    def tutorial_select_unit(self, token: str, unit_id: str) -> None:
+        with self._lock:
+            seat = self.require_seat(token)
+            if seat.team_id != 1 or self.tutorial_state is None or self.battle is None:
+                raise RoomError("当前不是可操作的新手教学。")
+            if self.tutorial_state["step_id"] != "select_unit":
+                return
+            unit = self.battle.get_unit(str(unit_id or ""))
+            if unit.hero_code != "fire_funeral" or unit.player_id != 1:
+                raise RoomError("这一步请点击你控制的火葬者。")
+            self._tutorial_advance("select_unit")
+            self.touch()
+
+    def _validate_tutorial_action(self, payload: dict[str, Any]) -> None:
+        if self.tutorial_state is None or self.battle is None:
+            return
+        step_id = str(self.tutorial_state["step_id"])
+        action_type = str(payload.get("type") or "")
+        fire = next(unit for unit in self.battle.player_units(1) if unit.hero_code == "fire_funeral")
+        ellie = next(unit for unit in self.battle.player_units(2) if unit.hero_code == "ellie")
+        if step_id == "select_unit":
+            raise RoomError("先点击火葬者完成选中教学。")
+        if step_id == "move":
+            if action_type != "move" or str(payload.get("unit_id") or "") != fire.unit_id:
+                raise RoomError("这一步只需要让火葬者移动到金色目标格。")
+            if (int(payload.get("x", -1)), int(payload.get("y", -1))) != (4, 4):
+                raise RoomError("请移动到火葬者与艾莉之间的金色目标格。")
+            return
+        if step_id == "basic_attack":
+            if action_type != "attack" or str(payload.get("target_unit_id") or "") != ellie.unit_id:
+                raise RoomError("这一步请选择普通攻击并以艾莉为目标。")
+            return
+        if step_id == "active_skill":
+            if action_type != "skill" or str(payload.get("skill_code") or "") != "pierce":
+                raise RoomError("这一步请使用火葬者的主动技能“穿刺”。")
+            selected_cells = {
+                (int(cell.get("x", -1)), int(cell.get("y", -1)))
+                for cell in (payload.get("cells") or [])
+                if isinstance(cell, dict)
+            }
+            if (ellie.position.x, ellie.position.y) not in selected_cells:
+                raise RoomError("请用穿刺选择朝向艾莉的两格直线。")
+            return
+        if step_id == "end_turn":
+            if action_type != "end_turn":
+                raise RoomError("这一步只需要点击结束回合。")
+            return
+        if step_id == "chain_response" and action_type not in {"chain_react", "chain_skip"}:
+            raise RoomError("等待艾莉触发连锁后，请选择响应或放弃连锁。")
+
+    def _update_tutorial_after_action(self, payload: dict[str, Any]) -> None:
+        if self.tutorial_state is None or self.battle is None:
+            return
+        step_id = str(self.tutorial_state["step_id"])
+        action_type = str(payload.get("type") or "")
+        if step_id == "move" and action_type == "move":
+            self._tutorial_advance("move")
+            if self.tutorial_state["first_effective_action_at"] is None:
+                self.tutorial_state["first_effective_action_at"] = time.time()
+        elif step_id == "basic_attack" and action_type == "attack":
+            self._tutorial_advance("basic_attack")
+        elif step_id == "active_skill" and action_type == "skill":
+            self._tutorial_advance("active_skill")
+        elif step_id == "end_turn" and action_type == "end_turn":
+            self._tutorial_advance("end_turn")
+        elif step_id == "chain_response" and action_type in {"chain_react", "chain_skip"}:
+            self._tutorial_advance("chain_response")
+            if self.battle.winner is None:
+                self.tutorial_checkpoint = copy.deepcopy(self.battle)
+        if self.tutorial_state["step_id"] == "win_objective" and self.battle.winner == 1:
+            completed = self.tutorial_state["completed_step_ids"]
+            if "win_objective" not in completed:
+                completed.append("win_objective")
+            self.tutorial_state["completed_at"] = time.time()
+
+    def retry_tutorial_checkpoint(self, token: str) -> None:
+        with self._lock:
+            self.require_seat(token)
+            if self.tutorial_state is None or self.tutorial_checkpoint is None:
+                raise RoomError("当前教学阶段还没有可恢复的检查点。")
+            self.battle = copy.deepcopy(self.tutorial_checkpoint)
+            self.battle.winner = None
+            self.status = "battle"
+            self.tutorial_state["step_id"] = "win_objective"
+            self.tutorial_state["completed_at"] = None
+            self.tutorial_state["retry_count"] += 1
+            self.replay = ReplayRecorder(self.room_id, self.mode, match_id=self.current_match_id)
+            self._record_replay_step("tutorial_checkpoint_retry")
+            self.touch()
 
     def occupied_seat_count(self) -> int:
         return sum(1 for seat in self.seats.values() if seat.occupied)
@@ -806,7 +991,7 @@ class GameRoom:
         if self.battle is None:
             return
         if self.replay is None:
-            self.replay = ReplayRecorder(self.room_id, self.mode)
+            self.replay = ReplayRecorder(self.room_id, self.mode, match_id=self.current_match_id)
         seat_views = {
             str(seat.player_id): battle_state_for_viewer(self.battle, seat.team_id, seat.player_id)
             for seat in self.seats.values()
@@ -1012,6 +1197,7 @@ class GameRoom:
         before_log_count = len(self.battle.logs)
         before_stale_count = int(getattr(self.battle, "stale_queued_action_count", 0))
         self.battle.perform_action(payload)
+        self.battle.record_postgame_action(actor, payload)
         new_logs = self.battle.logs[before_log_count:]
         self.last_action_meta = self._build_last_action_meta(
             payload,
@@ -1067,19 +1253,20 @@ class GameRoom:
         self.status = "finished" if self.battle and self.battle.winner is not None else "battle"
         return steps
 
-    def create_host(self, player_name: str) -> tuple[int, str]:
+    def create_host(self, player_name: str, *, account_user_id: Optional[int] = None) -> tuple[int, str]:
         with self._lock:
             seat = self.seats[self.host_player_id]
-            token = seat.claim(player_name)
+            token = seat.claim(player_name, account_user_id=account_user_id)
+            self.invalidate_readiness()
             self.touch()
             return seat.player_id, token
 
-    def join(self, player_name: str) -> tuple[int, str]:
+    def join(self, player_name: str, *, account_user_id: Optional[int] = None) -> tuple[int, str]:
         with self._lock:
             if self.status != "lobby":
                 existing = self.seat_for_name(player_name)
                 if existing is not None:
-                    token = existing.reclaim(player_name)
+                    token = existing.reclaim(player_name, account_user_id=account_user_id)
                     self.touch()
                     return existing.player_id, token
                 raise RoomError("对局已经开始，只能用原来的昵称恢复原席位。")
@@ -1087,11 +1274,12 @@ class GameRoom:
             if seat is None:
                 existing = self.seat_for_name(player_name)
                 if existing is not None:
-                    token = existing.reclaim(player_name)
+                    token = existing.reclaim(player_name, account_user_id=account_user_id)
                     self.touch()
                     return existing.player_id, token
                 raise RoomError("房间已经满员。")
-            token = seat.claim(player_name)
+            token = seat.claim(player_name, account_user_id=account_user_id)
+            self.invalidate_readiness()
             self.touch()
             return seat.player_id, token
 
@@ -1118,6 +1306,7 @@ class GameRoom:
                     )
             if self.mode == "random":
                 self._reset_random_quotas_to_defaults()
+            self.invalidate_readiness()
             self.touch()
 
     def set_seat_team(self, token: str, seat_id: Any, team_id: Any) -> None:
@@ -1130,6 +1319,7 @@ class GameRoom:
             if next_team == seat.team_id:
                 return
             seat.team_id = next_team
+            self.invalidate_readiness()
             self.touch()
 
     def set_seat_controller(self, token: str, seat_id: Any, controller_type: str) -> None:
@@ -1151,11 +1341,13 @@ class GameRoom:
                 if seat.is_human:
                     raise RoomError("已有真人加入的席位不能由房主直接清空。")
                 seat.set_open()
+                self.invalidate_readiness()
                 self.touch()
                 return
             if seat.is_human:
                 raise RoomError("已有真人加入的席位不能直接改成 AI。")
             seat.set_ai()
+            self.invalidate_readiness()
             self.touch()
 
     def set_default_ai_difficulty(self, token: str, difficulty: Any) -> None:
@@ -1167,6 +1359,7 @@ class GameRoom:
             if next_difficulty == self.default_ai_difficulty:
                 return
             self.default_ai_difficulty = next_difficulty
+            self.invalidate_readiness()
             self.touch()
 
     def set_seat_ai_difficulty(self, token: str, seat_id: Any, difficulty: Any) -> None:
@@ -1181,6 +1374,7 @@ class GameRoom:
             if next_difficulty == seat.ai_difficulty_override:
                 return
             seat.ai_difficulty_override = next_difficulty
+            self.invalidate_readiness()
             self.touch()
 
     def set_mode(self, token: str, mode: str) -> None:
@@ -1196,6 +1390,7 @@ class GameRoom:
                 seat.clear_roster()
             if self.mode == "random":
                 self._reset_random_quotas_to_defaults()
+            self.invalidate_readiness()
             self.touch()
 
     def set_random_roster_size(self, token: str, roster_size: Any) -> None:
@@ -1210,6 +1405,7 @@ class GameRoom:
                 return
             self.random_roster_size = next_size
             self._reset_random_quotas_to_defaults()
+            self.invalidate_readiness()
             self.touch()
 
     def set_random_quota(self, token: str, seat_id: Any, quota: Any) -> None:
@@ -1224,6 +1420,7 @@ class GameRoom:
             if next_quota == seat.random_quota:
                 return
             seat.random_quota = next_quota
+            self.invalidate_readiness()
             self.touch()
 
     def _editable_seat(self, token: str, seat_id: Any | None) -> PlayerSeat:
@@ -1247,10 +1444,46 @@ class GameRoom:
             if hero_code not in hero_lookup():
                 raise RoomError("所选武将不存在。")
             seat.adjust_hero_count(hero_code, normalize_hero_delta(delta))
+            self.invalidate_readiness()
+            self.touch()
+
+    def set_roster(self, token: str, hero_codes: list[str], seat_id: Any | None = None) -> None:
+        with self._lock:
+            if self.status != "lobby":
+                raise RoomError("对局已经开始，不能再更改武将。")
+            if self.mode == "random":
+                raise RoomError("随机选人模式下不需要手动选将。")
+            seat = self._editable_seat(token, seat_id)
+            known = hero_lookup()
+            normalized = [str(code or "").strip() for code in hero_codes]
+            if not normalized or any(code not in known for code in normalized):
+                raise RoomError("推荐阵容包含不存在的武将。")
+            seat.hero_counts.clear()
+            for code in normalized:
+                seat.hero_counts[code] = seat.hero_counts.get(code, 0) + 1
+            self.invalidate_readiness()
             self.touch()
 
     def can_start(self) -> bool:
         return self._start_blocker() is None
+
+    def set_ready(self, token: str, ready: bool) -> None:
+        with self._lock:
+            seat = self.require_seat(token)
+            if self.status != "lobby":
+                raise RoomError("只有在房间大厅中才能确认准备。")
+            next_ready = bool(ready)
+            if next_ready:
+                blocker = self._configuration_blocker()
+                if blocker is not None:
+                    raise RoomError(blocker)
+            if seat.ready == next_ready:
+                return
+            seat.ready = next_ready
+            self.touch()
+
+    def human_ready_count(self) -> int:
+        return sum(1 for seat in self.seats.values() if seat.is_human and seat.ready)
 
     def _team_random_rosters(self) -> dict[int, dict[int, list[str]]]:
         team1_roster, team2_roster = random_room_hero_codes(self.random_roster_size)
@@ -1289,6 +1522,7 @@ class GameRoom:
             seat.release()
             if leaving_player_id == self.host_player_id:
                 self.host_player_id = self._first_human_player_id() or 1
+            self.invalidate_readiness()
             self.touch()
             return leaving_player_id
 
@@ -1323,6 +1557,108 @@ class GameRoom:
         if current_unit is None:
             return None
         return self.seats.get(self._unit_owner_seat_id(current_unit) or -1)
+
+    def _current_turn_prompt(self) -> tuple[Optional[str], Optional[str], Optional[PlayerSeat]]:
+        if self.battle is None or self.battle.winner is not None:
+            return None, None, None
+        seat = self._current_prompt_seat()
+        prompt = self.battle.current_respawn_prompt()
+        if prompt is not None:
+            return f"respawn:{prompt.unit_id}", "respawn", seat
+        if self.battle.pending_chain is not None:
+            current_unit_id = self.battle.pending_chain.current_unit_id()
+            return (
+                f"chain:{self.battle.completed_turns}:{current_unit_id or 'none'}",
+                "chain",
+                seat,
+            )
+        current_unit = self.battle.current_turn_unit()
+        if current_unit is None:
+            return None, None, seat
+        return f"turn:{self.battle.completed_turns}:{current_unit.unit_id}", "turn", seat
+
+    def _sync_turn_timer(self, *, now: Optional[float] = None) -> None:
+        current_time = time.time() if now is None else now
+        prompt_key, _prompt_kind, seat = self._current_turn_prompt()
+        enabled = (
+            self.status == "battle"
+            and self.tutorial_state is None
+            and prompt_key is not None
+            and seat is not None
+            and seat.is_human
+        )
+        if not enabled:
+            self.turn_prompt_key = None
+            self.turn_prompt_started_at = None
+            self.turn_deadline_at = None
+            return
+        if prompt_key != self.turn_prompt_key or self.turn_deadline_at is None:
+            self.turn_prompt_key = prompt_key
+            self.turn_prompt_started_at = current_time
+            self.turn_deadline_at = current_time + ROOM_TURN_TIMEOUT_SECONDS
+
+    def _process_due_turn_timeout(self, *, now: Optional[float] = None) -> bool:
+        current_time = time.time() if now is None else now
+        self._sync_turn_timer(now=current_time)
+        if self.turn_deadline_at is None or current_time < self.turn_deadline_at or self.battle is None:
+            return False
+        _prompt_key, prompt_kind, seat = self._current_turn_prompt()
+        if seat is None or not seat.is_human or prompt_kind is None:
+            self._sync_turn_timer(now=current_time)
+            return False
+        if prompt_kind == "chain":
+            payload = {"type": "chain_skip"}
+            action_label = "自动放弃连锁"
+        elif prompt_kind == "respawn":
+            prompt = self.battle.current_respawn_prompt()
+            if prompt is None:
+                return False
+            unit = self.battle.get_unit(prompt.unit_id)
+            options = sorted(self.battle.respawn_options_for(unit), key=lambda item: (item.x, item.y))
+            if not options:
+                return False
+            fallback = options[0]
+            payload = {"type": "respawn_select", "unit_id": unit.unit_id, "x": fallback.x, "y": fallback.y}
+            action_label = "自动选择复活位置"
+        else:
+            payload = {"type": "end_turn"}
+            action_label = "自动结束回合"
+        self.battle.log(f"{seat.name or f'席位 {seat.player_id}'} 操作超时，系统已{action_label}。")
+        self._perform_battle_action(payload, reason="turn_timeout")
+        self.last_turn_timeout = {
+            "seat_id": seat.player_id,
+            "player_name": seat.name or None,
+            "prompt_kind": prompt_kind,
+            "action": payload["type"],
+            "occurred_at": current_time,
+        }
+        self.turn_prompt_key = None
+        self.turn_prompt_started_at = None
+        self.turn_deadline_at = None
+        if self.battle.winner is None:
+            self._advance_simulation_due(force_steps=1)
+        self.status = "finished" if self.battle.winner is not None else "battle"
+        self._sync_turn_timer(now=current_time)
+        self.touch()
+        return True
+
+    def _turn_timer_public_state(self) -> dict[str, Any]:
+        now = time.time()
+        self._sync_turn_timer(now=now)
+        _prompt_key, prompt_kind, seat = self._current_turn_prompt()
+        remaining = None
+        if self.turn_deadline_at is not None:
+            remaining = max(0, int(self.turn_deadline_at - now + 0.999))
+        return {
+            "enabled": self.turn_deadline_at is not None,
+            "duration_seconds": int(ROOM_TURN_TIMEOUT_SECONDS),
+            "deadline_at": self.turn_deadline_at,
+            "remaining_seconds": remaining,
+            "prompt_kind": prompt_kind if self.turn_deadline_at is not None else None,
+            "prompt_seat_id": seat.player_id if self.turn_deadline_at is not None and seat is not None else None,
+            "last_timeout": dict(self.last_turn_timeout) if self.last_turn_timeout is not None else None,
+            "server_now": now,
+        }
 
     def allows_instant_action_override(self, seat: PlayerSeat, payload: dict[str, Any]) -> bool:
         if self.battle is None or self.battle.pending_chain is not None or self.battle.current_respawn_prompt() is not None:
@@ -1386,6 +1722,7 @@ class GameRoom:
             mode_meta = room_mode_payload(self.mode)
             return {
                 "room_id": self.room_id,
+                "match_id": self.current_match_id,
                 "status": self.status,
                 "mode": mode_meta["code"],
                 "mode_name": mode_meta["name"],
@@ -1403,12 +1740,47 @@ class GameRoom:
                 "is_full": is_full,
                 "can_join": self.status == "lobby" and any(seat.can_join for seat in self.seats.values()),
                 "can_start": self.can_start(),
+                "configuration_ready": self._configuration_blocker() is None,
                 "start_blocker": self._start_blocker(),
+                "human_ready_count": self.human_ready_count(),
                 "can_rematch": self.status == "finished",
+                "postgame": build_postgame_summary(
+                    self.battle,
+                    self.replay,
+                    seat_names={seat.player_id: seat.name for seat in self.seats.values() if seat.name},
+                ),
                 "seats": seats,
             }
 
     def _start_blocker(self) -> Optional[str]:
+        blocker = self._configuration_blocker()
+        if blocker is not None:
+            return blocker
+        waiting = [seat.name or f"席位 {seat.player_id}" for seat in self.seats.values() if seat.is_human and not seat.ready]
+        if waiting:
+            return f"等待真人席位确认准备：{'、'.join(waiting)}。"
+        return None
+
+    def _configuration_blocker(self) -> Optional[str]:
+        if self.battle is not None:
+            return "当前房间已经在对局中。"
+        if not self.seats:
+            return "房间里还没有席位。"
+        if any(not seat.occupied for seat in self.seats.values()):
+            return "仍有开放席位未被真人或 AI 占用。"
+        if self.human_seat_count() <= 0:
+            return "当前至少需要一个真人席位才能开始。"
+        if self.mode == "random":
+            for team_id in TEAM_IDS:
+                if self._team_quota_sum(team_id) != self.random_roster_size:
+                    return f"{team_name(team_id)}的随机武将配额之和必须等于 n = {self.random_roster_size}。"
+            return None
+        for team_id in TEAM_IDS:
+            if sum(seat.hero_total_count for seat in self._team_seats(team_id)) <= 0:
+                return f"{team_name(team_id)}还没有配置任何武将。"
+        return None
+
+    def _legacy_start_blocker(self) -> Optional[str]:
         if self.battle is not None:
             return "å½“å‰æˆ¿é—´å·²ç»åœ¨å¯¹å±€ä¸­ã€‚"
         if not self.seats:
@@ -1460,12 +1832,15 @@ class GameRoom:
             "pending_action": self._visible_pending_action_for_viewer(viewer),
         }
 
-    def start_battle(self, token: str) -> None:
+    def start_battle(self, token: str, *, require_confirmation: bool = False) -> None:
         with self._lock:
-            self.require_seat(token)
+            if require_confirmation:
+                self.require_host(token)
+            else:
+                self.require_seat(token)
             if self.status != "lobby":
                 raise RoomError("å½“å‰æˆ¿é—´å·²ç»åœ¨å¯¹å±€ä¸­ã€‚")
-            blocker = self._start_blocker()
+            blocker = self._start_blocker() if require_confirmation else self._configuration_blocker()
             if blocker is not None:
                 raise RoomError(blocker)
             if self.mode == "random":
@@ -1474,37 +1849,48 @@ class GameRoom:
                     seat.replace_roster(assignments[seat.team_id].get(seat.player_id, []))
             player1_entries = self._battle_entries_for_team(1)
             player2_entries = self._battle_entries_for_team(2)
+            self.match_number += 1
+            self.current_match_id = f"{self.room_id}-{self.match_number}"
             self.battle = create_room_battle(player1_entries, player2_entries, mode=self.mode)
-            self.replay = ReplayRecorder(self.room_id, self.mode)
+            self.replay = ReplayRecorder(self.room_id, self.mode, match_id=self.current_match_id)
             self.simulation_paused = False
             self.simulation_speed = DEFAULT_SIMULATION_SPEED
             self.simulation_last_advanced_at = time.time()
             self.pending_simulation_action = None
             self.last_action_id = 0
             self.last_action_meta = None
+            self.turn_prompt_key = None
+            self.turn_prompt_started_at = None
+            self.turn_deadline_at = None
+            self.last_turn_timeout = None
             self.status = "battle"
             self._record_replay_step("battle_start")
             self._advance_simulation_due(force_steps=1)
+            self._sync_turn_timer()
             self.touch()
 
     def restart_lobby(self, token: str) -> None:
         with self._lock:
-            self.require_seat(token)
+            self.require_host(token)
             if self.status != "finished":
                 raise RoomError("åªæœ‰å¯¹å±€ç»“æŸåŽï¼Œæ‰èƒ½é‡æ–°å¼€å§‹é€‰å°†ã€‚")
+            self._ensure_replay_saved()
             self.battle = None
             self.replay = None
+            self.current_match_id = None
             self.simulation_paused = False
             self.simulation_speed = DEFAULT_SIMULATION_SPEED
             self.simulation_last_advanced_at = None
             self.pending_simulation_action = None
             self.last_action_id = 0
             self.last_action_meta = None
+            self.turn_prompt_key = None
+            self.turn_prompt_started_at = None
+            self.turn_deadline_at = None
+            self.last_turn_timeout = None
             self.status = "lobby"
             for seat in self.seats.values():
-                seat.clear_roster()
-            if self.mode == "random":
-                self._reset_random_quotas_to_defaults()
+                seat.ready = False
             self.touch()
 
     def _resolve_ai_until_human_input(self, max_steps: Optional[int] = None) -> int:
@@ -1598,6 +1984,10 @@ class GameRoom:
         self.status = "finished" if self.battle and self.battle.winner is not None else "battle"
         return steps
 
+    def resolve_ai_until_human_input(self) -> int:
+        with self._lock:
+            return self._resolve_ai_until_human_input()
+
     def run_ai_simulation_to_end(self, *, max_steps: int = 5000) -> int:
         with self._lock:
             if self.battle is None:
@@ -1632,11 +2022,16 @@ class GameRoom:
                 if responsible_seat is not None and responsible_seat.player_id != seat.player_id:
                     raise RoomError("çŽ°åœ¨è¿˜æ²¡è½®åˆ°ä½ æŽ§åˆ¶çš„å•ä½ã€‚")
             try:
+                self._validate_tutorial_action(payload)
                 self._perform_battle_action(payload, reason="player_action")
             except ActionError as exc:
                 raise RoomError(str(exc)) from exc
+            self._update_tutorial_after_action(payload)
             if self.battle is not None and self.battle.winner is None:
-                self._advance_simulation_due(force_steps=1)
+                if self.tutorial_state is not None:
+                    self._resolve_ai_until_human_input()
+                else:
+                    self._advance_simulation_due(force_steps=1)
             self.status = "finished" if self.battle and self.battle.winner is not None else "battle"
             self.touch()
 
@@ -1709,6 +2104,7 @@ class GameRoom:
             viewer = self.seat_for_token(viewer_token)
             if self.battle is not None and self.battle.winner is None:
                 self._advance_simulation_due()
+                self._process_due_turn_timeout()
             viewer_player_id = viewer.player_id if viewer else None
             viewer_team_id = viewer.team_id if viewer else None
             viewer_name = viewer.name if viewer else None
@@ -1716,10 +2112,13 @@ class GameRoom:
             mode_meta = room_mode_payload(self.mode)
             room_state = {
                 "room_id": self.room_id,
+                "match_id": self.current_match_id,
                 "status": self.status,
                 "mode": mode_meta["code"],
                 "mode_name": mode_meta["name"],
                 "mode_description": mode_meta["description"],
+                "experience_kind": self.experience_kind,
+                "tutorial": self.tutorial_public_state(),
                 "available_modes": room_mode_list_payload(),
                 "version": self.version,
                 "created_at": self.created_at,
@@ -1741,9 +2140,17 @@ class GameRoom:
                 "ai_seat_count": self.ai_seat_count(),
                 "is_full": all(seat.occupied for seat in self.seats.values()),
                 "can_start": self.can_start(),
+                "configuration_ready": self._configuration_blocker() is None,
                 "start_blocker": self._start_blocker(),
-                "can_rematch": self.status == "finished",
+                "human_ready_count": self.human_ready_count(),
+                "can_rematch": self.status == "finished" and viewer_player_id == self.host_player_id,
                 "seats": [seat.to_public_dict(heroes_by_code, self.host_player_id) for seat in self.seats.values()],
+                "turn_timer": self._turn_timer_public_state(),
+                "postgame": build_postgame_summary(
+                    self.battle,
+                    self.replay,
+                    seat_names={seat.player_id: seat.name for seat in self.seats.values() if seat.name},
+                ),
                 "replay": self._replay_state_for_viewer(viewer),
                 "simulation": self._simulation_state_for_viewer(viewer),
             }
@@ -1768,6 +2175,17 @@ class GameRoom:
             self.battle.pending_chain = None
             self.battle.pending_respawn_unit_ids = []
             self.battle.winner = winner
+            self.battle.win_reason_code = "surrender"
+            self.battle.win_reason_text = f"{seat.name or f'席位 {seat.player_id}'} 投降。"
+            self.battle._append_summary_event(
+                "match_end",
+                actor_unit_id=None,
+                actor_name=seat.name or f"席位 {seat.player_id}",
+                actor_player_id=winner,
+                target_name=seat.name or f"席位 {seat.player_id}",
+                action_name="投降",
+                amount=0,
+            )
             self.battle.log(
                 f"{seat.name or f'\u5e2d\u4f4d {seat.player_id}'} "
                 f"\u6295\u964d\u3002{team_name(winner)}\u83b7\u80dc\u3002"
@@ -1789,10 +2207,16 @@ class RoomRegistry:
             if room_id not in self._rooms:
                 return room_id
 
-    def create_room(self, player_name: str, mode: str = DEFAULT_ROOM_MODE) -> tuple[GameRoom, int, str]:
+    def create_room(
+        self,
+        player_name: str,
+        mode: str = DEFAULT_ROOM_MODE,
+        *,
+        account_user_id: Optional[int] = None,
+    ) -> tuple[GameRoom, int, str]:
         with self._lock:
             room = GameRoom(self._generate_room_id(), mode=mode)
-            player_id, token = room.create_host(player_name)
+            player_id, token = room.create_host(player_name, account_user_id=account_user_id)
             self._rooms[room.room_id] = room
             return room, player_id, token
 
@@ -1805,11 +2229,15 @@ class RoomRegistry:
         player2_roster: list[str],
         start_immediately: bool = True,
         host_becomes_ai_after_start: bool = False,
+        ai_difficulty: str = DEFAULT_AI_DIFFICULTY,
+        host_account_user_id: Optional[int] = None,
     ) -> tuple[GameRoom, int, str]:
         with self._lock:
             room = GameRoom(self._generate_room_id(), mode="classic", seat_count=2)
-            player_id, token = room.create_host(host_name)
+            player_id, token = room.create_host(host_name, account_user_id=host_account_user_id)
             room.set_seat_controller(token, 2, "ai")
+            room.default_ai_difficulty = normalize_ai_difficulty(ai_difficulty)
+            room.seats[2].ai_difficulty_override = room.default_ai_difficulty
             room.seats[2].name = normalize_player_name(opponent_name)
             room.seats[1].replace_roster(list(player1_roster))
             room.seats[2].replace_roster(list(player2_roster))

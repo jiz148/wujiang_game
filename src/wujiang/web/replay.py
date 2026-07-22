@@ -36,10 +36,15 @@ class ReplayStep:
 class ReplayRecorder:
     room_id: str
     mode: str
+    match_id: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     finished_at: Optional[float] = None
     saved_path: Optional[str] = None
     steps: list[ReplayStep] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.match_id:
+            self.match_id = f"{self.room_id}-1"
 
     def append_step(
         self,
@@ -70,6 +75,7 @@ class ReplayRecorder:
 
     def metadata(self) -> dict[str, Any]:
         return {
+            "match_id": self.match_id,
             "room_id": self.room_id,
             "mode": self.mode,
             "created_at": self.created_at,
@@ -105,8 +111,10 @@ class ReplayRecorder:
         self.finished_at = time.time()
         REPLAYS_DIR.mkdir(parents=True, exist_ok=True)
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(self.finished_at))
-        path = REPLAYS_DIR / f"{self.room_id}-{timestamp}.json"
+        safe_match_id = "".join(character for character in str(self.match_id) if character.isalnum() or character in {"-", "_"})
+        path = REPLAYS_DIR / f"{safe_match_id or self.room_id}-{timestamp}.json"
         payload = {
+            "match_id": self.match_id,
             "room_id": self.room_id,
             "mode": self.mode,
             "created_at": self.created_at,

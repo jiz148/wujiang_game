@@ -338,20 +338,62 @@ def enrich_world_public_state(world: WorldState) -> dict[str, Any]:
     from wujiang.strategy.story import scheduled_consequences_public, story_events_public
     from wujiang.strategy.offices import office_system_public
     from wujiang.strategy.administration import building_projects_public, registered_unit_types_public
+    from wujiang.strategy.neutral_politics import neutral_city_state_profiles_public
+    from wujiang.strategy.diplomacy import diplomacy_cooldown_until, diplomatic_memory_public, neutral_diplomatic_agreements_public, neutral_diplomacy_options_public
+    from wujiang.strategy.peaceful_integration import peaceful_integration_option
+    from wujiang.strategy.occupation import occupation_status_public
+    from wujiang.strategy.rebellion import rebellion_funding_option
 
     payload = world.to_dict()
+    # Monthly reports are persisted as the authoritative audit trail. The campaign
+    # serializer exposes only the faction-filtered monthly_cycle view.
+    payload.pop("monthly_reports", None)
+    payload.pop("campaign_tutorial", None)
     factions_by_id = {faction.faction_id: faction for faction in world.factions}
+    neutral_profiles = neutral_city_state_profiles_public(world)
     for faction_payload, faction in zip(payload["factions"], world.factions):
         faction_payload["tactic_tech_tree"] = tactic_tech_tree_public(faction)
         faction_payload["strategic_heroes"] = strategic_heroes_for_faction_public(world, faction.faction_id)
         faction_payload["strategic_hero_deployment_limit"] = strategic_hero_deployment_limit(world, faction.faction_id)
         faction_payload["hero_ritual_capacity"] = hero_ritual_capacity(world, faction.faction_id)
+        if faction.is_neutral_city_state:
+            profile = neutral_profiles[faction.faction_id]
+            for relationship in profile.get("relationships", []):
+                relationship["diplomacy_options"] = neutral_diplomacy_options_public(
+                    world,
+                    actor_faction_id=str(relationship.get("faction_id") or ""),
+                    neutral_faction_id=faction.faction_id,
+                )
+                relationship["incitement_cooldown_until_month"] = diplomacy_cooldown_until(
+                    world,
+                    str(relationship.get("faction_id") or ""),
+                    faction.faction_id,
+                    "incite",
+                )
+                relationship["peaceful_integration"] = peaceful_integration_option(
+                    world,
+                    actor_faction_id=str(relationship.get("faction_id") or ""),
+                    neutral_faction_id=faction.faction_id,
+                )
+            profile["agreements"] = neutral_diplomatic_agreements_public(world, faction.faction_id)
+            profile["diplomatic_memory"] = diplomatic_memory_public(world, faction.faction_id)
+            faction_payload["neutral_politics"] = profile
     for city_payload, city in zip(payload["cities"], world.cities):
         faction = factions_by_id[city.owner_faction_id]
         city_payload["troop_conversion"] = city_troop_conversion(city, faction)
         city_payload["building_limits"] = {
             project["id"]: building_max_level(faction, project["id"])
             for project in building_projects_public()
+        }
+        city_payload["occupation_governance"] = occupation_status_public(world, city.city_id)
+        city_payload["rebellion_funding_options"] = {
+            major.faction_id: rebellion_funding_option(
+                world,
+                sponsor_faction_id=major.faction_id,
+                city_id=city.city_id,
+            )
+            for major in world.factions
+            if not major.is_neutral_city_state
         }
     payload["policy_choices"] = sorted(POLICIES)
     payload["battle_resolution_modes"] = sorted(BATTLE_RESOLUTION_MODES)

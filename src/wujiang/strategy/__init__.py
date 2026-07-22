@@ -7,6 +7,26 @@ from wujiang.strategy.battles import (
     set_battle_defender_hero,
 )
 from wujiang.strategy.ai import apply_strategy_ai_monthly_actions
+from wujiang.strategy.armies import (
+    ARMY_MORALE_AT_FORMATION,
+    MIN_INITIAL_SUPPLY,
+    advance_army_movements,
+    advance_army_supply,
+    army_supply_plan,
+    army_manpower,
+    army_supply_capacity,
+    disband_army,
+    form_or_reinforce_army,
+    halt_army_march,
+    load_army_supply,
+    order_army_march,
+    shortest_army_route,
+)
+from wujiang.strategy.ai_goals import (
+    ai_strategic_goals_public,
+    ensure_ai_strategic_goal,
+    update_ai_strategic_goal,
+)
 from wujiang.strategy.command import (
     FACTION_MONTHLY_COMMAND_POINTS,
     faction_command_points,
@@ -78,6 +98,7 @@ from wujiang.strategy.administration import (
 from wujiang.strategy.models import (
     CampaignMember,
     City,
+    DiplomaticAgreement,
     EventLogEntry,
     Faction,
     MapNode,
@@ -86,6 +107,7 @@ from wujiang.strategy.models import (
     OfficeOrder,
     OfficeTakeover,
     StrategicHeroState,
+    StrategicArmy,
     HeroRecruitment,
     PendingBattle,
     ResourceBundle,
@@ -93,6 +115,34 @@ from wujiang.strategy.models import (
     StoryEvent,
     StrategyError,
     WorldState,
+)
+from wujiang.strategy.neutral_city_states import (
+    NEUTRAL_INCITEMENT_MONEY_COST,
+    incite_neutral_city_state,
+    incitement_attack_pair,
+    validate_neutral_city_state_incitement,
+)
+from wujiang.strategy.neutral_politics import neutral_city_state_profile, neutral_city_state_profiles_public
+from wujiang.strategy.diplomacy import (
+    NEUTRAL_DIPLOMACY_ACTIONS,
+    apply_neutral_diplomacy_action,
+    neutral_diplomatic_agreements_public,
+    neutral_diplomacy_option,
+    neutral_diplomacy_options_public,
+    validate_neutral_diplomacy_action,
+)
+from wujiang.strategy.peaceful_integration import (
+    PEACEFUL_INTEGRATION_FOOD_COST,
+    PEACEFUL_INTEGRATION_MONEY_COST,
+    apply_peaceful_integration,
+    peaceful_integration_option,
+    validate_peaceful_integration,
+)
+from wujiang.strategy.occupation import (
+    OCCUPATION_POLICIES,
+    apply_occupation_policy,
+    occupation_status_public,
+    validate_occupation_policy,
 )
 from wujiang.strategy.offices import (
     ACTION_PERMISSION,
@@ -120,10 +170,24 @@ from wujiang.strategy.story import (
     validate_story_event_choice,
 )
 from wujiang.strategy.objectives import (
+    FIRST_CAMPAIGN_CITY_COUNT,
+    FIRST_CAMPAIGN_MAJOR_FACTION_COUNT,
+    FIRST_CAMPAIGN_MONTH_LIMIT,
+    FIRST_CAMPAIGN_NEUTRAL_CITY_STATE_COUNT,
+    FIRST_CAMPAIGN_SCENARIO_ID,
     VICTORY_CONDITIONS,
+    campaign_assessment_rankings,
     city_counts_by_faction,
+    continue_campaign_as_sandbox,
     evaluate_strategic_status,
+    first_campaign_contract,
     record_strategic_status_events,
+    require_campaign_orders_open,
+)
+from wujiang.strategy.campaign_retrospective import (
+    archive_campaign,
+    build_campaign_retrospective,
+    campaign_retrospective_public,
 )
 from wujiang.strategy.rebellion import (
     MIN_REBELLION_BATTLE_TROOPS,
@@ -134,6 +198,9 @@ from wujiang.strategy.rebellion import (
     rebellion_action_choices_public,
     validate_rebellion_action,
     validate_rebellion_battle,
+    apply_rebellion_funding,
+    rebellion_funding_option,
+    validate_rebellion_funding,
 )
 from wujiang.strategy.simulation import advance_month, rebellion_risk
 from wujiang.strategy.store import CampaignRecord, QueuedStrategyAction, ResumeStatus, StrategyStore
@@ -153,6 +220,7 @@ __all__ = [
     "EventLogEntry",
     "EXILE_ACTIONS",
     "Faction",
+    "DiplomaticAgreement",
     "FACTION_MONTHLY_COMMAND_POINTS",
     "MapNode",
     "Office",
@@ -160,6 +228,7 @@ __all__ = [
     "OfficeOrder",
     "OfficeTakeover",
     "StrategicHeroState",
+    "StrategicArmy",
     "HeroRecruitment",
     "PendingBattle",
     "QueuedStrategyAction",
@@ -169,6 +238,7 @@ __all__ = [
     "REBUILD_MONEY_COST",
     "REBUILD_TROOP_COST",
     "MIN_REBELLION_BATTLE_TROOPS",
+    "NEUTRAL_INCITEMENT_MONEY_COST",
     "REBELLION_ACTIONS",
     "ResumeStatus",
     "StrategyError",
@@ -194,6 +264,19 @@ __all__ = [
     "advance_month",
     "advance_story_events",
     "apply_strategy_ai_monthly_actions",
+    "form_or_reinforce_army",
+    "disband_army",
+    "order_army_march",
+    "halt_army_march",
+    "advance_army_movements",
+    "shortest_army_route",
+    "army_manpower",
+    "army_supply_capacity",
+    "MIN_INITIAL_SUPPLY",
+    "ARMY_MORALE_AT_FORMATION",
+    "ai_strategic_goals_public",
+    "ensure_ai_strategic_goal",
+    "update_ai_strategic_goal",
     "apply_exile_action",
     "apply_office_order",
     "apply_rebellion_action",
@@ -213,6 +296,16 @@ __all__ = [
     "building_projects_public",
     "registered_unit_types_public",
     "increase_city_troops",
+    "incite_neutral_city_state",
+    "incitement_attack_pair",
+    "neutral_city_state_profile",
+    "neutral_city_state_profiles_public",
+    "NEUTRAL_DIPLOMACY_ACTIONS",
+    "apply_neutral_diplomacy_action",
+    "neutral_diplomatic_agreements_public",
+    "neutral_diplomacy_option",
+    "neutral_diplomacy_options_public",
+    "validate_neutral_diplomacy_action",
     "register_city_soldiers",
     "transfer_registered_units",
     "request_registered_units",
@@ -223,6 +316,18 @@ __all__ = [
     "ensure_office_system",
     "declare_city_attack",
     "evaluate_strategic_status",
+    "FIRST_CAMPAIGN_CITY_COUNT",
+    "FIRST_CAMPAIGN_MAJOR_FACTION_COUNT",
+    "FIRST_CAMPAIGN_MONTH_LIMIT",
+    "FIRST_CAMPAIGN_NEUTRAL_CITY_STATE_COUNT",
+    "FIRST_CAMPAIGN_SCENARIO_ID",
+    "campaign_assessment_rankings",
+    "continue_campaign_as_sandbox",
+    "archive_campaign",
+    "build_campaign_retrospective",
+    "campaign_retrospective_public",
+    "first_campaign_contract",
+    "require_campaign_orders_open",
     "faction_command_points",
     "exile_action_choices_public",
     "faction_is_exiled",
@@ -272,4 +377,5 @@ __all__ = [
     "validate_exile_action",
     "validate_rebellion_action",
     "validate_rebellion_battle",
+    "validate_neutral_city_state_incitement",
 ]

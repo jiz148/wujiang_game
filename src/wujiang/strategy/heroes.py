@@ -63,6 +63,10 @@ def ensure_strategic_hero_system(world: WorldState, members: Any = None) -> Worl
     initializing_hero_system = not next_world.strategic_heroes
     heroes_by_code = {hero.hero_code: hero for hero in next_world.strategic_heroes}
     cities = sorted(next_world.cities, key=lambda city: city.city_id)
+    city_ids = {city.city_id for city in cities}
+    mobile_commander_codes = {
+        army.commander_hero_code for army in next_world.armies if army.status != "disbanded"
+    }
     public_heroes = _base_hero_pool()
 
     for hero in public_heroes:
@@ -86,7 +90,8 @@ def ensure_strategic_hero_system(world: WorldState, members: Any = None) -> Worl
             if state is None:
                 continue
             state.faction_id = faction.faction_id
-            state.city_id = faction.capital_city_id
+            if state.hero_code not in mobile_commander_codes or state.city_id not in city_ids:
+                state.city_id = faction.capital_city_id
             state.ritual_city_id = state.ritual_city_id or faction.capital_city_id
             state.status = "sleeping" if sleeping.get(code, 0) > next_world.current_month else "serving"
             state.sleeping_until_month = sleeping.get(code) or None
@@ -111,6 +116,8 @@ def ensure_strategic_hero_system(world: WorldState, members: Any = None) -> Worl
 
     office_rank = {"lord": 0, "grand_general": 1, "general": 2, "governor": 3}
     for faction in sorted(next_world.factions, key=lambda item: item.faction_id):
+        if faction.is_neutral_city_state:
+            continue
         founded_during_campaign = any(tag.startswith("hero_founded_faction:") for tag in faction.memory_tags) or any(
             event.category == "hero_founded_faction" and faction.faction_id in event.related_ids
             for event in next_world.event_log
@@ -163,7 +170,8 @@ def ensure_strategic_hero_system(world: WorldState, members: Any = None) -> Worl
                 state = heroes_by_code[selected_code]
             state.status = "serving"
             state.faction_id = faction.faction_id
-            state.city_id = faction.capital_city_id
+            if state.hero_code not in mobile_commander_codes or state.city_id not in city_ids:
+                state.city_id = faction.capital_city_id
             state.ritual_city_id = state.ritual_city_id or faction.capital_city_id
             state.office_id = office.office_id
             office.holder_id = state.hero_code

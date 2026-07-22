@@ -1387,6 +1387,12 @@ class Battle:
         self.visual_events: list[VisualEvent] = []
         self._next_visual_event_id = 1
         self.stale_queued_action_count = 0
+        self.combat_stats: dict[str, dict[str, Any]] = {}
+        self.summary_events: list[dict[str, Any]] = []
+        self._next_summary_event_id = 1
+        self._summary_defeated_unit_ids: set[str] = set()
+        self.win_reason_code = ""
+        self.win_reason_text = ""
 
     def log(self, message: str) -> None:
         if self._log_suppression_depth > 0:
@@ -1451,6 +1457,169 @@ class Battle:
         self._next_visual_event_id += 1
         self.visual_events.append(event)
         self.visual_events = self.visual_events[-40:]
+
+    def _find_summary_unit(self, unit_id: Optional[str]) -> Optional[Unit]:
+        if not unit_id:
+            return None
+        unit = self.units.get(unit_id)
+        if unit is not None:
+            return unit
+        return next((item for item in self.destroyed_units if item.unit_id == unit_id), None)
+
+    def _summary_root_unit(self, unit: Optional[Unit]) -> Optional[Unit]:
+        current = unit
+        seen: set[str] = set()
+        while current is not None and (current.is_summon or current.is_clone):
+            if current.unit_id in seen:
+                break
+            seen.add(current.unit_id)
+            parent_id = current.mount_owner_id or current.summoner_id
+            parent = self._find_summary_unit(parent_id)
+            if parent is None:
+                break
+            current = parent
+        return current
+
+    def _combat_stat_for(self, unit: Optional[Unit]) -> Optional[dict[str, Any]]:
+        root = self._summary_root_unit(unit)
+        if root is None:
+            return None
+        existing = self.combat_stats.get(root.unit_id)
+        if existing is not None:
+            return existing
+        entry = {
+            "unit_id": root.unit_id,
+            "hero_code": str(getattr(root, "hero_code", "") or ""),
+            "name": root.name,
+            "player_id": root.player_id,
+            "owner_seat_id": getattr(root, "owner_seat_id", None),
+            "damage_dealt": 0.0,
+            "healing_done": 0.0,
+            "damage_taken": 0.0,
+            "healing_received": 0.0,
+            "kills": 0,
+            "deaths": 0,
+            "shields_broken": 0,
+            "chain_reactions": 0,
+            "actions": 0,
+        }
+        self.combat_stats[root.unit_id] = entry
+        return entry
+
+    def _append_summary_event(self, kind: str, **payload: Any) -> dict[str, Any]:
+        event = {
+            "event_id": self._next_summary_event_id,
+            "kind": kind,
+            "turn_index": max(1, int(self.completed_turns) + 1),
+            **payload,
+        }
+        self._next_summary_event_id += 1
+        self.summary_events.append(event)
+        self.summary_events = self.summary_events[-300:]
+        return event
+
+    def record_damage_summary(self, ctx: DamageContext, actual_damage: float) -> None:
+        amount = round(max(0.0, float(actual_damage)), 4)
+        if amount <= 0:
+            return
+        source = self._summary_root_unit(ctx.source)
+        target = self._summary_root_unit(ctx.target)
+        source_stat = self._combat_stat_for(source)
+        target_stat = self._combat_stat_for(target)
+        if source_stat is not None:
+            source_stat["damage_dealt"] = round(float(source_stat["damage_dealt"]) + amount, 4)
+        if target_stat is not None:
+            target_stat["damage_taken"] = round(float(target_stat["damage_taken"]) + amount, 4)
+        self._append_summary_event(
+            "damage",
+            actor_unit_id=source.unit_id if source is not None else None,
+            actor_name=source.name if source is not None else "场地效果",
+            actor_player_id=source.player_id if source is not None else None,
+            target_unit_id=target.unit_id if target is not None else ctx.target.unit_id,
+            target_name=target.name if target is not None else ctx.target.name,
+            target_player_id=target.player_id if target is not None else ctx.target.player_id,
+            action_name=ctx.action_name,
+            amount=amount,
+        )
+
+    def record_heal_summary(self, ctx: HealContext, actual_healing: float) -> None:
+        amount = round(max(0.0, float(actual_healing)), 4)
+        if amount <= 0:
+            return
+        source = self._summary_root_unit(ctx.source or ctx.target)
+        target = self._summary_root_unit(ctx.target)
+        source_stat = self._combat_stat_for(source)
+        target_stat = self._combat_stat_for(target)
+        if source_stat is not None:
+            source_stat["healing_done"] = round(float(source_stat["healing_done"]) + amount, 4)
+        if target_stat is not None:
+            target_stat["healing_received"] = round(float(target_stat["healing_received"]) + amount, 4)
+        self._append_summary_event(
+            "healing",
+            actor_unit_id=source.unit_id if source is not None else None,
+            actor_name=source.name if source is not None else "场地效果",
+            actor_player_id=source.player_id if source is not None else None,
+            target_unit_id=target.unit_id if target is not None else ctx.target.unit_id,
+            target_name=target.name if target is not None else ctx.target.name,
+            target_player_id=target.player_id if target is not None else ctx.target.player_id,
+            action_name=ctx.action_name,
+            amount=amount,
+        )
+
+    def record_shield_break_summary(self, source: Optional[Unit], target: Unit, action_name: str) -> None:
+        root_source = self._summary_root_unit(source)
+        source_stat = self._combat_stat_for(root_source)
+        if source_stat is not None:
+            source_stat["shields_broken"] = int(source_stat["shields_broken"]) + 1
+        self._append_summary_event(
+            "shield_break",
+            actor_unit_id=root_source.unit_id if root_source is not None else None,
+            actor_name=root_source.name if root_source is not None else "场地效果",
+            actor_player_id=root_source.player_id if root_source is not None else None,
+            target_name=self._summary_root_unit(target).name if self._summary_root_unit(target) is not None else target.name,
+            action_name=action_name,
+            amount=1,
+        )
+
+    def record_defeat_summary(self, source: Optional[Unit], target: Unit, action_name: str) -> None:
+        if target.unit_id in self._summary_defeated_unit_ids or target.is_summon or target.is_clone:
+            return
+        self._summary_defeated_unit_ids.add(target.unit_id)
+        root_source = self._summary_root_unit(source)
+        root_target = self._summary_root_unit(target)
+        source_stat = self._combat_stat_for(root_source)
+        target_stat = self._combat_stat_for(root_target)
+        if source_stat is not None:
+            source_stat["kills"] = int(source_stat["kills"]) + 1
+        if target_stat is not None:
+            target_stat["deaths"] = int(target_stat["deaths"]) + 1
+        self._append_summary_event(
+            "defeat",
+            actor_unit_id=root_source.unit_id if root_source is not None else None,
+            actor_name=root_source.name if root_source is not None else "场地效果",
+            actor_player_id=root_source.player_id if root_source is not None else None,
+            target_unit_id=root_target.unit_id if root_target is not None else target.unit_id,
+            target_name=root_target.name if root_target is not None else target.name,
+            target_player_id=root_target.player_id if root_target is not None else target.player_id,
+            action_name=action_name,
+            amount=1,
+        )
+
+    def record_postgame_action(self, actor: Optional[Unit], payload: dict[str, Any]) -> None:
+        stat = self._combat_stat_for(actor)
+        if stat is None:
+            return
+        action_type = str(payload.get("type") or "")
+        if action_type not in {"chain_skip", "respawn_select", "end_turn"}:
+            stat["actions"] = int(stat["actions"]) + 1
+        if action_type == "chain_react":
+            stat["chain_reactions"] = int(stat["chain_reactions"]) + 1
+
+    def combat_summary_entries(self) -> list[dict[str, Any]]:
+        for unit in [*self.all_units(), *self.destroyed_units]:
+            if not unit.is_summon and not unit.is_clone:
+                self._combat_stat_for(unit)
+        return [dict(entry) for entry in self.combat_stats.values()]
 
     def emit_visual_event_for_queued_action(self, actor: Unit, queued_action: QueuedAction) -> None:
         payload = queued_action.payload
@@ -1803,6 +1972,17 @@ class Battle:
             if not candidates:
                 candidates = [1, 2]
             self.winner = int(random.choice(candidates))
+            self.win_reason_code = "turn_limit_random"
+            self.win_reason_text = f"达到 {self.turn_timeout_limit} 个武将回合上限后随机判定胜方。"
+            self._append_summary_event(
+                "match_end",
+                actor_unit_id=None,
+                actor_name="系统",
+                actor_player_id=self.winner,
+                target_name="",
+                action_name="回合上限随机判定",
+                amount=0,
+            )
             self.log(
                 f"对局已达到 {self.turn_timeout_limit} 个武将回合上限，"
                 f"随机判定玩家 {self.winner} 获胜。"
@@ -2759,6 +2939,7 @@ class Battle:
                 if ctx.ignore_shield:
                     ctx.target.consume_one_shield()
                     ctx.shield_consumed = True
+                    self.record_shield_break_summary(ctx.source, ctx.target, ctx.action_name)
                     self.emit_defense_visual_event(
                         source=ctx.source,
                         target=ctx.target,
@@ -2773,6 +2954,7 @@ class Battle:
                 elif ctx.half_ignore_shield:
                     ctx.target.consume_one_shield()
                     ctx.shield_consumed = True
+                    self.record_shield_break_summary(ctx.source, ctx.target, ctx.action_name)
                     if ctx.raw_damage is None:
                         ctx.attack_power = max(0.0, ctx.attack_power - 1)
                     self.emit_defense_visual_event(
@@ -2789,6 +2971,7 @@ class Battle:
                 else:
                     ctx.target.consume_one_shield()
                     ctx.shield_consumed = True
+                    self.record_shield_break_summary(ctx.source, ctx.target, ctx.action_name)
                     ctx.cancelled = True
                     ctx.reason = f"{ctx.target.name} 的护盾挡下了伤害。"
                     self.emit_defense_visual_event(
@@ -2836,7 +3019,10 @@ class Battle:
             if ctx.raw_damage is not None:
                 damage_amount = ctx.raw_damage
             ctx.raw_damage = round(float(damage_amount), 4)
+            old_hp = ctx.target.current_hp
             ctx.target.take_damage_fraction(ctx.raw_damage)
+            actual_damage = round(max(0.0, old_hp - ctx.target.current_hp), 4)
+            self.record_damage_summary(ctx, actual_damage)
             self.log_public_event(
                 f"{ctx.target.name} 受到 {ctx.raw_damage} 点伤害。",
                 source=ctx.source,
@@ -2849,6 +3035,8 @@ class Battle:
                     component.on_after_damage(self, ctx)
             for component in list(ctx.target.iter_components()):
                 component.on_after_damage(self, ctx)
+            if not ctx.target.alive:
+                self.record_defeat_summary(ctx.source, ctx.target, ctx.action_name)
             self.cleanup_dead_units()
             return ctx
 
@@ -2878,6 +3066,7 @@ class Battle:
             old_hp = ctx.target.current_hp
             ctx.target.heal_fraction(ctx.amount)
             gained = round(ctx.target.current_hp - old_hp, 4)
+            self.record_heal_summary(ctx, gained)
             self.log_public_event(
                 f"{ctx.target.name} 回复了 {gained} 点生命。",
                 source=ctx.source,
@@ -4302,6 +4491,18 @@ class Battle:
         alive_players = {player_id for player_id in (1, 2) if self.hero_units(player_id)}
         if len(alive_players) == 1 and self.units:
             self.winner = alive_players.pop()
+            losing_player = 2 if self.winner == 1 else 1
+            self.win_reason_code = "elimination"
+            self.win_reason_text = f"玩家 {losing_player} 的全部武将被击破。"
+            self._append_summary_event(
+                "match_end",
+                actor_unit_id=None,
+                actor_name="系统",
+                actor_player_id=self.winner,
+                target_name=f"玩家 {losing_player}",
+                action_name="全部武将被击破",
+                amount=0,
+            )
             self.log(f"玩家 {self.winner} 获胜。")
 
     def perform_action(self, payload: dict[str, Any]) -> None:
@@ -4589,8 +4790,12 @@ class Battle:
             ),
             "turn_number": self.turn_number,
             "round_number": self.round_number,
+            "completed_turns": self.completed_turns,
             "turn_order_unit_ids": list(self.turn_order_unit_ids),
             "winner": self.winner,
+            "win_reason_code": self.win_reason_code if self.winner is not None else "",
+            "win_reason_text": self.win_reason_text if self.winner is not None else "",
+            "summary_event_count": self._next_summary_event_id - 1,
             "damage_rule": self.damage_rule.name,
             "units": [unit.to_public_dict(self) for unit in self.all_units()],
             "destroyed_units": [unit.to_public_dict(self) for unit in self.destroyed_units],

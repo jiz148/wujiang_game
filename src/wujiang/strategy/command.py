@@ -25,6 +25,10 @@ def strategy_action_command_cost(action_type: str, payload: dict[str, Any] | Non
         return 0
     if normalized_type == "issue_office_order":
         return 1
+    if normalized_type == "peaceful_integration":
+        return 2
+    if normalized_type in {"incite_neutral_city_state", "neutral_diplomacy"}:
+        return 1
     if normalized_type in {
         "set_city_policy",
         "unlock_tactic_tech",
@@ -35,6 +39,10 @@ def strategy_action_command_cost(action_type: str, payload: dict[str, Any] | Non
         "increase_city_troops",
         "register_city_soldiers",
         "transfer_registered_units",
+        "form_army",
+        "disband_army",
+        "set_army_movement",
+        "load_army_supply",
         "construct_city_building",
     }:
         return 1

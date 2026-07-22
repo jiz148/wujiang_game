@@ -37,6 +37,7 @@
               <button id="recover-room" class="ghost hidden">恢复席位</button>
               <button id="copy-invite" class="ghost hidden">复制邀请链接</button>
               <button id="room-battle" class="ghost hidden">进入战场</button>
+              <button id="toggle-ready" class="ghost hidden">确认准备</button>
               <button id="start-room" class="primary hidden">开始对局</button>
             </div>
           </div>
@@ -44,16 +45,52 @@
           <div id="room-home" class="room-home">
             <section class="mode-gateway">
               <div class="mode-gateway-copy">
-                <span class="meta-label">选择玩法</span>
-                <strong>先进入一个可玩的模式</strong>
-                <span class="meta-note">想经营城邦就进入英灵城邦；想快速对战就进入武将对战。</span>
+                <span class="meta-label">快速开始</span>
+                <strong>直接开战，也可以随时回到教学</strong>
+                <span class="meta-note">快速 AI 对战会自动使用入门阵容；第一次游玩可先进入固定新手教学。</span>
               </div>
               <div class="mode-gateway-actions">
-                <button id="focus-strategy-mode" class="primary" type="button">英灵城邦战役</button>
-                <button id="focus-duel-mode" class="ghost" type="button">武将对战房间</button>
+                <button id="quick-start-entry" class="primary" type="button">快速开始</button>
+                <button id="focus-strategy-mode" class="ghost" type="button">英灵城邦</button>
+                <button id="focus-duel-mode" class="ghost" type="button">自定义对战</button>
               </div>
             </section>
-            <section class="identity-card">
+            <section id="quick-start-panel" class="quick-start-panel hidden">
+              <div>
+                <span class="meta-label">快速对战</span>
+                <strong>选择直接开战或新手教学</strong>
+                <span id="tutorial-resume-note" class="meta-note">固定阵容和地图，依次练习选中、移动、普攻、技能、连锁响应和结束回合。</span>
+              </div>
+              <div class="quick-start-actions">
+                <button id="start-quick-ai" class="primary" type="button">快速 AI 对战</button>
+                <button id="resume-tutorial" class="primary hidden" type="button">继续未完成教学</button>
+                <button id="start-tutorial" class="ghost" type="button">进入新手教学</button>
+              </div>
+            </section>
+            <section id="recent-matches-panel" class="recent-matches-panel hidden" aria-labelledby="recent-matches-title">
+              <div class="section-head recent-matches-head">
+                <div>
+                  <span class="meta-label">账号记录</span>
+                  <h3 id="recent-matches-title">最近战绩与回放</h3>
+                  <p>保留最近 10 场已结束对局；历史回放只对实际参战账号开放。</p>
+                </div>
+                <button id="refresh-recent-matches" class="ghost" type="button">刷新战绩</button>
+              </div>
+              <section id="mastery-overview" class="mastery-overview" aria-labelledby="mastery-overview-title">
+                <div class="mastery-overview-head">
+                  <div>
+                    <span class="meta-label">Phase 2 成长档案</span>
+                    <h4 id="mastery-overview-title">武将熟练度</h4>
+                  </div>
+                  <span id="mastery-summary" class="meta-note">正在读取熟练度...</span>
+                </div>
+                <div id="mastery-next-goal" class="mastery-next-goal"></div>
+                <div id="mastery-hero-list" class="mastery-hero-list"></div>
+              </section>
+              <div id="recent-matches-message" class="meta-note"></div>
+              <div id="recent-matches-list" class="recent-matches-list"></div>
+            </section>
+            <section class="identity-card home-custom-section hidden">
               <div>
                 <span class="meta-label">当前昵称</span>
                 <strong id="profile-display-name">未命名玩家</strong>
@@ -62,11 +99,11 @@
               <button id="identity-edit" class="ghost">修改昵称</button>
             </section>
 
-            <section class="identity-card auth-card">
+            <section class="identity-card auth-card hidden">
               <div>
                 <span class="meta-label">账号</span>
                 <strong id="auth-display-name">未登录</strong>
-                <span id="auth-display-note" class="meta-note">战略模式存档会绑定到登录账号；当前房间测试仍可使用临时昵称。</span>
+                <span id="auth-display-note" class="meta-note">所有可玩模式都需要登录；昵称只负责游戏内显示，不能代替账号身份。</span>
                 <span id="auth-message" class="auth-message"></span>
               </div>
               <div id="auth-form" class="auth-form">
@@ -88,7 +125,7 @@
               </div>
             </section>
 
-            <div class="room-home-grid">
+            <div class="room-home-grid home-custom-section hidden">
               <section class="room-entry-card">
                 <h3>创建房间</h3>
                 <p>登录后使用当前昵称创建房间，并生成可分享的邀请链接。</p>
@@ -106,11 +143,11 @@
               </section>
             </div>
 
-            <section id="strategy-panel" class="strategy-panel">
+            <section id="strategy-panel" class="strategy-panel hidden">
               <div class="section-head">
                 <div>
                   <h3>英灵城邦</h3>
-                  <p id="strategy-caption">登录后可以创建、恢复并推进长期战略沙盒。</p>
+                  <p id="strategy-caption">登录后可以创建、恢复并推进 12 个月英灵城邦战役。</p>
                 </div>
                 <div class="strategy-actions">
                   <button id="strategy-refresh" class="ghost" type="button">刷新</button>
@@ -127,8 +164,8 @@
                   <input id="strategy-seed" type="number" step="1" value="1" />
                 </label>
                 <label>
-                  <span>初始玩家</span>
-                  <input id="strategy-player-count" type="number" min="1" max="6" step="1" value="2" />
+                  <span>主要势力</span>
+                  <input id="strategy-player-count" type="number" value="2" disabled />
                 </label>
                 <button id="strategy-create" class="primary" type="button">创建战役</button>
                 <label>
@@ -136,6 +173,7 @@
                   <input id="strategy-join-code" type="text" maxlength="6" placeholder="ABC234" />
                 </label>
                 <button id="strategy-join" class="ghost" type="button">加入战役</button>
+                <p class="strategy-meta">首个产品场景固定为 8 城、2 个主要势力、6 个中立城邦、12 个月，预计 60～90 分钟。</p>
               </div>
               <div id="strategy-message" class="strategy-message"></div>
               <div id="strategy-campaign-list" class="strategy-campaign-list"></div>
@@ -147,11 +185,11 @@
               <button id="resume-room" class="ghost">继续原身份</button>
             </div>
 
-            <div class="draft-note">
+            <div class="draft-note home-custom-section hidden">
               当前联机测试版采用房间制与 HTTP 轮询同步。部署到 Windows 机器并开放端口后，朋友就能通过同一房间链接进入并在线对战。
             </div>
 
-            <section class="room-directory">
+            <section class="room-directory home-custom-section hidden">
               <div class="section-head room-directory-head">
                 <div>
                   <h3>已有房间</h3>
@@ -161,7 +199,7 @@
               <div id="room-list" class="room-list"></div>
             </section>
 
-            <div id="home-hero-cards" class="hero-grid"></div>
+            <div id="home-hero-cards" class="hero-grid home-custom-section hidden"></div>
           </div>
 
           <div id="room-lobby" class="room-lobby hidden">
@@ -184,6 +222,7 @@
             </div>
 
             <div id="room-message" class="draft-note">等待双方进入房间。</div>
+            <div id="room-connection-summary" class="connection-summary" role="status" aria-live="polite"></div>
             <section class="room-meta-card room-mode-card">
               <span class="meta-label">模式</span>
               <strong id="room-mode-label">标准选将</strong>
@@ -208,9 +247,34 @@
             <div class="section-head room-hero-head">
               <div>
                 <h3>房间选将</h3>
-                <p>为当前正在编辑的席位配置武将。</p>
+                <p>默认显示新手武将；也可一键使用推荐阵容或展开完整武将库。</p>
               </div>
+              <button id="toggle-full-roster" class="ghost" type="button">查看完整武将库</button>
             </div>
+            <div id="team-readiness" class="team-readiness" role="status" aria-live="polite"></div>
+            <div id="recommended-rosters" class="recommended-rosters"></div>
+            <div id="hero-browser-toolbar" class="hero-browser-toolbar">
+              <label class="hero-search-field" for="hero-search">
+                <span>搜索武将</span>
+                <input id="hero-search" type="search" autocomplete="off" placeholder="名称、属性、技能或机制" />
+              </label>
+              <label for="hero-role-filter">
+                <span>定位</span>
+                <select id="hero-role-filter"><option value="">全部定位</option></select>
+              </label>
+              <label for="hero-difficulty-filter">
+                <span>难度</span>
+                <select id="hero-difficulty-filter">
+                  <option value="">全部难度</option>
+                  <option value="简单">简单</option>
+                  <option value="标准">标准</option>
+                  <option value="进阶">进阶</option>
+                </select>
+              </label>
+              <button id="clear-hero-filters" class="ghost" type="button">清空筛选</button>
+              <span id="hero-filter-result" class="meta-note" aria-live="polite"></span>
+            </div>
+            <div id="hero-filter-empty" class="draft-note hidden">没有符合当前筛选的武将。可以清空筛选或换一个关键词。</div>
             <div id="hero-cards" class="hero-grid"></div>
           </div>
         </section>
@@ -224,6 +288,8 @@
                 <div>
                   <h2>当前信息</h2>
                   <p id="message">尚未开始对局。</p>
+                  <div id="battle-turn-timer" class="battle-turn-timer hidden" role="timer" aria-live="polite"></div>
+                  <div id="battle-connection-summary" class="battle-connection-summary" role="status" aria-live="polite"></div>
                 </div>
               </div>
               <div id="selected-card" class="selected-card">点击棋子后，这里会显示该武将的数值、技能与状态。</div>
@@ -245,6 +311,7 @@
                     </div>
                   </div>
                   <div id="action-panel" class="action-panel"></div>
+                  <div id="action-forecast" class="action-forecast"></div>
                 </div>
                 <div class="stack-block">
                   <div class="section-head">
@@ -271,6 +338,17 @@
           </aside>
 
           <section class="board-wrap panel">
+            <section id="tutorial-guide" class="tutorial-guide hidden" aria-live="polite">
+              <div class="tutorial-progress"><span id="tutorial-step-count">步骤 1/7</span><span id="tutorial-objective">目标：完成第一次教学战</span></div>
+              <h3 id="tutorial-title">选中你的武将</h3>
+              <p id="tutorial-instruction">点击火葬者，先认识血量、魔力和行动。</p>
+              <div class="tutorial-guide-actions">
+                <button id="tutorial-back-note" class="ghost" type="button">上一步说明</button>
+                <button id="tutorial-retry" class="ghost" type="button">重试本步</button>
+                <button id="tutorial-skip-note" class="ghost" type="button">跳过说明</button>
+                <button id="tutorial-exit" class="ghost" type="button">退出教学</button>
+              </div>
+            </section>
             <div class="section-head">
               <div>
                 <h2>战场</h2>
@@ -282,6 +360,14 @@
               </div>
             </div>
             <div id="battle-effects" class="battle-effects"></div>
+            <div class="battle-accessibility-toolbar" aria-label="战斗反馈与无障碍设置">
+              <button id="toggle-battle-sound" class="ghost" type="button" aria-pressed="false">声音：关</button>
+              <button id="toggle-colorblind-mode" class="ghost" type="button" aria-pressed="false">色弱高对比：关</button>
+              <button id="toggle-reduced-motion" class="ghost" type="button" aria-pressed="false">动态：跟随系统</button>
+              <button id="open-keyboard-help" class="ghost" type="button" aria-haspopup="dialog">键盘帮助</button>
+            </div>
+            <div id="combat-feedback-feed" class="combat-feedback-feed" aria-label="最近战斗反馈"></div>
+            <div id="battle-announcer" class="visually-hidden" role="status" aria-live="assertive" aria-atomic="true"></div>
             <div id="battle-stage-row" class="battle-stage-row">
               <div id="board-stage" class="board-stage">
                 <div id="board" class="board"></div>
@@ -293,6 +379,27 @@
                     <p class="eyebrow">Battle Over</p>
                     <h3 id="game-over-title">游戏结束</h3>
                     <p id="game-over-text">本局对战已经结束。</p>
+                    <section id="postgame-summary" class="postgame-summary hidden" aria-label="赛后总结">
+                      <div class="postgame-result-head">
+                        <strong id="postgame-reason">胜负原因待生成</strong>
+                        <span id="postgame-meta"></span>
+                      </div>
+                      <div id="postgame-team-stats" class="postgame-team-stats"></div>
+                      <article id="postgame-mvp" class="postgame-mvp"></article>
+                      <article id="postgame-next-goal" class="postgame-next-goal" aria-live="polite"></article>
+                      <div class="postgame-section-head">
+                        <strong>武将明细</strong>
+                        <span id="postgame-formula"></span>
+                      </div>
+                      <div class="postgame-table-wrap">
+                        <table class="postgame-table">
+                          <thead><tr><th>武将</th><th>伤害</th><th>治疗</th><th>承伤</th><th>击破</th><th>破盾</th><th>连锁</th></tr></thead>
+                          <tbody id="postgame-hero-stats"></tbody>
+                        </table>
+                      </div>
+                      <div class="postgame-section-head"><strong>关键回合</strong><span>点击可跳到对应回放步骤</span></div>
+                      <div id="postgame-key-turns" class="postgame-key-turns"></div>
+                    </section>
                     <div class="game-over-actions">
                       <button id="game-over-strategy" class="ghost hidden">返回战役</button>
                       <button id="game-over-rematch" class="primary">重新开始选将</button>
@@ -331,6 +438,26 @@
       </main>
     </div>
 
+    <section id="keyboard-help" class="keyboard-help hidden" role="dialog" aria-modal="true" aria-labelledby="keyboard-help-title">
+      <div class="keyboard-help-card">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Keyboard</p>
+            <h2 id="keyboard-help-title">键盘操作</h2>
+          </div>
+          <button id="close-keyboard-help" class="ghost" type="button">关闭</button>
+        </div>
+        <dl>
+          <div><dt><kbd>?</kbd></dt><dd>打开或关闭这份键盘帮助</dd></div>
+          <div><dt><kbd>Esc</kbd></dt><dd>取消当前选取；帮助打开时先关闭帮助</dd></div>
+          <div><dt><kbd>Enter</kbd></dt><dd>完成当前多目标或路径选择</dd></div>
+          <div><dt><kbd>E</kbd></dt><dd>当前允许时结束回合</dd></div>
+          <div><dt><kbd>[</kbd> / <kbd>]</kbd></dt><dd>回放后退 / 前进一步</dd></div>
+          <div><dt><kbd>Space</kbd></dt><dd>当前允许时暂停或继续 AI 对局</dd></div>
+        </dl>
+      </div>
+    </section>
+
     <div id="profile-modal" class="profile-modal hidden">
       <div class="profile-modal-card">
         <p class="eyebrow">Player Identity</p>
@@ -346,6 +473,9 @@
       </div>
     </div>
 
+    <script src="/home-ui.js" defer></script>
+    <script src="/replay-ui.js" defer></script>
+    <script src="/battle-feedback.js" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>

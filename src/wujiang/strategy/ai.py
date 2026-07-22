@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import copy
 
-from wujiang.strategy.battles import MIN_ATTACK_TROOPS, declare_city_attack
+from wujiang.strategy.battles import MIN_ATTACK_TROOPS, city_attack_commitment, declare_city_attack
+from wujiang.strategy.ai_goals import (
+    ensure_ai_strategic_goal,
+    preferred_attack_for_goal,
+    preferred_policy_for_goal,
+    update_ai_strategic_goal,
+)
 from wujiang.strategy.command import FACTION_MONTHLY_COMMAND_POINTS
 from wujiang.strategy.exile import faction_is_exiled
 from wujiang.strategy.heroes import (
@@ -14,7 +20,9 @@ from wujiang.strategy.heroes import (
     strategic_heroes_for_faction_public,
 )
 from wujiang.strategy.models import City, EventLogEntry, Faction, WorldState
+from wujiang.strategy.neutral_city_states import incitement_attack_pair
 from wujiang.strategy.offices import ai_office_for_action, ensure_office_system
+from wujiang.strategy.political_ai import ai_peace_treasury_reserve, apply_major_political_ai_actions
 from wujiang.strategy.simulation import POLICIES, rebellion_risk
 from wujiang.strategy.story import choose_ai_story_choice, pending_story_event_for_faction, resolve_story_event
 from wujiang.strategy.tactics import TACTIC_TECH_TREE, set_city_policy, unlock_tactic_tech
@@ -157,7 +165,9 @@ def _best_attack(world: WorldState, faction: Faction) -> tuple[str, str] | None:
         viable_targets = [
             target
             for target in targets
-            if source.resources.troops // 3 >= target.resources.troops + target.defense * 80
+            if city_attack_commitment(source.resources.troops) >= (
+                target.resources.troops + target.defense * 80 + int(target.support_by_faction.get(target.owner_faction_id, 50)) * 3
+            )
         ]
         if viable_targets:
             target = min(viable_targets, key=lambda city: (city.resources.troops + city.defense * 80, city.city_id))
@@ -208,12 +218,123 @@ def apply_strategy_ai_monthly_actions(
         if not _cities_for_faction(next_world, faction_id):
             continue
 
+        if faction.is_neutral_city_state:
+            actions: list[str] = []
+            office_actions: list[str] = []
+            command_remaining = FACTION_MONTHLY_COMMAND_POINTS
+            policy_choice = _best_policy_city(next_world, faction)
+            if policy_choice is not None:
+                city, policy = policy_choice
+                office = ai_office_for_action(
+                    next_world,
+                    faction_id=faction_id,
+                    action_type="set_city_policy",
+                    payload={"city_id": city.city_id},
+                )
+                if office is not None:
+                    next_world = set_city_policy(next_world, faction_id=faction_id, city_id=city.city_id, policy=policy)
+                    action = f"policy:{city.city_id}:{policy}"
+                    actions.append(action)
+                    office_actions.append(f"{office.office_id}:{action}")
+                    command_remaining -= 1
+
+            attack = incitement_attack_pair(next_world, faction_id)
+            if attack is not None and command_remaining >= 2:
+                source_city_id, target_city_id = attack
+                source = next(city for city in next_world.cities if city.city_id == source_city_id)
+                attack_office = ai_office_for_action(
+                    next_world,
+                    faction_id=faction_id,
+                    action_type="declare_attack",
+                    payload={"source_city_id": source_city_id, "target_city_id": target_city_id},
+                )
+                if source.resources.troops >= MIN_ATTACK_TROOPS and attack_office is not None:
+                    next_world = declare_city_attack(
+                        next_world,
+                        faction_id=faction_id,
+                        source_city_id=source_city_id,
+                        target_city_id=target_city_id,
+                        resolution_mode="quick",
+                        auto_resolve=True,
+                        attacker_hero_codes=[],
+                        attacker_office_id=attack_office.office_id,
+                    )
+                    neutral = next(item for item in next_world.factions if item.faction_id == faction_id)
+                    neutral.incited_against_faction_id = None
+                    neutral.incited_by_faction_id = None
+                    action = f"incited_attack:{source_city_id}->{target_city_id}"
+                    actions.append(action)
+                    office_actions.append(f"{attack_office.office_id}:{action}")
+                    command_remaining -= 2
+                    next_world.event_log.append(
+                        EventLogEntry(
+                            month=next_world.current_month,
+                            category="neutral_city_state_incitement_spent",
+                            message=f"{neutral.name}响应教唆出兵，教唆意图已解除。",
+                            related_ids=[faction_id, source_city_id, target_city_id],
+                        )
+                    )
+
+            if office_actions:
+                next_world.event_log.append(
+                    EventLogEntry(
+                        month=next_world.current_month,
+                        category="strategy_ai_office_trace",
+                        message=f"{faction_id} neutral governor decisions: {', '.join(office_actions)}.",
+                        related_ids=[faction_id, *office_actions],
+                    )
+                )
+            next_world.event_log.append(
+                EventLogEntry(
+                    month=next_world.current_month,
+                    category="strategy_ai_plan",
+                    message=(
+                        f"{faction_id} neutral city-state plan "
+                        f"({FACTION_MONTHLY_COMMAND_POINTS - command_remaining}/{FACTION_MONTHLY_COMMAND_POINTS} command): "
+                        f"{', '.join(actions) if actions else 'defend and hold'}."
+                    ),
+                    related_ids=[faction_id, *actions],
+                )
+            )
+            continue
+
         actions: list[str] = []
         office_actions: list[str] = []
         command_remaining = FACTION_MONTHLY_COMMAND_POINTS
-        initial_attack = _best_attack(next_world, faction) if enable_attacks else None
+        strategic_goal = ensure_ai_strategic_goal(next_world, faction_id)
+        goal_attack = preferred_attack_for_goal(next_world, faction_id, strategic_goal) if enable_attacks else None
+        initial_attack = goal_attack
+        if initial_attack is None and enable_attacks and (strategic_goal or {}).get("goal_type") != "ritual_reinforcement":
+            initial_attack = _best_attack(next_world, faction)
         attack_reserve = 2 if initial_attack is not None else 0
-        policy_choice = _best_policy_city(next_world, faction)
+        next_world, command_remaining, political_actions, political_office_actions = apply_major_political_ai_actions(
+            next_world,
+            faction_id=faction_id,
+            command_remaining=command_remaining,
+            attack_reserve=attack_reserve,
+            strategic_goal=strategic_goal,
+        )
+        actions.extend(political_actions)
+        office_actions.extend(political_office_actions)
+        faction = next(faction for faction in next_world.factions if faction.faction_id == faction_id)
+        normal_policy_choice = _best_policy_city(next_world, faction)
+        policy_choice = (
+            normal_policy_choice
+            if normal_policy_choice is not None and _city_policy_urgency(normal_policy_choice[0], faction) >= 800
+            else None
+        )
+        goal_policy = preferred_policy_for_goal(strategic_goal)
+        if policy_choice is None and goal_policy is not None:
+            goal_city_id, policy_fragment = goal_policy
+            goal_city = next(
+                (city for city in next_world.cities if city.city_id == goal_city_id and city.owner_faction_id == faction_id),
+                None,
+            )
+            goal_policy_name = _policy_containing(policy_fragment, fallback=POLICY_STABLE)
+            if goal_city is not None and goal_city.policy != goal_policy_name:
+                policy_choice = (goal_city, goal_policy_name)
+        if policy_choice is None:
+            policy_choice = normal_policy_choice
         if policy_choice is not None and command_remaining >= 1:
             city, policy = policy_choice
             office = ai_office_for_action(
@@ -253,13 +374,21 @@ def apply_strategy_ai_monthly_actions(
                 faction = next(faction for faction in next_world.factions if faction.faction_id == faction_id)
 
         tech_id = _first_affordable_tech(faction)
+        tech = next((item for item in TACTIC_TECH_TREE if item.tech_id == tech_id), None)
+        peace_treasury_reserve = ai_peace_treasury_reserve(next_world, faction_id)
         tech_office = ai_office_for_action(
             next_world,
             faction_id=faction_id,
             action_type="unlock_tactic_tech",
             payload={"tech_id": tech_id or ""},
         )
-        if tech_id is not None and tech_office is not None and command_remaining - 1 >= attack_reserve:
+        if (
+            tech_id is not None
+            and tech is not None
+            and tech_office is not None
+            and command_remaining - 1 >= attack_reserve
+            and faction.resources.money - tech.money_cost >= peace_treasury_reserve
+        ):
             next_world = unlock_tactic_tech(next_world, faction_id=faction_id, tech_id=tech_id)
             action = f"tech:{tech_id}"
             actions.append(action)
@@ -345,7 +474,9 @@ def apply_strategy_ai_monthly_actions(
             faction = next(faction for faction in next_world.factions if faction.faction_id == faction_id)
 
         if enable_attacks and command_remaining >= 2:
-            attack = _best_attack(next_world, faction)
+            attack = preferred_attack_for_goal(next_world, faction_id, strategic_goal)
+            if attack is None and (strategic_goal or {}).get("goal_type") != "capture_city":
+                attack = _best_attack(next_world, faction)
             if attack is not None:
                 source_city_id, target_city_id = attack
                 attack_office = ai_office_for_action(
@@ -369,6 +500,8 @@ def apply_strategy_ai_monthly_actions(
                     actions.append(action)
                     office_actions.append(f"{attack_office.office_id}:{action}")
                     command_remaining -= 2
+
+        update_ai_strategic_goal(next_world, faction_id, actions)
 
         if office_actions:
             next_world.event_log.append(

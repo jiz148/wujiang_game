@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>产品聚合数据 · 武将</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="analytics-page">
+    <main class="analytics-shell">
+      <header class="analytics-header">
+        <div>
+          <p class="eyebrow">Phase 1 · 本地聚合数据</p>
+          <h1>对战与再战漏斗</h1>
+          <p class="subline">只显示白名单事件的聚合结果，不展示密码、账号、session token 或房间凭据。</p>
+        </div>
+        <div class="analytics-actions">
+          <a class="ghost button-link" href="/">返回游戏</a>
+          <button id="refresh-analytics" class="primary" type="button">刷新数据</button>
+        </div>
+      </header>
+
+      <p id="analytics-status" class="analytics-status" role="status">正在读取本地数据…</p>
+      <section id="analytics-summary" class="analytics-summary" aria-label="关键指标"></section>
+      <section class="panel analytics-panel">
+        <div class="section-head">
+          <div>
+            <h2>关键漏斗</h2>
+            <p id="analytics-generated" class="meta-note"></p>
+          </div>
+        </div>
+        <div class="analytics-table-wrap">
+          <table class="analytics-table">
+            <thead>
+              <tr><th>步骤</th><th>事件数</th><th>匿名会话</th><th>从首页转化</th></tr>
+            </thead>
+            <tbody id="analytics-funnel"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script src="/analytics.js"></script>
+  </body>
+</html>

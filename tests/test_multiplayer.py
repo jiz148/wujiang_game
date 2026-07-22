@@ -158,7 +158,9 @@ class MultiplayerRoomTests(unittest.TestCase):
         self.assertEqual(room_state["mode_name"], "随机选人")
         self.assertEqual(room_state["seats"][0]["hero_counts"], {})
         self.assertEqual(room_state["seats"][1]["hero_counts"], {})
-        self.assertTrue(room_state["can_start"])
+        self.assertTrue(room_state["configuration_ready"])
+        self.assertFalse(room_state["can_start"])
+        self.assertIn("确认准备", room_state["start_blocker"])
 
     def test_random_mode_does_not_allow_manual_hero_selection(self) -> None:
         room, _, host_token = self.registry.create_room("Alice", mode="random")
@@ -717,7 +719,7 @@ class MultiplayerRoomTests(unittest.TestCase):
             self.assertEqual(visible_clone["raw_skill_text"], visible_caster["raw_skill_text"])
             self.assertEqual(visible_clone["raw_trait_text"], visible_caster["raw_trait_text"])
 
-    def test_finished_room_can_restart_lobby_and_clear_rosters(self) -> None:
+    def test_finished_room_host_can_restart_lobby_with_same_rosters(self) -> None:
         room, _, host_token = self.registry.create_room("Alice")
         _, guest_token = room.join("Bob")
         room.select_hero(host_token, "ellie", 2)
@@ -725,15 +727,19 @@ class MultiplayerRoomTests(unittest.TestCase):
         room.start_battle(host_token)
         room.status = "finished"
 
-        room.restart_lobby(guest_token)
+        with self.assertRaises(RoomError):
+            room.restart_lobby(guest_token)
+        room.restart_lobby(host_token)
         room_state = room.serialize_state(host_token)["room"]
 
         self.assertEqual(room.status, "lobby")
         self.assertIsNone(room.battle)
         self.assertFalse(room_state["can_start"])
         self.assertFalse(room_state["can_rematch"])
-        self.assertEqual(room_state["seats"][0]["hero_counts"], {})
-        self.assertEqual(room_state["seats"][1]["hero_counts"], {})
+        self.assertEqual(room_state["seats"][0]["hero_counts"], {"ellie": 2})
+        self.assertEqual(room_state["seats"][1]["hero_counts"], {"bard": 1})
+        self.assertFalse(room_state["seats"][0]["ready"])
+        self.assertFalse(room_state["seats"][1]["ready"])
 
     def test_host_can_delete_room_but_guest_cannot(self) -> None:
         room, _, host_token = self.registry.create_room("Alice")

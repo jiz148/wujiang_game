@@ -381,6 +381,8 @@ def _eligible_templates(world: WorldState, faction_id: str) -> list[StoryTemplat
 def open_monthly_story_events(world: WorldState) -> WorldState:
     next_world = _clone_world(world)
     for faction in sorted(next_world.factions, key=lambda item: item.faction_id):
+        if faction.is_neutral_city_state:
+            continue
         if any(event.faction_id == faction.faction_id and event.status == "pending" for event in next_world.story_events):
             continue
         candidates = _eligible_templates(next_world, faction.faction_id)
