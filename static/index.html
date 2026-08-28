@@ -4,9 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>武将</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=r3g" />
   </head>
   <body>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
     <div class="shell">
       <header class="topbar">
         <div>
@@ -24,7 +25,8 @@
         </div>
       </header>
 
-      <section id="draft-screen" class="screen draft-screen">
+      <main id="main-content" tabindex="-1">
+      <section id="draft-screen" class="screen draft-screen" aria-labelledby="lobby-title">
         <section class="draft panel">
           <div class="section-head">
             <div>
@@ -147,13 +149,23 @@
               <div class="section-head">
                 <div>
                   <h3>英灵城邦</h3>
-                  <p id="strategy-caption">登录后可以创建、恢复并推进 12 个月英灵城邦战役。</p>
+                  <p id="strategy-caption">先用 25～35 分钟快速战役体验完整抉择与结算，也可创建长期自定义战役。</p>
                 </div>
                 <div class="strategy-actions">
+                  <button id="strategy-exit-campaign" class="ghost hidden" type="button">战役列表</button>
                   <button id="strategy-refresh" class="ghost" type="button">刷新</button>
                   <button id="strategy-advance-month" class="primary" type="button">推进一月</button>
                 </div>
               </div>
+              <section class="strategy-quick-start-card" aria-labelledby="strategy-quick-start-title">
+                <div>
+                  <p class="eyebrow">推荐首局</p>
+                  <h4 id="strategy-quick-start-title">六个月边境决断</h4>
+                  <p>5 城、固定主公、三选一开局国策；世界危机与圣物系统暂不加入，第一局先把真正的决策和冲突玩明白。</p>
+                  <p class="strategy-quick-facts">约 25～35 分钟 · 6 个月 · 单人对 AI · 自动开战</p>
+                </div>
+                <button id="strategy-quick-start" class="primary strategy-quick-start-button" type="button">开始快速战役</button>
+              </section>
               <div class="strategy-create-row">
                 <label>
                   <span>战役名</span>
@@ -164,6 +176,15 @@
                   <input id="strategy-seed" type="number" step="1" value="1" />
                 </label>
                 <label>
+                  <span>开局变体</span>
+                  <select id="strategy-variant">
+                    <option value="classic_frontier">经典边境</option>
+                    <option value="hungry_frontier">粮荒前线</option>
+                    <option value="fortified_leagues">坚城联盟</option>
+                    <option value="ether_tide">以太潮汐</option>
+                  </select>
+                </label>
+                <label>
                   <span>主要势力</span>
                   <input id="strategy-player-count" type="number" value="2" disabled />
                 </label>
@@ -172,8 +193,13 @@
                   <span>加入码</span>
                   <input id="strategy-join-code" type="text" maxlength="6" placeholder="ABC234" />
                 </label>
+                <label class="strategy-join-side">
+                  <input id="strategy-join-host-faction" type="checkbox" />
+                  <span>加入房主势力（合作官职）</span>
+                </label>
                 <button id="strategy-join" class="ghost" type="button">加入战役</button>
-                <p class="strategy-meta">首个产品场景固定为 8 城、2 个主要势力、6 个中立城邦、12 个月，预计 60～90 分钟。</p>
+                <p id="strategy-variant-preview" class="strategy-meta strategy-variant-preview" role="status">经典边境：在雪鬼危机到来前，平衡城邦外交、战争准备与圣物经营。使用标准开局资源。</p>
+                <p class="strategy-meta strategy-create-note">长期战役：固定为 8 城、2 个主要势力、6 个中立城邦、12 个月；支持 2～4 名真人，每个势力最多 2 人。</p>
               </div>
               <div id="strategy-message" class="strategy-message"></div>
               <div id="strategy-campaign-list" class="strategy-campaign-list"></div>
@@ -280,7 +306,7 @@
         </section>
       </section>
 
-      <main id="battle-screen" class="screen battle-screen hidden">
+      <section id="battle-screen" class="screen battle-screen hidden" aria-labelledby="battle-screen-title">
         <section class="arena">
           <aside id="battle-left-rail" class="battle-rail battle-left-rail">
             <section class="panel info-panel fixed-panel">
@@ -351,7 +377,7 @@
             </section>
             <div class="section-head">
               <div>
-                <h2>战场</h2>
+                  <h2 id="battle-screen-title">战场</h2>
                 <p id="board-caption">等待房间开始对局。</p>
               </div>
               <div class="legend">
@@ -435,10 +461,11 @@
             </section>
           </aside>
         </section>
+      </section>
       </main>
     </div>
 
-    <section id="keyboard-help" class="keyboard-help hidden" role="dialog" aria-modal="true" aria-labelledby="keyboard-help-title">
+    <section id="keyboard-help" class="keyboard-help hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="keyboard-help-title" aria-describedby="keyboard-help-description">
       <div class="keyboard-help-card">
         <div class="section-head">
           <div>
@@ -447,6 +474,7 @@
           </div>
           <button id="close-keyboard-help" class="ghost" type="button">关闭</button>
         </div>
+        <p id="keyboard-help-description" class="meta-note">焦点会停留在此窗口中；按 Esc 可关闭并返回原来的控件。</p>
         <dl>
           <div><dt><kbd>?</kbd></dt><dd>打开或关闭这份键盘帮助</dd></div>
           <div><dt><kbd>Esc</kbd></dt><dd>取消当前选取；帮助打开时先关闭帮助</dd></div>
@@ -458,7 +486,7 @@
       </div>
     </section>
 
-    <div id="profile-modal" class="profile-modal hidden">
+    <div id="profile-modal" class="profile-modal hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="profile-modal-title" aria-describedby="profile-modal-text">
       <div class="profile-modal-card">
         <p class="eyebrow">Player Identity</p>
         <h2 id="profile-modal-title">先设置你的昵称</h2>
@@ -468,14 +496,15 @@
           <input id="profile-name-input" type="text" maxlength="20" placeholder="例如：暗人玩家" />
         </label>
         <div class="profile-modal-actions">
+          <button id="profile-cancel" class="ghost hidden" type="button">取消</button>
           <button id="profile-save" class="primary">进入大厅</button>
         </div>
       </div>
     </div>
 
-    <script src="/home-ui.js" defer></script>
-    <script src="/replay-ui.js" defer></script>
-    <script src="/battle-feedback.js" defer></script>
-    <script src="/app.js" defer></script>
+    <script src="/home-ui.js?v=p761a" defer></script>
+    <script src="/replay-ui.js?v=p761a" defer></script>
+    <script src="/battle-feedback.js?v=p761a" defer></script>
+    <script src="/app.js?v=r3g" defer></script>
   </body>
 </html>

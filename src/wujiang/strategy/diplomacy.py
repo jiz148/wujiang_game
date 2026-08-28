@@ -136,7 +136,7 @@ def neutral_diplomacy_option(
         raise StrategyError("未知中立外交行动。")
     actor = faction_by_id(world, actor_faction_id)
     neutral = faction_by_id(world, neutral_faction_id)
-    if actor.is_neutral_city_state:
+    if not actor.is_major:
         raise StrategyError("中立城邦不能代表主要势力提出外交行动。")
     if not neutral.is_neutral_city_state:
         raise StrategyError("普通中立外交只能以中立城邦为目标。")

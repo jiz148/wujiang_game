@@ -291,6 +291,8 @@ def apply_major_political_ai_actions(
     command_remaining: int,
     attack_reserve: int,
     strategic_goal: dict[str, Any] | None,
+    money_reserve: int = 0,
+    food_reserve: int = 0,
 ) -> tuple[WorldState, int, list[str], list[str]]:
     next_world = world
     actions: list[str] = []
@@ -336,8 +338,26 @@ def apply_major_political_ai_actions(
     diplomacy = choose_ai_neutral_diplomacy(next_world, faction_id, strategic_goal)
     if diplomacy is not None and command_remaining - 1 >= attack_reserve:
         neutral_id, action_id, reason = diplomacy
+        diplomacy_option = next(
+            (
+                option
+                for option in neutral_diplomacy_options_public(
+                    next_world,
+                    actor_faction_id=faction_id,
+                    neutral_faction_id=neutral_id,
+                )
+                if option["id"] == action_id
+            ),
+            {},
+        )
+        faction = _faction(next_world, faction_id)
+        diplomacy_cost = diplomacy_option.get("resource_cost") or {}
         office = ai_office_for_action(next_world, faction_id=faction_id, action_type="neutral_diplomacy", payload={"neutral_faction_id": neutral_id})
-        if office is not None:
+        if (
+            office is not None
+            and faction.resources.money - int(diplomacy_cost.get("money", 0)) >= money_reserve
+            and faction.resources.food - int(diplomacy_cost.get("food", 0)) >= food_reserve
+        ):
             next_world = apply_neutral_diplomacy_action(
                 next_world,
                 actor_faction_id=faction_id,
@@ -351,7 +371,12 @@ def apply_major_political_ai_actions(
             _record_decision(next_world, faction_id=faction_id, action=action, reason=reason, related_ids=[neutral_id, action_id])
 
     funding = choose_ai_rebellion_funding(next_world, faction_id, strategic_goal)
-    if funding is not None and command_remaining - 1 >= attack_reserve:
+    faction = _faction(next_world, faction_id)
+    if (
+        funding is not None
+        and command_remaining - 1 >= attack_reserve
+        and faction.resources.money - 60 >= money_reserve
+    ):
         city_id, reason = funding
         office = ai_office_for_action(next_world, faction_id=faction_id, action_type="fund_rebellion", payload={"city_id": city_id})
         if office is not None:

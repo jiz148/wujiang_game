@@ -68,3 +68,14 @@ class StrategyWallEngineer(StrategySoldier):
     hero_name = "城墙工兵"
     role = "工兵"
     base_stats = Stats(attack=1, defense=3, speed=2, attack_range=2, mana=0)
+
+
+class StrategySnowGhost(StrategySoldier):
+    hero_code = "strategy_snow_ghost"
+    hero_name = "雪鬼"
+    role = "雪鬼"
+    attribute = "冰"
+    race = "雪鬼"
+    base_stats = Stats(attack=3, defense=3, speed=2, attack_range=1, mana=0)
+    raw_skill_text = "北方寒潮孕育的先锋；无主动技能。"
+    raw_trait_text = "雪鬼单位。"

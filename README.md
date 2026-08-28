@@ -22,3 +22,9 @@
   - You can force LAN/manual mode with `-LanOnly`.
 - [scripts/open_firewall_port.ps1](/C:/Users/jiz14/TeamGH/wujiang_game/scripts/open_firewall_port.ps1)
   - Opens or removes an inbound TCP firewall rule for the selected port.
+
+## Production Deployment
+
+The production container, TLS proxy, persistent volumes, release audit, and rollback procedure are documented in [docs/正式部署与回滚手册.md](C:/Users/jiz14/TeamGH/wujiang_game/docs/正式部署与回滚手册.md). Production is intentionally single-replica while SQLite and in-memory room state remain authoritative.
+
+For a local Docker deployment, run `docker compose -f compose.local.yml up -d --build`, then open `http://127.0.0.1:8000`. The local service binds only to the loopback interface and keeps game data in named Docker volumes. If port 8000 is occupied, set `WUJIANG_LOCAL_PORT` first. The public HTTPS deployment files remain available for future use.

@@ -16,6 +16,7 @@ from wujiang.heroes.strategy_soldiers import (
     StrategyInfantry,
     StrategyMountainSoldier,
     StrategyWallEngineer,
+    StrategySnowGhost,
 )
 
 
@@ -48,6 +49,7 @@ HERO_REGISTRY: dict[str, HeroFactory] = {
     "strategy_mountain_soldier": StrategyMountainSoldier,
     "strategy_ether_scout": StrategyEtherScout,
     "strategy_wall_engineer": StrategyWallEngineer,
+    "strategy_snow_ghost": StrategySnowGhost,
 }
 HERO_REGISTRY.update(EXCEL_HERO_REGISTRY)
 

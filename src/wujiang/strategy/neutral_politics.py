@@ -31,7 +31,7 @@ def _adjacent_major_strengths(world: WorldState, city: City) -> list[tuple[Facti
         if adjacent.node_id not in adjacent_nodes:
             continue
         owner = faction_by_id.get(adjacent.owner_faction_id)
-        if owner is None or owner.is_neutral_city_state:
+        if owner is None or not owner.is_major:
             continue
         strengths[owner.faction_id] = strengths.get(owner.faction_id, 0) + adjacent.resources.troops + adjacent.defense * 40
     return sorted(
@@ -49,7 +49,7 @@ def neutral_city_state_profile(world: WorldState, neutral_faction_id: str) -> di
         return {}
 
     major_factions = sorted(
-        (item for item in world.factions if not item.is_neutral_city_state),
+        (item for item in world.factions if item.is_major),
         key=lambda item: item.faction_id,
     )
     city = _city_for_neutral(world, faction)

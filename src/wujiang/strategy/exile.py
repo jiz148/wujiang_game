@@ -152,8 +152,21 @@ def apply_exile_action(
         target.resources.troops = REBUILD_TROOP_COST
         target.support_by_faction[faction_id] = clamp(target.support_by_faction.get(faction_id, 40) + 20, 0, 100)
         target.support_by_faction[previous_owner_id] = clamp(target.support_by_faction.get(previous_owner_id, 50) - 20, 0, 100)
+        from wujiang.strategy.relics import apply_city_control_change_consequences
+
+        next_world, control_change = apply_city_control_change_consequences(
+            next_world,
+            city_id=target.city_id,
+            previous_faction_id=previous_owner_id,
+            new_faction_id=faction_id,
+            cause="exile_rebuild_base",
+        )
+        faction = _faction(next_world, faction_id)
+        target = _city(next_world, target_city_id)
         message = f"{faction.name}在{target.name}重建据点，重新取得城市控制权。"
         related_ids = [faction_id, target.city_id, previous_owner_id]
+        if control_change["captured_relic_ids"]:
+            message += f" 同时接收 {len(control_change['captured_relic_ids'])} 件当地圣物。"
     else:
         raise StrategyError("流亡行动无法结算。")
 

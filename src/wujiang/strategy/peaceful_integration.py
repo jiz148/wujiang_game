@@ -60,7 +60,7 @@ def peaceful_integration_option(
 ) -> dict[str, Any]:
     actor = faction_by_id(world, actor_faction_id)
     neutral = faction_by_id(world, neutral_faction_id)
-    if actor.is_neutral_city_state:
+    if not actor.is_major:
         raise StrategyError("中立城邦不能整合其他城邦。")
     if not neutral.is_neutral_city_state:
         raise StrategyError("和平整合只能以中立城邦为目标。")
@@ -128,6 +128,18 @@ def apply_peaceful_integration(world: WorldState, *, actor_faction_id: str, neut
     neutral.diplomacy[actor.faction_id] = "peacefully_integrated"
     neutral.incited_against_faction_id = None
     neutral.incited_by_faction_id = None
+    from wujiang.strategy.relics import apply_city_control_change_consequences
+
+    next_world, _ = apply_city_control_change_consequences(
+        next_world,
+        city_id=city.city_id,
+        previous_faction_id=neutral.faction_id,
+        new_faction_id=actor.faction_id,
+        cause="peaceful_integration",
+    )
+    actor = faction_by_id(next_world, actor_faction_id)
+    neutral = faction_by_id(next_world, neutral_faction_id)
+    city = next(item for item in next_world.cities if item.city_id == city.city_id)
     for agreement in next_world.diplomatic_agreements:
         if agreement.major_faction_id == actor.faction_id and agreement.neutral_faction_id == neutral.faction_id and agreement.status == "active":
             agreement.status = "ended"

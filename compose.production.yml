@@ -1,0 +1,77 @@
+services:
+  app:
+    build:
+      context: .
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12-slim-bookworm}
+    restart: unless-stopped
+    environment:
+      WUJIANG_ENVIRONMENT: production
+      WUJIANG_REQUIRE_HTTPS: "true"
+      WUJIANG_ALLOW_QUERY_AUTH_TOKENS: "false"
+      WUJIANG_REQUEST_LOGS: "true"
+      WUJIANG_PUBLIC_BASE_URL: https://${WUJIANG_DOMAIN}
+      WUJIANG_ALLOWED_ORIGINS: https://${WUJIANG_DOMAIN}
+      WUJIANG_TRUSTED_PROXY_NETWORKS: 127.0.0.1/32,172.31.250.2/32
+      WUJIANG_AUTH_DB: /app/var/wujiang.sqlite3
+      WUJIANG_STRATEGY_DB: /app/var/wujiang.sqlite3
+      WUJIANG_ANALYTICS_DB: /app/var/analytics.sqlite3
+      WUJIANG_MATCH_HISTORY_DB: /app/var/match-history.sqlite3
+      WUJIANG_STRATEGY_BACKUP_DIR: /app/var/backups
+      WUJIANG_OPS_TOKEN: ${WUJIANG_OPS_TOKEN:?WUJIANG_OPS_TOKEN is required}
+      WUJIANG_MAX_JSON_BODY_BYTES: ${WUJIANG_MAX_JSON_BODY_BYTES:-262144}
+      WUJIANG_SLOW_REQUEST_MS: ${WUJIANG_SLOW_REQUEST_MS:-1500}
+    volumes:
+      - wujiang_data:/app/var
+      - wujiang_replays:/app/replays
+    networks:
+      wujiang_private:
+        ipv4_address: 172.31.250.3
+    expose:
+      - "8000"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      WUJIANG_DOMAIN: ${WUJIANG_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      wujiang_private:
+        ipv4_address: 172.31.250.2
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  wujiang_private:
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
+
+volumes:
+  wujiang_data:
+  wujiang_replays:
+  caddy_data:
+  caddy_config:

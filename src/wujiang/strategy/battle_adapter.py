@@ -17,6 +17,7 @@ STRATEGY_UNIT_HERO_CODES: dict[str, str] = {
     "infantry": "strategy_infantry",
     "archer": "strategy_archer",
     "cavalry": "strategy_cavalry",
+    "snow_ghost": "strategy_snow_ghost",
     "普通步兵": "strategy_infantry",
     "守备兵": "strategy_garrison",
     "弓兵": "strategy_archer",
@@ -25,7 +26,12 @@ STRATEGY_UNIT_HERO_CODES: dict[str, str] = {
     "以太侦察兵": "strategy_ether_scout",
     "城墙工兵": "strategy_wall_engineer",
 }
-REGISTERED_UNIT_LABELS = {"infantry": "步兵", "archer": "弓兵", "cavalry": "骑兵"}
+REGISTERED_UNIT_LABELS = {
+    "infantry": "步兵",
+    "archer": "弓兵",
+    "cavalry": "骑兵",
+    "snow_ghost": "雪鬼",
+}
 DEFAULT_STRATEGY_UNIT_HERO_CODE = "strategy_infantry"
 
 
@@ -165,7 +171,7 @@ def roster_for_registered_units(
     roster: list[str] = []
     manifest: list[dict[str, Any]] = []
     remaining = max(0, int(limit))
-    for unit_type in ("cavalry", "archer", "infantry"):
+    for unit_type in ("snow_ghost", "cavalry", "archer", "infantry"):
         count = min(remaining, max(0, int(registered_units.get(unit_type, 0))))
         if count <= 0:
             continue
@@ -248,23 +254,39 @@ def strategy_battle_rosters(world: WorldState, battle: PendingBattle) -> Strateg
     attacker_faction = factions_by_id[battle.attacker_faction_id]
     defender_faction = factions_by_id[battle.defender_faction_id]
     available_codes = _available_hero_codes()
-    attacker_roster = _merge_rosters(
-        roster_for_registered_units(battle.attacker_registered_units, available_hero_codes=available_codes),
-        roster_for_city_troops(
-            source_city,
-            attacker_faction,
-            troop_count=battle.attacker_troops,
-            available_hero_codes=available_codes,
-        ),
+    attacker_units = roster_for_registered_units(
+        battle.attacker_registered_units,
+        available_hero_codes=available_codes,
     )
-    defender_roster = _merge_rosters(
-        roster_for_registered_units(battle.defender_registered_units, available_hero_codes=available_codes),
-        roster_for_city_troops(
-            target_city,
-            defender_faction,
-            troop_count=battle.defender_troops,
-            available_hero_codes=available_codes,
-        ),
+    defender_units = roster_for_registered_units(
+        battle.defender_registered_units,
+        available_hero_codes=available_codes,
+    )
+    attacker_roster = (
+        attacker_units
+        if battle.source_kind in {"encounter", "siege", "world_crisis"}
+        else _merge_rosters(
+            attacker_units,
+            roster_for_city_troops(
+                source_city,
+                attacker_faction,
+                troop_count=battle.attacker_troops,
+                available_hero_codes=available_codes,
+            ),
+        )
+    )
+    defender_roster = (
+        defender_units
+        if battle.source_kind in {"encounter", "world_crisis"}
+        else _merge_rosters(
+            defender_units,
+            roster_for_city_troops(
+                target_city,
+                defender_faction,
+                troop_count=battle.defender_troops,
+                available_hero_codes=available_codes,
+            ),
+        )
     )
     return StrategyBattleRosters(
         attacker=_with_active_strategic_heroes(

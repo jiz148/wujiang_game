@@ -343,15 +343,30 @@ def enrich_world_public_state(world: WorldState) -> dict[str, Any]:
     from wujiang.strategy.peaceful_integration import peaceful_integration_option
     from wujiang.strategy.occupation import occupation_status_public
     from wujiang.strategy.rebellion import rebellion_funding_option
+    from wujiang.strategy.relics import relic_system_public
+    from wujiang.strategy.world_crisis import world_crises_public
 
     payload = world.to_dict()
     # Monthly reports are persisted as the authoritative audit trail. The campaign
     # serializer exposes only the faction-filtered monthly_cycle view.
     payload.pop("monthly_reports", None)
     payload.pop("campaign_tutorial", None)
+    payload.pop("relics", None)
+    payload.pop("relic_altars", None)
     factions_by_id = {faction.faction_id: faction for faction in world.factions}
     neutral_profiles = neutral_city_state_profiles_public(world)
     for faction_payload, faction in zip(payload["factions"], world.factions):
+        if faction.is_world_crisis:
+            faction_payload["is_world_crisis"] = True
+            faction_payload["tactic_tech_tree"] = []
+            faction_payload["strategic_heroes"] = []
+            faction_payload["strategic_hero_deployment_limit"] = 0
+            faction_payload["hero_ritual_capacity"] = {
+                "used": 0,
+                "maximum": 0,
+                "remaining": 0,
+            }
+            continue
         faction_payload["tactic_tech_tree"] = tactic_tech_tree_public(faction)
         faction_payload["strategic_heroes"] = strategic_heroes_for_faction_public(world, faction.faction_id)
         faction_payload["strategic_hero_deployment_limit"] = strategic_hero_deployment_limit(world, faction.faction_id)
@@ -393,7 +408,7 @@ def enrich_world_public_state(world: WorldState) -> dict[str, Any]:
                 city_id=city.city_id,
             )
             for major in world.factions
-            if not major.is_neutral_city_state
+            if major.is_major
         }
     payload["policy_choices"] = sorted(POLICIES)
     payload["battle_resolution_modes"] = sorted(BATTLE_RESOLUTION_MODES)
@@ -407,6 +422,8 @@ def enrich_world_public_state(world: WorldState) -> dict[str, Any]:
     payload["office_system"] = office_system_public(world)
     payload["building_projects"] = building_projects_public()
     payload["registered_unit_types"] = registered_unit_types_public()
+    payload["relic_system"] = relic_system_public(world)
+    payload["world_crises"] = world_crises_public(world)
     return payload
 
 

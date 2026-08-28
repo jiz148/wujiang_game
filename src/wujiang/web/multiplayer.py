@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import copy
+import pickle
 import random
 import secrets
 import threading
 import time
+import zlib
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -573,6 +575,32 @@ class GameRoom:
         self.created_at = time.time()
         self.updated_at = self.created_at
         self._lock = threading.RLock()
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        state.pop("_lock", None)
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._lock = threading.RLock()
+
+    def checkpoint_bytes(self) -> bytes:
+        """Serialize an internal, authoritative room checkpoint for trusted storage."""
+        with self._lock:
+            return zlib.compress(pickle.dumps(self, protocol=pickle.HIGHEST_PROTOCOL), level=6)
+
+    @classmethod
+    def from_checkpoint_bytes(cls, payload: bytes) -> GameRoom:
+        try:
+            restored = pickle.loads(zlib.decompress(bytes(payload)))
+        except Exception as exc:
+            raise RoomError("战略战斗检查点已损坏，不能静默恢复。") from exc
+        if not isinstance(restored, cls):
+            raise RoomError("战略战斗检查点类型无效，不能静默恢复。")
+        restored.room_id = normalize_room_id(restored.room_id)
+        restored._lock = threading.RLock()
+        return restored
 
     def _build_seats(self, seat_count: int) -> dict[int, PlayerSeat]:
         return {
@@ -2231,9 +2259,15 @@ class RoomRegistry:
         host_becomes_ai_after_start: bool = False,
         ai_difficulty: str = DEFAULT_AI_DIFFICULTY,
         host_account_user_id: Optional[int] = None,
+        room_id: Optional[str] = None,
     ) -> tuple[GameRoom, int, str]:
         with self._lock:
-            room = GameRoom(self._generate_room_id(), mode="classic", seat_count=2)
+            normalized_room_id = normalize_room_id(room_id) if room_id else self._generate_room_id()
+            if not normalized_room_id:
+                raise RoomError("预设战斗房间编号无效。")
+            if normalized_room_id in self._rooms:
+                raise RoomError("预设战斗房间编号已被占用。")
+            room = GameRoom(normalized_room_id, mode="classic", seat_count=2)
             player_id, token = room.create_host(host_name, account_user_id=host_account_user_id)
             room.set_seat_controller(token, 2, "ai")
             room.default_ai_difficulty = normalize_ai_difficulty(ai_difficulty)
@@ -2258,6 +2292,20 @@ class RoomRegistry:
         if room is None:
             raise RoomError("房间不存在，可能是房间码输错了。")
         return room
+
+    def restore_room(self, room: GameRoom) -> GameRoom:
+        normalized = normalize_room_id(room.room_id)
+        if not normalized:
+            raise RoomError("恢复的房间编号无效。")
+        with self._lock:
+            room.room_id = normalized
+            self._rooms[normalized] = room
+        return room
+
+    def discard_room(self, room_id: str) -> None:
+        normalized = normalize_room_id(room_id)
+        with self._lock:
+            self._rooms.pop(normalized, None)
 
     def delete_room(self, room_id: str, token: str) -> None:
         normalized = normalize_room_id(room_id)

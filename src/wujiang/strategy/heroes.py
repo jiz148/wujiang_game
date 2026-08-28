@@ -101,22 +101,22 @@ def ensure_strategic_hero_system(world: WorldState, members: Any = None) -> Worl
             state.status = "serving" if state.faction_id else "roaming"
             state.sleeping_until_month = None
 
-    member_by_faction = {
-        str(getattr(member, "faction_id", "")): member
-        for member in (members or ())
-        if str(getattr(member, "role", "")).lower() != "ai" and int(getattr(member, "user_id", 0)) > 0
-    }
+    members_by_faction: dict[str, list[Any]] = {}
+    for member in members or ():
+        if str(getattr(member, "role", "")).lower() == "ai" or int(getattr(member, "user_id", 0)) <= 0:
+            continue
+        members_by_faction.setdefault(str(getattr(member, "faction_id", "")), []).append(member)
+    assigned_codes = {hero.hero_code for hero in heroes_by_code.values() if hero.office_id}
+    available_codes = [str(hero.get("code") or "") for hero in public_heroes if str(hero.get("code") or "") not in assigned_codes]
     controlled_player_user_ids = {
         int(hero.controller_user_id)
         for hero in heroes_by_code.values()
         if hero.controller_type == "player" and hero.controller_user_id is not None
     }
-    assigned_codes = {hero.hero_code for hero in heroes_by_code.values() if hero.office_id}
-    available_codes = [str(hero.get("code") or "") for hero in public_heroes if str(hero.get("code") or "") not in assigned_codes]
 
     office_rank = {"lord": 0, "grand_general": 1, "general": 2, "governor": 3}
     for faction in sorted(next_world.factions, key=lambda item: item.faction_id):
-        if faction.is_neutral_city_state:
+        if not faction.is_major:
             continue
         founded_during_campaign = any(tag.startswith("hero_founded_faction:") for tag in faction.memory_tags) or any(
             event.category == "hero_founded_faction" and faction.faction_id in event.related_ids
@@ -128,22 +128,59 @@ def ensure_strategic_hero_system(world: WorldState, members: Any = None) -> Worl
             (office for office in next_world.offices if office.faction_id == faction.faction_id and office.status != "disabled"),
             key=lambda office: (office_rank.get(office.office_type, 9), office.office_id),
         )
-        human_member = member_by_faction.get(faction.faction_id)
-        existing_player_office_id = None
-        if human_member is not None:
-            human_user_id = int(getattr(human_member, "user_id"))
-            existing_player_office_id = next(
+        human_members = members_by_faction.get(faction.faction_id, [])
+        member_by_user_id = {
+            int(getattr(member, "user_id")): member
+            for member in human_members
+        }
+        player_member_by_office_id: dict[str, Any] = {}
+        assigned_user_ids: set[int] = set()
+        for hero in heroes_by_code.values():
+            user_id = int(hero.controller_user_id or 0)
+            if (
+                hero.faction_id == faction.faction_id
+                and hero.controller_type == "player"
+                and user_id in member_by_user_id
+                and hero.office_id
+            ):
+                player_member_by_office_id[str(hero.office_id)] = member_by_user_id[user_id]
+                assigned_user_ids.add(user_id)
+
+        capital_governor_id = f"office:{faction.faction_id}:governor:{faction.capital_city_id}"
+        initial_office_order = sorted(
+            faction_offices,
+            key=lambda office: (
+                0 if office.office_type == "lord" else
+                1 if office.office_id == capital_governor_id else
+                2 if office.office_type == "grand_general" else
+                3 if office.office_type == "general" else
+                4,
+                office.office_id,
+            ),
+        )
+        occupied_office_ids = set(player_member_by_office_id)
+        for member in human_members:
+            user_id = int(getattr(member, "user_id"))
+            if user_id in assigned_user_ids:
+                continue
+            if not initializing_hero_system and user_id in controlled_player_user_ids:
+                continue
+            target = next(
                 (
-                    hero.office_id
-                    for hero in heroes_by_code.values()
-                    if hero.faction_id == faction.faction_id
-                    and hero.controller_type == "player"
-                    and int(hero.controller_user_id or 0) == human_user_id
-                    and hero.office_id
+                    office
+                    for office in initial_office_order
+                    if office.office_id not in occupied_office_ids
                 ),
                 None,
             )
+            if target is None:
+                break
+            player_member_by_office_id[target.office_id] = member
+            occupied_office_ids.add(target.office_id)
+            assigned_user_ids.add(user_id)
         for office in faction_offices:
+            if office.holder_type == "temporary_player":
+                continue
             state = heroes_by_code.get(str(office.holder_id or ""))
             if founded_during_campaign and office.office_type != "lord" and state is None:
                 office.holder_id = None
@@ -170,6 +207,7 @@ def ensure_strategic_hero_system(world: WorldState, members: Any = None) -> Worl
                 state = heroes_by_code[selected_code]
             state.status = "serving"
             state.faction_id = faction.faction_id
+            state.loyalty = max(state.loyalty, 60)
             if state.hero_code not in mobile_commander_codes or state.city_id not in city_ids:
                 state.city_id = faction.capital_city_id
             state.ritual_city_id = state.ritual_city_id or faction.capital_city_id
@@ -177,15 +215,8 @@ def ensure_strategic_hero_system(world: WorldState, members: Any = None) -> Worl
             office.holder_id = state.hero_code
             office.holder_type = "hero"
             office.status = "active"
-            player_holds_office = human_member is not None and (
-                office.office_id == existing_player_office_id
-                or (
-                    existing_player_office_id is None
-                    and int(getattr(human_member, "user_id")) not in controlled_player_user_ids
-                    and office.office_type == "lord"
-                )
-            )
-            if player_holds_office:
+            human_member = player_member_by_office_id.get(office.office_id)
+            if human_member is not None:
                 user_id = int(getattr(human_member, "user_id"))
                 office.controller_type = "player"
                 office.controller_user_id = user_id
@@ -206,6 +237,9 @@ def ensure_strategic_hero_system(world: WorldState, members: Any = None) -> Worl
     for city in next_world.cities:
         if city.city_id in ritual_city_ids:
             city.building_levels["ritual_site"] = max(1, int(city.building_levels.get("ritual_site", 0)))
+    from wujiang.strategy.hero_personal import initialize_hero_personal_state
+
+    initialize_hero_personal_state(next_world)
     next_world.validate()
     return next_world
 
@@ -255,6 +289,8 @@ def _hero_name(hero_code: str) -> str:
 
 
 def strategic_hero_pool_public(world: WorldState) -> list[dict[str, Any]]:
+    from wujiang.strategy.hero_personal import hero_personal_public
+
     states_by_code = {hero.hero_code: hero for hero in world.strategic_heroes}
     payload: list[dict[str, Any]] = []
     for hero in _base_hero_pool():
@@ -284,9 +320,11 @@ def strategic_hero_pool_public(world: WorldState) -> list[dict[str, Any]]:
             "sleeping_until_month": state.sleeping_until_month if sleeping else None,
             "assignment_type": state.assignment_type,
             "assignment_target_id": state.assignment_target_id,
+            "last_personal_action_month": state.last_personal_action_month,
             "defender_assigned": defender_assigned,
             "summon_cost_ether": HERO_RITUAL_ETHER_COST,
         }
+        item.update(hero_personal_public(world, state))
         payload.append(item)
     return payload
 
@@ -330,6 +368,7 @@ def normalize_strategic_hero_deployment(
     hero_codes: list[str] | tuple[str, ...] | set[str] | None,
     *,
     limit: int | None = None,
+    check_command_acceptance: bool = True,
 ) -> list[str]:
     if hero_codes is None:
         return active_strategic_hero_codes_for_faction(world, faction_id, limit=limit)
@@ -345,16 +384,32 @@ def normalize_strategic_hero_deployment(
     invalid_codes = [code for code in normalized if code not in active_codes]
     if invalid_codes:
         raise StrategyError("åªèƒ½æŠ•å…¥å·²å¬å”¤ä¸”æœªæ²‰ç¡çš„æœ¬åŠ¿åŠ›æˆ˜ç•¥è‹±çµã€‚")
+    if check_command_acceptance:
+        from wujiang.strategy.hero_personal import require_hero_command_acceptance
+
+        for code in normalized:
+            hero = next(item for item in world.strategic_heroes if item.hero_code == code)
+            require_hero_command_acceptance(world, hero, "battle")
     return normalized
 
 
-def strategic_defender_hero_codes_for_faction(world: WorldState, faction_id: str) -> list[str]:
+def strategic_defender_hero_codes_for_faction(
+    world: WorldState,
+    faction_id: str,
+    *,
+    check_command_acceptance: bool = True,
+) -> list[str]:
     faction = _faction(world, faction_id)
     configured_codes = _defender_codes(faction)
     if not configured_codes:
         return active_strategic_hero_codes_for_faction(world, faction_id)
     try:
-        return normalize_strategic_hero_deployment(world, faction_id, configured_codes)
+        return normalize_strategic_hero_deployment(
+            world,
+            faction_id,
+            configured_codes,
+            check_command_acceptance=check_command_acceptance,
+        )
     except StrategyError:
         return []
 
@@ -406,9 +461,18 @@ def record_strategic_hero_battle_losses(
         faction = _faction(next_world, faction_id)
         configured_codes = None if committed_hero_codes_by_team is None else committed_hero_codes_by_team.get(team_id)
         committed = (
-            strategic_defender_hero_codes_for_faction(next_world, faction_id)
+            strategic_defender_hero_codes_for_faction(
+                next_world,
+                faction_id,
+                check_command_acceptance=False,
+            )
             if side == "defender" and configured_codes is None
-            else normalize_strategic_hero_deployment(next_world, faction_id, configured_codes)
+            else normalize_strategic_hero_deployment(
+                next_world,
+                faction_id,
+                configured_codes,
+                check_command_acceptance=False,
+            )
         )
         surviving = {str(code) for code in surviving_hero_codes_by_team.get(team_id, set())}
         sleeping_before = _sleeping_until_by_code(faction)
@@ -433,6 +497,22 @@ def record_strategic_hero_battle_losses(
                     related_ids=[faction_id, code],
                 )
             )
+        from wujiang.strategy.hero_personal import record_hero_battle_outcome
+
+        record_hero_battle_outcome(
+            next_world,
+            faction_id=faction_id,
+            committed=committed,
+            surviving=result[side]["surviving"],
+        )
+        from wujiang.strategy.relics import release_sleeping_heroes_with_lost_relics
+
+        release_sleeping_heroes_with_lost_relics(
+            next_world,
+            faction_id=faction_id,
+            hero_codes=result[side]["sleeping"],
+            cause="battle_defeat_after_relic_loss",
+        )
     next_world.validate()
     return next_world, result
 
@@ -530,6 +610,9 @@ def perform_hero_ritual(
     selected.loyalty = max(selected.loyalty, 55)
     selected.assignment_type = "reserve"
     selected.assignment_target_id = None
+    from wujiang.strategy.hero_personal import initialize_hero_personal_state
+
+    initialize_hero_personal_state(next_world)
     next_world.event_log.append(
         EventLogEntry(
             month=next_world.current_month,
@@ -573,7 +656,30 @@ def unbind_strategic_hero(
     return next_world
 
 
-def _release_hero_binding(world: WorldState, hero: StrategicHeroState) -> None:
+def _release_hero_binding(
+    world: WorldState,
+    hero: StrategicHeroState,
+    *,
+    preserve_sleep: bool = False,
+) -> None:
+    sleeping_until_month = hero.sleeping_until_month if preserve_sleep and hero.status == "sleeping" else None
+    previous_faction_id = hero.faction_id
+    if previous_faction_id:
+        faction = next(
+            (item for item in world.factions if item.faction_id == previous_faction_id),
+            None,
+        )
+        if faction is not None:
+            summoned_tag = f"{SUMMONED_TAG_PREFIX}{hero.hero_code}"
+            sleeping_tag_prefix = (
+                f"{SLEEPING_TAG_PREFIX}{hero.hero_code}"
+                f"{SLEEPING_TAG_SEPARATOR}"
+            )
+            faction.memory_tags = [
+                tag
+                for tag in faction.memory_tags
+                if tag != summoned_tag and not tag.startswith(sleeping_tag_prefix)
+            ]
     office = next((item for item in world.offices if item.office_id == hero.office_id), None)
     if office is not None and office.holder_id == hero.hero_code:
         office.holder_id = None
@@ -585,10 +691,65 @@ def _release_hero_binding(world: WorldState, hero: StrategicHeroState) -> None:
     hero.ritual_city_id = None
     hero.faction_id = None
     hero.office_id = None
-    hero.status = "roaming"
-    hero.sleeping_until_month = None
+    hero.status = "sleeping" if sleeping_until_month is not None else "roaming"
+    hero.sleeping_until_month = sleeping_until_month
     hero.assignment_type = "reserve"
     hero.assignment_target_id = None
+
+
+def release_sleeping_hero_for_lost_relic(
+    world: WorldState,
+    *,
+    hero_code: str,
+    previous_faction_id: str,
+    relic_id: str,
+    cause: str,
+) -> bool:
+    hero = next((item for item in world.strategic_heroes if item.hero_code == str(hero_code)), None)
+    if (
+        hero is None
+        or hero.faction_id != str(previous_faction_id)
+        or hero.status != "sleeping"
+        or int(hero.sleeping_until_month or 0) <= world.current_month
+    ):
+        return False
+    office = next((item for item in world.offices if item.office_id == hero.office_id), None)
+    if office is not None and office.office_type == "lord":
+        hero.ritual_city_id = None
+        hero.personal_history.append(
+            {
+                "month": world.current_month,
+                "event": "lord_relic_control_lost",
+                "summary": "沉睡期间失去圣物控制；主公保留流亡身份，但祭祀锚点已经断开。",
+                "relic_id": relic_id,
+                "cause": cause,
+            }
+        )
+        event_category = "hero_lord_relic_anchor_lost"
+        message = f"{_hero_name(hero.hero_code)}沉睡期间失去圣物控制；主公身份保留，祭祀锚点断开。"
+    else:
+        _release_hero_binding(world, hero, preserve_sleep=True)
+        hero.personal_history.append(
+            {
+                "month": world.current_month,
+                "event": "relic_control_lost_while_sleeping",
+                "summary": "沉睡期间失去圣物控制，解除原势力祭祀绑定；醒来后成为在野英灵。",
+                "relic_id": relic_id,
+                "cause": cause,
+            }
+        )
+        event_category = "hero_relic_unbound_while_sleeping"
+        message = f"{_hero_name(hero.hero_code)}沉睡期间失去圣物控制，解除原势力祭祀绑定。"
+    hero.personal_history = hero.personal_history[-24:]
+    world.event_log.append(
+        EventLogEntry(
+            month=world.current_month,
+            category=event_category,
+            message=message,
+            related_ids=[previous_faction_id, hero.hero_code, relic_id, cause],
+        )
+    )
+    return True
 
 
 def release_ritual_bindings_for_captured_city(
@@ -603,12 +764,37 @@ def release_ritual_bindings_for_captured_city(
         if hero.ritual_city_id == str(city_id) and hero.faction_id == str(previous_faction_id)
     ]
     for hero in released:
-        _release_hero_binding(world, hero)
+        office = next((item for item in world.offices if item.office_id == hero.office_id), None)
+        from wujiang.strategy.hero_personal import record_hero_city_loss
+
+        record_hero_city_loss(
+            world,
+            hero=hero,
+            previous_faction_id=previous_faction_id,
+        )
+        if office is not None and office.office_type == "lord":
+            hero.ritual_city_id = None
+            remaining_city = next(
+                (
+                    city
+                    for city in world.cities
+                    if city.owner_faction_id == previous_faction_id and city.city_id != str(city_id)
+                ),
+                None,
+            )
+            if remaining_city is not None:
+                hero.city_id = remaining_city.city_id
+            category = "hero_lord_ritual_anchor_lost"
+            message = f"城市失守，{_hero_name(hero.hero_code)}失去当地祭祀锚点，但保留主公与流亡身份。"
+        else:
+            _release_hero_binding(world, hero, preserve_sleep=True)
+            category = "hero_ritual_unbound_on_capture"
+            message = f"城市失守，{_hero_name(hero.hero_code)}与当地祭祀场解除绑定。"
         world.event_log.append(
             EventLogEntry(
                 month=world.current_month,
-                category="hero_ritual_unbound_on_capture",
-                message=f"城市失守，{_hero_name(hero.hero_code)}与当地祭祀场解除绑定。",
+                category=category,
+                message=message,
                 related_ids=[previous_faction_id, str(city_id), hero.hero_code],
             )
         )
@@ -795,6 +981,9 @@ def assign_strategic_hero_duty(
         city = next((item for item in next_world.cities if item.city_id == normalized_target), None)
         if city is None or city.owner_faction_id != faction_id:
             raise StrategyError("驻守或训练任务必须指定一座己方城市。")
+    from wujiang.strategy.hero_personal import require_hero_command_acceptance
+
+    require_hero_command_acceptance(next_world, hero, f"assignment:{normalized}")
     hero.assignment_type = normalized
     hero.assignment_target_id = normalized_target
     faction = _faction(next_world, faction_id)
@@ -844,6 +1033,22 @@ def choose_player_hero_path(
     )
     if current is not None and current.hero_code != chosen.hero_code and not allow_reselect:
         raise StrategyError("战役开始后不能改为控制另一名武将；请继续操作当前武将。")
+    if normalized_path == "lord":
+        faction_id = str(assigned_faction_id or target_faction_id)
+        lord = next(
+            (
+                office
+                for office in next_world.offices
+                if office.faction_id == faction_id and office.office_type == "lord"
+            ),
+            None,
+        )
+        if (
+            lord is not None
+            and lord.controller_type == "player"
+            and int(lord.controller_user_id or 0) not in {0, int(user_id)}
+        ):
+            raise StrategyError("同势力主公职位已由另一名真人控制；请保留当前官职或选择其他道路。")
     if current is not None and current.hero_code != chosen.hero_code:
         current.controller_type = "ai"
         current.controller_user_id = None
@@ -893,6 +1098,16 @@ def choose_player_hero_path(
                     item.diplomacy[faction_id] = "neutral"
             city.owner_faction_id = faction_id
             city.support_by_faction.setdefault(faction_id, 50)
+            from wujiang.strategy.relics import apply_city_control_change_consequences
+
+            next_world, _ = apply_city_control_change_consequences(
+                next_world,
+                city_id=city.city_id,
+                previous_faction_id=previous_owner_id,
+                new_faction_id=faction_id,
+                cause="hero_founded_faction",
+            )
+            city = next(item for item in next_world.cities if item.city_id == city.city_id)
             previous_owner = next((item for item in next_world.factions if item.faction_id == previous_owner_id), None)
             if previous_owner is not None and previous_owner.capital_city_id == city.city_id:
                 replacement = next(
@@ -1081,6 +1296,7 @@ def appoint_strategic_hero_to_office(
     if hero is None or hero.status != "serving" or hero.faction_id != faction_id:
         raise StrategyError("只能任命已通过招募进入本势力的在职武将。")
 
+    is_new_appointment = hero.office_id != target.office_id or target.holder_id != hero.hero_code
     if target.holder_type == "hero" and target.holder_id and target.holder_id != hero.hero_code:
         previous = next((item for item in next_world.strategic_heroes if item.hero_code == target.holder_id), None)
         if previous is not None:
@@ -1099,6 +1315,15 @@ def appoint_strategic_hero_to_office(
     target.controller_type = hero.controller_type
     target.controller_user_id = hero.controller_user_id
     target.status = "active"
+    if is_new_appointment:
+        from wujiang.strategy.hero_personal import record_hero_appointment
+
+        record_hero_appointment(
+            next_world,
+            faction_id=faction_id,
+            hero_code=hero.hero_code,
+            lord_hero_code=issuer.holder_id or "",
+        )
     faction = _faction(next_world, faction_id)
     next_world.event_log.append(
         EventLogEntry(
@@ -1106,6 +1331,154 @@ def appoint_strategic_hero_to_office(
             category="strategic_hero_appointed",
             message=f"{faction.name}任命{_hero_name(hero.hero_code)}担任{target.office_type}。",
             related_ids=[faction_id, issuer.office_id, target.office_id, hero.hero_code],
+        )
+    )
+    next_world.validate()
+    return next_world
+
+
+def handover_player_office(
+    world: WorldState,
+    *,
+    faction_id: str,
+    office_id: str,
+    from_user_id: int,
+    to_user_id: int,
+) -> WorldState:
+    next_world = _clone_world(world)
+    source = next(
+        (
+            office
+            for office in next_world.offices
+            if office.office_id == str(office_id)
+            and office.faction_id == str(faction_id)
+        ),
+        None,
+    )
+    if (
+        source is None
+        or source.status != "active"
+        or source.controller_type != "player"
+        or int(source.controller_user_id or 0) != int(from_user_id)
+    ):
+        raise StrategyError("只能交接自己当前控制的有效职位。")
+    source_hero = next(
+        (
+            hero
+            for hero in next_world.strategic_heroes
+            if hero.hero_code == source.holder_id
+            and hero.controller_type == "player"
+            and int(hero.controller_user_id or 0) == int(from_user_id)
+        ),
+        None,
+    )
+    target_hero = next(
+        (
+            hero
+            for hero in next_world.strategic_heroes
+            if hero.controller_type == "player"
+            and int(hero.controller_user_id or 0) == int(to_user_id)
+            and hero.status == "serving"
+            and hero.faction_id == str(faction_id)
+        ),
+        None,
+    )
+    if source_hero is None or target_hero is None:
+        raise StrategyError("交接双方都必须控制本势力的一名仕官武将。")
+    target_office = next(
+        (
+            office
+            for office in next_world.offices
+            if office.office_id == target_hero.office_id
+            and office.faction_id == str(faction_id)
+            and office.status == "active"
+        ),
+        None,
+    )
+    source_holder = (source.holder_id, source.holder_type)
+    if target_office is None:
+        source_hero.office_id = None
+        source.holder_id = target_hero.hero_code
+        source.holder_type = "hero"
+        source.controller_user_id = int(to_user_id)
+        target_hero.office_id = source.office_id
+    else:
+        target_holder = (target_office.holder_id, target_office.holder_type)
+        source.holder_id, source.holder_type = target_holder
+        source.controller_type = "player"
+        source.controller_user_id = int(to_user_id)
+        target_hero.office_id = source.office_id
+        target_office.holder_id, target_office.holder_type = source_holder
+        target_office.controller_type = "player"
+        target_office.controller_user_id = int(from_user_id)
+        source_hero.office_id = target_office.office_id
+    next_world.event_log.append(
+        EventLogEntry(
+            month=next_world.current_month,
+            category="player_office_handover",
+            message=f"真人官职完成交接：{source.office_id}由账号 {to_user_id} 接任。",
+            related_ids=[
+                str(faction_id),
+                source.office_id,
+                str(from_user_id),
+                str(to_user_id),
+                *( [target_office.office_id] if target_office is not None else [] ),
+            ],
+        )
+    )
+    next_world.validate()
+    return next_world
+
+
+def vacate_player_office(
+    world: WorldState,
+    *,
+    faction_id: str,
+    office_id: str,
+    user_id: int,
+) -> WorldState:
+    next_world = _clone_world(world)
+    office = next(
+        (
+            item
+            for item in next_world.offices
+            if item.office_id == str(office_id)
+            and item.faction_id == str(faction_id)
+        ),
+        None,
+    )
+    if office is None or office.office_type == "lord":
+        raise StrategyError("主公职位不能通过普通撤换流程空缺。")
+    if (
+        office.status != "active"
+        or office.controller_type != "player"
+        or int(office.controller_user_id or 0) != int(user_id)
+    ):
+        raise StrategyError("只能确认撤换自己当前控制的有效职位。")
+    hero = next(
+        (
+            item
+            for item in next_world.strategic_heroes
+            if item.hero_code == office.holder_id
+            and item.controller_type == "player"
+            and int(item.controller_user_id or 0) == int(user_id)
+        ),
+        None,
+    )
+    if hero is None:
+        raise StrategyError("撤换职位没有一致的真人武将持有人。")
+    hero.office_id = None
+    office.holder_id = None
+    office.holder_type = None
+    office.controller_type = "ai"
+    office.controller_user_id = None
+    office.status = "vacant"
+    next_world.event_log.append(
+        EventLogEntry(
+            month=next_world.current_month,
+            category="player_office_vacated",
+            message=f"账号 {user_id} 确认离任，{office.office_id}成为空缺职位。",
+            related_ids=[str(faction_id), office.office_id, str(user_id), hero.hero_code],
         )
     )
     next_world.validate()

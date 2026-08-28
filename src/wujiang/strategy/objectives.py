@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from wujiang.strategy.models import EventLogEntry, StrategyError, WorldState
+from wujiang.strategy.quick_campaign import QUICK_CAMPAIGN_SCENARIO_ID, quick_campaign_opening_status
 
 
 FIRST_CAMPAIGN_SCENARIO_ID = "city_states_twelve_months_v1"
@@ -12,20 +13,121 @@ FIRST_CAMPAIGN_CITY_COUNT = 8
 FIRST_CAMPAIGN_MAJOR_FACTION_COUNT = 2
 FIRST_CAMPAIGN_NEUTRAL_CITY_STATE_COUNT = 6
 FIRST_CAMPAIGN_MONTH_LIMIT = 12
+CAMPAIGN_CONTENT_VERSION = "p8.1-content-1"
+CAMPAIGN_BALANCE_VERSION = "p8.1-balance-1"
+DEFAULT_CAMPAIGN_VARIANT_ID = "classic_frontier"
+
+CAMPAIGN_OPENING_VARIANTS: dict[str, dict[str, Any]] = {
+    "classic_frontier": {
+        "id": "classic_frontier",
+        "name": "经典边境",
+        "core_question": "在雪鬼危机到来前，如何平衡城邦外交、战争准备与圣物经营？",
+        "modifiers": ["使用标准钱粮、城防、兵员与以太开局。"],
+    },
+    "hungry_frontier": {
+        "id": "hungry_frontier",
+        "name": "粮荒前线",
+        "core_question": "当全境粮食储备骤减时，是优先保城、贸易求援，还是冒险扩张？",
+        "modifiers": ["所有城市开局粮食降至 70%。", "主要势力开局粮食降至 75%。"],
+    },
+    "fortified_leagues": {
+        "id": "fortified_leagues",
+        "name": "坚城联盟",
+        "core_question": "中立城邦更难武力吞并时，能否用外交、影响力和长期围城打开局面？",
+        "modifiers": ["中立城邦城防 +2。", "中立城邦守军 +120。", "当地自治支持 +15。"],
+    },
+    "ether_tide": {
+        "id": "ether_tide",
+        "name": "以太潮汐",
+        "core_question": "以太充裕但主要势力资金紧张时，是否围绕英灵与圣物路线竞速？",
+        "modifiers": ["所有城市开局以太 +60。", "主要势力开局以太 +30、金钱 -80。"],
+    },
+}
 
 
-def first_campaign_contract() -> dict[str, Any]:
+def campaign_variant_catalog_public() -> list[dict[str, Any]]:
+    return [dict(CAMPAIGN_OPENING_VARIANTS[variant_id]) for variant_id in CAMPAIGN_OPENING_VARIANTS]
+
+
+def first_campaign_contract(variant_id: str = DEFAULT_CAMPAIGN_VARIANT_ID) -> dict[str, Any]:
+    normalized_variant_id = str(variant_id or DEFAULT_CAMPAIGN_VARIANT_ID).strip().lower()
+    variant = CAMPAIGN_OPENING_VARIANTS.get(normalized_variant_id)
+    if variant is None:
+        raise StrategyError("未知的战役开局变体。")
     return {
         "id": FIRST_CAMPAIGN_SCENARIO_ID,
         "name": "十二月城邦争衡",
+        "content_version": CAMPAIGN_CONTENT_VERSION,
+        "balance_version": CAMPAIGN_BALANCE_VERSION,
+        "opening_variant": dict(variant),
         "city_count": FIRST_CAMPAIGN_CITY_COUNT,
         "major_faction_count": FIRST_CAMPAIGN_MAJOR_FACTION_COUNT,
         "neutral_city_state_count": FIRST_CAMPAIGN_NEUTRAL_CITY_STATE_COUNT,
         "month_limit": FIRST_CAMPAIGN_MONTH_LIMIT,
         "expected_duration_minutes": [60, 90],
-        "available_victory_routes": ["unify_cities", "eliminate_enemy_factions", "peaceful_integration", "time_limit_assessment"],
-        "locked_systems": ["formal_armies", "world_mainline", "relic_altar"],
+        "available_victory_routes": [
+            "unify_cities",
+            "eliminate_enemy_factions",
+            "peaceful_integration",
+            "world_mainline_victory",
+            "relic_altar_victory",
+            "time_limit_assessment",
+        ],
+        "locked_systems": [],
     }
+
+
+def apply_campaign_opening_variant(world: WorldState) -> WorldState:
+    contract = world.campaign_contract
+    raw_variant = contract.get("opening_variant") if isinstance(contract, dict) else None
+    if not isinstance(raw_variant, dict):
+        return world
+    variant_id = str(raw_variant.get("id") or DEFAULT_CAMPAIGN_VARIANT_ID)
+    if variant_id not in CAMPAIGN_OPENING_VARIANTS:
+        raise StrategyError("战役存档包含未知的开局变体。")
+    tag = f"campaign_opening_variant:{variant_id}"
+    if tag in world.memory_tags:
+        return world
+    if variant_id == "hungry_frontier":
+        for city in world.cities:
+            city.resources.food = max(0, city.resources.food * 70 // 100)
+        for faction in world.factions:
+            if faction.is_major:
+                faction.resources.food = max(0, faction.resources.food * 75 // 100)
+    elif variant_id == "fortified_leagues":
+        neutral_ids = {faction.faction_id for faction in world.factions if faction.is_neutral_city_state}
+        for city in world.cities:
+            if city.owner_faction_id not in neutral_ids:
+                continue
+            city.defense += 2
+            city.resources.troops += 120
+            city.support_by_faction["local_autonomy"] = min(
+                100, int(city.support_by_faction.get("local_autonomy", 0)) + 15
+            )
+        for faction in world.factions:
+            if faction.is_neutral_city_state:
+                faction.resources.troops += 120
+    elif variant_id == "ether_tide":
+        for city in world.cities:
+            city.resources.ether += 60
+        for faction in world.factions:
+            if faction.is_major:
+                faction.resources.ether += 30
+                faction.resources.money = max(0, faction.resources.money - 80)
+    world.memory_tags.append(tag)
+    if variant_id != DEFAULT_CAMPAIGN_VARIANT_ID:
+        world.event_log.append(
+            EventLogEntry(
+                month=1,
+                category="campaign_opening_variant",
+                message=(
+                    f"本次战役采用“{raw_variant.get('name', variant_id)}”："
+                    f"{raw_variant.get('core_question', '')}"
+                ),
+                visibility="player_visible",
+            )
+        )
+    return world
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,14 +137,22 @@ class VictoryCondition:
     description: str
     implemented: bool
 
-    def to_status(self, *, achieved: bool = False, winner_faction_id: str | None = None) -> dict[str, Any]:
+    def to_status(
+        self,
+        *,
+        achieved: bool = False,
+        winner_faction_id: str | None = None,
+        winner_faction_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        winner_ids = list(winner_faction_ids or ([winner_faction_id] if winner_faction_id else []))
         return {
             "id": self.condition_id,
             "name": self.name,
             "description": self.description,
             "implemented": self.implemented,
             "achieved": bool(achieved),
-            "winner_faction_id": winner_faction_id,
+            "winner_faction_id": winner_faction_id or (winner_ids[0] if winner_ids else None),
+            "winner_faction_ids": winner_ids,
         }
 
 
@@ -62,14 +172,14 @@ VICTORY_CONDITIONS: tuple[VictoryCondition, ...] = (
     VictoryCondition(
         condition_id="world_mainline",
         name="世界主线",
-        description="完成雪鬼、电甲子等世界主线目标。v0.1 仅保留目标槽位。",
-        implemented=False,
+        description="赢得第 11 月北境雪鬼决战；联军反攻分支可共享主线胜利。",
+        implemented=True,
     ),
     VictoryCondition(
         condition_id="relic_altar",
         name="圣物祭坛",
-        description="围绕圣物、祭坛和英灵召唤达成特殊胜利。v0.1 仅保留目标槽位。",
-        implemented=False,
+        description="在圣物祭坛绑定完整圣物，并连续完成三个月全额维护。",
+        implemented=True,
     ),
 )
 
@@ -89,7 +199,7 @@ def campaign_assessment_rankings(world: WorldState) -> list[dict[str, Any]]:
     counts = city_counts_by_faction(world)
     rows: list[dict[str, Any]] = []
     for faction in world.factions:
-        if faction.is_neutral_city_state:
+        if not faction.is_major:
             continue
         owned = [city for city in world.cities if city.owner_faction_id == faction.faction_id]
         support_score = (
@@ -121,7 +231,16 @@ def campaign_assessment_rankings(world: WorldState) -> list[dict[str, Any]]:
             if neutral.is_neutral_city_state and neutral.diplomacy.get(faction.faction_id) == "peacefully_integrated"
         )
         influence_score = min(100, neutral_influence_value // 4 + peaceful_integrations * 25)
-        mainline_score = 0
+        mainline_score = min(
+            100,
+            max(
+                [
+                    int(crisis.contributions_by_faction.get(faction.faction_id, 0))
+                    for crisis in world.world_crises
+                ]
+                or [0]
+            ),
+        )
         rows.append(
             {
                 "faction_id": faction.faction_id,
@@ -174,16 +293,24 @@ def _campaign_conclusion_payload(
     rankings = campaign_assessment_rankings(world)
     early_winners = sorted(
         {
-            str(condition["winner_faction_id"])
+            str(winner_faction_id)
             for condition in achieved_conditions
-            if condition.get("winner_faction_id")
+            for winner_faction_id in (
+                condition.get("winner_faction_ids")
+                or ([condition.get("winner_faction_id")] if condition.get("winner_faction_id") else [])
+            )
+            if winner_faction_id
         }
     )
     assessment_winners = [str(row["faction_id"]) for row in rankings if int(row.get("rank", 0)) == 1]
     conclusion = {
         "state": "settled",
         "reason": reason,
-        "result_label": "提前胜利" if reason == "early_victory" else "十二月评议",
+        "result_label": (
+            "提前胜利"
+            if reason == "early_victory"
+            else str(world.campaign_contract.get("assessment_label") or "十二月评议")
+        ),
         "concluded_month": world.current_month,
         "winner_faction_ids": early_winners if early_winners else assessment_winners,
         "achieved_condition_ids": [str(condition["id"]) for condition in achieved_conditions],
@@ -200,22 +327,51 @@ def evaluate_strategic_status(world: WorldState) -> dict[str, Any]:
     counts = city_counts_by_faction(world)
     names = _faction_name_by_id(world)
     total_cities = len(world.cities)
-    active_faction_ids = [faction_id for faction_id, count in counts.items() if count > 0]
-    exiled_faction_ids = [faction_id for faction_id, count in counts.items() if count <= 0]
+    regular_faction_ids = {
+        faction.faction_id for faction in world.factions if not faction.is_world_crisis
+    }
+    active_faction_ids = [
+        faction_id for faction_id, count in counts.items()
+        if count > 0 and faction_id in regular_faction_ids
+    ]
+    exiled_faction_ids = [
+        faction_id for faction_id, count in counts.items()
+        if count <= 0 and faction_id in regular_faction_ids
+    ]
 
     unified_winner = None
     if total_cities > 0:
         for faction_id, count in counts.items():
-            if count == total_cities:
+            if count == total_cities and faction_id in regular_faction_ids:
                 unified_winner = faction_id
                 break
 
-    major_faction_ids = {faction.faction_id for faction in world.factions if not faction.is_neutral_city_state}
+    major_faction_ids = {faction.faction_id for faction in world.factions if faction.is_major}
     active_major_faction_ids = [faction_id for faction_id in active_faction_ids if faction_id in major_faction_ids]
     elimination_winner = (
         active_major_faction_ids[0]
         if total_cities > 0 and len(active_major_faction_ids) == 1
         else None
+    )
+    mainline_winners = sorted(
+        {
+            faction_id
+            for crisis in world.world_crises
+            if crisis.stage == "resolved" and crisis.showdown_outcome == "victory"
+            for faction_id in crisis.mainline_winner_faction_ids
+        }
+    )
+    relic_victory_winners = sorted(
+        {
+            str(altar.consecration_faction_id)
+            for altar in world.relic_altars
+            if altar.consecration_faction_id
+            and altar.consecration_progress >= altar.consecration_required
+            and altar.state == "active"
+        }
+    )
+    relic_victory_enabled = (
+        str(world.campaign_contract.get("id") or "") == FIRST_CAMPAIGN_SCENARIO_ID
     )
     condition_statuses: list[dict[str, Any]] = []
     for condition in VICTORY_CONDITIONS:
@@ -227,7 +383,29 @@ def evaluate_strategic_status(world: WorldState) -> dict[str, Any]:
         elif condition.condition_id == "eliminate_enemy_factions" and elimination_winner:
             achieved = True
             winner_faction_id = elimination_winner
-        condition_statuses.append(condition.to_status(achieved=achieved, winner_faction_id=winner_faction_id))
+        elif condition.condition_id == "world_mainline" and mainline_winners:
+            achieved = True
+            winner_faction_id = mainline_winners[0]
+        elif condition.condition_id == "relic_altar" and relic_victory_winners:
+            achieved = True
+            winner_faction_id = relic_victory_winners[0]
+        status = condition.to_status(
+            achieved=achieved,
+            winner_faction_id=winner_faction_id,
+            winner_faction_ids=(
+                mainline_winners
+                if condition.condition_id == "world_mainline"
+                else relic_victory_winners if condition.condition_id == "relic_altar" else None
+            ),
+        )
+        if condition.condition_id == "relic_altar":
+            status["implemented"] = relic_victory_enabled
+        if (
+            str(world.campaign_contract.get("id") or "") == QUICK_CAMPAIGN_SCENARIO_ID
+            and condition.condition_id in {"world_mainline", "relic_altar"}
+        ):
+            status["implemented"] = False
+        condition_statuses.append(status)
 
     achieved_conditions = [
         condition
@@ -246,6 +424,11 @@ def evaluate_strategic_status(world: WorldState) -> dict[str, Any]:
             achieved_conditions=achieved_conditions,
         )
     campaign_state = str(conclusion.get("state") or ("active" if contract else "legacy_sandbox"))
+    quick_opening_by_faction = {
+        faction.faction_id: quick_campaign_opening_status(world, faction.faction_id)
+        for faction in world.factions
+        if faction.is_major and str(contract.get("id") or "") == QUICK_CAMPAIGN_SCENARIO_ID
+    }
     return {
         "city_counts_by_faction": counts,
         "active_faction_ids": active_faction_ids,
@@ -271,11 +454,16 @@ def evaluate_strategic_status(world: WorldState) -> dict[str, Any]:
         "campaign_complete": bool(achieved_conditions or conclusion),
         "winner_faction_ids": list(conclusion.get("winner_faction_ids") or sorted(
             {
-                str(condition["winner_faction_id"])
+                str(winner_faction_id)
                 for condition in achieved_conditions
-                if condition.get("winner_faction_id")
+                for winner_faction_id in (
+                    condition.get("winner_faction_ids")
+                    or ([condition.get("winner_faction_id")] if condition.get("winner_faction_id") else [])
+                )
+                if winner_faction_id
             }
         )),
+        "quick_opening_by_faction": quick_opening_by_faction,
     }
 
 
@@ -299,21 +487,22 @@ def record_strategic_status_events(world: WorldState) -> WorldState:
         )
 
     for condition in status["achieved_conditions"]:
-        winner_faction_id = condition.get("winner_faction_id")
-        if not winner_faction_id:
-            continue
-        tag = f"victory:{condition['id']}:{winner_faction_id}"
-        if tag in next_world.memory_tags:
-            continue
-        next_world.memory_tags.append(tag)
-        next_world.event_log.append(
-            EventLogEntry(
-                month=next_world.current_month,
-                category="victory_achieved",
-                message=f"{names.get(str(winner_faction_id), str(winner_faction_id))}达成胜利目标：{condition['name']}。",
-                related_ids=[str(winner_faction_id), str(condition["id"])],
-            )
+        winner_ids = condition.get("winner_faction_ids") or (
+            [condition["winner_faction_id"]] if condition.get("winner_faction_id") else []
         )
+        for winner_faction_id in winner_ids:
+            tag = f"victory:{condition['id']}:{winner_faction_id}"
+            if tag in next_world.memory_tags:
+                continue
+            next_world.memory_tags.append(tag)
+            next_world.event_log.append(
+                EventLogEntry(
+                    month=next_world.current_month,
+                    category="victory_achieved",
+                    message=f"{names.get(str(winner_faction_id), str(winner_faction_id))}达成胜利目标：{condition['name']}。",
+                    related_ids=[str(winner_faction_id), str(condition["id"])],
+                )
+            )
 
     if status["conclusion"] and not next_world.campaign_conclusion:
         next_world.campaign_conclusion = dict(status["conclusion"])

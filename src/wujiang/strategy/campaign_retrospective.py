@@ -43,7 +43,7 @@ def _faction_outcomes(world: WorldState, conclusion: dict[str, Any]) -> list[dic
     rankings = {str(row.get("faction_id")): row for row in conclusion.get("rankings", [])}
     rows = []
     for faction in world.factions:
-        if faction.is_neutral_city_state:
+        if not faction.is_major:
             continue
         ranking = rankings.get(faction.faction_id, {})
         city_count = int(ranking.get("city_count", 0))

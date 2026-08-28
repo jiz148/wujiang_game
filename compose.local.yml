@@ -1,0 +1,38 @@
+services:
+  app:
+    build:
+      context: .
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12-slim-bookworm}
+    restart: unless-stopped
+    environment:
+      WUJIANG_ENVIRONMENT: development
+      WUJIANG_REQUIRE_HTTPS: "false"
+      WUJIANG_ALLOW_QUERY_AUTH_TOKENS: "false"
+      WUJIANG_REQUEST_LOGS: "true"
+      WUJIANG_PUBLIC_BASE_URL: http://127.0.0.1:${WUJIANG_LOCAL_PORT:-8000}
+      WUJIANG_ALLOWED_ORIGINS: http://127.0.0.1:${WUJIANG_LOCAL_PORT:-8000},http://localhost:${WUJIANG_LOCAL_PORT:-8000}
+      WUJIANG_AUTH_DB: /app/var/wujiang.sqlite3
+      WUJIANG_STRATEGY_DB: /app/var/wujiang.sqlite3
+      WUJIANG_ANALYTICS_DB: /app/var/analytics.sqlite3
+      WUJIANG_MATCH_HISTORY_DB: /app/var/match-history.sqlite3
+      WUJIANG_STRATEGY_BACKUP_DIR: /app/var/backups
+      WUJIANG_MAX_JSON_BODY_BYTES: ${WUJIANG_MAX_JSON_BODY_BYTES:-262144}
+      WUJIANG_SLOW_REQUEST_MS: ${WUJIANG_SLOW_REQUEST_MS:-1500}
+    ports:
+      - "127.0.0.1:${WUJIANG_LOCAL_PORT:-8000}:8000"
+    volumes:
+      - wujiang_local_data:/app/var
+      - wujiang_local_replays:/app/replays
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+
+volumes:
+  wujiang_local_data:
+  wujiang_local_replays:

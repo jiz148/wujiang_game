@@ -94,6 +94,11 @@ ACTION_PERMISSION = {
     "advance_month": "advance_month",
     "unlock_tactic_tech": "national_technology",
     "perform_hero_ritual": "perform_ritual",
+    "search_relic": "relic_decision",
+    "transfer_relic": "relic_decision",
+    "repair_relic": "relic_decision",
+    "bind_relic": "relic_decision",
+    "release_relic": "relic_decision",
     "unbind_strategic_hero": "unbind_hero",
     "appoint_strategic_hero": "manage_offices",
     "assign_strategic_hero_duty": "manage_offices",
@@ -110,12 +115,15 @@ ACTION_PERMISSION = {
     "form_army": "command_army",
     "disband_army": "command_army",
     "set_army_movement": "command_army",
+    "set_siege_attacker_stance": "command_army",
+    "set_siege_defender_stance": "manage_local_defense",
     "load_army_supply": "command_army",
     "incite_neutral_city_state": "diplomacy",
     "neutral_diplomacy": "diplomacy",
     "peaceful_integration": "diplomacy",
     "choose_occupation_policy": "manage_occupation",
     "fund_rebellion": "diplomacy",
+    "world_crisis_choice": "diplomacy",
     "exile_action": "exile_action",
     "issue_office_order": "issue_order",
     "send_office_request": "send_request",
@@ -199,7 +207,7 @@ def ensure_office_system(world: WorldState, members: Iterable[Any] | None = None
     active_ids: set[str] = set()
 
     for faction in sorted(next_world.factions, key=lambda item: item.faction_id):
-        if faction.is_neutral_city_state:
+        if not faction.is_major:
             owned_cities = sorted(
                 (city for city in next_world.cities if city.owner_faction_id == faction.faction_id),
                 key=lambda city: city.city_id,
@@ -230,8 +238,15 @@ def ensure_office_system(world: WorldState, members: Iterable[Any] | None = None
             continue
         lord_id = office_id(faction.faction_id, "lord")
         existing_lord = offices.get(lord_id)
-        if existing_lord is not None and existing_lord.holder_type == "hero":
-            if members is None:
+        if existing_lord is not None and existing_lord.holder_type in {"hero", "temporary_player"}:
+            valid_human_user_ids = {
+                int(getattr(member, "user_id", 0))
+                for member in (members or ())
+                if str(getattr(member, "faction_id", "")) == faction.faction_id
+                and str(getattr(member, "role", "")).lower() != "ai"
+                and int(getattr(member, "user_id", 0)) > 0
+            }
+            if members is None or int(existing_lord.controller_user_id or 0) in valid_human_user_ids:
                 controller_type = existing_lord.controller_type
                 controller_user_id = existing_lord.controller_user_id
             else:
@@ -284,11 +299,11 @@ def ensure_office_system(world: WorldState, members: Iterable[Any] | None = None
                     duties=list(OFFICE_DUTY_TYPES["grand_general"]),
                 ),
             )
-            if existing_grand is not None and existing_grand.holder_type == "hero":
+            if existing_grand is not None and existing_grand.holder_type in {"hero", "temporary_player"}:
                 grand.controller_type = existing_grand.controller_type
                 grand.controller_user_id = existing_grand.controller_user_id
                 grand.holder_id = existing_grand.holder_id
-                grand.holder_type = "hero"
+                grand.holder_type = existing_grand.holder_type
             elif not next_world.strategic_heroes:
                 grand.controller_type = controller_type
                 grand.controller_user_id = controller_user_id
@@ -323,11 +338,11 @@ def ensure_office_system(world: WorldState, members: Iterable[Any] | None = None
                         duties=list(OFFICE_DUTY_TYPES["general"]),
                     ),
                 )
-                if existing_general is not None and existing_general.holder_type == "hero":
+                if existing_general is not None and existing_general.holder_type in {"hero", "temporary_player"}:
                     general.controller_type = existing_general.controller_type
                     general.controller_user_id = existing_general.controller_user_id
                     general.holder_id = existing_general.holder_id
-                    general.holder_type = "hero"
+                    general.holder_type = existing_general.holder_type
                 elif not next_world.strategic_heroes:
                     general.controller_type = controller_type
                     general.controller_user_id = controller_user_id
@@ -356,11 +371,11 @@ def ensure_office_system(world: WorldState, members: Iterable[Any] | None = None
                     duties=list(OFFICE_DUTY_TYPES["governor"]),
                 ),
             )
-            if existing_governor is not None and existing_governor.holder_type == "hero":
+            if existing_governor is not None and existing_governor.holder_type in {"hero", "temporary_player"}:
                 governor.controller_type = existing_governor.controller_type
                 governor.controller_user_id = existing_governor.controller_user_id
                 governor.holder_id = existing_governor.holder_id
-                governor.holder_type = "hero"
+                governor.holder_type = existing_governor.holder_type
             elif not next_world.strategic_heroes:
                 governor.controller_type = controller_type
                 governor.controller_user_id = controller_user_id
@@ -427,6 +442,8 @@ def office_action_entity_id(action_type: str, payload: dict[str, Any]) -> str:
         "form_army",
     }:
         return str(payload.get("city_id") or payload.get("target_city_id") or "")
+    if action_type == "set_siege_defender_stance":
+        return str(payload.get("city_id") or "")
     if action_type == "declare_attack":
         return str(payload.get("source_city_id") or "")
     # Battle ids are not managed entities. Battle ownership is validated by the

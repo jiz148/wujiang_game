@@ -11,13 +11,16 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_AUTH_DB_PATH = PROJECT_ROOT / "var" / "wujiang.sqlite3"
-PASSWORD_HASH_ITERATIONS = 200_000
+PASSWORD_HASH_ITERATIONS = 300_000
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
+SESSION_IDLE_TTL_SECONDS = 60 * 60 * 24 * 7
+SESSION_TOUCH_INTERVAL_SECONDS = 5 * 60
+MAX_ACTIVE_SESSIONS_PER_USER = 8
 
 
 class AuthError(Exception):
@@ -66,22 +69,29 @@ def validate_username(username: str) -> str:
 
 def validate_password(password: str) -> str:
     raw = str(password or "")
-    if len(raw) < 6:
-        raise AuthError("密码至少需要 6 个字符。")
+    if len(raw) < 8:
+        raise AuthError("密码至少需要 8 个字符。")
     if len(raw) > 128:
         raise AuthError("密码最多 128 个字符。")
     return raw
 
 
-def hash_password(password: str) -> str:
+def validate_login_password(password: str) -> str:
+    raw = str(password or "")
+    if not raw or len(raw) > 128:
+        raise AuthError("用户名或密码不正确。", status=HTTPStatus.UNAUTHORIZED)
+    return raw
+
+
+def hash_password(password: str, *, iterations: int = PASSWORD_HASH_ITERATIONS) -> str:
     salt = secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac(
         "sha256",
         password.encode("utf-8"),
         salt,
-        PASSWORD_HASH_ITERATIONS,
+        iterations,
     )
-    return f"pbkdf2_sha256${PASSWORD_HASH_ITERATIONS}${salt.hex()}${digest.hex()}"
+    return f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}"
 
 
 def verify_password(password: str, encoded_hash: str) -> bool:
@@ -98,9 +108,36 @@ def verify_password(password: str, encoded_hash: str) -> bool:
     return hmac.compare_digest(actual, expected)
 
 
+def password_hash_needs_upgrade(encoded_hash: str) -> bool:
+    try:
+        algorithm, iterations_raw, _salt_hex, _digest_hex = encoded_hash.split("$", 3)
+        return algorithm != "pbkdf2_sha256" or int(iterations_raw) < PASSWORD_HASH_ITERATIONS
+    except (AttributeError, TypeError, ValueError):
+        return True
+
+
+def session_token_hash(token: str) -> str:
+    return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
+
+
+DUMMY_PASSWORD_HASH = hash_password("not-a-real-account-password")
+
+
 class UserStore:
-    def __init__(self, db_path: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        db_path: str | Path | None = None,
+        *,
+        clock: Callable[[], float] = time.time,
+        session_ttl_seconds: int = SESSION_TTL_SECONDS,
+        session_idle_ttl_seconds: int = SESSION_IDLE_TTL_SECONDS,
+        max_active_sessions_per_user: int = MAX_ACTIVE_SESSIONS_PER_USER,
+    ) -> None:
         self.db_path = auth_database_path(str(db_path) if db_path is not None else None)
+        self._clock = clock
+        self._session_ttl_seconds = max(60, int(session_ttl_seconds))
+        self._session_idle_ttl_seconds = max(60, int(session_idle_ttl_seconds))
+        self._max_active_sessions_per_user = max(1, int(max_active_sessions_per_user))
         self._lock = threading.RLock()
         self._schema_ready = False
 
@@ -110,6 +147,14 @@ class UserStore:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
+
+    def healthcheck(self) -> None:
+        self._ensure_schema()
+        connection = self._connect()
+        try:
+            connection.execute("SELECT 1 FROM users LIMIT 1").fetchone()
+        finally:
+            connection.close()
 
     @contextmanager
     def _connection(self) -> sqlite3.Connection:
@@ -153,6 +198,25 @@ class UserStore:
                     CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
                     """
                 )
+                session_columns = {
+                    str(row["name"])
+                    for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
+                }
+                if "token_hash" not in session_columns:
+                    connection.execute("ALTER TABLE sessions ADD COLUMN token_hash TEXT")
+                legacy_rows = connection.execute(
+                    "SELECT token FROM sessions WHERE token_hash IS NULL OR token_hash = ''"
+                ).fetchall()
+                for row in legacy_rows:
+                    raw_token = str(row["token"])
+                    digest = session_token_hash(raw_token)
+                    connection.execute(
+                        "UPDATE sessions SET token = ?, token_hash = ? WHERE token = ?",
+                        (f"migrated:{digest}", digest, raw_token),
+                    )
+                connection.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash)"
+                )
             self._schema_ready = True
 
     def _user_from_row(self, row: sqlite3.Row | None) -> AuthUser | None:
@@ -168,7 +232,7 @@ class UserStore:
         normalized = validate_username(username)
         normalized_key = normalized_username_key(normalized)
         valid_password = validate_password(password)
-        now = time.time()
+        now = self._clock()
         with self._lock:
             self._ensure_schema()
             with self._connection() as connection:
@@ -188,8 +252,8 @@ class UserStore:
 
     def authenticate(self, username: str, password: str) -> tuple[AuthUser, str]:
         normalized_key = normalized_username_key(username)
-        valid_password = validate_password(password)
-        now = time.time()
+        valid_password = validate_login_password(password)
+        now = self._clock()
         with self._lock:
             self._ensure_schema()
             with self._connection() as connection:
@@ -197,11 +261,18 @@ class UserStore:
                     "SELECT * FROM users WHERE normalized_username = ?",
                     (normalized_key,),
                 ).fetchone()
-                if row is None or not verify_password(valid_password, str(row["password_hash"])):
+                encoded_hash = str(row["password_hash"]) if row is not None else DUMMY_PASSWORD_HASH
+                password_matches = verify_password(valid_password, encoded_hash)
+                if row is None or not password_matches:
                     raise AuthError("用户名或密码不正确。", status=HTTPStatus.UNAUTHORIZED)
                 user = self._user_from_row(row)
                 if user is None:
                     raise AuthError("用户不存在。", status=HTTPStatus.UNAUTHORIZED)
+                if password_hash_needs_upgrade(str(row["password_hash"])):
+                    connection.execute(
+                        "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
+                        (hash_password(valid_password), now, user.user_id),
+                    )
                 token = self._create_session(connection, user.user_id, now)
                 return user, token
 
@@ -209,25 +280,32 @@ class UserStore:
         normalized_token = str(token or "").strip()
         if not normalized_token:
             raise AuthError("缺少登录令牌。", status=HTTPStatus.UNAUTHORIZED)
-        now = time.time()
+        now = self._clock()
+        token_hash = session_token_hash(normalized_token)
         with self._lock:
             self._ensure_schema()
             with self._connection() as connection:
                 row = connection.execute(
                     """
-                    SELECT users.*
+                    SELECT users.*, sessions.last_seen_at
                     FROM sessions
                     JOIN users ON users.id = sessions.user_id
-                    WHERE sessions.token = ? AND sessions.expires_at > ?
+                    WHERE sessions.token_hash = ? AND sessions.expires_at > ?
+                      AND sessions.last_seen_at > ?
                     """,
-                    (normalized_token, now),
+                    (token_hash, now, now - self._session_idle_ttl_seconds),
                 ).fetchone()
                 if row is None:
+                    connection.execute(
+                        "DELETE FROM sessions WHERE token_hash = ?",
+                        (token_hash,),
+                    )
                     raise AuthError("登录状态已失效，请重新登录。", status=HTTPStatus.UNAUTHORIZED)
-                connection.execute(
-                    "UPDATE sessions SET last_seen_at = ? WHERE token = ?",
-                    (now, normalized_token),
-                )
+                if now - float(row["last_seen_at"]) >= SESSION_TOUCH_INTERVAL_SECONDS:
+                    connection.execute(
+                        "UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?",
+                        (now, token_hash),
+                    )
                 user = self._user_from_row(row)
                 if user is None:
                     raise AuthError("登录状态已失效，请重新登录。", status=HTTPStatus.UNAUTHORIZED)
@@ -240,15 +318,36 @@ class UserStore:
         with self._lock:
             self._ensure_schema()
             with self._connection() as connection:
-                connection.execute("DELETE FROM sessions WHERE token = ?", (normalized_token,))
+                connection.execute(
+                    "DELETE FROM sessions WHERE token_hash = ?",
+                    (session_token_hash(normalized_token),),
+                )
 
     def _create_session(self, connection: sqlite3.Connection, user_id: int, now: float) -> str:
+        connection.execute(
+            "DELETE FROM sessions WHERE expires_at <= ? OR last_seen_at <= ?",
+            (now, now - self._session_idle_ttl_seconds),
+        )
+        overflow = connection.execute(
+            """
+            SELECT token_hash FROM sessions WHERE user_id = ?
+            ORDER BY last_seen_at DESC, created_at DESC
+            LIMIT -1 OFFSET ?
+            """,
+            (user_id, self._max_active_sessions_per_user - 1),
+        ).fetchall()
+        if overflow:
+            connection.executemany(
+                "DELETE FROM sessions WHERE token_hash = ?",
+                [(str(row["token_hash"]),) for row in overflow],
+            )
         token = secrets.token_urlsafe(32)
+        token_hash = session_token_hash(token)
         connection.execute(
             """
-            INSERT INTO sessions (token, user_id, created_at, last_seen_at, expires_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO sessions (token, token_hash, user_id, created_at, last_seen_at, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (token, user_id, now, now, now + SESSION_TTL_SECONDS),
+            (f"stored:{token_hash}", token_hash, user_id, now, now, now + self._session_ttl_seconds),
         )
         return token

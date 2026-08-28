@@ -311,11 +311,11 @@ def rebellion_funding_option(world: WorldState, *, sponsor_faction_id: str, city
     risk = rebellion_risk(city, food_shortage=False)
     eligible_crisis = bool(city.occupation.get("status") in {"pending", "active"} or rebellion_force_troops(city) > 0 or risk >= 45)
     blocked = ""
-    if sponsor.is_neutral_city_state:
+    if not sponsor.is_major:
         blocked = "中立城邦不能资助外部叛乱。"
     elif city.owner_faction_id == sponsor.faction_id:
         blocked = "不能资助本势力城市内的叛乱。"
-    elif owner.is_neutral_city_state:
+    elif not owner.is_major:
         blocked = "外部资助只能针对主要势力控制的城市。"
     elif sponsor.resources.money < REBELLION_FUNDING_MONEY_COST:
         blocked = f"势力金钱不足 {REBELLION_FUNDING_MONEY_COST}。"
@@ -393,7 +393,7 @@ def resolve_rebellion_political_outcome(
     sponsors = _rebellion_sponsor_ids(city)
     candidates = []
     for faction in world.factions:
-        if faction.is_neutral_city_state or faction.faction_id == old_owner_id:
+        if not faction.is_major or faction.faction_id == old_owner_id:
             continue
         support = _clamp(city.support_by_faction.get(faction.faction_id, 35), 0, 100)
         threshold = 60 if faction.faction_id in sponsors else 70
@@ -406,6 +406,15 @@ def resolve_rebellion_political_outcome(
         set_rebellion_force_troops(city, 0, month=month)
         city.occupation.update({"status": "ended", "outcome": "rebellion_defection", "ended_month": month})
         city.event_states = [state for state in city.event_states if not state.startswith("rebellion_sponsor:")]
+        from wujiang.strategy.relics import apply_city_control_change_consequences
+
+        apply_city_control_change_consequences(
+            world,
+            city_id=city.city_id,
+            previous_faction_id=old_owner_id,
+            new_faction_id=new_owner_id,
+            cause="rebellion_defection",
+        )
         events.append(EventLogEntry(
             month=month,
             category="rebellion_defection",
@@ -426,6 +435,15 @@ def resolve_rebellion_political_outcome(
     set_rebellion_force_troops(city, 0, month=month)
     city.occupation.update({"status": "ended", "outcome": "autonomy_restored", "ended_month": month})
     city.event_states = [state for state in city.event_states if not state.startswith("rebellion_sponsor:")]
+    from wujiang.strategy.relics import apply_city_control_change_consequences
+
+    apply_city_control_change_consequences(
+        world,
+        city_id=city.city_id,
+        previous_faction_id=old_owner_id,
+        new_faction_id=previous_owner.faction_id,
+        cause="rebellion_autonomy_restored",
+    )
     events.append(EventLogEntry(
         month=month,
         category="rebellion_autonomy_restored",

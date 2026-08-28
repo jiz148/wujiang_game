@@ -6,6 +6,7 @@ from typing import Any
 from wujiang.strategy.battles import city_attack_commitment
 from wujiang.strategy.models import City, EventLogEntry, Faction, WorldState
 from wujiang.strategy.objectives import FIRST_CAMPAIGN_SCENARIO_ID
+from wujiang.strategy.quick_campaign import QUICK_CAMPAIGN_SCENARIO_ID
 from wujiang.strategy.simulation import rebellion_risk
 
 
@@ -13,7 +14,10 @@ GOAL_DURATION_MONTHS = {"stabilize_food": 2, "stabilize_unrest": 2, "secure_bord
 
 
 def _enabled(world: WorldState) -> bool:
-    return str(world.campaign_contract.get("id") or "") == FIRST_CAMPAIGN_SCENARIO_ID
+    return str(world.campaign_contract.get("id") or "") in {
+        FIRST_CAMPAIGN_SCENARIO_ID,
+        QUICK_CAMPAIGN_SCENARIO_ID,
+    }
 
 
 def _cities(world: WorldState, faction_id: str) -> list[City]:
@@ -215,7 +219,7 @@ def ensure_ai_strategic_goal(world: WorldState, faction_id: str) -> dict[str, An
     if not _enabled(world):
         return None
     faction = next((item for item in world.factions if item.faction_id == faction_id), None)
-    if faction is None or faction.is_neutral_city_state:
+    if faction is None or not faction.is_major:
         return None
     state = copy.deepcopy(world.ai_strategic_goals.get(faction_id) or {"current": None, "history": []})
     current = state.get("current")
@@ -360,7 +364,7 @@ def ai_strategic_goals_public(world: WorldState) -> list[dict[str, Any]]:
     for faction_id, state in sorted(world.ai_strategic_goals.items()):
         faction = factions.get(faction_id)
         current = state.get("current") if isinstance(state, dict) else None
-        if faction is None or faction.is_neutral_city_state or not isinstance(current, dict):
+        if faction is None or not faction.is_major or not isinstance(current, dict):
             continue
         target = cities.get(str(current.get("target_city_id") or ""))
         rows.append(

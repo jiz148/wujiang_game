@@ -57,6 +57,12 @@ def generate_random_world(
     neutral_city_states: bool = False,
     campaign_contract: dict[str, Any] | None = None,
 ) -> WorldState:
+    contract = dict(campaign_contract or {})
+    if contract:
+        city_count = int(contract.get("city_count", city_count))
+        faction_count = int(contract.get("major_faction_count", faction_count))
+        if "neutral_city_state_count" in contract:
+            neutral_city_states = int(contract["neutral_city_state_count"]) > 0
     if city_count < 2:
         raise StrategyError("随机战略地图至少需要 2 座城市。")
     if faction_count < 1:
@@ -191,11 +197,23 @@ def generate_random_world(
             )
         ],
         memory_tags=["campaign_started"],
-        campaign_contract=dict(campaign_contract or {}),
+        campaign_contract=contract,
     )
     from wujiang.strategy.story import open_monthly_story_events
 
     from wujiang.strategy.heroes import ensure_strategic_hero_system
+    from wujiang.strategy.objectives import apply_campaign_opening_variant
     from wujiang.strategy.offices import ensure_office_system
+    from wujiang.strategy.quick_campaign import apply_quick_campaign_setup
+    from wujiang.strategy.relics import ensure_relic_system
+    from wujiang.strategy.world_crisis import ensure_world_crises
 
-    return ensure_strategic_hero_system(ensure_office_system(open_monthly_story_events(world)))
+    return ensure_world_crises(
+        ensure_relic_system(
+            ensure_strategic_hero_system(
+                ensure_office_system(
+                    open_monthly_story_events(apply_quick_campaign_setup(apply_campaign_opening_variant(world)))
+                )
+            )
+        )
+    )

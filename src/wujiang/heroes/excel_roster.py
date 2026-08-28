@@ -7280,6 +7280,7 @@ def _make_build_traits(spec: dict[str, Any]) -> Callable[[AbstractHero], list[Tr
 def _hero_class_from_spec(spec: dict[str, Any]) -> type[AbstractHero]:
     width, height = _footprint_size(spec)
     attrs: dict[str, Any] = {
+        "__module__": __name__,
         "hero_code": spec["code"],
         "hero_name": spec["name"],
         "role": spec["role"],
@@ -7359,6 +7360,8 @@ EXCEL_HERO_REGISTRY: dict[str, HeroFactory] = {
     spec["code"]: _hero_class_from_spec(spec)
     for spec in EXCEL_HERO_SPECS
 }
+for _excel_hero_class in EXCEL_HERO_REGISTRY.values():
+    globals()[_excel_hero_class.__name__] = _excel_hero_class
 
 EXCEL_HERO_NAMES_BY_CODE: dict[str, str] = {
     spec["code"]: spec["name"]

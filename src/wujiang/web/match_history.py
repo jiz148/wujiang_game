@@ -42,6 +42,14 @@ class MatchHistoryStore:
         connection.row_factory = sqlite3.Row
         return connection
 
+    def healthcheck(self) -> None:
+        self._ensure_schema()
+        connection = self._connect()
+        try:
+            connection.execute("SELECT 1 FROM match_history LIMIT 1").fetchone()
+        finally:
+            connection.close()
+
     def _ensure_schema(self) -> None:
         if self._schema_ready:
             return

@@ -27,12 +27,17 @@ def strategy_action_command_cost(action_type: str, payload: dict[str, Any] | Non
         return 1
     if normalized_type == "peaceful_integration":
         return 2
-    if normalized_type in {"incite_neutral_city_state", "neutral_diplomacy"}:
+    if normalized_type in {"incite_neutral_city_state", "neutral_diplomacy", "world_crisis_choice"}:
         return 1
     if normalized_type in {
         "set_city_policy",
         "unlock_tactic_tech",
         "perform_hero_ritual",
+        "search_relic",
+        "transfer_relic",
+        "repair_relic",
+        "bind_relic",
+        "release_relic",
         "unbind_strategic_hero",
         "exile_action",
         "resolve_story_event",
@@ -42,6 +47,8 @@ def strategy_action_command_cost(action_type: str, payload: dict[str, Any] | Non
         "form_army",
         "disband_army",
         "set_army_movement",
+        "set_siege_attacker_stance",
+        "set_siege_defender_stance",
         "load_army_supply",
         "construct_city_building",
     }:

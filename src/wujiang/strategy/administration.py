@@ -23,6 +23,12 @@ REGISTERED_UNIT_TYPES: dict[str, dict[str, Any]] = {
     "infantry": {"name": "步兵", "troop_cost": 100, "building_id": "barracks"},
     "archer": {"name": "弓兵", "troop_cost": 140, "building_id": "archery_range"},
     "cavalry": {"name": "骑兵", "troop_cost": 180, "building_id": "stables"},
+    "snow_ghost": {
+        "name": "雪鬼",
+        "troop_cost": 100,
+        "building_id": None,
+        "player_trainable": False,
+    },
 }
 
 
@@ -125,6 +131,8 @@ def _eligible_registration_types(world: WorldState, city, faction_id: str) -> li
     unlocked = unlocked_registered_unit_types(faction)
     weighted: list[str] = []
     for unit_type, config in REGISTERED_UNIT_TYPES.items():
+        if config.get("player_trainable", True) is False:
+            continue
         building_level = int(city.building_levels.get(str(config["building_id"]), 0))
         if unit_type in unlocked and building_level > 0:
             weighted.extend([unit_type] * building_level)

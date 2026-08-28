@@ -9,6 +9,11 @@ from wujiang.strategy.heroes import hero_ritual_capacity, perform_hero_ritual
 from wujiang.strategy.models import EventLogEntry, OfficeOrder, WorldState
 from wujiang.strategy.offices import OFFICE_TYPE_LABELS, ensure_office_system
 from wujiang.strategy.story import choose_ai_story_choice, pending_story_event_for_faction, resolve_story_event
+from wujiang.strategy.quick_campaign import (
+    QUICK_CAMPAIGN_SCENARIO_ID,
+    is_quick_campaign,
+    quick_campaign_recommendations,
+)
 from wujiang.strategy.tactics import set_city_policy
 
 
@@ -16,7 +21,10 @@ FIRST_CAMPAIGN_ID = "city_states_twelve_months_v1"
 
 
 def _enabled(world: WorldState) -> bool:
-    return str(world.campaign_contract.get("id") or "") == FIRST_CAMPAIGN_ID
+    return str(world.campaign_contract.get("id") or "") in {
+        FIRST_CAMPAIGN_ID,
+        QUICK_CAMPAIGN_SCENARIO_ID,
+    }
 
 
 def _clone_world(world: WorldState) -> WorldState:
@@ -126,7 +134,7 @@ def apply_player_office_automation(
     actions = list(queued_actions)
     for faction_id in sorted({str(item) for item in controlled_faction_ids}):
         faction = next((item for item in next_world.factions if item.faction_id == faction_id), None)
-        if faction is None or faction.is_neutral_city_state:
+        if faction is None or not faction.is_major:
             continue
         expected_month = next_world.current_month + 1
         results: list[str] = []
@@ -214,7 +222,7 @@ def office_coordination_public(world: WorldState, queued_actions: Iterable[Any])
     output: dict[str, dict[str, Any]] = {}
     offices = {office.office_id: office for office in world.offices}
     for faction in world.factions:
-        if faction.is_neutral_city_state:
+        if not faction.is_major:
             continue
         faction_actions = [item for item in actions if item.get("faction_id") == faction.faction_id]
         decisions: list[dict[str, Any]] = []
@@ -314,10 +322,14 @@ def office_coordination_public(world: WorldState, queued_actions: Iterable[Any])
                 "expected_completion_month": int(order.details.get("expected_completion_month") or order.deadline_month or order.issued_month + 1),
                 "result_summary": str(order.details.get("result_summary") or "等待接收职位处理。"),
             })
+        quick_pacing = quick_campaign_recommendations(world, faction.faction_id, faction_actions) if is_quick_campaign(world) else None
+        if quick_pacing is not None and not quick_pacing["opening_required"]:
+            decisions = list(quick_pacing["recommendations"])
         output[faction.faction_id] = {
             "high_consequence_decisions": decisions[:3],
             "routine_maintenance": routine,
             "order_feedback": feedback[-8:],
             "automation_rule": "默认方针持续生效；AI 官职只在缺粮或叛乱风险下自动调整一座城，并且只能使用玩家计划后剩余的军令。",
+            "quick_pacing": quick_pacing,
         }
     return output

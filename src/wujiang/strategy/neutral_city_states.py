@@ -62,11 +62,11 @@ def validate_neutral_city_state_incitement(
     instigator = faction_by_id(world, instigator_faction_id)
     neutral = faction_by_id(world, neutral_faction_id)
     target = faction_by_id(world, target_faction_id)
-    if instigator.is_neutral_city_state:
+    if not instigator.is_major:
         raise StrategyError("中立城邦不能教唆其他城邦。")
     if not neutral.is_neutral_city_state:
         raise StrategyError("只能教唆中立城邦。")
-    if target.is_neutral_city_state:
+    if not target.is_major:
         raise StrategyError("教唆目标必须是玩家或主要 AI 势力。")
     if target.faction_id == instigator.faction_id:
         raise StrategyError("不能教唆中立城邦攻击己方。")

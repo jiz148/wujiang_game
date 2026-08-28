@@ -3,16 +3,16 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>产品聚合数据 · 武将</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <title>战役数据看板 · 武将</title>
+    <link rel="stylesheet" href="/styles.css?v=p82" />
   </head>
   <body class="analytics-page">
     <main class="analytics-shell">
       <header class="analytics-header">
         <div>
-          <p class="eyebrow">Phase 1 · 本地聚合数据</p>
-          <h1>对战与再战漏斗</h1>
-          <p class="subline">只显示白名单事件的聚合结果，不展示密码、账号、session token 或房间凭据。</p>
+          <p class="eyebrow">Phase 8 · 战役聚合数据</p>
+          <h1>战役节奏、路线与 AI 竞争力</h1>
+          <p class="subline">只显示服务端权威快照的聚合结果，不展示密码、账号、用户名、session token、加入码、军令文本或房间凭据。</p>
         </div>
         <div class="analytics-actions">
           <a class="ghost button-link" href="/">返回游戏</a>
@@ -21,6 +21,46 @@
       </header>
 
       <p id="analytics-status" class="analytics-status" role="status">正在读取本地数据…</p>
+      <section class="panel analytics-panel" aria-labelledby="strategy-filter-title">
+        <div class="section-head">
+          <div>
+            <h2 id="strategy-filter-title">战役筛选</h2>
+            <p class="meta-note">可按规则版本、变体、种子、人数、危机、胜利路线和月份组合筛选。</p>
+          </div>
+          <button id="reset-strategy-filters" class="ghost" type="button">清除筛选</button>
+        </div>
+        <div id="strategy-analytics-filters" class="analytics-filter-grid">
+          <label><span>内容版本</span><select data-filter="content_version"><option value="">全部</option></select></label>
+          <label><span>平衡版本</span><select data-filter="balance_version"><option value="">全部</option></select></label>
+          <label><span>开局变体</span><select data-filter="variant_id"><option value="">全部</option></select></label>
+          <label><span>地图种子</span><select data-filter="seed"><option value="">全部</option></select></label>
+          <label><span>真人数</span><select data-filter="human_count"><option value="">全部</option></select></label>
+          <label><span>危机</span><select data-filter="crisis_id"><option value="">全部</option></select></label>
+          <label><span>危机阶段</span><select data-filter="crisis_stage"><option value="">全部</option></select></label>
+          <label><span>胜利路线</span><select data-filter="victory_route"><option value="">全部</option></select></label>
+          <label><span>月份</span><select data-filter="month"><option value="">全部</option></select></label>
+        </div>
+      </section>
+      <section id="strategy-analytics-summary" class="analytics-summary" aria-label="战役关键指标"></section>
+      <section class="analytics-dashboard-grid">
+        <article class="panel analytics-panel">
+          <h2>胜利路线</h2>
+          <div class="analytics-table-wrap"><table class="analytics-table"><thead><tr><th>路线</th><th>战役数</th></tr></thead><tbody id="strategy-victory-routes"></tbody></table></div>
+        </article>
+        <article class="panel analytics-panel">
+          <h2>未完成战役最后月份</h2>
+          <div class="analytics-table-wrap"><table class="analytics-table"><thead><tr><th>月份</th><th>战役数</th></tr></thead><tbody id="strategy-dropoff"></tbody></table></div>
+        </article>
+      </section>
+      <section class="panel analytics-panel">
+        <div class="section-head"><div><h2>月度经济与滚雪球</h2><p id="strategy-sample-quality" class="meta-note"></p></div></div>
+        <div class="analytics-table-wrap">
+          <table class="analytics-table">
+            <thead><tr><th>月份</th><th>战役</th><th>城市领先差</th><th>真人粮/钱/以太</th><th>AI 粮/钱/以太</th></tr></thead>
+            <tbody id="strategy-monthly"></tbody>
+          </table>
+        </div>
+      </section>
       <section id="analytics-summary" class="analytics-summary" aria-label="关键指标"></section>
       <section class="panel analytics-panel">
         <div class="section-head">
@@ -39,6 +79,6 @@
         </div>
       </section>
     </main>
-    <script src="/analytics.js"></script>
+    <script src="/analytics.js?v=p82"></script>
   </body>
 </html>

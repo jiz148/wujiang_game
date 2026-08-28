@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
+from http import HTTPStatus
 from pathlib import Path
 
 
@@ -13,15 +17,24 @@ if str(SRC) not in sys.path:
 
 from wujiang.strategy import (  # noqa: E402
     FACTION_MONTHLY_COMMAND_POINTS,
+    SNOW_GHOST_COLD_ROUTE_MIN_SUPPLY,
+    SNOW_GHOST_FACTION_ID,
+    SNOW_GHOST_MOBILIZATION_MONTH,
+    SNOW_GHOST_SHOWDOWN_MONTH,
+    SNOW_GHOST_VANGUARD_ARMY_ID,
     STRATEGIC_HERO_BATTLE_SLEEP_MONTHS,
+    RELIC_ALTAR_VICTORY_REQUIRED_MONTHS,
     StrategyError,
     StrategyStore,
     active_strategic_hero_codes_for_faction,
+    advance_hero_personal_states,
     advance_month,
+    advance_relic_maintenance,
     advance_story_events,
     apply_rebellion_action,
     apply_rebellion_battle,
     apply_strategy_ai_monthly_actions,
+    apply_strategy_ai_showdown_action,
     ai_strategic_goals_public,
     apply_exile_action,
     apply_office_order,
@@ -32,7 +45,9 @@ from wujiang.strategy import (  # noqa: E402
     apply_rebellion_funding,
     appoint_strategic_hero_to_office,
     assign_strategic_hero_duty,
+    bind_relic,
     hero_ritual_capacity,
+    hero_command_accepts,
     perform_hero_ritual,
     unbind_strategic_hero,
     accept_hero_recruitment,
@@ -43,19 +58,36 @@ from wujiang.strategy import (  # noqa: E402
     archive_campaign,
     continue_campaign_as_sandbox,
     declare_city_attack,
+    declare_strategic_battle,
     evaluate_strategic_status,
     ensure_office_system,
+    ensure_relic_system,
     ensure_strategic_hero_system,
+    ensure_world_crises,
     faction_command_points,
     form_or_reinforce_army,
+    advance_army_encounters,
+    advance_army_movements,
+    advance_army_retreats,
     advance_army_supply,
+    advance_sieges,
     army_supply_plan,
     disband_army,
     halt_army_march,
     order_army_march,
+    order_army_intercept,
+    order_army_reinforce,
+    order_army_retreat,
+    order_siege_attacker_stance,
+    order_siege_defender_stance,
     load_army_supply,
     shortest_army_route,
+    snow_ghost_cold_route_keys,
     first_campaign_contract,
+    quick_campaign_contract,
+    quick_campaign_opening_status,
+    quick_campaign_recommendations,
+    apply_quick_campaign_opening_choice,
     generate_random_world,
     monthly_briefings_public,
     neutral_city_state_profile,
@@ -80,12 +112,22 @@ from wujiang.strategy import (  # noqa: E402
     rebellion_action_choices_public,
     rebellion_force_troops,
     rebellion_risk,
+    relic_system_public,
+    repair_relic,
+    release_relic,
+    record_strategic_hero_battle_losses,
+    search_relic,
+    transfer_relic,
     record_strategic_status_events,
     require_campaign_orders_open,
     resolve_battle_room_result,
+    resolve_pending_battle,
     resolve_action_office,
     resolve_story_event,
+    resolve_world_crisis_choice,
+    set_world_crisis_showdown_resolution,
     roster_for_city_troops,
+    roster_for_registered_units,
     set_battle_defender_hero,
     set_city_policy,
     set_strategic_defender_hero,
@@ -102,11 +144,18 @@ from wujiang.strategy import (  # noqa: E402
     unlock_tactic_tech,
     validate_rebellion_action,
     validate_rebellion_battle,
+    validate_relic_search,
+    validate_bind_relic,
+    validate_release_relic,
     validate_summon_strategic_hero,
     validate_story_event_choice,
+    validate_world_crisis_choice,
     validate_exile_action,
+    strategic_route_key,
+    world_crises_public,
 )
 from wujiang.strategy.models import City, DiplomaticAgreement, Faction, MapNode, PendingBattle, ResourceBundle, StoryEvent, WorldState  # noqa: E402
+from wujiang.strategy.migrations import CURRENT_STRATEGY_SAVE_VERSION, migrate_world_payload  # noqa: E402
 from wujiang.strategy.monthly_cycle import forecast_city_month, monthly_cycle_public, record_monthly_report  # noqa: E402
 from wujiang.strategy.campaign_tutorial import campaign_tutorial_public, update_campaign_tutorial  # noqa: E402
 from wujiang.strategy.office_automation import apply_player_office_automation, office_coordination_public  # noqa: E402
@@ -118,6 +167,70 @@ from wujiang.heroes.registry import create_battle, list_heroes  # noqa: E402
 
 
 class StrategyGenerationTests(unittest.TestCase):
+    def test_r1_quick_campaign_is_compact_and_opening_choice_changes_real_state_once(self) -> None:
+        world = generate_random_world(seed=42, campaign_contract=quick_campaign_contract())
+
+        self.assertEqual(len(world.cities), 5)
+        self.assertEqual(len([item for item in world.factions if item.is_major]), 2)
+        self.assertEqual(len([item for item in world.factions if item.is_neutral_city_state]), 3)
+        self.assertEqual(world.campaign_contract["month_limit"], 6)
+        self.assertEqual(world.campaign_contract["expected_duration_minutes"], [25, 35])
+        self.assertEqual(world.world_crises, [])
+        self.assertEqual(world.relics, [])
+        quick_status = evaluate_strategic_status(world)
+        locked_conditions = {
+            item["id"]: item["implemented"]
+            for item in quick_status["victory_conditions"]
+            if item["id"] in {"world_mainline", "relic_altar"}
+        }
+        self.assertEqual(locked_conditions, {"world_mainline": False, "relic_altar": False})
+
+        opening = quick_campaign_opening_status(world, "faction_1")
+        assert opening is not None
+        self.assertTrue(opening["available"])
+        self.assertEqual([item["id"] for item in opening["choices"]], ["stabilize", "diplomacy", "mobilize"])
+        capital = next(item for item in world.cities if item.city_id == "city_1")
+        before_troops = capital.resources.troops
+        before_food = next(item for item in world.factions if item.faction_id == "faction_1").resources.food
+
+        updated = apply_quick_campaign_opening_choice(
+            world,
+            faction_id="faction_1",
+            choice_id="mobilize",
+        )
+
+        updated_capital = next(item for item in updated.cities if item.city_id == "city_1")
+        updated_faction = next(item for item in updated.factions if item.faction_id == "faction_1")
+        self.assertEqual(updated_capital.resources.troops, before_troops + 180)
+        self.assertEqual(updated_faction.resources.food, before_food + 100)
+        self.assertFalse(quick_campaign_opening_status(updated, "faction_1")["available"])
+        self.assertTrue(any(event.category == "quick_campaign_opening_choice" for event in updated.event_log))
+        pacing = quick_campaign_recommendations(updated, "faction_1")
+        assert pacing is not None
+        self.assertLessEqual(len(pacing["recommendations"]), 3)
+        self.assertEqual(pacing["recommendations"][0]["kind"], "military")
+        self.assertTrue(pacing["conflict_window"]["available"])
+        self.assertEqual(pacing["conflict_window"]["expected_month"], 2)
+        self.assertEqual(
+            {item["kind"] for item in pacing["recommendations"]},
+            {"governance", "diplomacy", "military"},
+        )
+        self.assertTrue(all(item["available"] for item in pacing["recommendations"]))
+        military = pacing["recommendations"][0]
+        self.assertEqual(military["recommended_action"]["action_type"], "declare_attack")
+        self.assertEqual(military["recommended_action"]["command_cost"], 2)
+        with self.assertRaisesRegex(StrategyError, "已经完成"):
+            apply_quick_campaign_opening_choice(updated, faction_id="faction_1", choice_id="stabilize")
+        updated.current_month = 4
+        later_pacing = quick_campaign_recommendations(updated, "faction_1")
+        assert later_pacing is not None
+        self.assertEqual(later_pacing["conflict_window"]["expected_month"], 4)
+        self.assertIn("本月可执行", later_pacing["conflict_window"]["summary"])
+        updated.current_month = 6
+        conclusion = evaluate_strategic_status(updated)["conclusion"]
+        self.assertEqual(conclusion["reason"], "time_limit")
+        self.assertEqual(conclusion["result_label"], "六月评议")
+
     def test_random_world_is_deterministic_and_connected(self) -> None:
         first = generate_random_world(seed=42, city_count=7, faction_count=3)
         second = generate_random_world(seed=42, city_count=7, faction_count=3)
@@ -137,6 +250,726 @@ class StrategyGenerationTests(unittest.TestCase):
             seen.add(node_id)
             stack.extend(sorted(graph[node_id] - seen))
         self.assertEqual(seen, set(graph))
+
+    def test_first_campaign_builds_deterministic_relic_archive_and_capital_altars(self) -> None:
+        first = generate_random_world(
+            seed=611,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+        second = generate_random_world(
+            seed=611,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+
+        self.assertEqual(first.to_dict(), second.to_dict())
+        self.assertEqual(len(first.relics), len(first.strategic_heroes))
+        self.assertEqual(
+            {relic.hero_code for relic in first.relics},
+            {hero.hero_code for hero in first.strategic_heroes},
+        )
+        self.assertEqual(len(first.relic_altars), 2)
+        self.assertTrue(all(altar.state == "dormant" for altar in first.relic_altars))
+        self.assertTrue(all(relic.state == "scattered" for relic in first.relics))
+        self.assertTrue(all(relic.location_node_id for relic in first.relics))
+        self.assertEqual(
+            {altar.city_id for altar in first.relic_altars},
+            {faction.capital_city_id for faction in first.factions if faction.is_major},
+        )
+        public = first.to_public_dict()
+        self.assertNotIn("relics", public)
+        self.assertNotIn("relic_altars", public)
+        self.assertEqual(public["relic_system"]["phase"], "p6_6_relic_victory")
+        for faction in (item for item in first.factions if item.is_major):
+            intel = public["relic_system"]["intel_by_faction"][faction.faction_id]
+            self.assertEqual(intel["known_count"], 1)
+            self.assertEqual(intel["unknown_count"], len(first.relics) - 1)
+            self.assertTrue(intel["known_relics"][0]["location_city_name"])
+            self.assertTrue(intel["search_options"])
+
+    def test_campaign_opening_variants_persist_versions_and_apply_only_declared_modifiers(self) -> None:
+        classic = generate_random_world(
+            seed=812,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract("classic_frontier"),
+        )
+        hungry = generate_random_world(
+            seed=812,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract("hungry_frontier"),
+        )
+        fortified = generate_random_world(
+            seed=812,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract("fortified_leagues"),
+        )
+        ether = generate_random_world(
+            seed=812,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract("ether_tide"),
+        )
+
+        self.assertTrue(classic.campaign_contract["content_version"])
+        self.assertTrue(classic.campaign_contract["balance_version"])
+        self.assertEqual(hungry.campaign_contract["opening_variant"]["id"], "hungry_frontier")
+        for classic_city, hungry_city in zip(classic.cities, hungry.cities, strict=True):
+            self.assertEqual(hungry_city.resources.food, classic_city.resources.food * 70 // 100)
+        for classic_faction, hungry_faction in zip(classic.factions, hungry.factions, strict=True):
+            expected = classic_faction.resources.food * 75 // 100 if classic_faction.is_major else classic_faction.resources.food
+            self.assertEqual(hungry_faction.resources.food, expected)
+        classic_neutral = next(city for city in classic.cities if city.owner_faction_id.startswith("neutral_city_state_"))
+        fortified_neutral = next(city for city in fortified.cities if city.city_id == classic_neutral.city_id)
+        self.assertEqual(fortified_neutral.defense, classic_neutral.defense + 2)
+        self.assertEqual(fortified_neutral.resources.troops, classic_neutral.resources.troops + 120)
+        self.assertEqual(
+            fortified_neutral.support_by_faction["local_autonomy"],
+            min(100, classic_neutral.support_by_faction["local_autonomy"] + 15),
+        )
+        for classic_city, ether_city in zip(classic.cities, ether.cities, strict=True):
+            self.assertEqual(ether_city.resources.ether, classic_city.resources.ether + 60)
+        for classic_faction, ether_faction in zip(classic.factions, ether.factions, strict=True):
+            if classic_faction.is_major:
+                self.assertEqual(ether_faction.resources.ether, classic_faction.resources.ether + 30)
+                self.assertEqual(ether_faction.resources.money, classic_faction.resources.money - 80)
+        with self.assertRaises(StrategyError):
+            first_campaign_contract("unknown_variant")
+
+    def test_relic_search_consumes_hero_action_and_stores_result_deterministically(self) -> None:
+        world = generate_random_world(
+            seed=611,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+        faction = next(item for item in world.factions if item.faction_id == "faction_1")
+        city = next(item for item in world.cities if item.city_id == faction.capital_city_id)
+        lord = next(
+            item for item in world.offices
+            if item.faction_id == faction.faction_id and item.office_type == "lord"
+        )
+        hero = next(
+            item for item in world.strategic_heroes
+            if item.faction_id == faction.faction_id and item.status == "serving" and item.city_id == city.city_id
+        )
+        relic = next(
+            item for item in world.relics
+            if faction.faction_id in item.discovered_by_faction_ids
+        )
+        food_before = city.resources.food
+
+        searched = search_relic(
+            world,
+            faction_id=faction.faction_id,
+            relic_id=relic.relic_id,
+            hero_code=hero.hero_code,
+            city_id=city.city_id,
+            issuer_office_id=lord.office_id,
+        )
+        stored = next(item for item in searched.relics if item.relic_id == relic.relic_id)
+        searched_city = next(item for item in searched.cities if item.city_id == city.city_id)
+        searched_hero = next(item for item in searched.strategic_heroes if item.hero_code == hero.hero_code)
+        self.assertEqual((stored.state, stored.location_city_id, stored.owner_faction_id), ("stored", city.city_id, faction.faction_id))
+        self.assertIn(stored.relic_id, searched_city.relics_stored)
+        self.assertEqual(searched_city.resources.food, food_before - 20)
+        self.assertEqual(searched_hero.last_personal_action_month, world.current_month)
+        alternate = next(item for item in searched.relics if item.state == "scattered")
+        alternate.location_node_id = city.node_id
+        alternate.discovered_by_faction_ids.append(faction.faction_id)
+        with self.assertRaises(StrategyError):
+            validate_relic_search(
+                searched,
+                faction_id=faction.faction_id,
+                relic_id=alternate.relic_id,
+                hero_code=hero.hero_code,
+                city_id=city.city_id,
+                issuer_office_id=lord.office_id,
+            )
+
+    def test_relic_transfer_moves_one_owned_edge_and_repair_spends_real_resources(self) -> None:
+        world = generate_random_world(
+            seed=611,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+        faction = next(item for item in world.factions if item.faction_id == "faction_1")
+        source = next(item for item in world.cities if item.city_id == faction.capital_city_id)
+        source_node = next(item for item in world.nodes if item.node_id == source.node_id)
+        target = next(item for item in world.cities if item.node_id in source_node.connected_node_ids)
+        target.owner_faction_id = faction.faction_id
+        lord = next(
+            item for item in world.offices
+            if item.faction_id == faction.faction_id and item.office_type == "lord"
+        )
+        hero = next(
+            item for item in world.strategic_heroes
+            if item.faction_id == faction.faction_id and item.status == "serving" and item.city_id == source.city_id
+        )
+        relic = next(item for item in world.relics if faction.faction_id in item.discovered_by_faction_ids)
+        stored_world = search_relic(
+            world,
+            faction_id=faction.faction_id,
+            relic_id=relic.relic_id,
+            hero_code=hero.hero_code,
+            city_id=source.city_id,
+            issuer_office_id=lord.office_id,
+        )
+        transferred = transfer_relic(
+            stored_world,
+            faction_id=faction.faction_id,
+            relic_id=relic.relic_id,
+            target_city_id=target.city_id,
+            issuer_office_id=lord.office_id,
+        )
+        moved = next(item for item in transferred.relics if item.relic_id == relic.relic_id)
+        self.assertEqual(moved.location_city_id, target.city_id)
+        self.assertNotIn(relic.relic_id, next(item for item in transferred.cities if item.city_id == source.city_id).relics_stored)
+        self.assertIn(relic.relic_id, next(item for item in transferred.cities if item.city_id == target.city_id).relics_stored)
+
+        moved.condition = "damaged"
+        faction_after = next(item for item in transferred.factions if item.faction_id == faction.faction_id)
+        target_after = next(item for item in transferred.cities if item.city_id == target.city_id)
+        money_before = faction_after.resources.money
+        ether_before = target_after.resources.ether
+        repaired = repair_relic(
+            transferred,
+            faction_id=faction.faction_id,
+            relic_id=relic.relic_id,
+            issuer_office_id=lord.office_id,
+        )
+        repaired_relic = next(item for item in repaired.relics if item.relic_id == relic.relic_id)
+        self.assertEqual(repaired_relic.condition, "intact")
+        self.assertEqual(
+            next(item for item in repaired.factions if item.faction_id == faction.faction_id).resources.money,
+            money_before - 40,
+        )
+        self.assertEqual(
+            next(item for item in repaired.cities if item.city_id == target.city_id).resources.ether,
+            ether_before - 20,
+        )
+
+    def test_relic_altar_binding_maintenance_failure_recovery_and_release_form_a_cycle(self) -> None:
+        world = generate_random_world(
+            seed=611,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+        faction = next(item for item in world.factions if item.faction_id == "faction_1")
+        city = next(item for item in world.cities if item.city_id == faction.capital_city_id)
+        altar = next(item for item in world.relic_altars if item.city_id == city.city_id)
+        lord = next(
+            item for item in world.offices
+            if item.faction_id == faction.faction_id and item.office_type == "lord"
+        )
+        hero = next(
+            item for item in world.strategic_heroes
+            if item.faction_id == faction.faction_id and item.status == "serving" and item.city_id == city.city_id
+        )
+        relic = next(item for item in world.relics if faction.faction_id in item.discovered_by_faction_ids)
+        stored_world = search_relic(
+            world,
+            faction_id=faction.faction_id,
+            relic_id=relic.relic_id,
+            hero_code=hero.hero_code,
+            city_id=city.city_id,
+            issuer_office_id=lord.office_id,
+        )
+        next(item for item in stored_world.relics if item.relic_id == relic.relic_id).condition = "intact"
+        bound_world = bind_relic(
+            stored_world,
+            faction_id=faction.faction_id,
+            relic_id=relic.relic_id,
+            altar_id=altar.altar_id,
+            issuer_office_id=lord.office_id,
+        )
+        bound_relic = next(item for item in bound_world.relics if item.relic_id == relic.relic_id)
+        bound_altar = next(item for item in bound_world.relic_altars if item.altar_id == altar.altar_id)
+        bound_city = next(item for item in bound_world.cities if item.city_id == city.city_id)
+        self.assertEqual(bound_relic.state, "bound_to_altar")
+        self.assertEqual(bound_relic.altar_id, altar.altar_id)
+        self.assertNotIn(relic.relic_id, bound_city.relics_stored)
+        self.assertEqual(bound_altar.bound_relic_ids, [relic.relic_id])
+        self.assertEqual((bound_altar.state, bound_altar.actions_used), ("active", 1))
+        with self.assertRaises(StrategyError):
+            validate_release_relic(
+                bound_world,
+                faction_id=faction.faction_id,
+                relic_id=relic.relic_id,
+                issuer_office_id=lord.office_id,
+            )
+
+        bound_world.current_month += 1
+        bound_city.resources.ether = 50
+        maintained = advance_relic_maintenance(bound_world)
+        maintained_city = next(item for item in maintained.cities if item.city_id == city.city_id)
+        self.assertEqual(maintained_city.resources.ether, 40)
+        self.assertEqual(
+            next(item for item in maintained.relic_altars if item.altar_id == altar.altar_id).state,
+            "active",
+        )
+        self.assertEqual(
+            next(item for item in advance_relic_maintenance(maintained).cities if item.city_id == city.city_id).resources.ether,
+            40,
+        )
+
+        maintained.current_month += 1
+        maintained_city.resources.ether = 7
+        failed = advance_relic_maintenance(maintained)
+        self.assertEqual(
+            next(item for item in failed.cities if item.city_id == city.city_id).resources.ether,
+            7,
+        )
+        self.assertEqual(
+            next(item for item in failed.relic_altars if item.altar_id == altar.altar_id).state,
+            "damaged",
+        )
+
+        failed.current_month += 1
+        next(item for item in failed.cities if item.city_id == city.city_id).resources.ether = 20
+        recovered = advance_relic_maintenance(failed)
+        self.assertEqual(
+            next(item for item in recovered.cities if item.city_id == city.city_id).resources.ether,
+            10,
+        )
+        self.assertEqual(
+            next(item for item in recovered.relic_altars if item.altar_id == altar.altar_id).state,
+            "active",
+        )
+
+        released = release_relic(
+            recovered,
+            faction_id=faction.faction_id,
+            relic_id=relic.relic_id,
+            issuer_office_id=lord.office_id,
+        )
+        released_again = release_relic(
+            WorldState.from_dict(recovered.to_dict()),
+            faction_id=faction.faction_id,
+            relic_id=relic.relic_id,
+            issuer_office_id=lord.office_id,
+        )
+        released_relic = next(item for item in released.relics if item.relic_id == relic.relic_id)
+        self.assertEqual(released_relic.state, "released")
+        self.assertIsNone(released_relic.owner_faction_id)
+        self.assertIsNone(released_relic.location_city_id)
+        self.assertIsNone(released_relic.altar_id)
+        self.assertNotEqual(released_relic.location_node_id, city.node_id)
+        self.assertIn(faction.faction_id, released_relic.discovered_by_faction_ids)
+        self.assertEqual(
+            released_relic.location_node_id,
+            next(item for item in released_again.relics if item.relic_id == relic.relic_id).location_node_id,
+        )
+        self.assertEqual(
+            next(item for item in released.relic_altars if item.altar_id == altar.altar_id).state,
+            "dormant",
+        )
+
+    def test_releasing_a_sleeping_hero_relic_preserves_sleep_and_unbinds_the_hero(self) -> None:
+        world = generate_random_world(
+            seed=613,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+        faction = next(item for item in world.factions if item.faction_id == "faction_1")
+        city = next(item for item in world.cities if item.city_id == faction.capital_city_id)
+        lord = next(
+            item for item in world.offices
+            if item.faction_id == faction.faction_id and item.office_type == "lord"
+        )
+        hero = next(
+            item for item in world.strategic_heroes
+            if item.faction_id == faction.faction_id
+            and item.status == "serving"
+            and item.hero_code != lord.holder_id
+        )
+        relic = next(item for item in world.relics if item.hero_code == hero.hero_code)
+        altar = next(item for item in world.relic_altars if item.city_id == city.city_id)
+        relic.state = "stored"
+        relic.condition = "intact"
+        relic.location_node_id = city.node_id
+        relic.location_city_id = city.city_id
+        relic.owner_faction_id = faction.faction_id
+        relic.discovered_by_faction_ids.append(faction.faction_id)
+        city.relics_stored.append(relic.relic_id)
+        bound = bind_relic(
+            world,
+            faction_id=faction.faction_id,
+            relic_id=relic.relic_id,
+            altar_id=altar.altar_id,
+            issuer_office_id=lord.office_id,
+        )
+        bound_hero = next(item for item in bound.strategic_heroes if item.hero_code == hero.hero_code)
+        bound_hero.status = "sleeping"
+        bound_hero.sleeping_until_month = bound.current_month + 2
+        sleeping_until = bound_hero.sleeping_until_month
+        bound.current_month += 1
+
+        released = release_relic(
+            bound,
+            faction_id=faction.faction_id,
+            relic_id=relic.relic_id,
+            issuer_office_id=lord.office_id,
+        )
+        released_hero = next(item for item in released.strategic_heroes if item.hero_code == hero.hero_code)
+        self.assertEqual(released_hero.status, "sleeping")
+        self.assertEqual(released_hero.sleeping_until_month, sleeping_until)
+        self.assertIsNone(released_hero.faction_id)
+        self.assertIsNone(released_hero.office_id)
+        self.assertIsNone(released_hero.ritual_city_id)
+        self.assertTrue(
+            any(event.category == "hero_relic_unbound_while_sleeping" for event in released.event_log)
+        )
+
+    def test_city_capture_transfers_stored_and_bound_relics_and_disrupts_altar(self) -> None:
+        world = generate_random_world(
+            seed=614,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+        attacker = next(item for item in world.factions if item.faction_id == "faction_1")
+        defender = next(item for item in world.factions if item.faction_id == "faction_2")
+        source = next(item for item in world.cities if item.city_id == attacker.capital_city_id)
+        target = next(item for item in world.cities if item.city_id == defender.capital_city_id)
+        source_node = next(item for item in world.nodes if item.node_id == source.node_id)
+        target_node = next(item for item in world.nodes if item.node_id == target.node_id)
+        if target.node_id not in source_node.connected_node_ids:
+            source_node.connected_node_ids.append(target.node_id)
+            target_node.connected_node_ids.append(source.node_id)
+        source.resources.troops = 2400
+        target.resources.troops = 0
+        target.registered_units = {}
+        target.defense = 0
+        target.support_by_faction[defender.faction_id] = 0
+        defender_lord = next(
+            item for item in world.offices
+            if item.faction_id == defender.faction_id and item.office_type == "lord"
+        )
+        sleeping_hero = next(
+            item for item in world.strategic_heroes
+            if item.faction_id == defender.faction_id
+            and item.status == "serving"
+            and item.hero_code != defender_lord.holder_id
+        )
+        alternate_anchor = next(
+            item
+            for item in world.cities
+            if item.city_id not in {source.city_id, target.city_id}
+        )
+        alternate_anchor.owner_faction_id = defender.faction_id
+        sleeping_hero.ritual_city_id = alternate_anchor.city_id
+        sleeping_hero.city_id = alternate_anchor.city_id
+        sleeping_hero.status = "sleeping"
+        sleeping_hero.sleeping_until_month = world.current_month + 2
+        bound_relic = next(item for item in world.relics if item.hero_code == sleeping_hero.hero_code)
+        stored_relic = next(
+            item for item in world.relics
+            if item.relic_id != bound_relic.relic_id
+        )
+        altar = next(item for item in world.relic_altars if item.city_id == target.city_id)
+        bound_relic.state = "bound_to_altar"
+        bound_relic.condition = "intact"
+        bound_relic.location_node_id = target.node_id
+        bound_relic.location_city_id = target.city_id
+        bound_relic.owner_faction_id = defender.faction_id
+        bound_relic.altar_id = altar.altar_id
+        altar.bound_relic_ids = [bound_relic.relic_id]
+        altar.state = "active"
+        stored_relic.state = "stored"
+        stored_relic.condition = "damaged"
+        stored_relic.location_node_id = target.node_id
+        stored_relic.location_city_id = target.city_id
+        stored_relic.owner_faction_id = defender.faction_id
+        target.relics_stored = [stored_relic.relic_id]
+
+        resolved = declare_city_attack(
+            world,
+            faction_id=attacker.faction_id,
+            source_city_id=source.city_id,
+            target_city_id=target.city_id,
+            resolution_mode="quick",
+        )
+        captured = {
+            relic.relic_id: relic
+            for relic in resolved.relics
+            if relic.relic_id in {stored_relic.relic_id, bound_relic.relic_id}
+        }
+        resolved_altar = next(item for item in resolved.relic_altars if item.altar_id == altar.altar_id)
+        released_hero = next(
+            item for item in resolved.strategic_heroes if item.hero_code == sleeping_hero.hero_code
+        )
+        defender_lord_after = next(
+            item for item in resolved.strategic_heroes if item.hero_code == defender_lord.holder_id
+        )
+        control_change = resolved.pending_battles[-1].battle_result["city_control_change"]
+        self.assertTrue(all(item.owner_faction_id == attacker.faction_id for item in captured.values()))
+        self.assertEqual(captured[stored_relic.relic_id].condition, "damaged")
+        self.assertEqual(captured[bound_relic.relic_id].altar_id, altar.altar_id)
+        self.assertEqual(resolved_altar.state, "damaged")
+        self.assertEqual(resolved_altar.action_month, resolved.current_month)
+        self.assertEqual(resolved_altar.actions_used, 1)
+        self.assertEqual(released_hero.status, "sleeping")
+        self.assertEqual(released_hero.sleeping_until_month, world.current_month + 2)
+        self.assertIsNone(released_hero.faction_id)
+        self.assertEqual(defender_lord_after.faction_id, defender.faction_id)
+        self.assertCountEqual(
+            control_change["captured_relic_ids"],
+            [stored_relic.relic_id, bound_relic.relic_id],
+        )
+        self.assertIn(sleeping_hero.hero_code, control_change["unbound_hero_codes"])
+        self.assertTrue(
+            any(event.category == "relics_captured_on_city_control_change" for event in resolved.event_log)
+        )
+
+    def test_hero_defeated_after_an_earlier_relic_loss_becomes_sleeping_and_roaming(self) -> None:
+        world = generate_random_world(
+            seed=615,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+        faction_id = "faction_1"
+        lord = next(
+            item for item in world.offices
+            if item.faction_id == faction_id and item.office_type == "lord"
+        )
+        hero = next(
+            item for item in world.strategic_heroes
+            if item.faction_id == faction_id
+            and item.status == "serving"
+            and item.hero_code != lord.holder_id
+        )
+        relic = next(item for item in world.relics if item.hero_code == hero.hero_code)
+        enemy_city = next(item for item in world.cities if item.owner_faction_id == "faction_2")
+        relic.state = "stored"
+        relic.condition = "intact"
+        relic.owner_faction_id = "faction_2"
+        relic.location_node_id = enemy_city.node_id
+        relic.location_city_id = enemy_city.city_id
+        relic.altar_id = None
+        enemy_city.relics_stored.append(relic.relic_id)
+        relic.history.append(
+            {
+                "month": world.current_month,
+                "event": "captured_on_city_control_change",
+                "previous_faction_id": faction_id,
+                "new_faction_id": "faction_2",
+            }
+        )
+        resolved, result = record_strategic_hero_battle_losses(
+            world,
+            attacker_faction_id=faction_id,
+            defender_faction_id="faction_2",
+            surviving_hero_codes_by_team={1: set(), 2: set()},
+            committed_hero_codes_by_team={1: [hero.hero_code], 2: []},
+        )
+        defeated = next(item for item in resolved.strategic_heroes if item.hero_code == hero.hero_code)
+        self.assertEqual(result["attacker"]["sleeping"], [hero.hero_code])
+        self.assertEqual(defeated.status, "sleeping")
+        self.assertIsNone(defeated.faction_id)
+        self.assertIsNone(defeated.ritual_city_id)
+        self.assertEqual(defeated.sleeping_until_month, world.current_month + STRATEGIC_HERO_BATTLE_SLEEP_MONTHS)
+
+    def test_relic_archive_round_trips_and_legacy_sandbox_stays_disabled(self) -> None:
+        world = generate_random_world(
+            seed=612,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+        restored = WorldState.from_dict(world.to_dict())
+        self.assertEqual(restored.to_dict(), world.to_dict())
+        self.assertIs(ensure_relic_system(restored), restored)
+        removed = restored.relics.pop()
+        known_before = {
+            faction.faction_id: sum(
+                faction.faction_id in relic.discovered_by_faction_ids for relic in restored.relics
+            )
+            for faction in restored.factions
+            if faction.is_major
+        }
+        expanded = ensure_relic_system(restored)
+        self.assertIn(removed.hero_code, {relic.hero_code for relic in expanded.relics})
+        self.assertEqual(
+            known_before,
+            {
+                faction.faction_id: sum(
+                    faction.faction_id in relic.discovered_by_faction_ids for relic in expanded.relics
+                )
+                for faction in expanded.factions
+                if faction.is_major
+            },
+        )
+
+        sandbox = generate_random_world(seed=612, city_count=6, faction_count=2)
+        self.assertFalse(sandbox.relics)
+        self.assertFalse(sandbox.relic_altars)
+        self.assertFalse(relic_system_public(sandbox)["enabled"])
+
+    def test_relic_altar_victory_requires_three_consecutive_maintenance_months(self) -> None:
+        world = generate_random_world(
+            seed=619,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+        faction = next(item for item in world.factions if item.faction_id == "faction_1")
+        city = next(item for item in world.cities if item.city_id == faction.capital_city_id)
+        altar = next(item for item in world.relic_altars if item.city_id == city.city_id)
+        lord = next(
+            item for item in world.offices
+            if item.faction_id == faction.faction_id and item.office_type == "lord"
+        )
+        relic = next(item for item in world.relics if item.state == "scattered")
+        relic.state = "stored"
+        relic.condition = "intact"
+        relic.location_node_id = city.node_id
+        relic.location_city_id = city.city_id
+        relic.owner_faction_id = faction.faction_id
+        city.relics_stored.append(relic.relic_id)
+        city.resources.ether = 100
+        bound = bind_relic(
+            world,
+            faction_id=faction.faction_id,
+            relic_id=relic.relic_id,
+            altar_id=altar.altar_id,
+            issuer_office_id=lord.office_id,
+        )
+        self.assertEqual(
+            next(
+                item for item in bound.relic_altars if item.altar_id == altar.altar_id
+            ).consecration_progress,
+            0,
+        )
+
+        advanced = bound
+        for expected_progress in range(1, RELIC_ALTAR_VICTORY_REQUIRED_MONTHS + 1):
+            advanced = advance_month(advanced)
+            advanced_altar = next(
+                item for item in advanced.relic_altars if item.altar_id == altar.altar_id
+            )
+            self.assertEqual(advanced_altar.consecration_progress, expected_progress)
+            relic_condition = next(
+                item
+                for item in evaluate_strategic_status(advanced)["victory_conditions"]
+                if item["id"] == "relic_altar"
+            )
+            self.assertEqual(
+                relic_condition["achieved"],
+                expected_progress == RELIC_ALTAR_VICTORY_REQUIRED_MONTHS,
+            )
+
+        self.assertEqual(advanced.campaign_conclusion["reason"], "early_victory")
+        self.assertEqual(advanced.campaign_conclusion["winner_faction_ids"], [faction.faction_id])
+        restored = WorldState.from_dict(advanced.to_dict())
+        restored_altar = next(
+            item for item in restored.relic_altars if item.altar_id == altar.altar_id
+        )
+        self.assertEqual(
+            restored_altar.consecration_progress,
+            RELIC_ALTAR_VICTORY_REQUIRED_MONTHS,
+        )
+
+    def test_relic_altar_consecration_resets_after_failed_maintenance(self) -> None:
+        world = generate_random_world(
+            seed=620,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+        faction = next(item for item in world.factions if item.faction_id == "faction_1")
+        city = next(item for item in world.cities if item.city_id == faction.capital_city_id)
+        altar = next(item for item in world.relic_altars if item.city_id == city.city_id)
+        lord = next(
+            item for item in world.offices
+            if item.faction_id == faction.faction_id and item.office_type == "lord"
+        )
+        relic = next(item for item in world.relics if item.state == "scattered")
+        relic.state = "stored"
+        relic.condition = "intact"
+        relic.location_node_id = city.node_id
+        relic.location_city_id = city.city_id
+        relic.owner_faction_id = faction.faction_id
+        city.relics_stored.append(relic.relic_id)
+        city.resources.ether = 20
+        bound = bind_relic(
+            world,
+            faction_id=faction.faction_id,
+            relic_id=relic.relic_id,
+            altar_id=altar.altar_id,
+            issuer_office_id=lord.office_id,
+        )
+        first = advance_month(bound)
+        first_city = next(item for item in first.cities if item.city_id == city.city_id)
+        first_city.resources.ether = 0
+        failed = advance_month(first)
+        failed_altar = next(
+            item for item in failed.relic_altars if item.altar_id == altar.altar_id
+        )
+        self.assertEqual((failed_altar.state, failed_altar.consecration_progress), ("damaged", 0))
+        self.assertIsNone(failed_altar.consecration_faction_id)
+        recovered_city = next(item for item in failed.cities if item.city_id == city.city_id)
+        recovered_city.resources.ether = 20
+        recovered = advance_month(failed)
+        recovered_altar = next(
+            item for item in recovered.relic_altars if item.altar_id == altar.altar_id
+        )
+        self.assertEqual((recovered_altar.state, recovered_altar.consecration_progress), ("active", 1))
+
+    def test_fixed_campaign_contract_migrates_to_unlock_relic_victory(self) -> None:
+        world = generate_random_world(
+            seed=621,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+        world.campaign_contract["available_victory_routes"] = [
+            item
+            for item in world.campaign_contract["available_victory_routes"]
+            if item != "relic_altar_victory"
+        ]
+        world.campaign_contract["locked_systems"] = ["relic_altar"]
+        world.memory_tags = [
+            item for item in world.memory_tags if item != "relic_altar_p6_6_v1"
+        ]
+
+        migrated = ensure_relic_system(world)
+        self.assertIn(
+            "relic_altar_victory",
+            migrated.campaign_contract["available_victory_routes"],
+        )
+        self.assertNotIn("relic_altar", migrated.campaign_contract["locked_systems"])
+        relic_condition = next(
+            item
+            for item in evaluate_strategic_status(migrated)["victory_conditions"]
+            if item["id"] == "relic_altar"
+        )
+        self.assertTrue(relic_condition["implemented"])
 
     def test_random_world_rejects_invalid_sizes(self) -> None:
         with self.assertRaises(StrategyError):
@@ -440,6 +1273,469 @@ class StrategyGenerationTests(unittest.TestCase):
 
 
 class StrategyOfficeTests(unittest.TestCase):
+    def _formed_major_armies(self, seed: int = 405) -> tuple[WorldState, dict[str, str]]:
+        world = generate_random_world(seed=seed, city_count=8, faction_count=2, neutral_city_states=True)
+        general_ids: dict[str, str] = {}
+        for faction_id in ("faction_1", "faction_2"):
+            general = next(
+                item for item in world.offices
+                if item.faction_id == faction_id and item.office_type == "general"
+            )
+            general.unit_inventory = {"infantry": 1}
+            general_ids[faction_id] = general.office_id
+            hero = next(item for item in world.strategic_heroes if item.office_id == general.office_id)
+            city = next(item for item in world.cities if item.city_id == hero.city_id)
+            city.resources.food = max(city.resources.food, 500)
+        for faction_id in ("faction_1", "faction_2"):
+            general_id = general_ids[faction_id]
+            hero = next(item for item in world.strategic_heroes if item.office_id == general_id)
+            world = form_or_reinforce_army(
+                world,
+                faction_id=faction_id,
+                city_id=str(hero.city_id),
+                unit_inventory={"infantry": 1},
+                supply=100,
+                issuer_office_id=general_id,
+            )
+        return world, general_ids
+
+    @staticmethod
+    def _place_army(world: WorldState, faction_id: str, node_id: str) -> None:
+        army = next(item for item in world.armies if item.faction_id == faction_id)
+        army.location_node_id = node_id
+        army.status = "deployed"
+        army.current_order = "hold"
+        army.march_origin_node_id = node_id
+        army.destination_node_id = node_id
+        army.route_node_ids = [node_id]
+        army.route_progress_index = 0
+        army.departure_month = world.current_month
+        army.estimated_arrival_month = world.current_month
+        army.supply_source_city_id = None
+        army.supply_line_node_ids = []
+        army.supply_line_status = "unassessed"
+        army.supply_distance = None
+
+    def _active_major_siege(self, seed: int = 410) -> tuple[WorldState, dict[str, str], str]:
+        world, general_ids = self._formed_major_armies(seed=seed)
+        target = next(city for city in world.cities if city.owner_faction_id == "faction_2")
+        self._place_army(world, "faction_1", target.node_id)
+        defender_army = next(item for item in world.armies if item.faction_id == "faction_2")
+        defender_army.status = "destroyed"
+        defender_army.current_order = "hold"
+        world.validate()
+        besieged = advance_sieges(world)
+        self.assertEqual(len(besieged.sieges), 1)
+        return besieged, general_ids, target.city_id
+
+    def test_enemy_army_establishes_persistent_siege_without_arrival_month_damage(self) -> None:
+        besieged, _, target_city_id = self._active_major_siege()
+        siege = besieged.sieges[0]
+        city = next(item for item in besieged.cities if item.city_id == target_city_id)
+        self.assertEqual((siege.status, siege.started_month), ("active", besieged.current_month))
+        self.assertEqual(siege.fortification_remaining, max(20, city.defense * 10))
+        self.assertEqual(siege.last_city_food_consumed, 0)
+        self.assertEqual(besieged.armies[0].status, "besieging")
+        self.assertEqual(WorldState.from_dict(besieged.to_dict()).sieges[0].to_dict(), siege.to_dict())
+
+    def test_siege_tick_consumes_city_food_and_breach_does_not_capture_city(self) -> None:
+        besieged, general_ids, target_city_id = self._active_major_siege(seed=411)
+        besieged.current_month += 1
+        target = next(item for item in besieged.cities if item.city_id == target_city_id)
+        target.resources.food = 100
+        siege = besieged.sieges[0]
+        siege.fortification_remaining = 5
+        siege.defender_stance = "await_relief"
+        ordered = order_siege_attacker_stance(
+            besieged,
+            faction_id="faction_1",
+            siege_id=siege.siege_id,
+            stance="assault",
+            issuer_office_id=general_ids["faction_1"],
+        )
+        resolved = advance_sieges(ordered)
+        siege = resolved.sieges[0]
+        target = next(item for item in resolved.cities if item.city_id == target_city_id)
+        self.assertEqual((siege.status, siege.battle_trigger, siege.fortification_remaining), ("breached", "assault", 0))
+        self.assertGreater(siege.last_city_food_consumed, 0)
+        self.assertEqual(target.owner_faction_id, "faction_2")
+
+    def test_governor_can_surrender_siege_into_occupation_governance(self) -> None:
+        besieged, _, target_city_id = self._active_major_siege(seed=412)
+        governor = next(
+            item for item in besieged.offices
+            if item.faction_id == "faction_2"
+            and item.office_type == "governor"
+            and target_city_id in item.managed_entity_ids
+        )
+        surrendered = order_siege_defender_stance(
+            besieged,
+            faction_id="faction_2",
+            siege_id=besieged.sieges[0].siege_id,
+            stance="surrender",
+            issuer_office_id=governor.office_id,
+        )
+        target = next(item for item in surrendered.cities if item.city_id == target_city_id)
+        self.assertEqual((surrendered.sieges[0].status, surrendered.sieges[0].outcome), ("ended", "surrendered"))
+        self.assertEqual(target.owner_faction_id, "faction_1")
+        self.assertEqual(target.occupation.get("status"), "pending")
+        self.assertEqual(next(item for item in surrendered.armies if item.faction_id == "faction_1").status, "garrisoned")
+
+    def test_siege_surrender_transfers_local_relics_to_the_attacker(self) -> None:
+        besieged, _, target_city_id = self._active_major_siege(seed=416)
+        besieged.campaign_contract = first_campaign_contract()
+        besieged = ensure_relic_system(besieged)
+        target = next(item for item in besieged.cities if item.city_id == target_city_id)
+        relic = next(item for item in besieged.relics if item.state == "scattered")
+        relic.state = "stored"
+        relic.condition = "intact"
+        relic.owner_faction_id = "faction_2"
+        relic.location_node_id = target.node_id
+        relic.location_city_id = target.city_id
+        relic.altar_id = None
+        target.relics_stored.append(relic.relic_id)
+        governor = next(
+            item for item in besieged.offices
+            if item.faction_id == "faction_2"
+            and item.office_type == "governor"
+            and target_city_id in item.managed_entity_ids
+        )
+
+        surrendered = order_siege_defender_stance(
+            besieged,
+            faction_id="faction_2",
+            siege_id=besieged.sieges[0].siege_id,
+            stance="surrender",
+            issuer_office_id=governor.office_id,
+        )
+        captured_relic = next(item for item in surrendered.relics if item.relic_id == relic.relic_id)
+        self.assertEqual(captured_relic.owner_faction_id, "faction_1")
+        self.assertTrue(
+            any(event.category == "strategy_siege_relics_captured" for event in surrendered.event_log)
+        )
+
+    def test_attacker_can_order_safe_withdrawal_and_end_siege_next_month(self) -> None:
+        besieged, general_ids, _ = self._active_major_siege(seed=413)
+        army = next(item for item in besieged.armies if item.faction_id == "faction_1")
+        node = next(item for item in besieged.nodes if item.node_id == army.location_node_id)
+        destination_id = next(
+            node_id for node_id in node.connected_node_ids
+            if not any(
+                other.faction_id == "faction_2" and other.location_node_id == node_id
+                for other in besieged.armies
+            )
+        )
+        ordered = order_siege_attacker_stance(
+            besieged,
+            faction_id="faction_1",
+            siege_id=besieged.sieges[0].siege_id,
+            stance="withdraw",
+            destination_node_id=destination_id,
+            issuer_office_id=general_ids["faction_1"],
+        )
+        retreated = advance_army_retreats(ordered)
+        self.assertEqual(retreated.sieges[0].status, "ended")
+        self.assertEqual(retreated.sieges[0].outcome, "withdrawn")
+        self.assertEqual(next(item for item in retreated.armies if item.faction_id == "faction_1").location_node_id, destination_id)
+
+    def test_defender_reinforcement_turns_siege_into_contested_encounter(self) -> None:
+        besieged, _, target_city_id = self._active_major_siege(seed=415)
+        target = next(item for item in besieged.cities if item.city_id == target_city_id)
+        defender = next(item for item in besieged.armies if item.faction_id == "faction_2")
+        self._place_army(besieged, "faction_2", target.node_id)
+        defender.status = "deployed"
+        besieged.validate()
+        engaged = advance_army_encounters(besieged)
+        contested = advance_sieges(engaged)
+        self.assertEqual(contested.encounters[0].status, "active")
+        self.assertEqual(contested.sieges[0].status, "contested")
+        self.assertEqual({army.status for army in contested.armies}, {"engaged"})
+
+    def test_encounter_quick_battle_uses_armies_and_writes_back_retreat(self) -> None:
+        world, _ = self._formed_major_armies(seed=416)
+        node = world.nodes[0]
+        self._place_army(world, "faction_1", node.node_id)
+        self._place_army(world, "faction_2", node.node_id)
+        engaged = advance_army_encounters(world)
+        encounter = engaged.encounters[0]
+
+        resolved = declare_strategic_battle(
+            engaged,
+            faction_id="faction_1",
+            source_kind="encounter",
+            source_entity_id=encounter.encounter_id,
+            resolution_mode="quick",
+        )
+
+        battle = resolved.pending_battles[-1]
+        attacker = next(item for item in resolved.armies if item.faction_id == "faction_1")
+        defender = next(item for item in resolved.armies if item.faction_id == "faction_2")
+        self.assertEqual((battle.source_kind, battle.status), ("encounter", "resolved"))
+        self.assertEqual(battle.battle_result["resolution_source"], "quick")
+        self.assertEqual(resolved.encounters[0].outcome, "battle_resolved")
+        self.assertEqual((attacker.manpower, attacker.morale), (100, 75))
+        self.assertEqual((defender.manpower, defender.morale), (100, 55))
+        self.assertNotEqual(defender.location_node_id, node.node_id)
+        self.assertEqual(WorldState.from_dict(resolved.to_dict()).pending_battles[-1].source_entity_id, encounter.encounter_id)
+
+    def test_encounter_real_grid_uses_same_snapshot_and_writes_survivors(self) -> None:
+        world, _ = self._formed_major_armies(seed=419)
+        node = world.nodes[0]
+        for army in world.armies:
+            army.unit_inventory = {"infantry": 2}
+            army.manpower = 200
+            army.supply_capacity = 200
+            army.supply = 100
+            self._place_army(world, army.faction_id, node.node_id)
+        engaged = advance_army_encounters(world)
+        pending = declare_strategic_battle(
+            engaged,
+            faction_id="faction_1",
+            source_kind="encounter",
+            source_entity_id=engaged.encounters[0].encounter_id,
+            resolution_mode="manual",
+            auto_resolve=False,
+        )
+        battle = pending.pending_battles[-1]
+        rosters = strategy_battle_rosters(pending, battle)
+        self.assertEqual((len(rosters.attacker.roster), len(rosters.defender.roster)), (3, 3))
+        attached = attach_battle_room(pending, battle_id=battle.battle_id, room_id="P46GRID", invite_path="/room/P46GRID")
+        resolved = resolve_battle_room_result(
+            attached,
+            battle_room_id="P46GRID",
+            winner_team_id=1,
+            surviving_grid_units_by_team={1: 1, 2: 0},
+            surviving_hero_codes_by_team={1: set(battle.attacker_hero_codes or []), 2: set()},
+        )
+        attacker = next(item for item in resolved.armies if item.faction_id == "faction_1")
+        defender = next(item for item in resolved.armies if item.faction_id == "faction_2")
+        self.assertEqual((attacker.manpower, attacker.unit_inventory), (100, {"infantry": 1}))
+        self.assertEqual((defender.status, defender.manpower), ("destroyed", 0))
+        self.assertEqual(resolved.pending_battles[-1].battle_result["resolution_source"], "real_grid")
+
+    def test_encounter_quick_result_changes_with_morale_and_supply(self) -> None:
+        world, _ = self._formed_major_armies(seed=420)
+        node = world.nodes[0]
+        attacker = next(item for item in world.armies if item.faction_id == "faction_1")
+        defender = next(item for item in world.armies if item.faction_id == "faction_2")
+        attacker.morale = 10
+        attacker.supply = 0
+        defender.morale = 100
+        defender.supply = defender.supply_capacity
+        self._place_army(world, "faction_1", node.node_id)
+        self._place_army(world, "faction_2", node.node_id)
+        engaged = advance_army_encounters(world)
+
+        resolved = declare_strategic_battle(
+            engaged,
+            faction_id="faction_1",
+            source_kind="encounter",
+            source_entity_id=engaged.encounters[0].encounter_id,
+            resolution_mode="quick",
+        )
+
+        self.assertEqual(resolved.pending_battles[-1].winner_faction_id, "faction_2")
+        self.assertEqual(next(item for item in resolved.armies if item.faction_id == "faction_1").morale, 0)
+
+    def test_breached_siege_quick_assault_captures_city_and_occupies(self) -> None:
+        besieged, _, target_city_id = self._active_major_siege(seed=417)
+        siege = besieged.sieges[0]
+        siege.status = "breached"
+        siege.fortification_remaining = 0
+        siege.battle_trigger = "assault"
+        target = next(item for item in besieged.cities if item.city_id == target_city_id)
+        target.resources.troops = 1
+        target.registered_units = {}
+        target.support_by_faction["faction_2"] = 0
+
+        resolved = declare_strategic_battle(
+            besieged,
+            faction_id="faction_1",
+            source_kind="siege",
+            source_entity_id=siege.siege_id,
+            resolution_mode="quick",
+        )
+
+        target = next(item for item in resolved.cities if item.city_id == target_city_id)
+        army = next(item for item in resolved.armies if item.faction_id == "faction_1")
+        self.assertEqual(target.owner_faction_id, "faction_1")
+        self.assertEqual(target.occupation.get("status"), "pending")
+        self.assertEqual((resolved.sieges[0].status, resolved.sieges[0].outcome), ("ended", "captured"))
+        self.assertEqual(army.status, "garrisoned")
+        self.assertTrue(resolved.pending_battles[-1].battle_result["city_captured"])
+
+    def test_failed_breakout_restores_breached_siege_without_changing_owner(self) -> None:
+        besieged, _, target_city_id = self._active_major_siege(seed=418)
+        siege = besieged.sieges[0]
+        siege.status = "battle_pending"
+        siege.battle_trigger = "breakout"
+        siege.fortification_remaining = 0
+        target = next(item for item in besieged.cities if item.city_id == target_city_id)
+        target.resources.troops = 1
+        target.registered_units = {}
+        target.support_by_faction["faction_2"] = 0
+
+        resolved = declare_strategic_battle(
+            besieged,
+            faction_id="faction_2",
+            source_kind="siege",
+            source_entity_id=siege.siege_id,
+            resolution_mode="quick",
+        )
+
+        target = next(item for item in resolved.cities if item.city_id == target_city_id)
+        self.assertEqual(target.owner_faction_id, "faction_2")
+        self.assertEqual((resolved.sieges[0].status, resolved.sieges[0].battle_trigger), ("breached", "assault"))
+        self.assertEqual(next(item for item in resolved.armies if item.faction_id == "faction_1").status, "besieging")
+
+    def test_same_node_enemy_armies_create_persistent_encounter_and_can_retreat(self) -> None:
+        world, general_ids = self._formed_major_armies()
+        encounter_node = world.nodes[0]
+        self._place_army(world, "faction_1", encounter_node.node_id)
+        self._place_army(world, "faction_2", encounter_node.node_id)
+        world.validate()
+
+        engaged = advance_army_encounters(world)
+        self.assertEqual(len(engaged.encounters), 1)
+        encounter = engaged.encounters[0]
+        self.assertEqual((encounter.status, encounter.node_id), ("active", encounter_node.node_id))
+        self.assertEqual({army.status for army in engaged.armies}, {"engaged"})
+        self.assertEqual(WorldState.from_dict(engaged.to_dict()).encounters[0].to_dict(), encounter.to_dict())
+
+        retreat_node_id = encounter_node.connected_node_ids[0]
+        own_army = next(item for item in engaged.armies if item.faction_id == "faction_1")
+        ordered = order_army_retreat(
+            engaged,
+            faction_id="faction_1",
+            army_id=own_army.army_id,
+            destination_node_id=retreat_node_id,
+            issuer_office_id=general_ids["faction_1"],
+        )
+        retreated = advance_army_retreats(ordered)
+        own_army = next(item for item in retreated.armies if item.faction_id == "faction_1")
+        enemy_army = next(item for item in retreated.armies if item.faction_id == "faction_2")
+        self.assertEqual((own_army.location_node_id, own_army.morale), (retreat_node_id, 60))
+        self.assertIn(own_army.status, {"garrisoned", "deployed"})
+        self.assertNotEqual(enemy_army.status, "engaged")
+        self.assertEqual(retreated.encounters[0].status, "ended")
+
+    def test_adjacent_intercept_moves_one_edge_and_starts_encounter(self) -> None:
+        world, general_ids = self._formed_major_armies(seed=406)
+        source_node = world.nodes[0]
+        target_node_id = source_node.connected_node_ids[0]
+        self._place_army(world, "faction_1", source_node.node_id)
+        self._place_army(world, "faction_2", target_node_id)
+        world.validate()
+        interceptor = next(item for item in world.armies if item.faction_id == "faction_1")
+        target = next(item for item in world.armies if item.faction_id == "faction_2")
+
+        ordered = order_army_intercept(
+            world,
+            faction_id="faction_1",
+            army_id=interceptor.army_id,
+            target_army_id=target.army_id,
+            issuer_office_id=general_ids["faction_1"],
+        )
+        cancelled = halt_army_march(
+            ordered,
+            faction_id="faction_1",
+            army_id=interceptor.army_id,
+            issuer_office_id=general_ids["faction_1"],
+        )
+        self.assertEqual((cancelled.armies[0].current_order, cancelled.armies[0].target_army_id), ("hold", None))
+        resolved = advance_army_encounters(ordered)
+        interceptor = next(item for item in resolved.armies if item.faction_id == "faction_1")
+        self.assertEqual((interceptor.location_node_id, interceptor.status), (target_node_id, "engaged"))
+        self.assertEqual(resolved.encounters[0].status, "active")
+        self.assertTrue(any(event.category == "strategy_army_intercepted" for event in resolved.event_log))
+
+    def test_adjacent_friendly_army_can_reinforce_active_encounter(self) -> None:
+        world, general_ids = self._formed_major_armies(seed=407)
+        encounter_node = world.nodes[0]
+        reinforcement_node_id = encounter_node.connected_node_ids[0]
+        self._place_army(world, "faction_1", encounter_node.node_id)
+        self._place_army(world, "faction_2", encounter_node.node_id)
+        engaged = advance_army_encounters(world)
+        encounter = engaged.encounters[0]
+
+        original_general = next(item for item in engaged.offices if item.office_id == general_ids["faction_1"])
+        reserve_general = type(original_general).from_dict(original_general.to_dict())
+        reserve_general.office_id = f"{original_general.office_id}:reserve"
+        reserve_general.holder_id = "reserve_commander"
+        reserve_general.unit_inventory = {}
+        engaged.offices.append(reserve_general)
+        original_hero = next(item for item in engaged.strategic_heroes if item.office_id == original_general.office_id)
+        reserve_hero = type(original_hero).from_dict(original_hero.to_dict())
+        reserve_hero.hero_code = "reserve_commander"
+        reserve_hero.office_id = reserve_general.office_id
+        reserve_hero.controller_type = "ai"
+        reserve_hero.controller_user_id = None
+        engaged.strategic_heroes.append(reserve_hero)
+        original_army = next(item for item in engaged.armies if item.faction_id == "faction_1")
+        reserve_army = type(original_army).from_dict(original_army.to_dict())
+        reserve_army.army_id = f"{original_army.army_id}:reserve"
+        reserve_army.commander_office_id = reserve_general.office_id
+        reserve_army.commander_hero_code = "reserve_commander"
+        reserve_army.location_node_id = reinforcement_node_id
+        reserve_army.status = "deployed"
+        reserve_army.current_order = "hold"
+        reserve_army.route_node_ids = [reinforcement_node_id]
+        reserve_army.route_progress_index = 0
+        reserve_army.march_origin_node_id = reinforcement_node_id
+        reserve_army.destination_node_id = reinforcement_node_id
+        reserve_army.supply_source_city_id = None
+        reserve_army.supply_line_node_ids = []
+        reserve_army.supply_line_status = "unassessed"
+        reserve_army.supply_distance = None
+        engaged.armies.append(reserve_army)
+        engaged.validate()
+
+        ordered = order_army_reinforce(
+            engaged,
+            faction_id="faction_1",
+            army_id=reserve_army.army_id,
+            encounter_id=encounter.encounter_id,
+            issuer_office_id=reserve_general.office_id,
+        )
+        reinforced = advance_army_encounters(ordered)
+        reserve_army = next(item for item in reinforced.armies if item.army_id.endswith(":reserve"))
+        encounter = reinforced.encounters[0]
+        self.assertEqual((reserve_army.location_node_id, reserve_army.status), (encounter_node.node_id, "engaged"))
+        self.assertIn(reserve_army.army_id, encounter.faction_army_ids["faction_1"])
+        self.assertTrue(any(event.category == "strategy_army_reinforced_encounter" for event in reinforced.event_log))
+
+    def test_non_aggression_prevents_automatic_encounter_and_interception(self) -> None:
+        world, general_ids = self._formed_major_armies(seed=408)
+        neutral = next(item for item in world.factions if item.faction_id == "faction_2")
+        neutral.faction_type = "neutral_city_state"
+        world.diplomatic_agreements.append(DiplomaticAgreement(
+            agreement_id="agreement:p44:non-aggression",
+            agreement_type="non_aggression",
+            major_faction_id="faction_1",
+            neutral_faction_id="faction_2",
+            started_month=1,
+            expires_month=4,
+        ))
+        source_node = world.nodes[0]
+        target_node_id = source_node.connected_node_ids[0]
+        self._place_army(world, "faction_1", source_node.node_id)
+        self._place_army(world, "faction_2", target_node_id)
+        world.validate()
+        own_army = next(item for item in world.armies if item.faction_id == "faction_1")
+        target_army = next(item for item in world.armies if item.faction_id == "faction_2")
+        with self.assertRaises(StrategyError):
+            order_army_intercept(
+                world,
+                faction_id="faction_1",
+                army_id=own_army.army_id,
+                target_army_id=target_army.army_id,
+                issuer_office_id=general_ids["faction_1"],
+            )
+        self._place_army(world, "faction_2", source_node.node_id)
+        peaceful = advance_army_encounters(world)
+        self.assertFalse(peaceful.encounters)
+        self.assertNotIn("engaged", {army.status for army in peaceful.armies})
+
     def test_army_supply_draws_real_city_food_and_manual_loading_respects_capacity(self) -> None:
         world = generate_random_world(seed=403, city_count=8, faction_count=2, neutral_city_states=True)
         general = next(item for item in world.offices if item.faction_id == "faction_1" and item.office_type == "general")
@@ -1005,6 +2301,8 @@ class StrategyStoreTests(unittest.TestCase):
         self.alice = AuthUser(user_id=1, username="Alice", created_at=1.0)
         self.bob = AuthUser(user_id=2, username="Bob", created_at=2.0)
         self.carol = AuthUser(user_id=3, username="Carol", created_at=3.0)
+        self.dave = AuthUser(user_id=4, username="Dave", created_at=4.0)
+        self.eve = AuthUser(user_id=5, username="Eve", created_at=5.0)
 
     def tearDown(self) -> None:
         self.tmpdir.cleanup()
@@ -1021,6 +2319,87 @@ class StrategyStoreTests(unittest.TestCase):
         self.assertEqual(first.members[0].user_id, self.alice.user_id)
         self.assertEqual(second.world.seed, 12)
         self.assertEqual(len(second.world.cities), 5)
+
+    def test_strategy_save_and_schema_migrations_are_versioned_and_idempotent(self) -> None:
+        campaign = self.store.create_campaign(owner=self.alice, name="旧存档迁移", seed=301, city_count=6)
+        database_path = self.store.db_path
+        with closing(sqlite3.connect(database_path)) as connection:
+            raw = json.loads(connection.execute(
+                "SELECT world_json FROM strategy_campaigns WHERE id = ?",
+                (campaign.campaign_id,),
+            ).fetchone()[0])
+            raw.pop("save_format_version", None)
+            connection.execute(
+                "UPDATE strategy_campaigns SET world_json = ? WHERE id = ?",
+                (json.dumps(raw, ensure_ascii=False, sort_keys=True), campaign.campaign_id),
+            )
+            connection.commit()
+
+        reopened = StrategyStore(database_path)
+        migrated = reopened.get_campaign_for_user(campaign.campaign_id, self.alice.user_id)
+        StrategyStore(database_path).get_campaign_for_user(campaign.campaign_id, self.alice.user_id)
+
+        self.assertEqual(migrated.world.save_format_version, CURRENT_STRATEGY_SAVE_VERSION)
+        self.assertEqual(migrate_world_payload(migrated.world.to_dict()), migrated.world.to_dict())
+        automatic_backups = reopened.list_backups()
+        self.assertEqual(len(automatic_backups), 1)
+        self.assertEqual(automatic_backups[0].reason, "pre_save_migration")
+        self.assertTrue(automatic_backups[0].automatic)
+        self.assertEqual(reopened.drill_backup_restore(automatic_backups[0].path)["status"], "passed")
+        with closing(sqlite3.connect(database_path)) as connection:
+            stored = json.loads(connection.execute(
+                "SELECT world_json FROM strategy_campaigns WHERE id = ?",
+                (campaign.campaign_id,),
+            ).fetchone()[0])
+            schema_rows = connection.execute(
+                "SELECT version, name FROM strategy_schema_migrations ORDER BY version"
+            ).fetchall()
+            save_rows = connection.execute(
+                "SELECT from_version, to_version, before_payload, before_hash, after_hash FROM strategy_save_migrations WHERE campaign_id = ?",
+                (campaign.campaign_id,),
+            ).fetchall()
+        self.assertEqual(stored["save_format_version"], CURRENT_STRATEGY_SAVE_VERSION)
+        self.assertEqual(
+            schema_rows,
+            [
+                (1, "campaign_invitation_baseline"),
+                (2, "save_migration_rollback_payload"),
+                (3, "tamper_evident_operation_audit"),
+            ],
+        )
+        self.assertEqual(len(save_rows), 1)
+        self.assertEqual(save_rows[0][:2], (0, CURRENT_STRATEGY_SAVE_VERSION))
+        self.assertNotIn("save_format_version", json.loads(save_rows[0][2]))
+        self.assertNotEqual(save_rows[0][3], save_rows[0][4])
+
+    def test_future_strategy_save_is_rejected_without_rewriting_it(self) -> None:
+        campaign = self.store.create_campaign(owner=self.alice, name="未来存档", seed=302, city_count=6)
+        database_path = self.store.db_path
+        future_version = CURRENT_STRATEGY_SAVE_VERSION + 1
+        with closing(sqlite3.connect(database_path)) as connection:
+            raw = json.loads(connection.execute(
+                "SELECT world_json FROM strategy_campaigns WHERE id = ?",
+                (campaign.campaign_id,),
+            ).fetchone()[0])
+            raw["save_format_version"] = future_version
+            serialized = json.dumps(raw, ensure_ascii=False, sort_keys=True)
+            connection.execute(
+                "UPDATE strategy_campaigns SET world_json = ? WHERE id = ?",
+                (serialized, campaign.campaign_id),
+            )
+            connection.commit()
+
+        with self.assertRaises(StrategyError) as raised:
+            StrategyStore(database_path).get_campaign_for_user(campaign.campaign_id, self.alice.user_id)
+
+        self.assertEqual(raised.exception.status, HTTPStatus.CONFLICT)
+        self.assertIn("升级服务", str(raised.exception))
+        with closing(sqlite3.connect(database_path)) as connection:
+            unchanged = connection.execute(
+                "SELECT world_json FROM strategy_campaigns WHERE id = ?",
+                (campaign.campaign_id,),
+            ).fetchone()[0]
+        self.assertEqual(unchanged, serialized)
 
     def test_campaign_name_validation(self) -> None:
         with self.assertRaises(StrategyError):
@@ -1067,15 +2446,29 @@ class StrategyStoreTests(unittest.TestCase):
 
         with self.assertRaises(StrategyError):
             self.store.rotate_join_code(campaign.campaign_id, self.bob.user_id)
+        with self.assertRaises(StrategyError):
+            self.store.revoke_join_code(campaign.campaign_id, self.bob.user_id)
+
+        revoked = self.store.revoke_join_code(campaign.campaign_id, self.alice.user_id)
+        self.assertFalse(revoked.join_code_enabled)
+        self.assertEqual(revoked.to_public_dict()["invite"]["status"], "revoked")
+        self.assertEqual(revoked.to_public_dict()["join_code"], "")
+        with self.assertRaises(StrategyError):
+            self.store.join_campaign_by_code(old_code, self.bob)
 
         rotated = self.store.rotate_join_code(campaign.campaign_id, self.alice.user_id)
 
+        self.assertTrue(rotated.join_code_enabled)
         self.assertEqual(len(rotated.join_code), 6)
         self.assertNotEqual(rotated.join_code, old_code)
         with self.assertRaises(StrategyError):
             self.store.join_campaign_by_code(old_code, self.bob)
         joined = self.store.join_campaign_by_code(rotated.join_code, self.bob)
         self.assertEqual(joined.campaign_id, campaign.campaign_id)
+        locked = self.store.lock_initial_players(campaign.campaign_id, self.alice.user_id)
+        self.assertEqual(locked.to_public_dict()["invite"]["status"], "locked")
+        with self.assertRaises(StrategyError):
+            self.store.rotate_join_code(campaign.campaign_id, self.alice.user_id)
 
     def test_join_campaign_by_code_and_lock_initial_players(self) -> None:
         campaign = self.store.create_campaign(
@@ -1093,8 +2486,14 @@ class StrategyStoreTests(unittest.TestCase):
         self.assertEqual([member.user_id for member in joined.members], [1, 2])
         self.assertEqual([member.faction_id for member in joined.members], ["faction_1", "faction_2"])
 
+        joined = self.store.join_campaign_by_code(campaign.join_code, self.carol)
+        joined = self.store.join_campaign_by_code(campaign.join_code, self.dave)
+        self.assertEqual(
+            [member.faction_id for member in joined.members],
+            ["faction_1", "faction_2", "faction_1", "faction_2"],
+        )
         with self.assertRaises(StrategyError):
-            self.store.join_campaign_by_code(campaign.join_code, self.carol)
+            self.store.join_campaign_by_code(campaign.join_code, self.eve)
         with self.assertRaises(StrategyError):
             self.store.lock_initial_players(campaign.campaign_id, self.bob.user_id)
 
@@ -1102,7 +2501,191 @@ class StrategyStoreTests(unittest.TestCase):
         self.assertEqual(locked.status, "active")
         self.assertEqual(self.store.join_campaign_by_code(campaign.join_code, self.bob).campaign_id, campaign.campaign_id)
         with self.assertRaises(StrategyError):
-            self.store.join_campaign_by_code(campaign.join_code, self.carol)
+            self.store.join_campaign_by_code(campaign.join_code, self.eve)
+        player_heroes = [
+            hero
+            for hero in locked.world.strategic_heroes
+            if hero.controller_type == "player"
+        ]
+        self.assertEqual(
+            {int(hero.controller_user_id or 0) for hero in player_heroes},
+            {1, 2, 3, 4},
+        )
+        self.assertEqual(len({hero.office_id for hero in player_heroes}), 4)
+        faction_1_offices = {
+            office.office_type
+            for office in locked.world.offices
+            if office.controller_type == "player"
+            and int(office.controller_user_id or 0) in {1, 3}
+        }
+        self.assertEqual(faction_1_offices, {"lord", "governor"})
+
+    def test_joiner_can_choose_host_faction_for_two_player_coop(self) -> None:
+        campaign = self.store.create_campaign(
+            owner=self.alice,
+            name="同势力协作",
+            seed=221,
+            city_count=6,
+            faction_count=2,
+        )
+
+        joined = self.store.join_campaign_by_code(
+            campaign.join_code,
+            self.bob,
+            join_host_faction=True,
+        )
+        self.assertEqual([member.faction_id for member in joined.members], ["faction_1", "faction_1"])
+        controlled_offices = {
+            int(office.controller_user_id or 0): office.office_type
+            for office in joined.world.offices
+            if office.controller_type == "player"
+        }
+        self.assertEqual(controlled_offices, {1: "lord", 2: "governor"})
+
+        with self.assertRaisesRegex(StrategyError, "另一名真人"):
+            choose_player_hero_path(
+                joined.world,
+                user_id=self.bob.user_id,
+                hero_code=next(
+                    hero.hero_code
+                    for hero in joined.world.strategic_heroes
+                    if hero.controller_user_id == self.bob.user_id
+                ),
+                path="lord",
+                assigned_faction_id="faction_1",
+                allow_reselect=True,
+            )
+
+    def test_same_faction_players_confirm_handover_and_lord_requested_vacate(self) -> None:
+        campaign = self.store.create_campaign(
+            owner=self.alice,
+            name="官职交接",
+            seed=222,
+            city_count=6,
+            faction_count=2,
+        )
+        campaign = self.store.join_campaign_by_code(
+            campaign.join_code,
+            self.bob,
+            join_host_faction=True,
+        )
+        campaign = self.store.lock_initial_players(campaign.campaign_id, self.alice.user_id)
+        offices_by_user = {
+            int(office.controller_user_id or 0): office
+            for office in campaign.world.offices
+            if office.controller_type == "player"
+        }
+        alice_office = offices_by_user[1]
+        bob_office = offices_by_user[2]
+
+        requested = self.store.request_office_change(
+            campaign.campaign_id,
+            self.alice.user_id,
+            request_type="handover",
+            office_id=alice_office.office_id,
+            target_user_id=self.bob.user_id,
+        )
+        pending = requested.office_change_requests[0]
+        self.assertEqual((pending.request_type, pending.status, pending.target_user_id), ("handover", "pending", 2))
+        with self.assertRaises(StrategyError):
+            self.store.respond_office_change(
+                campaign.campaign_id,
+                self.carol.user_id,
+                request_id=pending.request_id,
+                accept=True,
+            )
+
+        handed_over = self.store.respond_office_change(
+            campaign.campaign_id,
+            self.bob.user_id,
+            request_id=pending.request_id,
+            accept=True,
+        )
+        swapped = {
+            int(office.controller_user_id or 0): office.office_type
+            for office in handed_over.world.offices
+            if office.controller_type == "player"
+        }
+        self.assertEqual(swapped, {1: bob_office.office_type, 2: "lord"})
+        self.assertEqual(handed_over.office_change_requests[0].status, "accepted")
+
+        vacate_requested = self.store.request_office_change(
+            campaign.campaign_id,
+            self.bob.user_id,
+            request_type="vacate",
+            office_id=bob_office.office_id,
+        )
+        vacate = vacate_requested.office_change_requests[0]
+        vacated = self.store.respond_office_change(
+            campaign.campaign_id,
+            self.alice.user_id,
+            request_id=vacate.request_id,
+            accept=True,
+        )
+        former_office = next(
+            office
+            for office in vacated.world.offices
+            if office.office_id == bob_office.office_id
+        )
+        alice_hero = next(
+            hero
+            for hero in vacated.world.strategic_heroes
+            if hero.controller_user_id == self.alice.user_id
+        )
+        self.assertEqual(former_office.status, "vacant")
+        self.assertIsNone(former_office.controller_user_id)
+        self.assertIsNone(alice_hero.office_id)
+
+        with self.assertRaises(StrategyError):
+            self.store.grant_office_takeover(
+                campaign.campaign_id,
+                self.alice.user_id,
+                office_id=former_office.office_id,
+                delegate_user_id=self.bob.user_id,
+            )
+        with self.assertRaises(StrategyError):
+            self.store.grant_office_takeover(
+                campaign.campaign_id,
+                self.bob.user_id,
+                office_id=former_office.office_id,
+                delegate_user_id=self.bob.user_id,
+            )
+
+        delegated = self.store.grant_office_takeover(
+            campaign.campaign_id,
+            self.bob.user_id,
+            office_id=former_office.office_id,
+            delegate_user_id=self.alice.user_id,
+        )
+        takeover = delegated.office_takeovers[0]
+        temporary_office = next(
+            office for office in delegated.world.offices if office.office_id == former_office.office_id
+        )
+        self.assertEqual((takeover.status, takeover.month), ("active", 1))
+        self.assertEqual(
+            (temporary_office.status, temporary_office.holder_type, temporary_office.controller_user_id),
+            ("active", "temporary_player", self.alice.user_id),
+        )
+        authorized = resolve_action_office(
+            delegated.world,
+            user_id=self.alice.user_id,
+            faction_id="faction_1",
+            action_type="set_city_policy",
+            payload={"city_id": temporary_office.managed_entity_ids[0]},
+            requested_office_id=temporary_office.office_id,
+        )
+        self.assertEqual(authorized.office_id, temporary_office.office_id)
+
+        next_world = delegated.world
+        next_world.current_month = 2
+        self.store.update_world(campaign.campaign_id, self.bob.user_id, next_world)
+        expired = self.store.expire_office_takeovers(campaign.campaign_id, self.bob.user_id)
+        expired_office = next(
+            office for office in expired.world.offices if office.office_id == former_office.office_id
+        )
+        self.assertEqual(expired.office_takeovers[0].status, "expired")
+        self.assertEqual(expired_office.status, "vacant")
+        self.assertIsNone(expired_office.controller_user_id)
 
     def test_lock_initial_players_fills_open_factions_with_ai_members(self) -> None:
         campaign = self.store.create_campaign(
@@ -1127,7 +2710,7 @@ class StrategyStoreTests(unittest.TestCase):
         self.assertTrue(resume.can_resume)
         self.assertEqual(resume.missing_initial_user_ids, ())
 
-    def test_resume_requires_all_initial_players_online(self) -> None:
+    def test_resume_is_async_and_month_deadline_can_proxy_only_offline_drafting_players(self) -> None:
         campaign = self.store.create_campaign(
             owner=self.alice,
             initial_players=[self.bob],
@@ -1159,8 +2742,51 @@ class StrategyStoreTests(unittest.TestCase):
         self.assertTrue(self.store.require_can_resume(campaign.campaign_id, self.bob.user_id).can_resume)
 
         after_leave = self.store.mark_offline(campaign.campaign_id, self.alice.user_id)
-        self.assertFalse(after_leave.can_resume)
+        self.assertTrue(after_leave.can_resume)
         self.assertEqual(after_leave.missing_initial_user_ids, (1,))
+        self.assertEqual(after_leave.drafting_user_ids, (1, 2))
+
+        alice_ready = self.store.set_month_ready(campaign.campaign_id, self.alice.user_id, ready=True)
+        self.assertEqual(alice_ready.ready_user_ids, (1,))
+        with self.assertRaises(StrategyError):
+            self.store.close_month_deadline(campaign.campaign_id, self.alice.user_id)
+
+        self.store.mark_offline(campaign.campaign_id, self.bob.user_id)
+        closed = self.store.close_month_deadline(campaign.campaign_id, self.alice.user_id)
+        self.assertEqual(closed.proxy_ai_user_ids, (2,))
+        self.assertTrue(closed.can_advance_month)
+        self.assertEqual(
+            self.store.temporary_ai_faction_ids(campaign.campaign_id, campaign.world.current_month),
+            {"faction_2"},
+        )
+
+        reclaimed = self.store.set_month_ready(campaign.campaign_id, self.bob.user_id, ready=True)
+        self.assertEqual(reclaimed.ready_user_ids, (1, 2))
+        self.assertEqual(reclaimed.proxy_ai_user_ids, ())
+
+    def test_ready_member_must_withdraw_before_changing_queued_actions(self) -> None:
+        campaign = self.store.create_campaign(owner=self.alice, name="ready lock")
+        self.store.lock_initial_players(campaign.campaign_id, self.alice.user_id)
+        self.store.set_month_ready(campaign.campaign_id, self.alice.user_id, ready=True)
+
+        with self.assertRaises(StrategyError):
+            self.store.queue_action(
+                campaign_id=campaign.campaign_id,
+                user=self.alice,
+                action_type="set_policy",
+                action_key="city_1",
+                payload={"city_id": "city_1", "policy": "稳定优先"},
+            )
+
+        self.store.set_month_ready(campaign.campaign_id, self.alice.user_id, ready=False)
+        queued = self.store.queue_action(
+            campaign_id=campaign.campaign_id,
+            user=self.alice,
+            action_type="set_policy",
+            action_key="city_1",
+            payload={"city_id": "city_1", "policy": "稳定优先"},
+        )
+        self.assertEqual(len(queued.queued_actions), 1)
 
     def test_non_member_cannot_read_or_enter_campaign(self) -> None:
         campaign = self.store.create_campaign(owner=self.alice, name="私有战役")
@@ -1513,6 +3139,799 @@ class StrategyBattleTests(unittest.TestCase):
         self.assertEqual(public["pending_battles"][-1]["status"], "resolved")
 
 
+class StrategyWorldCrisisTests(unittest.TestCase):
+    def _campaign_world(self, *, seed: int = 260) -> WorldState:
+        return generate_random_world(
+            seed=seed,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+
+    def test_fixed_campaign_starts_with_deterministic_public_crisis_clock(self) -> None:
+        world = self._campaign_world()
+        self.assertEqual(len(world.world_crises), 1)
+        crisis = world.world_crises[0]
+        expected_origin = min(world.nodes, key=lambda node: (node.y, node.x, node.node_id))
+        expected_frontier = sorted(
+            {expected_origin.node_id, *expected_origin.connected_node_ids},
+            key=lambda node_id: (
+                next(node.y for node in world.nodes if node.node_id == node_id),
+                next(node.x for node in world.nodes if node.node_id == node_id),
+                node_id,
+            ),
+        )
+        self.assertEqual(crisis.stage, "dormant")
+        self.assertEqual(crisis.next_stage_month, 3)
+        self.assertEqual(crisis.origin_node_id, expected_origin.node_id)
+        self.assertEqual(crisis.frontier_node_ids, expected_frontier)
+
+        public = world_crises_public(world)[0]
+        self.assertEqual(public["stage_label"], "潜伏")
+        self.assertEqual(public["origin_name"], expected_origin.name)
+        self.assertIn("没有路线封锁", public["effect_summary"])
+        self.assertTrue(all(item["city_id"] for item in public["frontier"]))
+
+    def test_month_three_triggers_omen_once_without_map_or_army_effects(self) -> None:
+        world = self._campaign_world()
+        original_connections = [list(node.connected_node_ids) for node in world.nodes]
+        original_owners = [city.owner_faction_id for city in world.cities]
+        original_armies = [army.to_dict() for army in world.armies]
+
+        month_two = advance_month(world)
+        self.assertEqual(month_two.world_crises[0].stage, "dormant")
+        month_three = advance_month(month_two)
+        crisis = month_three.world_crises[0]
+        self.assertEqual(crisis.status, "active")
+        self.assertEqual(crisis.stage, "omen")
+        self.assertEqual(crisis.pressure, 10)
+        self.assertEqual(crisis.started_month, 3)
+        self.assertEqual(crisis.next_stage_month, 5)
+        self.assertEqual(
+            sum(event.category == "world_crisis_omen" for event in month_three.event_log),
+            1,
+        )
+        self.assertEqual([list(node.connected_node_ids) for node in month_three.nodes], original_connections)
+        self.assertEqual([city.owner_faction_id for city in month_three.cities], original_owners)
+        self.assertEqual([army.to_dict() for army in month_three.armies], original_armies)
+
+        month_four = advance_month(month_three)
+        self.assertEqual(month_four.world_crises[0].stage, "omen")
+        self.assertEqual(
+            sum(event.category == "world_crisis_omen" for event in month_four.event_log),
+            1,
+        )
+        self.assertEqual(
+            sum(item.get("event") == "northern_omen_confirmed" for item in month_four.world_crises[0].history),
+            1,
+        )
+
+    def test_crisis_roundtrip_legacy_backfill_and_sandbox_compatibility(self) -> None:
+        world = self._campaign_world()
+        restored = WorldState.from_dict(world.to_dict())
+        self.assertEqual(restored.world_crises[0].to_dict(), world.world_crises[0].to_dict())
+
+        legacy_payload = world.to_dict()
+        legacy_payload.pop("world_crises")
+        legacy = WorldState.from_dict(legacy_payload)
+        self.assertFalse(legacy.world_crises)
+        backfilled = ensure_world_crises(legacy)
+        self.assertEqual(backfilled.world_crises[0].origin_node_id, world.world_crises[0].origin_node_id)
+        self.assertEqual(legacy.to_public_dict()["world_crises"][0]["stage"], "dormant")
+
+        month_four_payload = advance_month(advance_month(world)).to_dict()
+        month_four_payload.pop("world_crises")
+        month_four_legacy = WorldState.from_dict(month_four_payload)
+        self.assertEqual(month_four_legacy.to_public_dict()["world_crises"][0]["stage"], "omen")
+
+        sandbox = generate_random_world(seed=260, city_count=8, faction_count=2)
+        self.assertFalse(sandbox.world_crises)
+        self.assertFalse(ensure_world_crises(sandbox).world_crises)
+
+    def _formed_army_at(
+        self,
+        world: WorldState,
+        *,
+        node_id: str,
+        supply: int,
+    ) -> tuple[WorldState, str]:
+        general = next(
+            item for item in world.offices
+            if item.faction_id == "faction_1" and item.office_type == "general"
+        )
+        hero = next(item for item in world.strategic_heroes if item.office_id == general.office_id)
+        city = next(item for item in world.cities if item.city_id == hero.city_id)
+        general.unit_inventory = {"infantry": 1}
+        city.resources.food = max(city.resources.food, supply + 100)
+        formed = form_or_reinforce_army(
+            world,
+            faction_id="faction_1",
+            city_id=city.city_id,
+            unit_inventory={"infantry": 1},
+            supply=supply,
+            issuer_office_id=general.office_id,
+        )
+        army = formed.armies[0]
+        army.location_node_id = node_id
+        army.status = "deployed"
+        army.current_order = "hold"
+        army.march_origin_node_id = node_id
+        army.destination_node_id = node_id
+        army.route_node_ids = [node_id]
+        army.route_progress_index = 0
+        army.departure_month = formed.current_month
+        army.estimated_arrival_month = formed.current_month
+        army.supply_source_city_id = None
+        army.supply_line_node_ids = []
+        army.supply_line_status = "unassessed"
+        army.supply_distance = None
+        formed.validate()
+        return formed, general.office_id
+
+    def test_month_five_creates_stable_cold_routes_once_without_spawning_enemies(self) -> None:
+        world = self._campaign_world(seed=1)
+        original_connections = [list(node.connected_node_ids) for node in world.nodes]
+        original_owners = [city.owner_faction_id for city in world.cities]
+        for _ in range(4):
+            world = advance_month(world)
+
+        crisis = world.world_crises[0]
+        expected_routes = {
+            strategic_route_key(crisis.origin_node_id, node_id)
+            for node_id in crisis.frontier_node_ids
+            if node_id != crisis.origin_node_id
+        }
+        self.assertEqual((crisis.stage, crisis.pressure, crisis.next_stage_month), ("border_pressure", 30, 7))
+        self.assertEqual(set(crisis.affected_route_keys), expected_routes)
+        self.assertEqual(snow_ghost_cold_route_keys(world), expected_routes)
+        self.assertEqual(sum(event.category == "world_crisis_border_pressure" for event in world.event_log), 1)
+        self.assertEqual([list(node.connected_node_ids) for node in world.nodes], original_connections)
+        self.assertEqual([city.owner_faction_id for city in world.cities], original_owners)
+        self.assertFalse(world.armies)
+
+        month_six = advance_month(world)
+        self.assertEqual(month_six.world_crises[0].stage, "border_pressure")
+        self.assertEqual(sum(event.category == "world_crisis_border_pressure" for event in month_six.event_log), 1)
+        public = world_crises_public(month_six)[0]
+        self.assertEqual(len(public["route_effects"]), len(expected_routes))
+        self.assertTrue(all(item["minimum_supply"] == SNOW_GHOST_COLD_ROUTE_MIN_SUPPLY for item in public["route_effects"]))
+        self.assertIn("低补给军队必须安全改道", public["effect_summary"])
+
+    def test_low_supply_detours_or_rejects_and_supplied_army_pays_cold_cost(self) -> None:
+        world = self._campaign_world(seed=1)
+        world.current_month = 5
+        world = ensure_world_crises(world)
+        origin = world.world_crises[0].origin_node_id
+        neighbors = sorted(node_id for node_id in world.world_crises[0].frontier_node_ids if node_id != origin)
+        self.assertEqual((origin, neighbors), ("node_2", ["node_1", "node_3"]))
+
+        low_supply, general_id = self._formed_army_at(world, node_id="node_1", supply=50)
+        army = low_supply.armies[0]
+        detoured = order_army_march(
+            low_supply,
+            faction_id="faction_1",
+            army_id=army.army_id,
+            destination_node_id="node_3",
+            issuer_office_id=general_id,
+        )
+        self.assertEqual(detoured.armies[0].route_node_ids, ["node_1", "node_7", "node_6", "node_5", "node_4", "node_3"])
+        self.assertIn("自动避开严寒路线", detoured.event_log[-1].message)
+
+        with self.assertRaisesRegex(StrategyError, "至少需要 80 粮草"):
+            order_army_march(
+                low_supply,
+                faction_id="faction_1",
+                army_id=army.army_id,
+                destination_node_id=origin,
+                issuer_office_id=general_id,
+            )
+
+        supplied, general_id = self._formed_army_at(world, node_id="node_1", supply=100)
+        supplied_army = supplied.armies[0]
+        ordered = order_army_march(
+            supplied,
+            faction_id="faction_1",
+            army_id=supplied_army.army_id,
+            destination_node_id=origin,
+            issuer_office_id=general_id,
+        )
+        crossed = advance_army_movements(ordered)
+        crossed_army = crossed.armies[0]
+        self.assertEqual((crossed_army.location_node_id, crossed_army.supply, crossed_army.morale), (origin, 80, 65))
+        self.assertEqual(
+            (crossed_army.last_cold_exposure_month, crossed_army.last_cold_supply_loss, crossed_army.last_cold_morale_loss),
+            (5, 20, 5),
+        )
+        self.assertEqual(crossed_army.last_cold_route_key, strategic_route_key("node_1", origin))
+        self.assertTrue(any(event.category == "strategy_army_cold_route" for event in crossed.event_log))
+
+    def test_existing_march_crosses_new_cold_route_with_shortage_penalty(self) -> None:
+        world = self._campaign_world(seed=1)
+        world.current_month = 4
+        world = ensure_world_crises(world)
+        origin = world.world_crises[0].origin_node_id
+        formed, general_id = self._formed_army_at(world, node_id="node_1", supply=50)
+        army = formed.armies[0]
+        ordered = order_army_march(
+            formed,
+            faction_id="faction_1",
+            army_id=army.army_id,
+            destination_node_id=origin,
+            issuer_office_id=general_id,
+        )
+        ordered.armies[0].supply = 10
+        ordered.current_month = 5
+        pressured = ensure_world_crises(ordered)
+
+        crossed = advance_army_movements(pressured)
+        crossed_army = crossed.armies[0]
+        self.assertEqual(
+            (crossed_army.location_node_id, crossed_army.supply, crossed_army.morale),
+            (origin, 0, 60),
+        )
+        self.assertEqual(
+            (crossed_army.last_cold_supply_loss, crossed_army.last_cold_morale_loss),
+            (10, 10),
+        )
+
+    def test_month_seven_spreads_routes_and_spawns_one_persistent_vanguard(self) -> None:
+        world = self._campaign_world(seed=1)
+        original_owners = [city.owner_faction_id for city in world.cities]
+        world.current_month = 7
+        spread = ensure_world_crises(world)
+        crisis = spread.world_crises[0]
+        frontier_ids = set(crisis.frontier_node_ids)
+        expected_routes = {
+            strategic_route_key(node.node_id, target_id)
+            for node in spread.nodes
+            for target_id in node.connected_node_ids
+            if node.node_id in frontier_ids or target_id in frontier_ids
+        }
+
+        self.assertEqual((crisis.stage, crisis.pressure, crisis.next_stage_month), ("spread", 60, 9))
+        self.assertEqual(set(crisis.affected_route_keys), expected_routes)
+        self.assertEqual(
+            set(crisis.threatened_city_ids),
+            {city.city_id for city in spread.cities if city.node_id in frontier_ids},
+        )
+        self.assertEqual(crisis.spawned_army_ids, [SNOW_GHOST_VANGUARD_ARMY_ID])
+        snow_faction = next(item for item in spread.factions if item.faction_id == SNOW_GHOST_FACTION_ID)
+        self.assertTrue(snow_faction.is_world_crisis)
+        army = next(item for item in spread.armies if item.army_id == SNOW_GHOST_VANGUARD_ARMY_ID)
+        self.assertEqual(
+            (
+                army.name,
+                army.army_kind,
+                army.location_node_id,
+                army.unit_inventory,
+                army.manpower,
+                army.supply,
+                army.morale,
+            ),
+            ("北境雪鬼先锋", "snow_ghost", crisis.origin_node_id, {"snow_ghost": 6}, 600, 600, 90),
+        )
+        self.assertEqual([city.owner_faction_id for city in spread.cities], original_owners)
+        self.assertEqual(roster_for_registered_units({"snow_ghost": 6}).roster, ["strategy_snow_ghost"] * 6)
+
+        repeated = ensure_world_crises(WorldState.from_dict(spread.to_dict()))
+        self.assertEqual(sum(item.faction_id == SNOW_GHOST_FACTION_ID for item in repeated.factions), 1)
+        self.assertEqual(sum(item.army_id == SNOW_GHOST_VANGUARD_ARMY_ID for item in repeated.armies), 1)
+        self.assertEqual(
+            sum(event.category == "world_crisis_snow_ghost_spread" for event in repeated.event_log),
+            1,
+        )
+        public = world_crises_public(repeated)[0]
+        self.assertEqual(len(public["threatened_cities"]), len(crisis.threatened_city_ids))
+        self.assertEqual(public["crisis_armies"][0]["name"], "北境雪鬼先锋")
+
+    def test_month_seven_vanguard_uses_existing_siege_or_encounter_chain(self) -> None:
+        undefended = self._campaign_world(seed=1)
+        undefended.current_month = 6
+        undefended = ensure_world_crises(undefended)
+        original_owners = [city.owner_faction_id for city in undefended.cities]
+        besieged = advance_month(undefended)
+        crisis = besieged.world_crises[0]
+        origin_city = next(city for city in besieged.cities if city.node_id == crisis.origin_node_id)
+        siege = next(item for item in besieged.sieges if item.city_id == origin_city.city_id)
+        self.assertEqual(siege.attacker_faction_id, SNOW_GHOST_FACTION_ID)
+        self.assertEqual(siege.attacker_army_ids, [SNOW_GHOST_VANGUARD_ARMY_ID])
+        self.assertEqual(siege.status, "active")
+        self.assertEqual([city.owner_faction_id for city in besieged.cities], original_owners)
+
+        defended = self._campaign_world(seed=1)
+        defended.current_month = 6
+        defended = ensure_world_crises(defended)
+        defended, _ = self._formed_army_at(
+            defended,
+            node_id=defended.world_crises[0].origin_node_id,
+            supply=100,
+        )
+        encountered = advance_month(defended)
+        active = next(item for item in encountered.encounters if item.status == "active")
+        self.assertEqual(active.node_id, encountered.world_crises[0].origin_node_id)
+        self.assertIn(SNOW_GHOST_FACTION_ID, active.faction_army_ids)
+        self.assertFalse(any(item.status == "active" for item in encountered.sieges))
+
+        pending = declare_strategic_battle(
+            encountered,
+            faction_id="faction_1",
+            source_kind="encounter",
+            source_entity_id=active.encounter_id,
+            resolution_mode="manual",
+            auto_resolve=False,
+        )
+        battle = pending.pending_battles[-1]
+        rosters = strategy_battle_rosters(pending, battle)
+        snow_ghost_side = (
+            rosters.attacker
+            if battle.attacker_faction_id == SNOW_GHOST_FACTION_ID
+            else rosters.defender
+        )
+        self.assertEqual(snow_ghost_side.roster, ["strategy_snow_ghost"] * 6)
+        self.assertTrue(
+            any(
+                item["source"] == "registered_unit"
+                and item["unit_id"] == "snow_ghost"
+                and item["grid_units"] == 6
+                for item in snow_ghost_side.manifest
+            )
+        )
+
+    def test_month_nine_opens_persistent_mobilization_and_public_choices(self) -> None:
+        world = self._campaign_world(seed=1)
+        world.current_month = SNOW_GHOST_MOBILIZATION_MONTH
+        mobilized = ensure_world_crises(world)
+        crisis = mobilized.world_crises[0]
+
+        self.assertEqual((crisis.stage, crisis.pressure, crisis.next_stage_month), ("mobilization", 80, 11))
+        self.assertEqual(crisis.contributions_by_faction, {"faction_1": 0, "faction_2": 0})
+        self.assertEqual(
+            sum(event.category == "world_crisis_mobilization" for event in mobilized.event_log),
+            1,
+        )
+        public = world_crises_public(mobilized)[0]
+        self.assertEqual(public["stage_label"], "联军动员")
+        self.assertEqual(len(public["contribution_rows"]), 2)
+        self.assertEqual(
+            {item["id"] for item in public["choice_options_by_faction"]["faction_1"]},
+            {"contribute", "cooperate", "betray"},
+        )
+
+        repeated = ensure_world_crises(WorldState.from_dict(mobilized.to_dict()))
+        self.assertEqual(
+            sum(event.category == "world_crisis_mobilization" for event in repeated.event_log),
+            1,
+        )
+        self.assertEqual(repeated.world_crises[0].contributions_by_faction, crisis.contributions_by_faction)
+
+    def test_mobilization_contribution_cooperation_and_betrayal_use_real_values(self) -> None:
+        world = self._campaign_world(seed=1)
+        world.current_month = 9
+        world = ensure_world_crises(world)
+        lords = {
+            office.faction_id: office.office_id
+            for office in world.offices
+            if office.office_type == "lord" and office.faction_id in {"faction_1", "faction_2"}
+        }
+        lord_heroes = {
+            office.faction_id: office.holder_id
+            for office in world.offices
+            if office.office_type == "lord" and office.faction_id in {"faction_1", "faction_2"}
+        }
+        first_subordinate = next(
+            hero
+            for hero in world.strategic_heroes
+            if hero.faction_id == "faction_1"
+            and hero.status == "serving"
+            and hero.hero_code != lord_heroes["faction_1"]
+        )
+        subordinate_before = (
+            first_subordinate.loyalty,
+            first_subordinate.relationships.get(lord_heroes["faction_1"], 0),
+        )
+        first_before = next(item for item in world.factions if item.faction_id == "faction_1")
+        initial_resources = (first_before.resources.food, first_before.resources.money)
+
+        contributed = resolve_world_crisis_choice(
+            WorldState.from_dict(world.to_dict()),
+            faction_id="faction_1",
+            choice_id="contribute",
+            issuer_office_id=lords["faction_1"],
+        )
+        contributor = next(item for item in contributed.factions if item.faction_id == "faction_1")
+        self.assertEqual(
+            (contributor.resources.food, contributor.resources.money),
+            (initial_resources[0] - 100, initial_resources[1] - 50),
+        )
+        self.assertEqual(contributed.world_crises[0].contributions_by_faction["faction_1"], 35)
+        contributed_subordinate = next(
+            hero for hero in contributed.strategic_heroes if hero.hero_code == first_subordinate.hero_code
+        )
+        self.assertEqual(
+            (
+                contributed_subordinate.loyalty,
+                contributed_subordinate.relationships[lord_heroes["faction_1"]],
+            ),
+            (min(100, subordinate_before[0] + 3), subordinate_before[1] + 2),
+        )
+
+        pledged = resolve_world_crisis_choice(
+            world,
+            faction_id="faction_1",
+            choice_id="cooperate",
+            target_faction_id="faction_2",
+            issuer_office_id=lords["faction_1"],
+        )
+        first = next(item for item in pledged.factions if item.faction_id == "faction_1")
+        self.assertEqual(
+            (first.resources.food, first.resources.money),
+            (initial_resources[0] - 80, initial_resources[1] - 40),
+        )
+        self.assertEqual(pledged.world_crises[0].contributions_by_faction["faction_1"], 25)
+        with self.assertRaisesRegex(StrategyError, "本月已经"):
+            validate_world_crisis_choice(
+                pledged,
+                faction_id="faction_1",
+                choice_id="contribute",
+            )
+
+        allied = resolve_world_crisis_choice(
+            pledged,
+            faction_id="faction_2",
+            choice_id="cooperate",
+            target_faction_id="faction_1",
+            issuer_office_id=lords["faction_2"],
+        )
+        crisis = allied.world_crises[0]
+        self.assertEqual(crisis.contributions_by_faction, {"faction_1": 40, "faction_2": 40})
+        self.assertEqual(crisis.cooperation_pairs, ["faction_1::faction_2"])
+        first = next(item for item in allied.factions if item.faction_id == "faction_1")
+        second = next(item for item in allied.factions if item.faction_id == "faction_2")
+        self.assertEqual((first.diplomatic_reputation, second.diplomatic_reputation), (55, 55))
+        self.assertEqual((first.relations["faction_2"], second.relations["faction_1"]), (10, 10))
+
+        allied_subordinate = next(
+            hero for hero in allied.strategic_heroes if hero.hero_code == first_subordinate.hero_code
+        )
+        allied_personal = (
+            allied_subordinate.loyalty,
+            allied_subordinate.relationships[lord_heroes["faction_1"]],
+        )
+        allied.current_month = 10
+        betrayed = resolve_world_crisis_choice(
+            allied,
+            faction_id="faction_1",
+            choice_id="betray",
+            target_faction_id="faction_2",
+            issuer_office_id=lords["faction_1"],
+        )
+        crisis = betrayed.world_crises[0]
+        first = next(item for item in betrayed.factions if item.faction_id == "faction_1")
+        second = next(item for item in betrayed.factions if item.faction_id == "faction_2")
+        self.assertEqual(crisis.contributions_by_faction, {"faction_1": 60, "faction_2": 20})
+        self.assertEqual(crisis.broken_cooperation_pairs, ["faction_1::faction_2"])
+        self.assertEqual(first.diplomatic_reputation, 35)
+        self.assertEqual((first.relations["faction_2"], second.relations["faction_1"]), (-20, -20))
+        betrayed_subordinate = next(
+            hero for hero in betrayed.strategic_heroes if hero.hero_code == first_subordinate.hero_code
+        )
+        self.assertEqual(
+            (
+                betrayed_subordinate.loyalty,
+                betrayed_subordinate.relationships[lord_heroes["faction_1"]],
+            ),
+            (max(0, allied_personal[0] - 6), allied_personal[1] - 5),
+        )
+        self.assertTrue(any(event.category == "world_crisis_cooperation_betrayed" for event in betrayed.event_log))
+        self.assertEqual(
+            WorldState.from_dict(betrayed.to_dict()).world_crises[0].decisions,
+            crisis.decisions,
+        )
+
+    def test_month_eleven_freezes_all_three_showdown_branches_into_one_battle(self) -> None:
+        cases = (
+            ("united_counteroffensive", {"faction_1": 40, "faction_2": 40}, ["faction_1::faction_2"], []),
+            ("rival_vanguards", {"faction_1": 35, "faction_2": 35}, [], []),
+            ("shattered_line", {"faction_1": 60, "faction_2": 20}, ["faction_1::faction_2"], ["faction_1::faction_2"]),
+        )
+        for expected_branch, contributions, pairs, broken_pairs in cases:
+            with self.subTest(branch=expected_branch):
+                world = self._campaign_world(seed=261)
+                world.current_month = 9
+                world = ensure_world_crises(world)
+                crisis = world.world_crises[0]
+                crisis.contributions_by_faction = dict(contributions)
+                crisis.cooperation_pairs = list(pairs)
+                crisis.broken_cooperation_pairs = list(broken_pairs)
+                world.current_month = SNOW_GHOST_SHOWDOWN_MONTH
+
+                showdown = ensure_world_crises(world)
+                crisis = showdown.world_crises[0]
+                battles = [
+                    battle
+                    for battle in showdown.pending_battles
+                    if battle.source_kind == "world_crisis"
+                ]
+
+                self.assertEqual(crisis.stage, "showdown")
+                self.assertEqual(crisis.showdown_branch, expected_branch)
+                self.assertEqual(len(battles), 1)
+                self.assertEqual(battles[0].battle_id, crisis.showdown_battle_id)
+                self.assertEqual(battles[0].source_city_id, battles[0].target_city_id)
+                self.assertEqual(battles[0].resolution_mode, "unselected")
+                self.assertEqual(len([
+                    item for item in ensure_world_crises(showdown).pending_battles
+                    if item.source_kind == "world_crisis"
+                ]), 1)
+
+    def test_united_showdown_victory_shares_mainline_without_capturing_city(self) -> None:
+        world = self._campaign_world(seed=262)
+        world.current_month = 9
+        world = ensure_world_crises(world)
+        crisis = world.world_crises[0]
+        crisis.contributions_by_faction = {"faction_1": 40, "faction_2": 40}
+        crisis.cooperation_pairs = ["faction_1::faction_2"]
+        world.current_month = 11
+        world = ensure_world_crises(world)
+        owner_before = {city.city_id: city.owner_faction_id for city in world.cities}
+        battle = next(
+            item for item in world.pending_battles
+            if item.battle_id == world.world_crises[0].showdown_battle_id
+        )
+        battle.resolution_mode = "quick"
+
+        resolved = resolve_pending_battle(world, battle_id=battle.battle_id)
+        crisis = resolved.world_crises[0]
+        mainline = next(
+            item for item in evaluate_strategic_status(resolved)["victory_conditions"]
+            if item["id"] == "world_mainline"
+        )
+
+        self.assertEqual((crisis.stage, crisis.showdown_outcome, crisis.pressure), ("resolved", "victory", 0))
+        self.assertEqual(crisis.mainline_winner_faction_ids, ["faction_1", "faction_2"])
+        self.assertEqual({city.city_id: city.owner_faction_id for city in resolved.cities}, owner_before)
+        self.assertFalse(crisis.affected_route_keys)
+        self.assertTrue(mainline["achieved"])
+        self.assertEqual(mainline["winner_faction_ids"], ["faction_1", "faction_2"])
+        self.assertTrue(all(
+            army.status == "destroyed"
+            for army in resolved.armies
+            if army.faction_id == SNOW_GHOST_FACTION_ID
+        ))
+        scores = {
+            row["faction_id"]: row["mainline_score"]
+            for row in campaign_assessment_rankings(resolved)
+        }
+        self.assertEqual(scores, {"faction_1": 40, "faction_2": 40})
+
+    def test_showdown_defeat_applies_aftermath_and_blocks_month_twelve_until_resolved(self) -> None:
+        world = self._campaign_world(seed=263)
+        world.current_month = 11
+        world = ensure_world_crises(world)
+        crisis = world.world_crises[0]
+        threatened_before = {
+            city.city_id: (
+                city.resources.food,
+                city.support_by_faction.get(city.owner_faction_id, 50),
+            )
+            for city in world.cities
+            if city.city_id in crisis.threatened_city_ids
+        }
+        with self.assertRaisesRegex(StrategyError, "北境决战尚未完成"):
+            advance_month(world)
+        lord = next(
+            office for office in world.offices
+            if office.faction_id == "faction_1" and office.office_type == "lord"
+        )
+
+        resolved = set_world_crisis_showdown_resolution(
+            world,
+            faction_id="faction_1",
+            issuer_office_id=lord.office_id,
+            resolution_mode="quick",
+        )
+        crisis = resolved.world_crises[0]
+
+        self.assertEqual((crisis.stage, crisis.showdown_outcome), ("aftermath", "defeat"))
+        self.assertFalse(crisis.mainline_winner_faction_ids)
+        for city_id, (food, support) in threatened_before.items():
+            city = next(item for item in resolved.cities if item.city_id == city_id)
+            self.assertEqual(city.resources.food, max(0, food - 80))
+            self.assertEqual(
+                city.support_by_faction.get(city.owner_faction_id, 50),
+                max(0, support - 10),
+            )
+        month_twelve = advance_month(resolved)
+        self.assertEqual(month_twelve.current_month, 12)
+
+    def test_crisis_ai_publicly_balances_survival_mainline_and_expansion(self) -> None:
+        survival = self._campaign_world(seed=264)
+        survival.current_month = 9
+        survival = ensure_world_crises(survival)
+        ai_city = next(city for city in survival.cities if city.owner_faction_id == "faction_2")
+        survival.world_crises[0].threatened_city_ids = [ai_city.city_id]
+        ai_faction = next(item for item in survival.factions if item.faction_id == "faction_2")
+        ai_faction.resources.food = 1000
+        ai_faction.resources.money = 1000
+
+        survival = apply_strategy_ai_monthly_actions(
+            survival,
+            controlled_faction_ids={"faction_1"},
+            enable_attacks=False,
+        )
+        survival_decision = next(
+            item for item in survival.world_crises[0].decisions
+            if item["faction_id"] == "faction_2"
+        )
+        self.assertEqual(
+            (
+                survival_decision["decision_origin"],
+                survival_decision["ai_priority"],
+                survival_decision["choice_id"],
+            ),
+            ("ai", "survival", "cooperate"),
+        )
+        self.assertIn(ai_city.name, survival_decision["ai_rationale"])
+        public_intent = world_crises_public(survival)[0]["ai_intent_rows"][0]
+        self.assertEqual(public_intent["faction_id"], "faction_2")
+        self.assertEqual(public_intent["ai_priority"], "survival")
+
+        mainline = self._campaign_world(seed=265)
+        mainline.current_month = 9
+        mainline = ensure_world_crises(mainline)
+        mainline.world_crises[0].threatened_city_ids = [
+            city.city_id for city in mainline.cities if city.owner_faction_id == "faction_1"
+        ]
+        ai_faction = next(item for item in mainline.factions if item.faction_id == "faction_2")
+        ai_faction.resources.food = 1000
+        ai_faction.resources.money = 1000
+        mainline.ai_strategic_goals["faction_2"] = {
+            "current": {
+                "id": "ai_goal:faction_2:raise_army:9",
+                "faction_id": "faction_2",
+                "goal_type": "raise_army",
+                "title": "积蓄兵力",
+                "status": "active",
+                "start_month": 9,
+                "end_month": 10,
+                "target_city_id": next(
+                    city.city_id for city in mainline.cities if city.owner_faction_id == "faction_2"
+                ),
+            },
+            "history": [],
+        }
+        mainline = apply_strategy_ai_monthly_actions(
+            mainline,
+            controlled_faction_ids={"faction_1"},
+            enable_attacks=False,
+        )
+        mainline_decision = next(
+            item for item in mainline.world_crises[0].decisions
+            if item["faction_id"] == "faction_2"
+        )
+        self.assertEqual((mainline_decision["ai_priority"], mainline_decision["choice_id"]), ("mainline", "contribute"))
+
+        expansion = self._campaign_world(seed=266)
+        expansion.current_month = 9
+        expansion = ensure_world_crises(expansion)
+        expansion.world_crises[0].threatened_city_ids = [
+            city.city_id for city in expansion.cities if city.owner_faction_id == "faction_1"
+        ]
+        target_city = next(city for city in expansion.cities if city.owner_faction_id != "faction_2")
+        source_city = next(city for city in expansion.cities if city.owner_faction_id == "faction_2")
+        expansion.ai_strategic_goals["faction_2"] = {
+            "current": {
+                "id": "ai_goal:faction_2:capture_city:9",
+                "faction_id": "faction_2",
+                "goal_type": "capture_city",
+                "title": f"夺取{target_city.name}",
+                "status": "active",
+                "start_month": 9,
+                "end_month": 11,
+                "target_city_id": target_city.city_id,
+                "source_city_id": source_city.city_id,
+            },
+            "history": [],
+        }
+        expansion = apply_strategy_ai_monthly_actions(
+            expansion,
+            controlled_faction_ids={"faction_1"},
+            enable_attacks=False,
+        )
+        expansion_decision = next(
+            item for item in expansion.world_crises[0].decisions
+            if item["faction_id"] == "faction_2"
+        )
+        self.assertEqual((expansion_decision["ai_priority"], expansion_decision["choice_id"]), ("expansion", "avoid"))
+        self.assertTrue(any(
+            event.category == "world_crisis_ai_avoided"
+            for event in expansion.event_log
+        ))
+
+    def test_expansion_ai_only_exploits_an_existing_crisis_cooperation(self) -> None:
+        world = self._campaign_world(seed=267)
+        world.current_month = 9
+        world = ensure_world_crises(world)
+        crisis = world.world_crises[0]
+        crisis.threatened_city_ids = [
+            city.city_id for city in world.cities if city.owner_faction_id == "faction_1"
+        ]
+        crisis.cooperation_pairs = ["faction_1::faction_2"]
+        crisis.contributions_by_faction = {"faction_1": 40, "faction_2": 40}
+        world.current_month = 10
+        target_city = next(city for city in world.cities if city.owner_faction_id != "faction_2")
+        source_city = next(city for city in world.cities if city.owner_faction_id == "faction_2")
+        world.ai_strategic_goals["faction_2"] = {
+            "current": {
+                "id": "ai_goal:faction_2:capture_city:9",
+                "faction_id": "faction_2",
+                "goal_type": "capture_city",
+                "title": f"夺取{target_city.name}",
+                "status": "active",
+                "start_month": 9,
+                "end_month": 11,
+                "target_city_id": target_city.city_id,
+                "source_city_id": source_city.city_id,
+            },
+            "history": [],
+        }
+
+        updated = apply_strategy_ai_monthly_actions(
+            world,
+            controlled_faction_ids={"faction_1"},
+            enable_attacks=False,
+        )
+        crisis = updated.world_crises[0]
+        decision = next(item for item in crisis.decisions if item["faction_id"] == "faction_2")
+        self.assertEqual((decision["ai_priority"], decision["choice_id"]), ("expansion", "betray"))
+        self.assertEqual(crisis.broken_cooperation_pairs, ["faction_1::faction_2"])
+        self.assertEqual(crisis.contributions_by_faction, {"faction_1": 20, "faction_2": 60})
+
+    def test_ai_led_showdown_quick_resolves_and_full_campaign_survives_reload_to_month_twelve(self) -> None:
+        world = self._campaign_world(seed=268)
+        controlled = {"faction_1"}
+        while world.current_month < 12:
+            world = apply_strategy_ai_monthly_actions(
+                world,
+                controlled_faction_ids=controlled,
+                enable_attacks=False,
+            )
+            world = advance_month(world)
+            world = apply_strategy_ai_showdown_action(
+                world,
+                controlled_faction_ids=controlled,
+            )
+            world = WorldState.from_dict(world.to_dict())
+
+        crisis = world.world_crises[0]
+        battle = next(
+            item for item in world.pending_battles
+            if item.battle_id == crisis.showdown_battle_id
+        )
+        self.assertEqual(world.current_month, 12)
+        self.assertEqual(battle.status, "resolved")
+        self.assertIn(crisis.stage, {"resolved", "aftermath"})
+        self.assertTrue(any(
+            event.category == "world_crisis_ai_showdown_selected"
+            for event in world.event_log
+        ))
+        self.assertTrue(any(
+            item.get("decision_origin") == "ai"
+            for item in crisis.decisions
+        ))
+        self.assertTrue(any(
+            item.get("decision_origin") == "ai"
+            and item.get("choice_id") in {"contribute", "cooperate"}
+            for item in crisis.decisions
+        ))
+        self.assertTrue(any(
+            item.get("decision_origin") == "ai"
+            and item.get("ai_priority") in {"survival", "mainline", "expansion"}
+            for item in WorldState.from_dict(world.to_dict()).world_crises[0].decisions
+        ))
+
+
 class StrategyObjectiveTests(unittest.TestCase):
     def test_first_campaign_tutorial_tracks_acknowledgement_actions_and_skip_without_rewards(self) -> None:
         world = generate_random_world(
@@ -1568,7 +3987,7 @@ class StrategyObjectiveTests(unittest.TestCase):
         self.assertEqual(conditions["unify_cities"]["winner_faction_id"], "faction_1")
         self.assertTrue(conditions["eliminate_enemy_factions"]["achieved"])
         self.assertEqual(conditions["eliminate_enemy_factions"]["winner_faction_id"], "faction_1")
-        self.assertFalse(conditions["world_mainline"]["implemented"])
+        self.assertTrue(conditions["world_mainline"]["implemented"])
         self.assertFalse(conditions["relic_altar"]["implemented"])
         self.assertTrue(status["campaign_complete"])
         self.assertEqual(status["winner_faction_ids"], ["faction_1"])
@@ -1767,6 +4186,45 @@ class StrategyExileTests(unittest.TestCase):
         self.assertEqual(rebuilt_city.resources.troops, 300)
         self.assertFalse(evaluate_strategic_status(rebuilt)["campaign_complete"])
 
+    def test_exile_rebuild_base_recovers_local_relics(self) -> None:
+        world = generate_random_world(
+            seed=616,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+        faction = next(item for item in world.factions if item.faction_id == "faction_2")
+        target = next(item for item in world.cities if item.city_id == faction.capital_city_id)
+        for city in world.cities:
+            if city.owner_faction_id == faction.faction_id:
+                city.owner_faction_id = "faction_1"
+        faction.resources.money = 120
+        faction.resources.troops = 300
+        target.resources.troops = 260
+        target.support_by_faction[faction.faction_id] = 20
+        relic = next(item for item in world.relics if item.state == "scattered")
+        relic.state = "stored"
+        relic.condition = "damaged"
+        relic.owner_faction_id = "faction_1"
+        relic.location_node_id = target.node_id
+        relic.location_city_id = target.city_id
+        relic.altar_id = None
+        target.relics_stored.append(relic.relic_id)
+
+        rebuilt = apply_exile_action(
+            world,
+            faction_id=faction.faction_id,
+            action_id="rebuild_base",
+            target_city_id=target.city_id,
+        )
+        recovered = next(item for item in rebuilt.relics if item.relic_id == relic.relic_id)
+        self.assertEqual(recovered.owner_faction_id, faction.faction_id)
+        self.assertEqual(recovered.condition, "damaged")
+        self.assertTrue(
+            any(event.category == "relics_captured_on_city_control_change" for event in rebuilt.event_log)
+        )
+
     def test_exile_action_validation_rejects_non_exiled_faction_and_unready_rebuild(self) -> None:
         world = generate_random_world(seed=65, city_count=4, faction_count=2)
         with self.assertRaises(StrategyError):
@@ -1794,6 +4252,149 @@ class StrategyExileTests(unittest.TestCase):
 
 
 class StrategyHeroTests(unittest.TestCase):
+    def test_hero_personal_state_is_deterministic_persistent_and_visible(self) -> None:
+        first = generate_random_world(
+            seed=611,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+        second = generate_random_world(
+            seed=611,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+        faction_id = "faction_1"
+        lord_code = next(
+            item.holder_id
+            for item in first.offices
+            if item.faction_id == faction_id and item.office_type == "lord"
+        )
+        hero = next(
+            item
+            for item in first.strategic_heroes
+            if item.faction_id == faction_id and item.status == "serving" and item.hero_code != lord_code
+        )
+        counterpart = next(item for item in second.strategic_heroes if item.hero_code == hero.hero_code)
+        self.assertIn(hero.strategic_specialty, {"vanguard", "guardian", "trainer", "aether_scholar"})
+        self.assertEqual(hero.strategic_specialty, counterpart.strategic_specialty)
+        self.assertEqual(hero.personal_mission_status, "active")
+        self.assertEqual(hero.personal_mission_due_month, first.current_month + 3)
+        self.assertEqual(hero.relationships[lord_code], 0)
+        restored = WorldState.from_dict(first.to_dict())
+        self.assertEqual(
+            next(item for item in restored.strategic_heroes if item.hero_code == hero.hero_code).to_dict(),
+            hero.to_dict(),
+        )
+        public = next(item for item in strategic_hero_pool_public(first) if item["code"] == hero.hero_code)
+        self.assertEqual(public["specialty"]["id"], hero.strategic_specialty)
+        self.assertEqual(public["personal_mission"]["status"], "active")
+        self.assertEqual(public["lord_relationship"], 0)
+
+    def test_matching_duty_applies_specialty_and_completes_personal_mission_once(self) -> None:
+        world = generate_random_world(
+            seed=611,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+        faction_id = "faction_1"
+        city = next(item for item in world.cities if item.owner_faction_id == faction_id)
+        lord = next(item for item in world.offices if item.faction_id == faction_id and item.office_type == "lord")
+        hero = next(
+            item
+            for item in world.strategic_heroes
+            if item.faction_id == faction_id and item.status == "serving" and item.hero_code != lord.holder_id
+        )
+        hero.strategic_specialty = "trainer"
+        hero.personal_mission_assignment_type = "training"
+        hero.loyalty = 60
+        assigned = assign_strategic_hero_duty(
+            world,
+            faction_id=faction_id,
+            issuer_office_id=lord.office_id,
+            hero_code=hero.hero_code,
+            assignment_type="training",
+            target_id=city.city_id,
+        )
+        troops_before = next(item for item in assigned.cities if item.city_id == city.city_id).resources.troops
+        assigned.current_month += 1
+        first = advance_hero_personal_states(assigned)
+        first_hero = next(item for item in first.strategic_heroes if item.hero_code == hero.hero_code)
+        self.assertEqual(first_hero.personal_mission_progress, 1)
+        self.assertEqual(
+            next(item for item in first.cities if item.city_id == city.city_id).resources.troops,
+            troops_before + 35,
+        )
+        idempotent = advance_hero_personal_states(first)
+        self.assertEqual(
+            next(item for item in idempotent.cities if item.city_id == city.city_id).resources.troops,
+            troops_before + 35,
+        )
+        first.current_month += 1
+        completed = advance_hero_personal_states(first)
+        completed_hero = next(item for item in completed.strategic_heroes if item.hero_code == hero.hero_code)
+        self.assertEqual(completed_hero.personal_mission_status, "completed")
+        self.assertEqual(completed_hero.personal_mission_progress, 2)
+        self.assertEqual(completed_hero.loyalty, 70)
+        self.assertEqual(completed_hero.relationships[lord.holder_id], 8)
+        self.assertEqual(
+            next(item for item in completed.cities if item.city_id == city.city_id).resources.troops,
+            troops_before + 70,
+        )
+
+    def test_personal_mission_deadline_and_low_loyalty_refusal_are_real(self) -> None:
+        world = generate_random_world(
+            seed=612,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+        faction_id = "faction_1"
+        lord = next(item for item in world.offices if item.faction_id == faction_id and item.office_type == "lord")
+        hero = next(
+            item
+            for item in world.strategic_heroes
+            if item.faction_id == faction_id and item.status == "serving" and item.hero_code != lord.holder_id
+        )
+        loyalty_before = hero.loyalty
+        hero.assignment_type = "reserve"
+        world.current_month = int(hero.personal_mission_due_month or 4)
+        failed = advance_hero_personal_states(world)
+        failed_hero = next(item for item in failed.strategic_heroes if item.hero_code == hero.hero_code)
+        self.assertEqual(failed_hero.personal_mission_status, "failed")
+        self.assertEqual(failed_hero.loyalty, loyalty_before - 10)
+        self.assertEqual(failed_hero.relationships[lord.holder_id], -8)
+
+        failed_hero.loyalty = 10
+        self.assertFalse(hero_command_accepts(failed, failed_hero, "assignment:campaign"))
+        with self.assertRaises(StrategyError):
+            normalize_strategic_hero_deployment(failed, faction_id, [failed_hero.hero_code])
+        with self.assertRaises(StrategyError):
+            assign_strategic_hero_duty(
+                failed,
+                faction_id=faction_id,
+                issuer_office_id=lord.office_id,
+                hero_code=failed_hero.hero_code,
+                assignment_type="campaign",
+            )
+        reserved = assign_strategic_hero_duty(
+            failed,
+            faction_id=faction_id,
+            issuer_office_id=lord.office_id,
+            hero_code=failed_hero.hero_code,
+            assignment_type="reserve",
+        )
+        self.assertEqual(
+            next(item for item in reserved.strategic_heroes if item.hero_code == hero.hero_code).assignment_type,
+            "reserve",
+        )
+
     def _summon_faction_hero(self, world: WorldState, faction_id: str = "faction_1") -> tuple[WorldState, dict[str, object]]:
         hero = next(
             item
@@ -1924,6 +4525,9 @@ class StrategyHeroTests(unittest.TestCase):
 
         self.assertEqual(appointed_hero.office_id, target.office_id)
         self.assertEqual((appointed_office.holder_type, appointed_office.holder_id), ("hero", recruit.hero_code))
+        self.assertEqual(appointed_hero.relationships[lord.holder_id], 8)
+        self.assertEqual(appointed_hero.personal_mission_status, "active")
+        self.assertTrue(any(row.get("event") == "appointed" for row in appointed_hero.personal_history))
         self.assertTrue(any(event.category == "strategic_hero_appointed" for event in appointed.event_log))
 
     def test_roaming_player_join_request_requires_lord_acceptance(self) -> None:
@@ -2043,6 +4647,9 @@ class StrategyHeroTests(unittest.TestCase):
             room_id="hero_room",
             invite_path="/?room=HERO_ROOM",
         )
+        committed = next(item for item in attached.strategic_heroes if item.hero_code == hero["code"])
+        lord = next(item for item in attached.offices if item.faction_id == "faction_1" and item.office_type == "lord")
+        committed.loyalty = 0
 
         resolved = resolve_battle_room_result(
             attached,
@@ -2061,6 +4668,9 @@ class StrategyHeroTests(unittest.TestCase):
         )
         self.assertEqual(public_hero["status"], "sleeping")
         self.assertEqual(public_hero["sleeping_until_month"], resolved.current_month + STRATEGIC_HERO_BATTLE_SLEEP_MONTHS)
+        self.assertEqual(public_hero["loyalty"], 0)
+        self.assertEqual(public_hero["lord_relationship"], -3)
+        self.assertEqual(public_hero["lord_hero_code"], lord.holder_id)
         self.assertNotIn(hero["code"], active_strategic_hero_codes_for_faction(resolved, "faction_1"))
         self.assertEqual(battle.battle_result["strategic_heroes_by_side"]["attacker"]["sleeping"], [hero["code"]])
         self.assertTrue(any(event.category == "strategic_hero_sleeping" for event in resolved.event_log))
@@ -2781,6 +5391,12 @@ class StrategyRoleWorkspaceActionTests(unittest.TestCase):
             if hero.faction_id == target.owner_faction_id and hero.office_id and "lord" not in hero.office_id
         )
         bound.ritual_city_id = target.city_id
+        target_lord = next(
+            item
+            for item in world.offices
+            if item.faction_id == target.owner_faction_id and item.office_type == "lord"
+        )
+        loyalty_before = bound.loyalty
         resolved = declare_city_attack(
             world,
             faction_id=faction_id,
@@ -2796,6 +5412,9 @@ class StrategyRoleWorkspaceActionTests(unittest.TestCase):
         self.assertEqual(updated_general.unit_inventory, {"cavalry": 2})
         self.assertEqual(released.status, "roaming")
         self.assertIsNone(released.ritual_city_id)
+        self.assertEqual(released.loyalty, max(0, loyalty_before - 10))
+        self.assertEqual(released.relationships[target_lord.holder_id], -10)
+        self.assertTrue(any(row.get("event") == "ritual_city_lost" for row in released.personal_history))
         self.assertTrue(any(event.category == "hero_ritual_unbound_on_capture" for event in resolved.event_log))
 
 
@@ -3133,6 +5752,167 @@ class StrategySimulationTests(unittest.TestCase):
                 and any(item.startswith("ritual:") for item in event.related_ids)
                 and f"defender:{serving['code']}" in event.related_ids
                 for event in updated.event_log
+            )
+        )
+
+    def test_strategy_ai_uses_same_rule_relic_binding_and_records_reason(self) -> None:
+        world = generate_random_world(
+            seed=622,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+        faction = next(item for item in world.factions if item.faction_id == "faction_2")
+        city = next(item for item in world.cities if item.city_id == faction.capital_city_id)
+        altar = next(item for item in world.relic_altars if item.city_id == city.city_id)
+        relic = next(item for item in world.relics if item.state == "scattered")
+        relic.state = "stored"
+        relic.condition = "intact"
+        relic.location_node_id = city.node_id
+        relic.location_city_id = city.city_id
+        relic.owner_faction_id = faction.faction_id
+        city.relics_stored.append(relic.relic_id)
+        city.resources.ether = 100
+
+        updated = apply_strategy_ai_monthly_actions(
+            world,
+            controlled_faction_ids={"faction_1"},
+            enable_attacks=False,
+        )
+        updated_relic = next(item for item in updated.relics if item.relic_id == relic.relic_id)
+        updated_altar = next(item for item in updated.relic_altars if item.altar_id == altar.altar_id)
+
+        self.assertEqual(updated_relic.state, "bound_to_altar")
+        self.assertEqual(updated_altar.bound_relic_ids, [relic.relic_id])
+        self.assertEqual(updated_altar.actions_used, 1)
+        self.assertTrue(any(event.category == "strategy_ai_relic_decision" for event in updated.event_log))
+        self.assertTrue(
+            any(
+                event.category == "strategy_ai_plan"
+                and any(item.startswith("relic:bind:") for item in event.related_ids)
+                for event in updated.event_log
+            )
+        )
+
+    def test_strategy_ai_delays_proactive_relic_search_but_uses_public_clue_in_month_eight(self) -> None:
+        world = generate_random_world(
+            seed=622,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+        world.current_month = 7
+        before = apply_strategy_ai_monthly_actions(
+            world,
+            controlled_faction_ids={"faction_1"},
+            enable_attacks=False,
+        )
+        self.assertFalse(
+            any(
+                event.category == "strategy_ai_relic_decision"
+                and event.related_ids[0] == "faction_2"
+                for event in before.event_log
+            )
+        )
+
+        world.current_month = 8
+        after = apply_strategy_ai_monthly_actions(
+            world,
+            controlled_faction_ids={"faction_1"},
+            enable_attacks=False,
+        )
+        self.assertTrue(
+            any(
+                event.category == "strategy_ai_relic_decision"
+                and event.related_ids[0] == "faction_2"
+                and any(item.startswith("relic:search:") for item in event.related_ids)
+                for event in after.event_log
+            )
+        )
+
+    def test_strategy_ai_reserves_bound_altar_ether_before_ritual(self) -> None:
+        world = generate_random_world(
+            seed=623,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+        faction = next(item for item in world.factions if item.faction_id == "faction_2")
+        city = next(item for item in world.cities if item.city_id == faction.capital_city_id)
+        altar = next(item for item in world.relic_altars if item.city_id == city.city_id)
+        relic = next(item for item in world.relics if item.state == "scattered")
+        relic.state = "bound_to_altar"
+        relic.condition = "intact"
+        relic.location_node_id = city.node_id
+        relic.location_city_id = city.city_id
+        relic.owner_faction_id = faction.faction_id
+        relic.altar_id = altar.altar_id
+        altar.bound_relic_ids = [relic.relic_id]
+        altar.state = "active"
+        city.resources.ether = 35
+        for other in world.cities:
+            if other.owner_faction_id != faction.faction_id:
+                other.resources.troops = 0
+
+        updated = apply_strategy_ai_monthly_actions(
+            world,
+            controlled_faction_ids={"faction_1"},
+            enable_attacks=False,
+        )
+
+        self.assertFalse(any(event.category == "hero_ritual_summoned" for event in updated.event_log))
+        self.assertGreaterEqual(
+            next(item for item in updated.cities if item.city_id == city.city_id).resources.ether,
+            relic.maintenance_ether_cost,
+        )
+
+    def test_strategy_ai_prioritizes_legal_attack_on_enemy_relic_progress(self) -> None:
+        world = generate_random_world(
+            seed=624,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+        target_faction = next(item for item in world.factions if item.faction_id == "faction_1")
+        target = next(item for item in world.cities if item.city_id == target_faction.capital_city_id)
+        altar = next(item for item in world.relic_altars if item.city_id == target.city_id)
+        relic = next(item for item in world.relics if item.state == "scattered")
+        relic.state = "bound_to_altar"
+        relic.condition = "intact"
+        relic.location_node_id = target.node_id
+        relic.location_city_id = target.city_id
+        relic.owner_faction_id = target_faction.faction_id
+        relic.altar_id = altar.altar_id
+        altar.bound_relic_ids = [relic.relic_id]
+        altar.state = "active"
+        altar.consecration_faction_id = target_faction.faction_id
+        altar.consecration_relic_id = relic.relic_id
+        altar.consecration_progress = 1
+        altar.consecration_started_month = world.current_month
+        altar.consecration_last_month = world.current_month
+        neighbor_node_ids = set(next(node for node in world.nodes if node.node_id == target.node_id).connected_node_ids)
+        source = next(city for city in world.cities if city.node_id in neighbor_node_ids)
+        source.owner_faction_id = "faction_2"
+        source.resources.troops = 10000
+        source.resources.food = 10000
+        target.resources.troops = 10
+        target.defense = 0
+        target.support_by_faction[target.owner_faction_id] = 0
+
+        updated = apply_strategy_ai_monthly_actions(
+            world,
+            controlled_faction_ids={"faction_1"},
+        )
+
+        self.assertTrue(
+            any(
+                battle.attacker_faction_id == "faction_2"
+                and battle.target_city_id == target.city_id
+                for battle in updated.pending_battles
             )
         )
 

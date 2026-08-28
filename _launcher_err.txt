@@ -1,0 +1,21 @@
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 60011)
+Traceback (most recent call last):
+  File "C:\python312\Lib\socketserver.py", line 692, in process_request_thread
+    self.finish_request(request, client_address)
+  File "C:\python312\Lib\socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "C:\python312\Lib\socketserver.py", line 761, in __init__
+    self.handle()
+  File "C:\python312\Lib\http\server.py", line 436, in handle
+    self.handle_one_request()
+  File "C:\python312\Lib\http\server.py", line 424, in handle_one_request
+    method()
+  File "C:\Users\jiz14\TeamGH\wujiang_game\src\wujiang\web\server.py", line 1753, in do_GET
+    json_response(
+  File "C:\Users\jiz14\TeamGH\wujiang_game\src\wujiang\web\server.py", line 130, in json_response
+    handler.wfile.write(body)
+  File "C:\python312\Lib\socketserver.py", line 840, in write
+    self._sock.sendall(b)
+ConnectionAbortedError: [WinError 10053] An established connection was aborted by the software in your host machine
+----------------------------------------

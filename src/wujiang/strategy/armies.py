@@ -6,7 +6,7 @@ from collections import deque
 from typing import Any
 
 from wujiang.strategy.administration import REGISTERED_UNIT_TYPES
-from wujiang.strategy.models import EventLogEntry, StrategicArmy, StrategyError, WorldState
+from wujiang.strategy.models import EventLogEntry, StrategicArmy, StrategicEncounter, StrategyError, WorldState
 
 
 MIN_INITIAL_SUPPLY = 50
@@ -15,6 +15,7 @@ ARMY_SUPPLY_DISTANCE_COST = 5
 ARMY_MARCH_SUPPLY_COST = 5
 ARMY_STARVATION_MORALE_LOSS = 12
 ARMY_SEVERED_MORALE_LOSS = 3
+ARMY_RETREAT_MORALE_LOSS = 10
 
 
 def _clone_world(world: WorldState) -> WorldState:
@@ -68,7 +69,162 @@ def _commanded_army(
     return general, army
 
 
-def shortest_army_route(world: WorldState, source_node_id: str, destination_node_id: str) -> list[str]:
+def _army_by_id(world: WorldState, army_id: str) -> StrategicArmy | None:
+    return next((army for army in world.armies if army.army_id == str(army_id)), None)
+
+
+def _active_encounter(world: WorldState, encounter_id: str) -> StrategicEncounter | None:
+    return next(
+        (
+            encounter
+            for encounter in world.encounters
+            if encounter.encounter_id == str(encounter_id) and encounter.status == "active"
+        ),
+        None,
+    )
+
+
+def _encounter_for_army(world: WorldState, army_id: str) -> StrategicEncounter | None:
+    return next(
+        (
+            encounter
+            for encounter in world.encounters
+            if encounter.status == "active"
+            and any(str(army_id) in army_ids for army_ids in encounter.faction_army_ids.values())
+        ),
+        None,
+    )
+
+
+def _armies_hostile(world: WorldState, first: StrategicArmy, second: StrategicArmy) -> bool:
+    if first.faction_id == second.faction_id:
+        return False
+    factions = {faction.faction_id: faction for faction in world.factions}
+    first_faction = factions.get(first.faction_id)
+    second_faction = factions.get(second.faction_id)
+    if first_faction is None or second_faction is None:
+        return False
+    if first_faction.is_world_crisis or second_faction.is_world_crisis:
+        return True
+    if first_faction.is_neutral_city_state == second_faction.is_neutral_city_state:
+        return True
+    major_id = second.faction_id if first_faction.is_neutral_city_state else first.faction_id
+    neutral_id = first.faction_id if first_faction.is_neutral_city_state else second.faction_id
+    return not any(
+        agreement.status == "active"
+        and agreement.agreement_type == "non_aggression"
+        and agreement.major_faction_id == major_id
+        and agreement.neutral_faction_id == neutral_id
+        for agreement in world.diplomatic_agreements
+    )
+
+
+def _set_stationary_status(world: WorldState, army: StrategicArmy) -> None:
+    city = next((item for item in world.cities if item.node_id == army.location_node_id), None)
+    army.status = "garrisoned" if city is not None and city.owner_faction_id == army.faction_id else "deployed"
+    army.current_order = "hold"
+    army.target_army_id = None
+    army.target_encounter_id = None
+    army.retreat_destination_node_id = None
+
+
+def _reset_route(world: WorldState, army: StrategicArmy) -> None:
+    army.march_origin_node_id = army.location_node_id
+    army.destination_node_id = army.location_node_id
+    army.route_node_ids = [army.location_node_id]
+    army.route_progress_index = 0
+    army.departure_month = world.current_month
+    army.estimated_arrival_month = world.current_month
+
+
+def _move_army_to_node(world: WorldState, army: StrategicArmy, node_id: str) -> None:
+    army.location_node_id = str(node_id)
+    city = next((item for item in world.cities if item.node_id == army.location_node_id), None)
+    hero = next((item for item in world.strategic_heroes if item.hero_code == army.commander_hero_code), None)
+    if hero is not None:
+        hero.city_id = city.city_id if city is not None else None
+    _reset_route(world, army)
+    refresh_army_supply_intel(world, army)
+
+
+def _require_cold_route_supply(
+    world: WorldState,
+    army: StrategicArmy,
+    source_node_id: str,
+    destination_node_id: str,
+) -> None:
+    if army.army_kind == "snow_ghost":
+        return
+    from wujiang.strategy.world_crisis import (
+        SNOW_GHOST_COLD_ROUTE_MIN_SUPPLY,
+        snow_ghost_cold_route_keys,
+        strategic_route_key,
+    )
+
+    route_key = strategic_route_key(source_node_id, destination_node_id)
+    if (
+        route_key in snow_ghost_cold_route_keys(world)
+        and army.supply < SNOW_GHOST_COLD_ROUTE_MIN_SUPPLY
+    ):
+        raise StrategyError(
+            f"严寒路线至少需要 {SNOW_GHOST_COLD_ROUTE_MIN_SUPPLY} 粮草；请先在己方城市装粮。"
+        )
+
+
+def _apply_cold_route_exposure(
+    world: WorldState,
+    army: StrategicArmy,
+    source_node_id: str,
+    destination_node_id: str,
+) -> None:
+    if source_node_id == destination_node_id or army.army_kind == "snow_ghost":
+        return
+    from wujiang.strategy.world_crisis import (
+        SNOW_GHOST_COLD_ROUTE_MORALE_LOSS,
+        SNOW_GHOST_COLD_ROUTE_SHORTAGE_MORALE_LOSS,
+        SNOW_GHOST_COLD_ROUTE_SUPPLY_COST,
+        snow_ghost_cold_route_keys,
+        strategic_route_key,
+    )
+
+    route_key = strategic_route_key(source_node_id, destination_node_id)
+    if route_key not in snow_ghost_cold_route_keys(world):
+        return
+    supply_loss = min(SNOW_GHOST_COLD_ROUTE_SUPPLY_COST, army.supply)
+    morale_loss = (
+        SNOW_GHOST_COLD_ROUTE_MORALE_LOSS
+        if supply_loss == SNOW_GHOST_COLD_ROUTE_SUPPLY_COST
+        else SNOW_GHOST_COLD_ROUTE_SHORTAGE_MORALE_LOSS
+    )
+    army.supply -= supply_loss
+    army.morale = max(0, army.morale - morale_loss)
+    army.last_cold_route_key = route_key
+    army.last_cold_exposure_month = world.current_month
+    army.last_cold_supply_loss = supply_loss
+    army.last_cold_morale_loss = morale_loss
+    world.event_log.append(
+        EventLogEntry(
+            month=world.current_month,
+            category="strategy_army_cold_route",
+            message=f"军队穿越严寒路线，额外损失 {supply_loss} 粮草、{morale_loss} 士气。",
+            related_ids=[
+                army.faction_id,
+                army.army_id,
+                source_node_id,
+                destination_node_id,
+                route_key,
+            ],
+        )
+    )
+
+
+def shortest_army_route(
+    world: WorldState,
+    source_node_id: str,
+    destination_node_id: str,
+    *,
+    blocked_route_keys: set[str] | None = None,
+) -> list[str]:
     source_id = str(source_node_id or "")
     destination_id = str(destination_node_id or "")
     nodes_by_id = {node.node_id: node for node in world.nodes}
@@ -83,6 +239,11 @@ def shortest_army_route(world: WorldState, source_node_id: str, destination_node
         for next_id in sorted(nodes_by_id[current_id].connected_node_ids):
             if next_id not in nodes_by_id or next_id in previous:
                 continue
+            if blocked_route_keys:
+                from wujiang.strategy.world_crisis import strategic_route_key
+
+                if strategic_route_key(current_id, next_id) in blocked_route_keys:
+                    continue
             previous[next_id] = current_id
             if next_id == destination_id:
                 pending.clear()
@@ -305,6 +466,10 @@ def advance_army_supply(world: WorldState) -> WorldState:
                 *([source_city.city_id] if source_city is not None else []),
             ],
         ))
+    _reconcile_encounters(next_world)
+    from wujiang.strategy.sieges import reconcile_sieges
+
+    reconcile_sieges(next_world)
     next_world.validate()
     return next_world
 
@@ -325,6 +490,31 @@ def order_army_march(
         issuer_office_id=issuer_office_id,
     )
     route = shortest_army_route(next_world, army.location_node_id, destination_node_id)
+    from wujiang.strategy.world_crisis import (
+        SNOW_GHOST_COLD_ROUTE_MIN_SUPPLY,
+        snow_ghost_cold_route_keys,
+        strategic_route_key,
+    )
+
+    cold_route_keys = snow_ghost_cold_route_keys(next_world)
+    route_uses_cold = any(
+        strategic_route_key(source_id, target_id) in cold_route_keys
+        for source_id, target_id in zip(route, route[1:])
+    )
+    cold_detour = False
+    if route_uses_cold and army.supply < SNOW_GHOST_COLD_ROUTE_MIN_SUPPLY:
+        try:
+            route = shortest_army_route(
+                next_world,
+                army.location_node_id,
+                destination_node_id,
+                blocked_route_keys=cold_route_keys,
+            )
+            cold_detour = True
+        except StrategyError as exc:
+            raise StrategyError(
+                f"严寒路线至少需要 {SNOW_GHOST_COLD_ROUTE_MIN_SUPPLY} 粮草；当前没有安全改道，请先在己方城市装粮。"
+            ) from exc
     army.status = "marching"
     army.current_order = "march"
     army.march_origin_node_id = route[0]
@@ -342,6 +532,7 @@ def order_army_march(
             f"军队从{names_by_id.get(route[0], route[0])}出发，沿 "
             f"{' → '.join(names_by_id.get(node_id, node_id) for node_id in route)} 行军，"
             f"预计第 {army.estimated_arrival_month} 月抵达。"
+            f"{' 因补给不足，已自动避开严寒路线。' if cold_detour else ''}"
         ),
         related_ids=[faction_id, army.army_id, issuer_office_id, *route],
     ))
@@ -357,18 +548,22 @@ def halt_army_march(
     issuer_office_id: str,
 ) -> WorldState:
     next_world = _clone_world(world)
-    _, army = _commanded_army(
-        next_world,
-        faction_id=faction_id,
-        army_id=army_id,
-        issuer_office_id=issuer_office_id,
-    )
-    if army.status != "marching":
-        raise StrategyError("只有行军中的军队可以停止行军。")
-    city = next((item for item in next_world.cities if item.node_id == army.location_node_id), None)
-    army.status = "garrisoned" if city is not None and city.owner_faction_id == faction_id else "deployed"
+    general = _general(next_world, faction_id, issuer_office_id)
+    army = _army_by_id(next_world, army_id)
+    if army is None or army.faction_id != faction_id or army.commander_office_id != general.office_id:
+        raise StrategyError("只能指挥自己统率的军队。")
+    if army.status in {"disbanded", "destroyed", "besieging"}:
+        raise StrategyError("军队当前状态不能取消机动命令。")
+    was_marching = army.status == "marching"
+    if army.status in {"engaged", "retreating"}:
+        army.status = "engaged"
+    else:
+        _set_stationary_status(next_world, army)
     army.current_order = "hold"
-    if army.route_node_ids:
+    army.target_army_id = None
+    army.target_encounter_id = None
+    army.retreat_destination_node_id = None
+    if was_marching and army.route_node_ids:
         army.route_node_ids = army.route_node_ids[:army.route_progress_index + 1]
         army.route_progress_index = len(army.route_node_ids) - 1
     else:
@@ -380,9 +575,135 @@ def halt_army_march(
     node = next(item for item in next_world.nodes if item.node_id == army.location_node_id)
     next_world.event_log.append(EventLogEntry(
         month=next_world.current_month,
-        category="strategy_army_march_halted",
-        message=f"军队在{node.name}停止行军，等待新的命令。",
+        category="strategy_army_march_halted" if was_marching else "strategy_army_maneuver_cancelled",
+        message=f"军队在{node.name}{'停止行军' if was_marching else '取消机动计划'}，原地等待新的命令。",
         related_ids=[faction_id, army.army_id, issuer_office_id, node.node_id],
+    ))
+    next_world.validate()
+    return next_world
+
+
+def order_army_intercept(
+    world: WorldState,
+    *,
+    faction_id: str,
+    army_id: str,
+    target_army_id: str,
+    issuer_office_id: str,
+) -> WorldState:
+    next_world = _clone_world(world)
+    _, army = _commanded_army(
+        next_world,
+        faction_id=faction_id,
+        army_id=army_id,
+        issuer_office_id=issuer_office_id,
+    )
+    target = _army_by_id(next_world, target_army_id)
+    if target is None or target.status in {"disbanded", "destroyed", "engaged", "besieging", "retreating"}:
+        raise StrategyError("拦截目标不是可追踪的现役敌军。")
+    if not _armies_hostile(next_world, army, target):
+        raise StrategyError("只能拦截没有和平约束的敌军。")
+    node = next(item for item in next_world.nodes if item.node_id == army.location_node_id)
+    if target.location_node_id not in node.connected_node_ids:
+        raise StrategyError("只能拦截当前位于相邻节点的敌军。")
+    _require_cold_route_supply(
+        next_world,
+        army,
+        army.location_node_id,
+        target.location_node_id,
+    )
+    army.current_order = "intercept"
+    army.target_army_id = target.army_id
+    army.target_encounter_id = None
+    army.retreat_destination_node_id = None
+    next_world.event_log.append(EventLogEntry(
+        month=next_world.current_month,
+        category="strategy_army_intercept_ordered",
+        message=f"军队奉命拦截相邻敌军 {target.army_id}，将在月结读取其移动后的实际位置。",
+        related_ids=[faction_id, army.army_id, target.army_id, issuer_office_id],
+    ))
+    next_world.validate()
+    return next_world
+
+
+def order_army_reinforce(
+    world: WorldState,
+    *,
+    faction_id: str,
+    army_id: str,
+    encounter_id: str,
+    issuer_office_id: str,
+) -> WorldState:
+    next_world = _clone_world(world)
+    _, army = _commanded_army(
+        next_world,
+        faction_id=faction_id,
+        army_id=army_id,
+        issuer_office_id=issuer_office_id,
+    )
+    encounter = _active_encounter(next_world, encounter_id)
+    if encounter is None or faction_id not in encounter.faction_army_ids:
+        raise StrategyError("只能增援仍在持续的己方遭遇。")
+    node = next(item for item in next_world.nodes if item.node_id == army.location_node_id)
+    if encounter.node_id not in node.connected_node_ids:
+        raise StrategyError("只能增援相邻节点的遭遇。")
+    _require_cold_route_supply(
+        next_world,
+        army,
+        army.location_node_id,
+        encounter.node_id,
+    )
+    army.current_order = "reinforce"
+    army.target_army_id = None
+    army.target_encounter_id = encounter.encounter_id
+    army.retreat_destination_node_id = None
+    next_world.event_log.append(EventLogEntry(
+        month=next_world.current_month,
+        category="strategy_army_reinforce_ordered",
+        message=f"军队奉命增援遭遇 {encounter.encounter_id}，将在下次月结前进一条边。",
+        related_ids=[faction_id, army.army_id, encounter.encounter_id, issuer_office_id],
+    ))
+    next_world.validate()
+    return next_world
+
+
+def order_army_retreat(
+    world: WorldState,
+    *,
+    faction_id: str,
+    army_id: str,
+    destination_node_id: str,
+    issuer_office_id: str,
+) -> WorldState:
+    next_world = _clone_world(world)
+    general = _general(next_world, faction_id, issuer_office_id)
+    army = _army_by_id(next_world, army_id)
+    if army is None or army.faction_id != faction_id or army.commander_office_id != general.office_id:
+        raise StrategyError("只能指挥自己统率的军队。")
+    encounter = _encounter_for_army(next_world, army.army_id)
+    if encounter is None or army.status not in {"engaged", "retreating"}:
+        raise StrategyError("只有正在遭遇中的军队可以撤退。")
+    destination_id = str(destination_node_id)
+    node = next(item for item in next_world.nodes if item.node_id == army.location_node_id)
+    if destination_id == encounter.node_id or destination_id not in node.connected_node_ids:
+        raise StrategyError("撤退目的地必须是离开当前遭遇的相邻节点。")
+    if any(
+        other.status not in {"disbanded", "destroyed"}
+        and other.location_node_id == destination_id
+        and _armies_hostile(next_world, army, other)
+        for other in next_world.armies
+    ):
+        raise StrategyError("撤退目的地已有敌军，不能作为合法退路。")
+    army.status = "retreating"
+    army.current_order = "retreat"
+    army.target_army_id = None
+    army.target_encounter_id = encounter.encounter_id
+    army.retreat_destination_node_id = destination_id
+    next_world.event_log.append(EventLogEntry(
+        month=next_world.current_month,
+        category="strategy_army_retreat_ordered",
+        message=f"军队准备从遭遇 {encounter.encounter_id} 撤往相邻节点。",
+        related_ids=[faction_id, army.army_id, encounter.encounter_id, destination_id, issuer_office_id],
     ))
     next_world.validate()
     return next_world
@@ -403,6 +724,12 @@ def advance_army_movements(world: WorldState) -> WorldState:
         next_node_id = army.route_node_ids[next_index]
         if next_node_id not in nodes_by_id[previous_node_id].connected_node_ids:
             raise StrategyError(f"军队 {army.army_id} 的下一段路线已经失效。")
+        _apply_cold_route_exposure(
+            next_world,
+            army,
+            previous_node_id,
+            next_node_id,
+        )
         army.location_node_id = next_node_id
         army.route_progress_index = next_index
         hero = heroes_by_code.get(army.commander_hero_code)
@@ -428,6 +755,238 @@ def advance_army_movements(world: WorldState) -> WorldState:
             related_ids=[army.faction_id, army.army_id, previous_node_id, next_node_id],
         ))
         refresh_army_supply_intel(next_world, army)
+    next_world.validate()
+    return next_world
+
+
+def advance_army_retreats(world: WorldState) -> WorldState:
+    next_world = _clone_world(world)
+    nodes_by_id = {node.node_id: node for node in next_world.nodes}
+    for army in sorted(next_world.armies, key=lambda item: item.army_id):
+        if army.status != "retreating" or army.current_order != "retreat":
+            continue
+        destination_id = str(army.retreat_destination_node_id or "")
+        source_node = nodes_by_id[army.location_node_id]
+        blocked = destination_id not in source_node.connected_node_ids or any(
+            other.army_id != army.army_id
+            and other.status not in {"disbanded", "destroyed"}
+            and other.location_node_id == destination_id
+            and _armies_hostile(next_world, army, other)
+            for other in next_world.armies
+        )
+        if blocked:
+            army.status = "engaged"
+            army.current_order = "hold"
+            army.retreat_destination_node_id = None
+            next_world.event_log.append(EventLogEntry(
+                month=next_world.current_month,
+                category="strategy_army_retreat_blocked",
+                message=f"军队 {army.army_id} 的退路已经失效，只能继续交战。",
+                related_ids=[army.faction_id, army.army_id, destination_id],
+            ))
+            continue
+        previous_node_id = army.location_node_id
+        _apply_cold_route_exposure(
+            next_world,
+            army,
+            previous_node_id,
+            destination_id,
+        )
+        _move_army_to_node(next_world, army, destination_id)
+        army.morale = max(0, army.morale - ARMY_RETREAT_MORALE_LOSS)
+        _set_stationary_status(next_world, army)
+        next_world.event_log.append(EventLogEntry(
+            month=next_world.current_month,
+            category="strategy_army_retreated",
+            message=(
+                f"军队从{nodes_by_id[previous_node_id].name}撤至{nodes_by_id[destination_id].name}，"
+                f"士气降至 {army.morale}。"
+            ),
+            related_ids=[army.faction_id, army.army_id, previous_node_id, destination_id],
+        ))
+    _reconcile_encounters(next_world)
+    from wujiang.strategy.sieges import reconcile_sieges
+
+    reconcile_sieges(next_world)
+    next_world.validate()
+    return next_world
+
+
+def _encounter_has_hostile_sides(world: WorldState, encounter: StrategicEncounter) -> bool:
+    representatives = [
+        _army_by_id(world, army_ids[0])
+        for army_ids in encounter.faction_army_ids.values()
+        if army_ids
+    ]
+    return any(
+        first is not None and second is not None and _armies_hostile(world, first, second)
+        for index, first in enumerate(representatives)
+        for second in representatives[index + 1:]
+    )
+
+
+def _finish_encounter(world: WorldState, encounter: StrategicEncounter, outcome: str) -> None:
+    encounter.status = "ended"
+    encounter.ended_month = world.current_month
+    encounter.outcome = outcome
+    for army_ids in encounter.faction_army_ids.values():
+        for army_id in army_ids:
+            army = _army_by_id(world, army_id)
+            if army is not None and army.status == "engaged":
+                _set_stationary_status(world, army)
+    world.event_log.append(EventLogEntry(
+        month=world.current_month,
+        category="strategy_encounter_ended",
+        message=f"遭遇 {encounter.encounter_id} 因一方脱离接触而结束。",
+        related_ids=[encounter.encounter_id, encounter.node_id],
+    ))
+
+
+def _reconcile_encounters(world: WorldState) -> None:
+    for encounter in sorted(world.encounters, key=lambda item: item.encounter_id):
+        if encounter.status != "active":
+            continue
+        cleaned: dict[str, list[str]] = {}
+        for faction_id, army_ids in encounter.faction_army_ids.items():
+            valid_ids = [
+                army_id
+                for army_id in army_ids
+                if (army := _army_by_id(world, army_id)) is not None
+                and army.status not in {"disbanded", "destroyed"}
+                and army.location_node_id == encounter.node_id
+            ]
+            if valid_ids:
+                cleaned[faction_id] = valid_ids
+        encounter.faction_army_ids = cleaned
+        if not _encounter_has_hostile_sides(world, encounter):
+            _finish_encounter(world, encounter, "disengaged")
+
+
+def advance_army_encounters(world: WorldState) -> WorldState:
+    next_world = _clone_world(world)
+    nodes_by_id = {node.node_id: node for node in next_world.nodes}
+
+    for army in sorted(next_world.armies, key=lambda item: item.army_id):
+        if army.current_order != "intercept" or army.status in {"disbanded", "destroyed", "engaged", "retreating"}:
+            continue
+        target = _army_by_id(next_world, str(army.target_army_id or ""))
+        source_node = nodes_by_id[army.location_node_id]
+        can_intercept = (
+            target is not None
+            and target.status not in {"disbanded", "destroyed", "retreating"}
+            and _armies_hostile(next_world, army, target)
+            and (
+                target.location_node_id == army.location_node_id
+                or target.location_node_id in source_node.connected_node_ids
+            )
+        )
+        if can_intercept and target is not None:
+            previous_node_id = army.location_node_id
+            _apply_cold_route_exposure(
+                next_world,
+                army,
+                previous_node_id,
+                target.location_node_id,
+            )
+            _move_army_to_node(next_world, army, target.location_node_id)
+            _set_stationary_status(next_world, army)
+            next_world.event_log.append(EventLogEntry(
+                month=next_world.current_month,
+                category="strategy_army_intercepted",
+                message=f"军队从{nodes_by_id[previous_node_id].name}追入{nodes_by_id[target.location_node_id].name}，成功拦截敌军。",
+                related_ids=[army.faction_id, army.army_id, target.army_id, target.location_node_id],
+            ))
+        else:
+            target_id = str(army.target_army_id or "")
+            _set_stationary_status(next_world, army)
+            next_world.event_log.append(EventLogEntry(
+                month=next_world.current_month,
+                category="strategy_army_intercept_failed",
+                message=f"军队 {army.army_id} 未能在一段路程内追上目标，拦截取消。",
+                related_ids=[army.faction_id, army.army_id, target_id],
+            ))
+
+    for army in sorted(next_world.armies, key=lambda item: item.army_id):
+        if army.current_order != "reinforce" or army.status in {"disbanded", "destroyed", "engaged", "retreating"}:
+            continue
+        encounter = _active_encounter(next_world, str(army.target_encounter_id or ""))
+        source_node = nodes_by_id[army.location_node_id]
+        can_reinforce = (
+            encounter is not None
+            and army.faction_id in encounter.faction_army_ids
+            and encounter.node_id in source_node.connected_node_ids
+        )
+        if can_reinforce and encounter is not None:
+            previous_node_id = army.location_node_id
+            _apply_cold_route_exposure(
+                next_world,
+                army,
+                previous_node_id,
+                encounter.node_id,
+            )
+            _move_army_to_node(next_world, army, encounter.node_id)
+            army.status = "engaged"
+            army.current_order = "hold"
+            army.target_encounter_id = None
+            encounter.faction_army_ids.setdefault(army.faction_id, []).append(army.army_id)
+            next_world.event_log.append(EventLogEntry(
+                month=next_world.current_month,
+                category="strategy_army_reinforced_encounter",
+                message=f"军队从{nodes_by_id[previous_node_id].name}抵达{nodes_by_id[encounter.node_id].name}，加入遭遇。",
+                related_ids=[army.faction_id, army.army_id, encounter.encounter_id, encounter.node_id],
+            ))
+        else:
+            encounter_id = str(army.target_encounter_id or "")
+            _set_stationary_status(next_world, army)
+            next_world.event_log.append(EventLogEntry(
+                month=next_world.current_month,
+                category="strategy_army_reinforce_cancelled",
+                message=f"军队 {army.army_id} 的增援目标已经失效，命令取消。",
+                related_ids=[army.faction_id, army.army_id, encounter_id],
+            ))
+
+    _reconcile_encounters(next_world)
+    armies_by_node: dict[str, list[StrategicArmy]] = {}
+    for army in next_world.armies:
+        if army.status not in {"disbanded", "destroyed", "retreating"}:
+            armies_by_node.setdefault(army.location_node_id, []).append(army)
+    for node_id, node_armies in sorted(armies_by_node.items()):
+        if not any(
+            _armies_hostile(next_world, first, second)
+            for index, first in enumerate(node_armies)
+            for second in node_armies[index + 1:]
+        ):
+            continue
+        encounter = next(
+            (item for item in next_world.encounters if item.status == "active" and item.node_id == node_id),
+            None,
+        )
+        if encounter is None:
+            encounter = StrategicEncounter(
+                encounter_id=f"encounter:{next_world.current_month}:{node_id}:{len(next_world.encounters) + 1}",
+                node_id=node_id,
+                opened_month=next_world.current_month,
+            )
+            next_world.encounters.append(encounter)
+            created = True
+        else:
+            created = False
+        listed = {army_id for army_ids in encounter.faction_army_ids.values() for army_id in army_ids}
+        for army in node_armies:
+            if army.army_id not in listed:
+                encounter.faction_army_ids.setdefault(army.faction_id, []).append(army.army_id)
+            army.status = "engaged"
+            army.current_order = "hold"
+            army.target_army_id = None
+            army.target_encounter_id = None
+            army.retreat_destination_node_id = None
+        if created:
+            next_world.event_log.append(EventLogEntry(
+                month=next_world.current_month,
+                category="strategy_encounter_started",
+                message=f"{nodes_by_id[node_id].name}出现敌军遭遇，等待增援、撤退或战斗决策。",
+                related_ids=[encounter.encounter_id, node_id, *sorted(listed | {army.army_id for army in node_armies})],
+            ))
     next_world.validate()
     return next_world
 

@@ -41,8 +41,9 @@ class BattleSmokeTests(unittest.TestCase):
     def test_excel_roster_registers_every_generated_hero(self) -> None:
         self.assertEqual(len(EXCEL_HERO_REGISTRY), 370)
         strategy_codes = {code for code in HERO_REGISTRY if code.startswith("strategy_")}
-        self.assertEqual(len(strategy_codes), 7)
-        self.assertEqual(len(HERO_REGISTRY), 395)
+        self.assertEqual(len(strategy_codes), 8)
+        self.assertIn("strategy_snow_ghost", strategy_codes)
+        self.assertEqual(len(HERO_REGISTRY), 396)
         public_heroes = list_heroes()
         self.assertEqual(len(public_heroes), 59)
         public_codes = {str(hero["code"]) for hero in public_heroes}

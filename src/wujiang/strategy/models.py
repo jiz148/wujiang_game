@@ -2,14 +2,10 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from http import HTTPStatus
 from typing import Any
 
-
-class StrategyError(Exception):
-    def __init__(self, message: str, *, status: HTTPStatus = HTTPStatus.BAD_REQUEST) -> None:
-        super().__init__(message)
-        self.status = status
+from wujiang.strategy.errors import StrategyError
+from wujiang.strategy.migrations import CURRENT_STRATEGY_SAVE_VERSION, migrate_world_payload
 
 
 def _string_list(values: Any) -> list[str]:
@@ -112,6 +108,14 @@ class Faction:
     @property
     def is_neutral_city_state(self) -> bool:
         return self.faction_type == "neutral_city_state"
+
+    @property
+    def is_major(self) -> bool:
+        return self.faction_type == "major"
+
+    @property
+    def is_world_crisis(self) -> bool:
+        return self.faction_type == "world_crisis"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -388,6 +392,13 @@ class PendingBattle:
     defender_registered_units: dict[str, int] = field(default_factory=dict)
     report: list[str] = field(default_factory=list)
     battle_result: dict[str, Any] = field(default_factory=dict)
+    source_kind: str = "legacy_city_attack"
+    source_entity_id: str | None = None
+    battle_trigger: str | None = None
+    battle_node_id: str | None = None
+    attacker_army_ids: list[str] = field(default_factory=list)
+    defender_army_ids: list[str] = field(default_factory=list)
+    army_snapshots: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.month = int(self.month)
@@ -402,6 +413,17 @@ class PendingBattle:
             str(unit_type): max(0, int(count))
             for unit_type, count in self.defender_registered_units.items()
             if str(unit_type) and int(count) > 0
+        }
+        self.source_kind = str(self.source_kind or "legacy_city_attack")
+        self.source_entity_id = str(self.source_entity_id) if self.source_entity_id else None
+        self.battle_trigger = str(self.battle_trigger) if self.battle_trigger else None
+        self.battle_node_id = str(self.battle_node_id) if self.battle_node_id else None
+        self.attacker_army_ids = [str(army_id) for army_id in self.attacker_army_ids if str(army_id)]
+        self.defender_army_ids = [str(army_id) for army_id in self.defender_army_ids if str(army_id)]
+        self.army_snapshots = {
+            str(army_id): dict(snapshot)
+            for army_id, snapshot in self.army_snapshots.items()
+            if str(army_id) and isinstance(snapshot, dict)
         }
         if self.attacker_troops < 0 or self.defender_troops < 0:
             raise StrategyError("战斗兵力不能为负数。")
@@ -428,6 +450,13 @@ class PendingBattle:
             "defender_registered_units": dict(self.defender_registered_units),
             "report": list(self.report),
             "battle_result": dict(self.battle_result),
+            "source_kind": self.source_kind,
+            "source_entity_id": self.source_entity_id,
+            "battle_trigger": self.battle_trigger,
+            "battle_node_id": self.battle_node_id,
+            "attacker_army_ids": list(self.attacker_army_ids),
+            "defender_army_ids": list(self.defender_army_ids),
+            "army_snapshots": {army_id: dict(snapshot) for army_id, snapshot in self.army_snapshots.items()},
         }
 
     @classmethod
@@ -455,6 +484,17 @@ class PendingBattle:
             defender_registered_units=_int_dict(raw.get("defender_registered_units")),
             report=_string_list(raw.get("report")),
             battle_result=_plain_dict(raw.get("battle_result") or raw.get("result")),
+            source_kind=str(raw.get("source_kind") or "legacy_city_attack"),
+            source_entity_id=(str(raw.get("source_entity_id")) if raw.get("source_entity_id") else None),
+            battle_trigger=(str(raw.get("battle_trigger")) if raw.get("battle_trigger") else None),
+            battle_node_id=(str(raw.get("battle_node_id")) if raw.get("battle_node_id") else None),
+            attacker_army_ids=_string_list(raw.get("attacker_army_ids")),
+            defender_army_ids=_string_list(raw.get("defender_army_ids")),
+            army_snapshots={
+                str(army_id): dict(snapshot)
+                for army_id, snapshot in (raw.get("army_snapshots") or {}).items()
+                if isinstance(snapshot, dict)
+            },
         )
 
 
@@ -578,6 +618,29 @@ class StrategicHeroState:
     sleeping_until_month: int | None = None
     assignment_type: str = "reserve"
     assignment_target_id: str | None = None
+    last_personal_action_month: int | None = None
+    strategic_specialty: str = ""
+    relationships: dict[str, int] = field(default_factory=dict)
+    personal_mission_id: str | None = None
+    personal_mission_status: str = "none"
+    personal_mission_started_month: int | None = None
+    personal_mission_due_month: int | None = None
+    personal_mission_assignment_type: str | None = None
+    personal_mission_progress: int = 0
+    personal_mission_required: int = 2
+    last_duty_settlement_month: int | None = None
+    personal_history: list[dict[str, Any]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.loyalty = max(0, min(100, int(self.loyalty)))
+        self.relationships = {
+            str(hero_code): max(-100, min(100, int(score)))
+            for hero_code, score in self.relationships.items()
+            if str(hero_code)
+        }
+        self.personal_mission_progress = max(0, int(self.personal_mission_progress))
+        self.personal_mission_required = max(1, int(self.personal_mission_required))
+        self.personal_history = [_plain_dict(item) for item in self.personal_history if isinstance(item, dict)]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -593,12 +656,28 @@ class StrategicHeroState:
             "sleeping_until_month": self.sleeping_until_month,
             "assignment_type": self.assignment_type,
             "assignment_target_id": self.assignment_target_id,
+            "last_personal_action_month": self.last_personal_action_month,
+            "strategic_specialty": self.strategic_specialty,
+            "relationships": dict(self.relationships),
+            "personal_mission_id": self.personal_mission_id,
+            "personal_mission_status": self.personal_mission_status,
+            "personal_mission_started_month": self.personal_mission_started_month,
+            "personal_mission_due_month": self.personal_mission_due_month,
+            "personal_mission_assignment_type": self.personal_mission_assignment_type,
+            "personal_mission_progress": self.personal_mission_progress,
+            "personal_mission_required": self.personal_mission_required,
+            "last_duty_settlement_month": self.last_duty_settlement_month,
+            "personal_history": [dict(item) for item in self.personal_history],
         }
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> StrategicHeroState:
         controller_user_id = raw.get("controller_user_id")
         sleeping_until_month = raw.get("sleeping_until_month")
+        last_personal_action_month = raw.get("last_personal_action_month")
+        personal_mission_started_month = raw.get("personal_mission_started_month")
+        personal_mission_due_month = raw.get("personal_mission_due_month")
+        last_duty_settlement_month = raw.get("last_duty_settlement_month")
         return cls(
             hero_code=str(raw.get("hero_code") or raw.get("code") or ""),
             status=str(raw.get("status") or "roaming"),
@@ -614,6 +693,218 @@ class StrategicHeroState:
             assignment_target_id=(
                 str(raw.get("assignment_target_id")) if raw.get("assignment_target_id") is not None else None
             ),
+            last_personal_action_month=(
+                int(last_personal_action_month) if last_personal_action_month is not None else None
+            ),
+            strategic_specialty=str(raw.get("strategic_specialty") or ""),
+            relationships={
+                str(hero_code): int(score)
+                for hero_code, score in dict(raw.get("relationships") or {}).items()
+            },
+            personal_mission_id=(
+                str(raw.get("personal_mission_id")) if raw.get("personal_mission_id") is not None else None
+            ),
+            personal_mission_status=str(raw.get("personal_mission_status") or "none"),
+            personal_mission_started_month=(
+                int(personal_mission_started_month) if personal_mission_started_month is not None else None
+            ),
+            personal_mission_due_month=(
+                int(personal_mission_due_month) if personal_mission_due_month is not None else None
+            ),
+            personal_mission_assignment_type=(
+                str(raw.get("personal_mission_assignment_type"))
+                if raw.get("personal_mission_assignment_type") is not None
+                else None
+            ),
+            personal_mission_progress=max(0, int(raw.get("personal_mission_progress", 0))),
+            personal_mission_required=max(1, int(raw.get("personal_mission_required", 2))),
+            last_duty_settlement_month=(
+                int(last_duty_settlement_month) if last_duty_settlement_month is not None else None
+            ),
+            personal_history=[
+                dict(item) for item in raw.get("personal_history", []) if isinstance(item, dict)
+            ],
+        )
+
+
+@dataclass(slots=True)
+class RelicState:
+    relic_id: str
+    hero_code: str
+    name: str
+    state: str = "scattered"
+    condition: str = "intact"
+    location_node_id: str | None = None
+    location_city_id: str | None = None
+    owner_faction_id: str | None = None
+    altar_id: str | None = None
+    maintenance_ether_cost: int = 10
+    discovered_by_faction_ids: list[str] = field(default_factory=list)
+    last_changed_month: int = 1
+    history: list[dict[str, Any]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.maintenance_ether_cost = max(0, int(self.maintenance_ether_cost))
+        self.last_changed_month = max(1, int(self.last_changed_month))
+        self.discovered_by_faction_ids = sorted(set(self.discovered_by_faction_ids))
+        self.history = [_plain_dict(item) for item in self.history if isinstance(item, dict)]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.relic_id,
+            "hero_code": self.hero_code,
+            "name": self.name,
+            "state": self.state,
+            "condition": self.condition,
+            "location_node_id": self.location_node_id,
+            "location_city_id": self.location_city_id,
+            "owner_faction_id": self.owner_faction_id,
+            "altar_id": self.altar_id,
+            "maintenance_ether_cost": self.maintenance_ether_cost,
+            "discovered_by_faction_ids": list(self.discovered_by_faction_ids),
+            "last_changed_month": self.last_changed_month,
+            "history": [dict(item) for item in self.history],
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> RelicState:
+        return cls(
+            relic_id=str(raw.get("id") or raw.get("relic_id") or ""),
+            hero_code=str(raw.get("hero_code") or ""),
+            name=str(raw.get("name") or ""),
+            state=str(raw.get("state") or "scattered"),
+            condition=str(raw.get("condition") or "intact"),
+            location_node_id=(
+                str(raw.get("location_node_id")) if raw.get("location_node_id") is not None else None
+            ),
+            location_city_id=(
+                str(raw.get("location_city_id")) if raw.get("location_city_id") is not None else None
+            ),
+            owner_faction_id=(
+                str(raw.get("owner_faction_id")) if raw.get("owner_faction_id") is not None else None
+            ),
+            altar_id=str(raw.get("altar_id")) if raw.get("altar_id") is not None else None,
+            maintenance_ether_cost=int(raw.get("maintenance_ether_cost", 10)),
+            discovered_by_faction_ids=_string_list(raw.get("discovered_by_faction_ids")),
+            last_changed_month=int(raw.get("last_changed_month", 1)),
+            history=[
+                _plain_dict(item)
+                for item in raw.get("history", [])
+                if isinstance(item, dict)
+            ],
+        )
+
+
+@dataclass(slots=True)
+class RelicAltar:
+    altar_id: str
+    city_id: str
+    name: str
+    level: int = 1
+    state: str = "dormant"
+    capacity: int = 1
+    bound_relic_ids: list[str] = field(default_factory=list)
+    damaged_until_month: int | None = None
+    action_month: int | None = None
+    actions_used: int = 0
+    consecration_faction_id: str | None = None
+    consecration_relic_id: str | None = None
+    consecration_progress: int = 0
+    consecration_required: int = 3
+    consecration_started_month: int | None = None
+    consecration_last_month: int | None = None
+    history: list[dict[str, Any]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.level = max(1, int(self.level))
+        self.capacity = max(1, int(self.capacity))
+        self.bound_relic_ids = list(dict.fromkeys(self.bound_relic_ids))
+        self.damaged_until_month = (
+            max(1, int(self.damaged_until_month))
+            if self.damaged_until_month is not None
+            else None
+        )
+        self.action_month = max(1, int(self.action_month)) if self.action_month is not None else None
+        self.actions_used = max(0, int(self.actions_used))
+        self.consecration_progress = max(0, int(self.consecration_progress))
+        self.consecration_required = max(1, int(self.consecration_required))
+        self.consecration_started_month = (
+            max(1, int(self.consecration_started_month))
+            if self.consecration_started_month is not None
+            else None
+        )
+        self.consecration_last_month = (
+            max(1, int(self.consecration_last_month))
+            if self.consecration_last_month is not None
+            else None
+        )
+        self.history = [_plain_dict(item) for item in self.history if isinstance(item, dict)]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.altar_id,
+            "city_id": self.city_id,
+            "name": self.name,
+            "level": self.level,
+            "state": self.state,
+            "capacity": self.capacity,
+            "bound_relic_ids": list(self.bound_relic_ids),
+            "damaged_until_month": self.damaged_until_month,
+            "action_month": self.action_month,
+            "actions_used": self.actions_used,
+            "consecration_faction_id": self.consecration_faction_id,
+            "consecration_relic_id": self.consecration_relic_id,
+            "consecration_progress": self.consecration_progress,
+            "consecration_required": self.consecration_required,
+            "consecration_started_month": self.consecration_started_month,
+            "consecration_last_month": self.consecration_last_month,
+            "history": [dict(item) for item in self.history],
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> RelicAltar:
+        return cls(
+            altar_id=str(raw.get("id") or raw.get("altar_id") or ""),
+            city_id=str(raw.get("city_id") or ""),
+            name=str(raw.get("name") or ""),
+            level=int(raw.get("level", 1)),
+            state=str(raw.get("state") or "dormant"),
+            capacity=int(raw.get("capacity", 1)),
+            bound_relic_ids=_string_list(raw.get("bound_relic_ids")),
+            damaged_until_month=(
+                int(raw["damaged_until_month"])
+                if raw.get("damaged_until_month") is not None
+                else None
+            ),
+            action_month=int(raw["action_month"]) if raw.get("action_month") is not None else None,
+            actions_used=int(raw.get("actions_used", 0)),
+            consecration_faction_id=(
+                str(raw.get("consecration_faction_id"))
+                if raw.get("consecration_faction_id") is not None
+                else None
+            ),
+            consecration_relic_id=(
+                str(raw.get("consecration_relic_id"))
+                if raw.get("consecration_relic_id") is not None
+                else None
+            ),
+            consecration_progress=int(raw.get("consecration_progress", 0)),
+            consecration_required=int(raw.get("consecration_required", 3)),
+            consecration_started_month=(
+                int(raw["consecration_started_month"])
+                if raw.get("consecration_started_month") is not None
+                else None
+            ),
+            consecration_last_month=(
+                int(raw["consecration_last_month"])
+                if raw.get("consecration_last_month") is not None
+                else None
+            ),
+            history=[
+                _plain_dict(item)
+                for item in raw.get("history", [])
+                if isinstance(item, dict)
+            ],
         )
 
 
@@ -676,6 +967,8 @@ class StrategicArmy:
     commander_hero_code: str
     location_node_id: str
     home_city_id: str
+    name: str = ""
+    army_kind: str = "conventional"
     unit_inventory: dict[str, int] = field(default_factory=dict)
     manpower: int = 0
     supply: int = 0
@@ -698,8 +991,17 @@ class StrategicArmy:
     last_supply_consumed: int = 0
     last_supply_received: int = 0
     starvation_months: int = 0
+    target_army_id: str | None = None
+    target_encounter_id: str | None = None
+    retreat_destination_node_id: str | None = None
+    last_cold_route_key: str | None = None
+    last_cold_exposure_month: int | None = None
+    last_cold_supply_loss: int = 0
+    last_cold_morale_loss: int = 0
 
     def __post_init__(self) -> None:
+        self.name = str(self.name or self.army_id)
+        self.army_kind = str(self.army_kind or "conventional")
         self.unit_inventory = {
             str(unit_type): max(0, int(count))
             for unit_type, count in self.unit_inventory.items()
@@ -728,6 +1030,19 @@ class StrategicArmy:
         self.last_supply_consumed = max(0, int(self.last_supply_consumed))
         self.last_supply_received = max(0, int(self.last_supply_received))
         self.starvation_months = max(0, int(self.starvation_months))
+        self.target_army_id = str(self.target_army_id) if self.target_army_id else None
+        self.target_encounter_id = str(self.target_encounter_id) if self.target_encounter_id else None
+        self.retreat_destination_node_id = (
+            str(self.retreat_destination_node_id) if self.retreat_destination_node_id else None
+        )
+        self.last_cold_route_key = str(self.last_cold_route_key) if self.last_cold_route_key else None
+        self.last_cold_exposure_month = (
+            max(1, int(self.last_cold_exposure_month))
+            if self.last_cold_exposure_month is not None
+            else None
+        )
+        self.last_cold_supply_loss = max(0, int(self.last_cold_supply_loss))
+        self.last_cold_morale_loss = max(0, int(self.last_cold_morale_loss))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -737,6 +1052,8 @@ class StrategicArmy:
             "commander_hero_code": self.commander_hero_code,
             "location_node_id": self.location_node_id,
             "home_city_id": self.home_city_id,
+            "name": self.name,
+            "army_kind": self.army_kind,
             "unit_inventory": dict(self.unit_inventory),
             "manpower": self.manpower,
             "supply": self.supply,
@@ -759,6 +1076,13 @@ class StrategicArmy:
             "last_supply_consumed": self.last_supply_consumed,
             "last_supply_received": self.last_supply_received,
             "starvation_months": self.starvation_months,
+            "target_army_id": self.target_army_id,
+            "target_encounter_id": self.target_encounter_id,
+            "retreat_destination_node_id": self.retreat_destination_node_id,
+            "last_cold_route_key": self.last_cold_route_key,
+            "last_cold_exposure_month": self.last_cold_exposure_month,
+            "last_cold_supply_loss": self.last_cold_supply_loss,
+            "last_cold_morale_loss": self.last_cold_morale_loss,
         }
 
     @classmethod
@@ -770,6 +1094,8 @@ class StrategicArmy:
             commander_hero_code=str(raw.get("commander_hero_code") or ""),
             location_node_id=str(raw.get("location_node_id") or ""),
             home_city_id=str(raw.get("home_city_id") or ""),
+            name=str(raw.get("name") or raw.get("id") or raw.get("army_id") or ""),
+            army_kind=str(raw.get("army_kind") or "conventional"),
             unit_inventory=_int_dict(raw.get("unit_inventory")),
             manpower=int(raw.get("manpower", 0)),
             supply=int(raw.get("supply", 0)),
@@ -802,6 +1128,158 @@ class StrategicArmy:
             last_supply_consumed=int(raw.get("last_supply_consumed", 0)),
             last_supply_received=int(raw.get("last_supply_received", 0)),
             starvation_months=int(raw.get("starvation_months", 0)),
+            target_army_id=(str(raw.get("target_army_id")) if raw.get("target_army_id") else None),
+            target_encounter_id=(
+                str(raw.get("target_encounter_id")) if raw.get("target_encounter_id") else None
+            ),
+            retreat_destination_node_id=(
+                str(raw.get("retreat_destination_node_id"))
+                if raw.get("retreat_destination_node_id")
+                else None
+            ),
+            last_cold_route_key=(
+                str(raw.get("last_cold_route_key"))
+                if raw.get("last_cold_route_key")
+                else None
+            ),
+            last_cold_exposure_month=(
+                int(raw["last_cold_exposure_month"])
+                if raw.get("last_cold_exposure_month") is not None
+                else None
+            ),
+            last_cold_supply_loss=int(raw.get("last_cold_supply_loss", 0)),
+            last_cold_morale_loss=int(raw.get("last_cold_morale_loss", 0)),
+        )
+
+
+@dataclass(slots=True)
+class StrategicEncounter:
+    encounter_id: str
+    node_id: str
+    faction_army_ids: dict[str, list[str]] = field(default_factory=dict)
+    opened_month: int = 1
+    status: str = "active"
+    ended_month: int | None = None
+    outcome: str | None = None
+
+    def __post_init__(self) -> None:
+        self.faction_army_ids = {
+            str(faction_id): [str(army_id) for army_id in army_ids if str(army_id)]
+            for faction_id, army_ids in self.faction_army_ids.items()
+            if str(faction_id) and isinstance(army_ids, list) and army_ids
+        }
+        self.opened_month = max(1, int(self.opened_month))
+        self.ended_month = max(1, int(self.ended_month)) if self.ended_month is not None else None
+        self.outcome = str(self.outcome) if self.outcome else None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.encounter_id,
+            "node_id": self.node_id,
+            "faction_army_ids": {
+                faction_id: list(army_ids)
+                for faction_id, army_ids in self.faction_army_ids.items()
+            },
+            "opened_month": self.opened_month,
+            "status": self.status,
+            "ended_month": self.ended_month,
+            "outcome": self.outcome,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> StrategicEncounter:
+        raw_sides = raw.get("faction_army_ids")
+        sides = raw_sides if isinstance(raw_sides, dict) else {}
+        return cls(
+            encounter_id=str(raw.get("id") or raw.get("encounter_id") or ""),
+            node_id=str(raw.get("node_id") or ""),
+            faction_army_ids={
+                str(faction_id): _string_list(army_ids)
+                for faction_id, army_ids in sides.items()
+            },
+            opened_month=int(raw.get("opened_month", 1)),
+            status=str(raw.get("status") or "active"),
+            ended_month=(int(raw["ended_month"]) if raw.get("ended_month") is not None else None),
+            outcome=(str(raw.get("outcome")) if raw.get("outcome") else None),
+        )
+
+
+@dataclass(slots=True)
+class StrategicSiege:
+    siege_id: str
+    city_id: str
+    node_id: str
+    attacker_faction_id: str
+    defender_faction_id: str
+    attacker_army_ids: list[str] = field(default_factory=list)
+    started_month: int = 1
+    status: str = "active"
+    fortification_initial: int = 20
+    fortification_remaining: int = 20
+    attacker_stance: str = "blockade"
+    defender_stance: str = "hold"
+    last_city_food_consumed: int = 0
+    last_garrison_lost: int = 0
+    last_fortification_damage: int = 0
+    battle_trigger: str | None = None
+    ended_month: int | None = None
+    outcome: str | None = None
+
+    def __post_init__(self) -> None:
+        self.attacker_army_ids = [str(army_id) for army_id in self.attacker_army_ids if str(army_id)]
+        self.started_month = max(1, int(self.started_month))
+        self.fortification_initial = max(1, int(self.fortification_initial))
+        self.fortification_remaining = max(0, min(int(self.fortification_remaining), self.fortification_initial))
+        self.last_city_food_consumed = max(0, int(self.last_city_food_consumed))
+        self.last_garrison_lost = max(0, int(self.last_garrison_lost))
+        self.last_fortification_damage = max(0, int(self.last_fortification_damage))
+        self.battle_trigger = str(self.battle_trigger) if self.battle_trigger else None
+        self.ended_month = max(1, int(self.ended_month)) if self.ended_month is not None else None
+        self.outcome = str(self.outcome) if self.outcome else None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.siege_id,
+            "city_id": self.city_id,
+            "node_id": self.node_id,
+            "attacker_faction_id": self.attacker_faction_id,
+            "defender_faction_id": self.defender_faction_id,
+            "attacker_army_ids": list(self.attacker_army_ids),
+            "started_month": self.started_month,
+            "status": self.status,
+            "fortification_initial": self.fortification_initial,
+            "fortification_remaining": self.fortification_remaining,
+            "attacker_stance": self.attacker_stance,
+            "defender_stance": self.defender_stance,
+            "last_city_food_consumed": self.last_city_food_consumed,
+            "last_garrison_lost": self.last_garrison_lost,
+            "last_fortification_damage": self.last_fortification_damage,
+            "battle_trigger": self.battle_trigger,
+            "ended_month": self.ended_month,
+            "outcome": self.outcome,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> StrategicSiege:
+        return cls(
+            siege_id=str(raw.get("id") or raw.get("siege_id") or ""),
+            city_id=str(raw.get("city_id") or ""),
+            node_id=str(raw.get("node_id") or ""),
+            attacker_faction_id=str(raw.get("attacker_faction_id") or ""),
+            defender_faction_id=str(raw.get("defender_faction_id") or ""),
+            attacker_army_ids=_string_list(raw.get("attacker_army_ids")),
+            started_month=int(raw.get("started_month", 1)),
+            status=str(raw.get("status") or "active"),
+            fortification_initial=int(raw.get("fortification_initial", 20)),
+            fortification_remaining=int(raw.get("fortification_remaining", 20)),
+            attacker_stance=str(raw.get("attacker_stance") or "blockade"),
+            defender_stance=str(raw.get("defender_stance") or "hold"),
+            last_city_food_consumed=int(raw.get("last_city_food_consumed", 0)),
+            last_garrison_lost=int(raw.get("last_garrison_lost", 0)),
+            last_fortification_damage=int(raw.get("last_fortification_damage", 0)),
+            battle_trigger=(str(raw.get("battle_trigger")) if raw.get("battle_trigger") else None),
+            ended_month=(int(raw["ended_month"]) if raw.get("ended_month") is not None else None),
+            outcome=(str(raw.get("outcome")) if raw.get("outcome") else None),
         )
 
 
@@ -976,6 +1454,121 @@ class OfficeTakeover:
 
 
 @dataclass(slots=True)
+class WorldCrisis:
+    crisis_id: str
+    crisis_type: str
+    status: str
+    stage: str
+    stage_started_month: int
+    next_stage_month: int | None
+    pressure: int
+    origin_node_id: str
+    frontier_node_ids: list[str] = field(default_factory=list)
+    affected_route_keys: list[str] = field(default_factory=list)
+    threatened_city_ids: list[str] = field(default_factory=list)
+    spawned_army_ids: list[str] = field(default_factory=list)
+    contributions_by_faction: dict[str, int] = field(default_factory=dict)
+    cooperation_targets_by_faction: dict[str, str] = field(default_factory=dict)
+    cooperation_pairs: list[str] = field(default_factory=list)
+    broken_cooperation_pairs: list[str] = field(default_factory=list)
+    decisions: list[dict[str, Any]] = field(default_factory=list)
+    showdown_branch: str | None = None
+    showdown_battle_id: str | None = None
+    showdown_leader_faction_id: str | None = None
+    showdown_outcome: str | None = None
+    mainline_winner_faction_ids: list[str] = field(default_factory=list)
+    aftermath: dict[str, Any] = field(default_factory=dict)
+    started_month: int | None = None
+    history: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.crisis_id,
+            "crisis_type": self.crisis_type,
+            "status": self.status,
+            "stage": self.stage,
+            "stage_started_month": self.stage_started_month,
+            "next_stage_month": self.next_stage_month,
+            "pressure": self.pressure,
+            "origin_node_id": self.origin_node_id,
+            "frontier_node_ids": list(self.frontier_node_ids),
+            "affected_route_keys": list(self.affected_route_keys),
+            "threatened_city_ids": list(self.threatened_city_ids),
+            "spawned_army_ids": list(self.spawned_army_ids),
+            "contributions_by_faction": dict(self.contributions_by_faction),
+            "cooperation_targets_by_faction": dict(self.cooperation_targets_by_faction),
+            "cooperation_pairs": list(self.cooperation_pairs),
+            "broken_cooperation_pairs": list(self.broken_cooperation_pairs),
+            "decisions": [dict(item) for item in self.decisions],
+            "showdown_branch": self.showdown_branch,
+            "showdown_battle_id": self.showdown_battle_id,
+            "showdown_leader_faction_id": self.showdown_leader_faction_id,
+            "showdown_outcome": self.showdown_outcome,
+            "mainline_winner_faction_ids": list(self.mainline_winner_faction_ids),
+            "aftermath": dict(self.aftermath),
+            "started_month": self.started_month,
+            "history": [dict(item) for item in self.history],
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> WorldCrisis:
+        return cls(
+            crisis_id=str(raw.get("id") or raw.get("crisis_id") or ""),
+            crisis_type=str(raw.get("crisis_type") or ""),
+            status=str(raw.get("status") or "dormant"),
+            stage=str(raw.get("stage") or "dormant"),
+            stage_started_month=max(1, int(raw.get("stage_started_month", 1))),
+            next_stage_month=(
+                int(raw["next_stage_month"])
+                if raw.get("next_stage_month") is not None
+                else None
+            ),
+            pressure=max(0, int(raw.get("pressure", 0))),
+            origin_node_id=str(raw.get("origin_node_id") or ""),
+            frontier_node_ids=_string_list(raw.get("frontier_node_ids")),
+            affected_route_keys=_string_list(raw.get("affected_route_keys")),
+            threatened_city_ids=_string_list(raw.get("threatened_city_ids")),
+            spawned_army_ids=_string_list(raw.get("spawned_army_ids")),
+            contributions_by_faction={
+                faction_id: max(0, contribution)
+                for faction_id, contribution in _int_dict(raw.get("contributions_by_faction")).items()
+            },
+            cooperation_targets_by_faction=_string_dict(raw.get("cooperation_targets_by_faction")),
+            cooperation_pairs=_string_list(raw.get("cooperation_pairs")),
+            broken_cooperation_pairs=_string_list(raw.get("broken_cooperation_pairs")),
+            decisions=[
+                _plain_dict(item)
+                for item in raw.get("decisions", [])
+                if isinstance(item, dict)
+            ],
+            showdown_branch=(str(raw.get("showdown_branch")) if raw.get("showdown_branch") else None),
+            showdown_battle_id=(
+                str(raw.get("showdown_battle_id")) if raw.get("showdown_battle_id") else None
+            ),
+            showdown_leader_faction_id=(
+                str(raw.get("showdown_leader_faction_id"))
+                if raw.get("showdown_leader_faction_id")
+                else None
+            ),
+            showdown_outcome=(
+                str(raw.get("showdown_outcome")) if raw.get("showdown_outcome") else None
+            ),
+            mainline_winner_faction_ids=_string_list(raw.get("mainline_winner_faction_ids")),
+            aftermath=_plain_dict(raw.get("aftermath")),
+            started_month=(
+                int(raw["started_month"])
+                if raw.get("started_month") is not None
+                else None
+            ),
+            history=[
+                _plain_dict(item)
+                for item in raw.get("history", [])
+                if isinstance(item, dict)
+            ],
+        )
+
+
+@dataclass(slots=True)
 class WorldState:
     seed: int
     current_month: int
@@ -988,6 +1581,8 @@ class WorldState:
     story_events: list[StoryEvent] = field(default_factory=list)
     scheduled_consequences: list[ScheduledConsequence] = field(default_factory=list)
     strategic_heroes: list[StrategicHeroState] = field(default_factory=list)
+    relics: list[RelicState] = field(default_factory=list)
+    relic_altars: list[RelicAltar] = field(default_factory=list)
     hero_recruitments: list[HeroRecruitment] = field(default_factory=list)
     offices: list[Office] = field(default_factory=list)
     office_duties: list[OfficeDuty] = field(default_factory=list)
@@ -1002,12 +1597,21 @@ class WorldState:
     diplomatic_cooldowns: dict[str, int] = field(default_factory=dict)
     diplomatic_memory: list[dict[str, Any]] = field(default_factory=list)
     armies: list[StrategicArmy] = field(default_factory=list)
+    encounters: list[StrategicEncounter] = field(default_factory=list)
+    sieges: list[StrategicSiege] = field(default_factory=list)
+    world_crises: list[WorldCrisis] = field(default_factory=list)
+    save_format_version: int = CURRENT_STRATEGY_SAVE_VERSION
 
     def __post_init__(self) -> None:
         self.seed = int(self.seed)
         self.current_month = int(self.current_month)
+        self.save_format_version = int(self.save_format_version)
         if self.current_month <= 0:
             raise StrategyError("战略月份必须为正数。")
+        if self.save_format_version != CURRENT_STRATEGY_SAVE_VERSION:
+            raise StrategyError(
+                f"战略存档版本必须为当前版本 {CURRENT_STRATEGY_SAVE_VERSION}。"
+            )
         self.validate()
 
     def validate(self) -> None:
@@ -1021,9 +1625,15 @@ class WorldState:
         duty_ids = {duty.duty_id for duty in self.office_duties}
         order_ids = {order.order_id for order in self.office_orders}
         hero_codes = {hero.hero_code for hero in self.strategic_heroes}
+        relic_ids = {relic.relic_id for relic in self.relics}
+        relic_hero_codes = {relic.hero_code for relic in self.relics}
+        altar_ids = {altar.altar_id for altar in self.relic_altars}
         recruitment_ids = {item.recruitment_id for item in self.hero_recruitments}
         agreement_ids = {item.agreement_id for item in self.diplomatic_agreements}
         army_ids = {item.army_id for item in self.armies}
+        encounter_ids = {item.encounter_id for item in self.encounters}
+        siege_ids = {item.siege_id for item in self.sieges}
+        crisis_ids = {item.crisis_id for item in self.world_crises}
         if len(node_ids) != len(self.nodes):
             raise StrategyError("地图节点 ID 不能重复。")
         if len(city_ids) != len(self.cities):
@@ -1044,6 +1654,10 @@ class WorldState:
             raise StrategyError("职位命令 ID 不能重复。")
         if len(hero_codes) != len(self.strategic_heroes):
             raise StrategyError("战略武将不能重复。")
+        if len(relic_ids) != len(self.relics) or len(relic_hero_codes) != len(self.relics):
+            raise StrategyError("圣物 ID 与对应英灵必须唯一。")
+        if len(altar_ids) != len(self.relic_altars):
+            raise StrategyError("圣物祭坛 ID 不能重复。")
         player_controller_ids = [
             int(hero.controller_user_id)
             for hero in self.strategic_heroes
@@ -1057,6 +1671,12 @@ class WorldState:
             raise StrategyError("外交协议 ID 不能重复。")
         if len(army_ids) != len(self.armies):
             raise StrategyError("战略军队 ID 不能重复。")
+        if len(encounter_ids) != len(self.encounters):
+            raise StrategyError("战略遭遇 ID 不能重复。")
+        if len(siege_ids) != len(self.sieges):
+            raise StrategyError("战略围城 ID 不能重复。")
+        if len(crisis_ids) != len(self.world_crises):
+            raise StrategyError("世界危机 ID 不能重复。")
         for node in self.nodes:
             unknown = [target_id for target_id in node.connected_node_ids if target_id not in node_ids]
             if unknown:
@@ -1069,8 +1689,10 @@ class WorldState:
             for faction_id in city.support_by_faction:
                 if faction_id not in faction_ids and faction_id not in set(city.local_factions):
                     raise StrategyError(f"城市 {city.city_id} 记录了不存在势力的支持度。")
+            if any(altar_id not in altar_ids for altar_id in city.altars):
+                raise StrategyError(f"城市 {city.city_id} 记录了不存在的圣物祭坛。")
         for faction in self.factions:
-            if faction.faction_type not in {"major", "neutral_city_state"}:
+            if faction.faction_type not in {"major", "neutral_city_state", "world_crisis"}:
                 raise StrategyError(f"势力 {faction.faction_id} 类型无效。")
             if faction.capital_city_id is not None and faction.capital_city_id not in city_ids:
                 raise StrategyError(f"势力 {faction.faction_id} 的主城不存在。")
@@ -1085,7 +1707,7 @@ class WorldState:
         for agreement in self.diplomatic_agreements:
             major = next((item for item in self.factions if item.faction_id == agreement.major_faction_id), None)
             neutral = next((item for item in self.factions if item.faction_id == agreement.neutral_faction_id), None)
-            if major is None or major.is_neutral_city_state or neutral is None or not neutral.is_neutral_city_state:
+            if major is None or not major.is_major or neutral is None or not neutral.is_neutral_city_state:
                 raise StrategyError(f"外交协议 {agreement.agreement_id} 的签署势力无效。")
             if agreement.agreement_type not in {"protection", "non_aggression"}:
                 raise StrategyError(f"外交协议 {agreement.agreement_id} 类型无效。")
@@ -1106,6 +1728,8 @@ class WorldState:
                 raise StrategyError(f"军队 {army.army_id} 的位置或驻地不存在。")
             if army.status not in {"garrisoned", "deployed", "marching", "engaged", "besieging", "retreating", "disbanded", "destroyed"}:
                 raise StrategyError(f"军队 {army.army_id} 状态无效。")
+            if army.army_kind not in {"conventional", "snow_ghost"}:
+                raise StrategyError(f"军队 {army.army_id} 类型无效。")
             if army.current_order not in {"hold", "march", "intercept", "reinforce", "retreat", "besiege"}:
                 raise StrategyError(f"军队 {army.army_id} 命令无效。")
             if army.status not in {"disbanded", "destroyed"}:
@@ -1114,7 +1738,7 @@ class WorldState:
                 active_commanders.add(army.commander_office_id)
                 if not army.unit_inventory or army.manpower <= 0:
                     raise StrategyError(f"现役军队 {army.army_id} 必须拥有兵员。")
-            if any(unit_type not in {"infantry", "archer", "cavalry"} for unit_type in army.unit_inventory):
+            if any(unit_type not in {"infantry", "archer", "cavalry", "snow_ghost"} for unit_type in army.unit_inventory):
                 raise StrategyError(f"军队 {army.army_id} 包含不存在的注册兵种。")
             if army.supply_source_city_id is not None and army.supply_source_city_id not in city_ids:
                 raise StrategyError(f"军队 {army.army_id} 的补给城市不存在。")
@@ -1162,6 +1786,70 @@ class WorldState:
                     or army.estimated_arrival_month != army.departure_month + len(army.route_node_ids) - 1
                 ):
                     raise StrategyError(f"军队 {army.army_id} 的行军命令不完整。")
+            if army.target_army_id is not None and army.target_army_id not in army_ids:
+                raise StrategyError(f"军队 {army.army_id} 的拦截目标不存在。")
+            if army.target_encounter_id is not None and army.target_encounter_id not in encounter_ids:
+                raise StrategyError(f"军队 {army.army_id} 的增援目标不存在。")
+            if army.retreat_destination_node_id is not None and army.retreat_destination_node_id not in node_ids:
+                raise StrategyError(f"军队 {army.army_id} 的撤退目的地不存在。")
+        active_encounter_armies: set[str] = set()
+        for encounter in self.encounters:
+            if encounter.node_id not in node_ids:
+                raise StrategyError(f"战略遭遇 {encounter.encounter_id} 的节点不存在。")
+            if encounter.status not in {"active", "ended"}:
+                raise StrategyError(f"战略遭遇 {encounter.encounter_id} 状态无效。")
+            if any(faction_id not in faction_ids for faction_id in encounter.faction_army_ids):
+                raise StrategyError(f"战略遭遇 {encounter.encounter_id} 包含不存在的势力。")
+            listed_ids = [army_id for ids in encounter.faction_army_ids.values() for army_id in ids]
+            if len(listed_ids) != len(set(listed_ids)) or any(army_id not in army_ids for army_id in listed_ids):
+                raise StrategyError(f"战略遭遇 {encounter.encounter_id} 的军队列表无效。")
+            for faction_id, listed_armies in encounter.faction_army_ids.items():
+                if any(next(army for army in self.armies if army.army_id == army_id).faction_id != faction_id for army_id in listed_armies):
+                    raise StrategyError(f"战略遭遇 {encounter.encounter_id} 的参战势力不一致。")
+            if encounter.status == "active":
+                active_sides = [ids for ids in encounter.faction_army_ids.values() if ids]
+                if len(active_sides) < 2:
+                    raise StrategyError(f"战略遭遇 {encounter.encounter_id} 至少需要两个参战势力。")
+                if active_encounter_armies.intersection(listed_ids):
+                    raise StrategyError("同一军队不能同时参加多场战略遭遇。")
+                active_encounter_armies.update(listed_ids)
+                for army_id in listed_ids:
+                    army = next(item for item in self.armies if item.army_id == army_id)
+                    if army.location_node_id != encounter.node_id or army.status not in {"engaged", "retreating"}:
+                        raise StrategyError(f"战略遭遇 {encounter.encounter_id} 的军队位置或状态不一致。")
+        active_siege_armies: set[str] = set()
+        for siege in self.sieges:
+            if siege.city_id not in city_ids or siege.node_id not in node_ids:
+                raise StrategyError(f"战略围城 {siege.siege_id} 的城市或节点不存在。")
+            city = next(item for item in self.cities if item.city_id == siege.city_id)
+            if city.node_id != siege.node_id:
+                raise StrategyError(f"战略围城 {siege.siege_id} 的城市节点不一致。")
+            if siege.attacker_faction_id not in faction_ids or siege.defender_faction_id not in faction_ids:
+                raise StrategyError(f"战略围城 {siege.siege_id} 的攻守势力不存在。")
+            if siege.attacker_faction_id == siege.defender_faction_id:
+                raise StrategyError(f"战略围城 {siege.siege_id} 的攻守势力不能相同。")
+            if siege.status not in {"active", "contested", "breached", "battle_pending", "ended"}:
+                raise StrategyError(f"战略围城 {siege.siege_id} 状态无效。")
+            if siege.attacker_stance not in {"blockade", "starve", "assault", "withdraw"}:
+                raise StrategyError(f"战略围城 {siege.siege_id} 的攻方方针无效。")
+            if siege.defender_stance not in {"hold", "breakout", "await_relief", "surrender"}:
+                raise StrategyError(f"战略围城 {siege.siege_id} 的守方方针无效。")
+            if len(siege.attacker_army_ids) != len(set(siege.attacker_army_ids)) or any(
+                army_id not in army_ids for army_id in siege.attacker_army_ids
+            ):
+                raise StrategyError(f"战略围城 {siege.siege_id} 的参围军队无效。")
+            if siege.status != "ended":
+                if not siege.attacker_army_ids:
+                    raise StrategyError(f"战略围城 {siege.siege_id} 没有参围军队。")
+                if active_siege_armies.intersection(siege.attacker_army_ids):
+                    raise StrategyError("同一军队不能同时参加多场战略围城。")
+                active_siege_armies.update(siege.attacker_army_ids)
+                for army_id in siege.attacker_army_ids:
+                    army = next(item for item in self.armies if item.army_id == army_id)
+                    if army.faction_id != siege.attacker_faction_id or army.location_node_id != siege.node_id:
+                        raise StrategyError(f"战略围城 {siege.siege_id} 的参围军队不一致。")
+                    if army.status not in {"besieging", "engaged", "retreating"}:
+                        raise StrategyError(f"战略围城 {siege.siege_id} 的参围军队状态无效。")
         for battle in self.pending_battles:
             if battle.attacker_faction_id not in faction_ids or battle.defender_faction_id not in faction_ids:
                 raise StrategyError(f"战略战斗 {battle.battle_id} 绑定了不存在的势力。")
@@ -1169,6 +1857,12 @@ class WorldState:
                 raise StrategyError(f"战略战斗 {battle.battle_id} 绑定了不存在的城市。")
             if battle.attacker_office_id is not None and battle.attacker_office_id not in office_ids:
                 raise StrategyError(f"战略战斗 {battle.battle_id} 绑定了不存在的出征职位。")
+            if battle.source_kind not in {"legacy_city_attack", "encounter", "siege", "world_crisis"}:
+                raise StrategyError(f"战略战斗 {battle.battle_id} 的来源类型无效。")
+            if any(army_id not in army_ids for army_id in [*battle.attacker_army_ids, *battle.defender_army_ids]):
+                raise StrategyError(f"战略战斗 {battle.battle_id} 绑定了不存在的军队。")
+            if battle.battle_node_id is not None and battle.battle_node_id not in node_ids:
+                raise StrategyError(f"战略战斗 {battle.battle_id} 绑定了不存在的战斗节点。")
         for event in self.story_events:
             if event.faction_id not in faction_ids or event.city_id not in city_ids:
                 raise StrategyError(f"战略事件 {event.event_id} 绑定了不存在的势力或城市。")
@@ -1201,6 +1895,118 @@ class WorldState:
                 raise StrategyError(f"在野武将 {hero.hero_code} 不能已有所属势力。")
             if hero.assignment_type not in {"reserve", "administration", "training", "garrison", "campaign"}:
                 raise StrategyError(f"战略武将 {hero.hero_code} 的任务类型无效。")
+            if hero.last_personal_action_month is not None and hero.last_personal_action_month < 1:
+                raise StrategyError(f"战略武将 {hero.hero_code} 的个人行动月份无效。")
+            if hero.strategic_specialty and hero.strategic_specialty not in {
+                "vanguard",
+                "guardian",
+                "trainer",
+                "aether_scholar",
+            }:
+                raise StrategyError(f"战略武将 {hero.hero_code} 的战略专长无效。")
+            if hero.personal_mission_status not in {"none", "active", "completed", "failed"}:
+                raise StrategyError(f"战略武将 {hero.hero_code} 的个人任务状态无效。")
+            if hero.personal_mission_assignment_type is not None and hero.personal_mission_assignment_type not in {
+                "administration",
+                "training",
+                "garrison",
+                "campaign",
+            }:
+                raise StrategyError(f"战略武将 {hero.hero_code} 的个人任务职责无效。")
+            if any(other_code not in hero_codes or other_code == hero.hero_code for other_code in hero.relationships):
+                raise StrategyError(f"战略武将 {hero.hero_code} 记录了无效英灵关系。")
+            if any(score < -100 or score > 100 for score in hero.relationships.values()):
+                raise StrategyError(f"战略武将 {hero.hero_code} 的英灵关系超出范围。")
+            if hero.personal_mission_status != "none" and not hero.personal_mission_id:
+                raise StrategyError(f"战略武将 {hero.hero_code} 的个人任务缺少标识。")
+            if hero.personal_mission_progress > hero.personal_mission_required:
+                raise StrategyError(f"战略武将 {hero.hero_code} 的个人任务进度无效。")
+            if hero.last_duty_settlement_month is not None and hero.last_duty_settlement_month < 1:
+                raise StrategyError(f"战略武将 {hero.hero_code} 的职责结算月份无效。")
+        for altar in self.relic_altars:
+            if altar.city_id not in city_ids:
+                raise StrategyError(f"圣物祭坛 {altar.altar_id} 所在城市不存在。")
+            if altar.state not in {"dormant", "active", "damaged"}:
+                raise StrategyError(f"圣物祭坛 {altar.altar_id} 状态无效。")
+            if len(altar.bound_relic_ids) > altar.capacity:
+                raise StrategyError(f"圣物祭坛 {altar.altar_id} 超出绑定容量。")
+            if altar.actions_used > 1:
+                raise StrategyError(f"圣物祭坛 {altar.altar_id} 超出当前等级每月行动次数。")
+            if altar.actions_used and altar.action_month is None:
+                raise StrategyError(f"圣物祭坛 {altar.altar_id} 的行动月份缺失。")
+            if any(relic_id not in relic_ids for relic_id in altar.bound_relic_ids):
+                raise StrategyError(f"圣物祭坛 {altar.altar_id} 绑定了不存在的圣物。")
+            if altar.consecration_progress > altar.consecration_required:
+                raise StrategyError(f"圣物祭坛 {altar.altar_id} 的胜利准备进度无效。")
+            if altar.consecration_progress > 0:
+                if (
+                    altar.consecration_faction_id not in faction_ids
+                    or altar.consecration_relic_id not in altar.bound_relic_ids
+                    or altar.consecration_started_month is None
+                    or altar.consecration_last_month is None
+                ):
+                    raise StrategyError(f"圣物祭坛 {altar.altar_id} 的胜利准备绑定无效。")
+                consecration_relic = next(
+                    item
+                    for item in self.relics
+                    if item.relic_id == altar.consecration_relic_id
+                )
+                if (
+                    consecration_relic.owner_faction_id != altar.consecration_faction_id
+                    or consecration_relic.condition != "intact"
+                    or altar.state != "active"
+                ):
+                    raise StrategyError(f"圣物祭坛 {altar.altar_id} 的胜利准备状态不一致。")
+            city = next(item for item in self.cities if item.city_id == altar.city_id)
+            if altar.altar_id not in city.altars:
+                raise StrategyError(f"圣物祭坛 {altar.altar_id} 未登记到所在城市。")
+            if (
+                altar.consecration_progress > 0
+                and city.owner_faction_id != altar.consecration_faction_id
+            ):
+                raise StrategyError(f"圣物祭坛 {altar.altar_id} 的胜利准备控制权不一致。")
+        for relic in self.relics:
+            if relic.hero_code not in hero_codes:
+                raise StrategyError(f"圣物 {relic.relic_id} 对应的英灵不存在。")
+            if relic.state not in {"scattered", "stored", "bound_to_altar", "released"}:
+                raise StrategyError(f"圣物 {relic.relic_id} 状态无效。")
+            if relic.condition not in {"intact", "damaged"}:
+                raise StrategyError(f"圣物 {relic.relic_id} 完整度状态无效。")
+            if relic.location_node_id is not None and relic.location_node_id not in node_ids:
+                raise StrategyError(f"圣物 {relic.relic_id} 所在节点不存在。")
+            if relic.location_city_id is not None and relic.location_city_id not in city_ids:
+                raise StrategyError(f"圣物 {relic.relic_id} 所在城市不存在。")
+            if relic.owner_faction_id is not None and relic.owner_faction_id not in faction_ids:
+                raise StrategyError(f"圣物 {relic.relic_id} 所属势力不存在。")
+            if relic.altar_id is not None and relic.altar_id not in altar_ids:
+                raise StrategyError(f"圣物 {relic.relic_id} 绑定祭坛不存在。")
+            if any(faction_id not in faction_ids for faction_id in relic.discovered_by_faction_ids):
+                raise StrategyError(f"圣物 {relic.relic_id} 的发现势力不存在。")
+            if relic.state in {"scattered", "released"}:
+                if relic.location_node_id is None or relic.owner_faction_id is not None or relic.altar_id is not None:
+                    raise StrategyError(f"散落或释放的圣物 {relic.relic_id} 状态不一致。")
+            if relic.state == "stored":
+                if relic.location_city_id is None or relic.owner_faction_id is None or relic.altar_id is not None:
+                    raise StrategyError(f"保管中的圣物 {relic.relic_id} 状态不一致。")
+                city = next(item for item in self.cities if item.city_id == relic.location_city_id)
+                if relic.relic_id not in city.relics_stored:
+                    raise StrategyError(f"保管中的圣物 {relic.relic_id} 未登记到所在城市。")
+            if relic.state == "bound_to_altar":
+                if relic.location_city_id is None or relic.owner_faction_id is None or relic.altar_id is None:
+                    raise StrategyError(f"祭坛绑定圣物 {relic.relic_id} 状态不一致。")
+                altar = next(item for item in self.relic_altars if item.altar_id == relic.altar_id)
+                if relic.relic_id not in altar.bound_relic_ids or altar.city_id != relic.location_city_id:
+                    raise StrategyError(f"祭坛绑定圣物 {relic.relic_id} 与祭坛记录不一致。")
+        stored_relic_ids = {
+            relic.relic_id
+            for relic in self.relics
+            if relic.state == "stored"
+        }
+        for city in self.cities:
+            if len(city.relics_stored) != len(set(city.relics_stored)):
+                raise StrategyError(f"城市 {city.city_id} 的圣物保管清单存在重复。")
+            if any(relic_id not in stored_relic_ids for relic_id in city.relics_stored):
+                raise StrategyError(f"城市 {city.city_id} 登记了非保管状态圣物。")
         for recruitment in self.hero_recruitments:
             if recruitment.faction_id not in faction_ids or recruitment.city_id not in city_ids:
                 raise StrategyError(f"武将招募令 {recruitment.recruitment_id} 势力或城市不存在。")
@@ -1221,6 +2027,80 @@ class WorldState:
         for takeover in self.office_takeovers:
             if takeover.superior_office_id not in office_ids or takeover.vacant_office_id not in office_ids:
                 raise StrategyError("职位临时接管绑定了不存在的职位。")
+        for crisis in self.world_crises:
+            if crisis.crisis_type not in {"snow_ghost"}:
+                raise StrategyError(f"世界危机 {crisis.crisis_id} 类型无效。")
+            if crisis.status not in {"dormant", "active", "resolved"}:
+                raise StrategyError(f"世界危机 {crisis.crisis_id} 状态无效。")
+            if crisis.stage not in {
+                "dormant",
+                "omen",
+                "border_pressure",
+                "spread",
+                "mobilization",
+                "showdown",
+                "aftermath",
+                "resolved",
+            }:
+                raise StrategyError(f"世界危机 {crisis.crisis_id} 阶段无效。")
+            if crisis.origin_node_id not in node_ids:
+                raise StrategyError(f"世界危机 {crisis.crisis_id} 起源节点不存在。")
+            if (
+                not crisis.frontier_node_ids
+                or crisis.origin_node_id not in crisis.frontier_node_ids
+                or any(node_id not in node_ids for node_id in crisis.frontier_node_ids)
+            ):
+                raise StrategyError(f"世界危机 {crisis.crisis_id} 前线节点无效。")
+            for route_key in crisis.affected_route_keys:
+                route_nodes = route_key.split("::")
+                if len(route_nodes) != 2 or route_nodes[0] not in node_ids or route_nodes[1] not in node_ids:
+                    raise StrategyError(f"世界危机 {crisis.crisis_id} 影响路线无效。")
+                source = next(node for node in self.nodes if node.node_id == route_nodes[0])
+                if route_nodes[1] not in source.connected_node_ids:
+                    raise StrategyError(f"世界危机 {crisis.crisis_id} 影响了不存在的地图边。")
+            if any(city_id not in city_ids for city_id in crisis.threatened_city_ids):
+                raise StrategyError(f"世界危机 {crisis.crisis_id} 受威胁城市无效。")
+            if any(army_id not in army_ids for army_id in crisis.spawned_army_ids):
+                raise StrategyError(f"世界危机 {crisis.crisis_id} 生成军队无效。")
+            major_faction_ids = {faction.faction_id for faction in self.factions if faction.is_major}
+            if any(faction_id not in major_faction_ids for faction_id in crisis.contributions_by_faction):
+                raise StrategyError(f"世界危机 {crisis.crisis_id} 贡献势力无效。")
+            if any(
+                faction_id not in major_faction_ids
+                or target_id not in major_faction_ids
+                or faction_id == target_id
+                for faction_id, target_id in crisis.cooperation_targets_by_faction.items()
+            ):
+                raise StrategyError(f"世界危机 {crisis.crisis_id} 合作承诺无效。")
+            for pair_key in [*crisis.cooperation_pairs, *crisis.broken_cooperation_pairs]:
+                pair = pair_key.split("::")
+                if (
+                    len(pair) != 2
+                    or pair[0] not in major_faction_ids
+                    or pair[1] not in major_faction_ids
+                    or pair[0] == pair[1]
+                ):
+                    raise StrategyError(f"世界危机 {crisis.crisis_id} 合作组合无效。")
+            if crisis.showdown_branch is not None and crisis.showdown_branch not in {
+                "united_counteroffensive",
+                "rival_vanguards",
+                "shattered_line",
+            }:
+                raise StrategyError(f"世界危机 {crisis.crisis_id} 决战分支无效。")
+            if (
+                crisis.showdown_leader_faction_id is not None
+                and crisis.showdown_leader_faction_id not in major_faction_ids
+            ):
+                raise StrategyError(f"世界危机 {crisis.crisis_id} 决战领袖无效。")
+            if any(faction_id not in major_faction_ids for faction_id in crisis.mainline_winner_faction_ids):
+                raise StrategyError(f"世界危机 {crisis.crisis_id} 主线胜利势力无效。")
+            if (
+                crisis.showdown_battle_id is not None
+                and crisis.showdown_battle_id not in {battle.battle_id for battle in self.pending_battles}
+            ):
+                raise StrategyError(f"世界危机 {crisis.crisis_id} 决战记录不存在。")
+            if crisis.next_stage_month is not None and crisis.next_stage_month <= crisis.stage_started_month:
+                raise StrategyError(f"世界危机 {crisis.crisis_id} 下一阶段月份无效。")
         if self.campaign_contract:
             month_limit = int(self.campaign_contract.get("month_limit", 0))
             if month_limit <= 0:
@@ -1232,6 +2112,7 @@ class WorldState:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "save_format_version": self.save_format_version,
             "seed": self.seed,
             "current_month": self.current_month,
             "nodes": [node.to_dict() for node in self.nodes],
@@ -1243,6 +2124,8 @@ class WorldState:
             "story_events": [event.to_dict() for event in self.story_events],
             "scheduled_consequences": [item.to_dict() for item in self.scheduled_consequences],
             "strategic_heroes": [hero.to_dict() for hero in self.strategic_heroes],
+            "relics": [relic.to_dict() for relic in self.relics],
+            "relic_altars": [altar.to_dict() for altar in self.relic_altars],
             "hero_recruitments": [item.to_dict() for item in self.hero_recruitments],
             "offices": [office.to_dict() for office in self.offices],
             "office_duties": [duty.to_dict() for duty in self.office_duties],
@@ -1257,16 +2140,23 @@ class WorldState:
             "diplomatic_cooldowns": dict(self.diplomatic_cooldowns),
             "diplomatic_memory": [dict(item) for item in self.diplomatic_memory],
             "armies": [item.to_dict() for item in self.armies],
+            "encounters": [item.to_dict() for item in self.encounters],
+            "sieges": [item.to_dict() for item in self.sieges],
+            "world_crises": [item.to_dict() for item in self.world_crises],
         }
 
     def to_public_dict(self) -> dict[str, Any]:
         from wujiang.strategy.tactics import enrich_world_public_state
+        from wujiang.strategy.relics import ensure_relic_system
+        from wujiang.strategy.world_crisis import ensure_world_crises
 
-        return enrich_world_public_state(self)
+        return enrich_world_public_state(ensure_world_crises(ensure_relic_system(self)))
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> WorldState:
+        raw = migrate_world_payload(raw)
         return cls(
+            save_format_version=int(raw.get("save_format_version", CURRENT_STRATEGY_SAVE_VERSION)),
             seed=int(raw.get("seed", 0)),
             current_month=int(raw.get("current_month", 1)),
             nodes=[MapNode.from_dict(item) for item in raw.get("nodes", [])],
@@ -1278,6 +2168,16 @@ class WorldState:
             story_events=[StoryEvent.from_dict(item) for item in raw.get("story_events", [])],
             scheduled_consequences=[ScheduledConsequence.from_dict(item) for item in raw.get("scheduled_consequences", [])],
             strategic_heroes=[StrategicHeroState.from_dict(item) for item in raw.get("strategic_heroes", [])],
+            relics=[
+                RelicState.from_dict(item)
+                for item in raw.get("relics", [])
+                if isinstance(item, dict)
+            ],
+            relic_altars=[
+                RelicAltar.from_dict(item)
+                for item in raw.get("relic_altars", [])
+                if isinstance(item, dict)
+            ],
             hero_recruitments=[HeroRecruitment.from_dict(item) for item in raw.get("hero_recruitments", [])],
             offices=[Office.from_dict(item) for item in raw.get("offices", [])],
             office_duties=[OfficeDuty.from_dict(item) for item in raw.get("office_duties", [])],
@@ -1306,6 +2206,21 @@ class WorldState:
             armies=[
                 StrategicArmy.from_dict(item)
                 for item in raw.get("armies", [])
+                if isinstance(item, dict)
+            ],
+            encounters=[
+                StrategicEncounter.from_dict(item)
+                for item in raw.get("encounters", [])
+                if isinstance(item, dict)
+            ],
+            sieges=[
+                StrategicSiege.from_dict(item)
+                for item in raw.get("sieges", [])
+                if isinstance(item, dict)
+            ],
+            world_crises=[
+                WorldCrisis.from_dict(item)
+                for item in raw.get("world_crises", [])
                 if isinstance(item, dict)
             ],
         )

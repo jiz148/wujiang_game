@@ -197,6 +197,11 @@ def _resolve_rebellion_uprising(city: City, risk: int, events: list[EventLogEntr
 
 
 def advance_month(world: WorldState) -> WorldState:
+    from wujiang.strategy.world_crisis import (
+        require_world_crisis_showdown_complete_before_advance,
+    )
+
+    require_world_crisis_showdown_complete_before_advance(world)
     next_world = WorldState.from_dict(copy.deepcopy(world.to_dict()))
     from wujiang.strategy.heroes import ensure_strategic_hero_system
     from wujiang.strategy.offices import ensure_office_system
@@ -209,11 +214,26 @@ def advance_month(world: WorldState) -> WorldState:
     ]
 
     from wujiang.strategy.story import advance_story_events
-    from wujiang.strategy.armies import advance_army_movements, advance_army_supply
+    from wujiang.strategy.armies import (
+        advance_army_encounters,
+        advance_army_movements,
+        advance_army_retreats,
+        advance_army_supply,
+    )
+    from wujiang.strategy.sieges import advance_sieges
+    from wujiang.strategy.relics import advance_relic_maintenance
+    from wujiang.strategy.hero_personal import advance_hero_personal_states
+    from wujiang.strategy.world_crisis import advance_world_crises
 
+    next_world = advance_world_crises(next_world)
     next_world = advance_story_events(next_world)
+    next_world = advance_army_retreats(next_world)
     next_world = advance_army_movements(next_world)
+    next_world = advance_army_encounters(next_world)
     next_world = advance_army_supply(next_world)
+    next_world = advance_sieges(next_world)
+    next_world = advance_relic_maintenance(next_world)
+    next_world = advance_hero_personal_states(next_world)
 
     from wujiang.strategy.occupation import apply_occupation_month_start, finish_occupation_month
     from wujiang.strategy.rebellion import resolve_rebellion_political_outcome

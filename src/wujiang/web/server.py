@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import mimetypes
+import signal
+import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -10,6 +13,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from wujiang.engine.core import ActionError
+from wujiang.deployment import validate_production_configuration
 from wujiang.heroes.registry import create_battle, list_heroes
 from wujiang.strategy import (
     EventLogEntry,
@@ -23,20 +27,32 @@ from wujiang.strategy import (
     apply_office_order,
     appoint_strategic_hero_to_office,
     assign_strategic_hero_duty,
+    bind_relic,
     perform_hero_ritual,
+    repair_relic,
+    release_relic,
+    search_relic,
+    transfer_relic,
     unbind_strategic_hero,
     apply_rebellion_action,
     apply_rebellion_battle,
     apply_strategy_ai_monthly_actions,
+    apply_strategy_ai_showdown_action,
     form_or_reinforce_army,
     disband_army,
     halt_army_march,
     load_army_supply,
+    order_army_intercept,
     order_army_march,
+    order_army_reinforce,
+    order_army_retreat,
+    order_siege_attacker_stance,
+    order_siege_defender_stance,
     apply_exile_action,
     attach_battle_room,
     choose_player_hero_path,
     declare_city_attack,
+    declare_strategic_battle,
     normalize_strategic_hero_deployment,
     increase_city_troops,
     register_city_soldiers,
@@ -47,8 +63,14 @@ from wujiang.strategy import (
     continue_campaign_as_sandbox,
     resolve_battle_room_result as resolve_strategy_battle_room_result,
     resolve_story_event,
+    resolve_world_crisis_choice,
+    set_world_crisis_showdown_resolution,
     resolve_action_office,
+    campaign_variant_catalog_public,
     first_campaign_contract,
+    apply_quick_campaign_opening_choice,
+    quick_campaign_contract,
+    quick_campaign_opening_status,
     require_campaign_orders_open,
     set_battle_defender_hero,
     set_city_policy,
@@ -63,22 +85,44 @@ from wujiang.strategy import (
     validate_peaceful_integration,
     validate_occupation_policy,
     validate_rebellion_funding,
+    validate_relic_repair,
+    validate_relic_search,
+    validate_relic_transfer,
+    validate_bind_relic,
+    validate_release_relic,
+    validate_world_crisis_choice,
 )
 from wujiang.strategy.command import faction_command_points, strategy_action_command_cost
 from wujiang.strategy.neutral_city_states import (
     incite_neutral_city_state,
     validate_neutral_city_state_incitement,
 )
-from wujiang.web.auth import AuthError, AuthUser, UserStore
+from wujiang.web.auth import AuthError, AuthUser, UserStore, normalized_username_key, session_token_hash
 from wujiang.web.analytics import AnalyticsError, AnalyticsStore
 from wujiang.web.match_history import MatchHistoryError, MatchHistoryStore
-from wujiang.web.multiplayer import DEFAULT_ROOM_MODE, ROOMS, RoomError, battle_state_for_viewer
+from wujiang.web.multiplayer import DEFAULT_ROOM_MODE, GameRoom, ROOMS, RoomError, battle_state_for_viewer
 from wujiang.web.onboarding import onboarding_payload, quick_ai_match_payload, recommended_roster_hero_codes
+from wujiang.web.observability import Observability, ObservabilityConfig
+from wujiang.web.rate_limit import RateLimiter
+from wujiang.web.security import (
+    RequestSecurityError,
+    SecurityConfig,
+    effective_host,
+    effective_client_ip,
+    effective_scheme,
+    enforce_post_origin,
+    enforce_transport,
+    read_json_body,
+    response_security_headers,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 STATIC_ROOT = PROJECT_ROOT / "static"
 PUBLIC_BASE_URL: str | None = None
+SECURITY_CONFIG = SecurityConfig.from_environment()
+RATE_LIMITER = RateLimiter()
+OBSERVABILITY = Observability(ObservabilityConfig.from_environment(SECURITY_CONFIG.environment))
 AUTH_STORE = UserStore()
 ANALYTICS_STORE = AnalyticsStore()
 MATCH_HISTORY_STORE = MatchHistoryStore()
@@ -131,24 +175,67 @@ def configure_public_base_url(base_url: str | None) -> str | None:
     return PUBLIC_BASE_URL
 
 
-def first_header_value(raw_value: str | None) -> str:
-    return str(raw_value or "").split(",", 1)[0].strip()
+def configure_security(config: SecurityConfig | None = None) -> SecurityConfig:
+    global SECURITY_CONFIG
+    SECURITY_CONFIG = (config or SecurityConfig.from_environment()).validated()
+    return SECURITY_CONFIG
+
+
+def configure_rate_limiter(rate_limiter: RateLimiter | None = None) -> RateLimiter:
+    global RATE_LIMITER
+    RATE_LIMITER = rate_limiter or RateLimiter()
+    return RATE_LIMITER
+
+
+def reset_rate_limiter() -> None:
+    RATE_LIMITER.reset()
+
+
+def record_strategy_snapshot_safe(campaign: Any, *, checkpoint: str) -> None:
+    try:
+        ANALYTICS_STORE.record_strategy_snapshot(campaign, checkpoint=checkpoint)
+    except Exception:
+        # Product analytics must never block or alter authoritative gameplay.
+        return
+
+
+def configure_observability(observability: Observability | None = None) -> Observability:
+    global OBSERVABILITY
+    OBSERVABILITY = observability or Observability(
+        ObservabilityConfig.from_environment(SECURITY_CONFIG.environment)
+    )
+    return OBSERVABILITY
+
+
+def readiness_status() -> tuple[bool, dict[str, str]]:
+    dependencies: dict[str, bool] = {}
+    for name, store in (
+        ("auth", AUTH_STORE), ("analytics", ANALYTICS_STORE),
+        ("match_history", MATCH_HISTORY_STORE), ("strategy", STRATEGY_STORE),
+    ):
+        try:
+            store.healthcheck()
+            dependencies[name] = True
+        except Exception:
+            dependencies[name] = False
+    OBSERVABILITY.record_readiness(dependencies)
+    return all(dependencies.values()), {
+        name: "ok" if ready else "failed" for name, ready in dependencies.items()
+    }
 
 
 def request_base_url(handler: BaseHTTPRequestHandler) -> str | None:
     if PUBLIC_BASE_URL:
         return PUBLIC_BASE_URL
-    host = first_header_value(handler.headers.get("X-Forwarded-Host")) or first_header_value(handler.headers.get("Host"))
+    host = effective_host(handler, SECURITY_CONFIG)
     if not host:
         return None
-    scheme = first_header_value(handler.headers.get("X-Forwarded-Proto")) or "http"
+    scheme = effective_scheme(handler, SECURITY_CONFIG)
     return f"{scheme}://{host}"
 
 
 def request_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
-    content_length = int(handler.headers.get("Content-Length", "0"))
-    body = handler.rfile.read(content_length) if content_length else b"{}"
-    return json.loads(body.decode("utf-8"))
+    return read_json_body(handler, SECURITY_CONFIG)
 
 
 def auth_token_from_request(
@@ -164,7 +251,7 @@ def auth_token_from_request(
         token = payload.get("session_token") or payload.get("auth_token")
         if token:
             return str(token)
-    if query is not None:
+    if query is not None and SECURITY_CONFIG.allow_query_auth_tokens:
         token_values = query.get("session_token") or query.get("auth_token") or []
         if token_values:
             return str(token_values[0])
@@ -351,6 +438,16 @@ def normalize_strategy_action_payload(campaign, user_id: int, action_type: str, 
         )
         normalized_payload["issuer_office_id"] = office.office_id
         return normalized_type, action_key, normalized_payload
+
+    def ensure_relic_altar_queue_available(altar_id: str, action_key: str) -> None:
+        for queued in campaign.queued_actions:
+            if (
+                queued.faction_id == faction_id
+                and queued.action_type in {"bind_relic", "release_relic"}
+                and str(queued.payload.get("altar_id") or "") == altar_id
+                and not (queued.action_type == normalized_type and queued.action_key == action_key)
+            ):
+                raise StrategyError("该圣物祭坛本月已经安排过绑定或释放行动。")
     if normalized_type == "set_city_policy":
         city_id = str(payload.get("city_id") or "").strip()
         policy = str(payload.get("policy") or "").strip()
@@ -385,6 +482,20 @@ def normalize_strategy_action_payload(campaign, user_id: int, action_type: str, 
             action_id=diplomacy_action_id,
         )
         return finalize(neutral_faction_id, normalized_payload)
+    if normalized_type == "world_crisis_choice":
+        choice_id = str(payload.get("choice_id") or payload.get("action_id") or "").strip()
+        target_faction_id = str(payload.get("target_faction_id") or "").strip()
+        normalized_payload = {
+            "choice_id": choice_id,
+            "target_faction_id": target_faction_id,
+        }
+        validate_world_crisis_choice(
+            campaign.world,
+            faction_id=faction_id,
+            choice_id=choice_id,
+            target_faction_id=target_faction_id,
+        )
+        return finalize("snow_ghost_north_v1", normalized_payload)
     if normalized_type == "peaceful_integration":
         neutral_faction_id = str(payload.get("neutral_faction_id") or "").strip()
         normalized_payload = {"neutral_faction_id": neutral_faction_id}
@@ -465,6 +576,87 @@ def normalize_strategy_action_payload(campaign, user_id: int, action_type: str, 
             campaign.world,
             faction_id=faction_id,
             city_id=city_id,
+            issuer_office_id=normalized_payload["issuer_office_id"],
+        )
+        return normalized_type, action_key, normalized_payload
+    if normalized_type == "search_relic":
+        relic_id = str(payload.get("relic_id") or "").strip()
+        hero_code = str(payload.get("hero_code") or "").strip()
+        city_id = str(payload.get("city_id") or "").strip()
+        normalized_payload = {
+            "relic_id": relic_id,
+            "hero_code": hero_code,
+            "city_id": city_id,
+        }
+        _, action_key, normalized_payload = finalize(relic_id, normalized_payload)
+        for queued in campaign.queued_actions:
+            if (
+                queued.faction_id == faction_id
+                and queued.action_type == "search_relic"
+                and queued.action_key != action_key
+                and str(queued.payload.get("hero_code") or "") == hero_code
+            ):
+                raise StrategyError("该英灵本月已经被委派搜索另一件圣物。")
+        validate_relic_search(
+            campaign.world,
+            faction_id=faction_id,
+            relic_id=relic_id,
+            hero_code=hero_code,
+            city_id=city_id,
+            issuer_office_id=normalized_payload["issuer_office_id"],
+        )
+        return normalized_type, action_key, normalized_payload
+    if normalized_type == "transfer_relic":
+        relic_id = str(payload.get("relic_id") or "").strip()
+        target_city_id = str(payload.get("target_city_id") or "").strip()
+        normalized_payload = {"relic_id": relic_id, "target_city_id": target_city_id}
+        _, action_key, normalized_payload = finalize(relic_id, normalized_payload)
+        validate_relic_transfer(
+            campaign.world,
+            faction_id=faction_id,
+            relic_id=relic_id,
+            target_city_id=target_city_id,
+            issuer_office_id=normalized_payload["issuer_office_id"],
+        )
+        return normalized_type, action_key, normalized_payload
+    if normalized_type == "repair_relic":
+        relic_id = str(payload.get("relic_id") or "").strip()
+        normalized_payload = {"relic_id": relic_id}
+        _, action_key, normalized_payload = finalize(relic_id, normalized_payload)
+        validate_relic_repair(
+            campaign.world,
+            faction_id=faction_id,
+            relic_id=relic_id,
+            issuer_office_id=normalized_payload["issuer_office_id"],
+        )
+        return normalized_type, action_key, normalized_payload
+    if normalized_type == "bind_relic":
+        relic_id = str(payload.get("relic_id") or "").strip()
+        altar_id = str(payload.get("altar_id") or "").strip()
+        normalized_payload = {"relic_id": relic_id, "altar_id": altar_id}
+        _, action_key, normalized_payload = finalize(altar_id, normalized_payload)
+        ensure_relic_altar_queue_available(altar_id, action_key)
+        validate_bind_relic(
+            campaign.world,
+            faction_id=faction_id,
+            relic_id=relic_id,
+            altar_id=altar_id,
+            issuer_office_id=normalized_payload["issuer_office_id"],
+        )
+        return normalized_type, action_key, normalized_payload
+    if normalized_type == "release_relic":
+        relic_id = str(payload.get("relic_id") or "").strip()
+        relic = next((item for item in campaign.world.relics if item.relic_id == relic_id), None)
+        if relic is None or not relic.altar_id:
+            raise StrategyError("只能释放本势力已经绑定到祭坛的圣物。")
+        altar_id = relic.altar_id
+        normalized_payload = {"relic_id": relic_id, "altar_id": altar_id}
+        _, action_key, normalized_payload = finalize(altar_id, normalized_payload)
+        ensure_relic_altar_queue_available(altar_id, action_key)
+        validate_release_relic(
+            campaign.world,
+            faction_id=faction_id,
+            relic_id=relic_id,
             issuer_office_id=normalized_payload["issuer_office_id"],
         )
         return normalized_type, action_key, normalized_payload
@@ -582,12 +774,14 @@ def normalize_strategy_action_payload(campaign, user_id: int, action_type: str, 
         army_id = str(payload.get("army_id") or "").strip()
         movement_order = str(payload.get("movement_order") or "march").strip().lower()
         destination_node_id = str(payload.get("destination_node_id") or "").strip()
-        if movement_order not in {"march", "hold"}:
-            raise StrategyError("军队移动命令必须是行军或停止。")
+        if movement_order not in {"march", "hold", "intercept", "reinforce", "retreat"}:
+            raise StrategyError("军队机动命令无效。")
         normalized_payload = {
             "army_id": army_id,
             "movement_order": movement_order,
-            "destination_node_id": destination_node_id if movement_order == "march" else "",
+            "destination_node_id": destination_node_id if movement_order in {"march", "retreat"} else "",
+            "target_army_id": str(payload.get("target_army_id") or "").strip() if movement_order == "intercept" else "",
+            "target_encounter_id": str(payload.get("target_encounter_id") or "").strip() if movement_order == "reinforce" else "",
         }
         _, action_key, normalized_payload = finalize(army_id, normalized_payload)
         if movement_order == "march":
@@ -598,11 +792,35 @@ def normalize_strategy_action_payload(campaign, user_id: int, action_type: str, 
                 destination_node_id=destination_node_id,
                 issuer_office_id=normalized_payload["issuer_office_id"],
             )
-        else:
+        elif movement_order == "hold":
             halt_army_march(
                 campaign.world,
                 faction_id=faction_id,
                 army_id=army_id,
+                issuer_office_id=normalized_payload["issuer_office_id"],
+            )
+        elif movement_order == "intercept":
+            order_army_intercept(
+                campaign.world,
+                faction_id=faction_id,
+                army_id=army_id,
+                target_army_id=normalized_payload["target_army_id"],
+                issuer_office_id=normalized_payload["issuer_office_id"],
+            )
+        elif movement_order == "reinforce":
+            order_army_reinforce(
+                campaign.world,
+                faction_id=faction_id,
+                army_id=army_id,
+                encounter_id=normalized_payload["target_encounter_id"],
+                issuer_office_id=normalized_payload["issuer_office_id"],
+            )
+        else:
+            order_army_retreat(
+                campaign.world,
+                faction_id=faction_id,
+                army_id=army_id,
+                destination_node_id=destination_node_id,
                 issuer_office_id=normalized_payload["issuer_office_id"],
             )
         return normalized_type, action_key, normalized_payload
@@ -616,6 +834,43 @@ def normalize_strategy_action_payload(campaign, user_id: int, action_type: str, 
             faction_id=faction_id,
             army_id=army_id,
             supply=supply,
+            issuer_office_id=normalized_payload["issuer_office_id"],
+        )
+        return normalized_type, action_key, normalized_payload
+    if normalized_type == "set_siege_attacker_stance":
+        siege_id = str(payload.get("siege_id") or "").strip()
+        stance = str(payload.get("stance") or "").strip().lower()
+        destination_node_id = str(payload.get("destination_node_id") or "").strip()
+        normalized_payload = {
+            "siege_id": siege_id,
+            "stance": stance,
+            "destination_node_id": destination_node_id if stance == "withdraw" else "",
+        }
+        _, action_key, normalized_payload = finalize(siege_id, normalized_payload)
+        order_siege_attacker_stance(
+            campaign.world,
+            faction_id=faction_id,
+            siege_id=siege_id,
+            stance=stance,
+            destination_node_id=normalized_payload["destination_node_id"],
+            issuer_office_id=normalized_payload["issuer_office_id"],
+        )
+        return normalized_type, action_key, normalized_payload
+    if normalized_type == "set_siege_defender_stance":
+        siege_id = str(payload.get("siege_id") or "").strip()
+        stance = str(payload.get("stance") or "").strip().lower()
+        siege = next((item for item in campaign.world.sieges if item.siege_id == siege_id), None)
+        normalized_payload = {
+            "siege_id": siege_id,
+            "stance": stance,
+            "city_id": siege.city_id if siege is not None else "",
+        }
+        _, action_key, normalized_payload = finalize(siege_id, normalized_payload)
+        order_siege_defender_stance(
+            campaign.world,
+            faction_id=faction_id,
+            siege_id=siege_id,
+            stance=stance,
             issuer_office_id=normalized_payload["issuer_office_id"],
         )
         return normalized_type, action_key, normalized_payload
@@ -775,6 +1030,14 @@ def apply_strategy_action_queue(campaign):
                     neutral_faction_id=str(payload.get("neutral_faction_id") or ""),
                     action_id=str(payload.get("diplomacy_action_id") or ""),
                 )
+            elif action.action_type == "world_crisis_choice":
+                next_world = resolve_world_crisis_choice(
+                    next_world,
+                    faction_id=faction_id,
+                    choice_id=str(payload.get("choice_id") or ""),
+                    target_faction_id=str(payload.get("target_faction_id") or ""),
+                    issuer_office_id=office.office_id,
+                )
             elif action.action_type == "peaceful_integration":
                 next_world = apply_peaceful_integration(
                     next_world,
@@ -833,6 +1096,45 @@ def apply_strategy_action_queue(campaign):
                     next_world,
                     faction_id=faction_id,
                     city_id=str(payload.get("city_id") or ""),
+                    issuer_office_id=office.office_id,
+                )
+            elif action.action_type == "search_relic":
+                next_world = search_relic(
+                    next_world,
+                    faction_id=faction_id,
+                    relic_id=str(payload.get("relic_id") or ""),
+                    hero_code=str(payload.get("hero_code") or ""),
+                    city_id=str(payload.get("city_id") or ""),
+                    issuer_office_id=office.office_id,
+                )
+            elif action.action_type == "transfer_relic":
+                next_world = transfer_relic(
+                    next_world,
+                    faction_id=faction_id,
+                    relic_id=str(payload.get("relic_id") or ""),
+                    target_city_id=str(payload.get("target_city_id") or ""),
+                    issuer_office_id=office.office_id,
+                )
+            elif action.action_type == "repair_relic":
+                next_world = repair_relic(
+                    next_world,
+                    faction_id=faction_id,
+                    relic_id=str(payload.get("relic_id") or ""),
+                    issuer_office_id=office.office_id,
+                )
+            elif action.action_type == "bind_relic":
+                next_world = bind_relic(
+                    next_world,
+                    faction_id=faction_id,
+                    relic_id=str(payload.get("relic_id") or ""),
+                    altar_id=str(payload.get("altar_id") or ""),
+                    issuer_office_id=office.office_id,
+                )
+            elif action.action_type == "release_relic":
+                next_world = release_relic(
+                    next_world,
+                    faction_id=faction_id,
+                    relic_id=str(payload.get("relic_id") or ""),
                     issuer_office_id=office.office_id,
                 )
             elif action.action_type == "unbind_strategic_hero":
@@ -900,15 +1202,40 @@ def apply_strategy_action_queue(campaign):
                     issuer_office_id=office.office_id,
                 )
             elif action.action_type == "set_army_movement":
-                if str(payload.get("movement_order") or "march") == "hold":
+                movement_order = str(payload.get("movement_order") or "march")
+                if movement_order == "hold":
                     next_world = halt_army_march(
                         next_world,
                         faction_id=faction_id,
                         army_id=str(payload.get("army_id") or ""),
                         issuer_office_id=office.office_id,
                     )
-                else:
+                elif movement_order == "march":
                     next_world = order_army_march(
+                        next_world,
+                        faction_id=faction_id,
+                        army_id=str(payload.get("army_id") or ""),
+                        destination_node_id=str(payload.get("destination_node_id") or ""),
+                        issuer_office_id=office.office_id,
+                    )
+                elif movement_order == "intercept":
+                    next_world = order_army_intercept(
+                        next_world,
+                        faction_id=faction_id,
+                        army_id=str(payload.get("army_id") or ""),
+                        target_army_id=str(payload.get("target_army_id") or ""),
+                        issuer_office_id=office.office_id,
+                    )
+                elif movement_order == "reinforce":
+                    next_world = order_army_reinforce(
+                        next_world,
+                        faction_id=faction_id,
+                        army_id=str(payload.get("army_id") or ""),
+                        encounter_id=str(payload.get("target_encounter_id") or ""),
+                        issuer_office_id=office.office_id,
+                    )
+                else:
+                    next_world = order_army_retreat(
                         next_world,
                         faction_id=faction_id,
                         army_id=str(payload.get("army_id") or ""),
@@ -921,6 +1248,23 @@ def apply_strategy_action_queue(campaign):
                     faction_id=faction_id,
                     army_id=str(payload.get("army_id") or ""),
                     supply=int(payload.get("supply") or 0),
+                    issuer_office_id=office.office_id,
+                )
+            elif action.action_type == "set_siege_attacker_stance":
+                next_world = order_siege_attacker_stance(
+                    next_world,
+                    faction_id=faction_id,
+                    siege_id=str(payload.get("siege_id") or ""),
+                    stance=str(payload.get("stance") or ""),
+                    destination_node_id=str(payload.get("destination_node_id") or ""),
+                    issuer_office_id=office.office_id,
+                )
+            elif action.action_type == "set_siege_defender_stance":
+                next_world = order_siege_defender_stance(
+                    next_world,
+                    faction_id=faction_id,
+                    siege_id=str(payload.get("siege_id") or ""),
+                    stance=str(payload.get("stance") or ""),
                     issuer_office_id=office.office_id,
                 )
             elif action.action_type == "appoint_strategic_hero":
@@ -1013,6 +1357,8 @@ def create_strategy_battle_room(
     auth_user,
     battle,
     resolution_mode: str,
+    *,
+    room_id: str | None = None,
 ) -> dict[str, Any]:
     rosters = strategy_battle_rosters(campaign.world, battle)
     if not rosters.attacker.roster or not rosters.defender.roster:
@@ -1027,6 +1373,7 @@ def create_strategy_battle_room(
         start_immediately=True,
         host_becomes_ai_after_start=resolution_mode in {"watch_ai", "ai_auto"},
         host_account_user_id=auth_user.user_id,
+        room_id=room_id,
     )
     return {
         "room_id": room.room_id,
@@ -1144,6 +1491,218 @@ def declare_strategy_attack_for_world(
     return next_world, battle_room
 
 
+def declare_strategy_engagement_for_world(
+    campaign,
+    world,
+    auth_user,
+    *,
+    faction_id: str,
+    source_kind: str,
+    source_entity_id: str,
+    resolution_mode: str,
+) -> tuple[Any, dict[str, Any] | None]:
+    next_world = declare_strategic_battle(
+        world,
+        faction_id=faction_id,
+        source_kind=source_kind,
+        source_entity_id=source_entity_id,
+        resolution_mode=resolution_mode,
+        auto_resolve=resolution_mode == "quick",
+    )
+    if resolution_mode not in {"manual", "watch_ai", "ai_auto"}:
+        return next_world, None
+    pending_battle = next_world.pending_battles[-1]
+    battle_room = create_strategy_battle_room(
+        campaign=SimpleNamespace(world=next_world),
+        auth_user=auth_user,
+        battle=pending_battle,
+        resolution_mode=resolution_mode,
+    )
+    next_world = attach_battle_room(
+        next_world,
+        battle_id=pending_battle.battle_id,
+        room_id=battle_room["room_id"],
+        invite_path=battle_room["invite_path"],
+    )
+    if resolution_mode == "ai_auto":
+        room = ROOMS.get_room(str(battle_room["room_id"]))
+        simulation_steps = room.run_ai_simulation_to_end()
+        battle_room["status"] = room.status
+        battle_room["winner"] = getattr(room.battle, "winner", None)
+        battle_room["simulation_steps"] = simulation_steps
+        winner_team_id = getattr(room.battle, "winner", None)
+        if winner_team_id in {1, 2}:
+            next_world = resolve_strategy_battle_room_result(
+                next_world,
+                battle_room_id=str(battle_room["room_id"]),
+                winner_team_id=int(winner_team_id),
+                battle_summary=strategy_room_battle_summary(room),
+                surviving_grid_units_by_team=strategy_room_survivors_by_team(room),
+                surviving_hero_codes_by_team=strategy_room_surviving_hero_codes_by_team(room),
+            )
+    return next_world, battle_room
+
+
+def start_world_crisis_showdown_for_world(
+    campaign,
+    world,
+    auth_user,
+    *,
+    faction_id: str,
+    issuer_office_id: str,
+    resolution_mode: str,
+) -> tuple[Any, dict[str, Any] | None]:
+    next_world = set_world_crisis_showdown_resolution(
+        world,
+        faction_id=faction_id,
+        issuer_office_id=issuer_office_id,
+        resolution_mode=resolution_mode,
+        auto_resolve=resolution_mode == "quick",
+    )
+    if resolution_mode not in {"manual", "watch_ai", "ai_auto"}:
+        return next_world, None
+    pending_battle = next(
+        (
+            battle
+            for battle in next_world.pending_battles
+            if battle.source_kind == "world_crisis" and battle.status == "pending"
+        ),
+        None,
+    )
+    if pending_battle is None:
+        raise StrategyError("北境决战待处理记录不存在。", status=HTTPStatus.CONFLICT)
+    battle_room = create_strategy_battle_room(
+        campaign=SimpleNamespace(world=next_world),
+        auth_user=auth_user,
+        battle=pending_battle,
+        resolution_mode=resolution_mode,
+    )
+    next_world = attach_battle_room(
+        next_world,
+        battle_id=pending_battle.battle_id,
+        room_id=battle_room["room_id"],
+        invite_path=battle_room["invite_path"],
+    )
+    if resolution_mode == "ai_auto":
+        room = ROOMS.get_room(str(battle_room["room_id"]))
+        simulation_steps = room.run_ai_simulation_to_end()
+        battle_room["status"] = room.status
+        battle_room["winner"] = getattr(room.battle, "winner", None)
+        battle_room["simulation_steps"] = simulation_steps
+        winner_team_id = getattr(room.battle, "winner", None)
+        if winner_team_id in {1, 2}:
+            next_world = resolve_strategy_battle_room_result(
+                next_world,
+                battle_room_id=str(battle_room["room_id"]),
+                winner_team_id=int(winner_team_id),
+                battle_summary=strategy_room_battle_summary(room),
+                surviving_grid_units_by_team=strategy_room_survivors_by_team(room),
+                surviving_hero_codes_by_team=strategy_room_surviving_hero_codes_by_team(room),
+            )
+    return next_world, battle_room
+
+
+def strategy_battle_for_room(campaign, room_id: str):
+    normalized = str(room_id or "").strip().upper()
+    return next(
+        (
+            battle for battle in campaign.world.pending_battles
+            if str(battle.battle_room_id or "").strip().upper() == normalized
+        ),
+        None,
+    )
+
+
+def strategy_room_participant_user_ids(room) -> tuple[int, ...]:
+    return tuple(sorted({
+        int(seat.account_user_id)
+        for seat in room.seats.values()
+        if seat.account_user_id is not None and int(seat.account_user_id) > 0
+    }))
+
+
+def persist_strategy_battle_room(
+    room,
+    *,
+    campaign_id: int | None = None,
+    battle_id: str | None = None,
+    restarted: bool = False,
+):
+    checkpoint = STRATEGY_STORE.battle_checkpoint(room.room_id)
+    resolved_campaign_id = int(campaign_id) if campaign_id is not None else (
+        checkpoint.campaign_id if checkpoint is not None else None
+    )
+    resolved_battle_id = str(battle_id or (checkpoint.battle_id if checkpoint is not None else ""))
+    if resolved_campaign_id is None or not resolved_battle_id:
+        return None
+    participants = strategy_room_participant_user_ids(room)
+    if not participants and checkpoint is not None:
+        participants = checkpoint.participant_user_ids
+    return STRATEGY_STORE.save_battle_checkpoint(
+        campaign_id=resolved_campaign_id,
+        battle_id=resolved_battle_id,
+        room_id=room.room_id,
+        participant_user_ids=participants,
+        room_blob=room.checkpoint_bytes(),
+        room_version=room.version,
+        status=room.status,
+        restarted=restarted,
+    )
+
+
+def persist_created_strategy_battle_rooms(campaign, battle_rooms: list[dict[str, Any]]) -> None:
+    for battle_room in battle_rooms:
+        room_id = str(battle_room.get("room_id") or "").strip().upper()
+        battle = strategy_battle_for_room(campaign, room_id)
+        if battle is None:
+            continue
+        room = ROOMS.get_room(room_id)
+        persist_strategy_battle_room(
+            room,
+            campaign_id=campaign.campaign_id,
+            battle_id=battle.battle_id,
+        )
+
+
+def recover_strategy_battle_room(room_id: str, auth_user: AuthUser):
+    checkpoint = STRATEGY_STORE.battle_checkpoint_for_user(room_id, auth_user.user_id)
+    room = GameRoom.from_checkpoint_bytes(checkpoint.room_blob)
+    if room.room_id != checkpoint.room_id:
+        raise StrategyError("战略战斗检查点与房间编号不匹配，不能静默恢复。", status=HTTPStatus.CONFLICT)
+    ROOMS.restore_room(room)
+    return room, checkpoint
+
+
+def strategy_room_token_for_user(room, user_id: int) -> str:
+    seat = next(
+        (
+            seat for seat in room.seats.values()
+            if seat.account_user_id is not None and int(seat.account_user_id) == int(user_id)
+        ),
+        None,
+    )
+    return str(seat.token or "") if seat is not None and seat.is_human else ""
+
+
+def require_strategy_room_mutation_allowed(
+    room,
+    auth_user: AuthUser,
+    *,
+    allow_battleplay: bool = True,
+) -> None:
+    checkpoint = STRATEGY_STORE.battle_checkpoint(room.room_id)
+    if checkpoint is None:
+        return
+    campaign = STRATEGY_STORE.get_campaign_for_user(checkpoint.campaign_id, auth_user.user_id)
+    battle = strategy_battle_for_room(campaign, room.room_id)
+    if not allow_battleplay:
+        raise RoomError("战略战斗房间由战役保存，不能离开、删除或用于再战。")
+    if campaign.status == "archived" or str(campaign.world.campaign_conclusion.get("state") or "") == "archived":
+        raise RoomError("这场战略战役已经归档，战斗只能只读查看。")
+    if battle is None or battle.status != "pending":
+        raise RoomError("这场战略战斗已经结算，只能查看，不能再次操作或重开。")
+
+
 def sync_finished_strategy_battle_room(room) -> dict[str, Any] | None:
     battle = getattr(room, "battle", None)
     winner_team_id = getattr(battle, "winner", None)
@@ -1161,9 +1720,35 @@ def sync_finished_strategy_battle_room(room) -> dict[str, Any] | None:
     return campaign.to_public_dict(resume_status=STRATEGY_STORE.resume_status(campaign.campaign_id))
 
 
-def room_state_with_strategy_sync(room, player_token: str | None, *, base_url: str | None) -> dict[str, Any]:
+def room_state_with_strategy_sync(
+    room,
+    player_token: str | None,
+    *,
+    base_url: str | None,
+    recovered: bool = False,
+) -> dict[str, Any]:
     record_finished_room_history(room)
     state = room.serialize_state(player_token, base_url=base_url)
+    checkpoint = persist_strategy_battle_room(room)
+    if checkpoint is not None:
+        access_mode = STRATEGY_STORE.campaign_access_mode(checkpoint.campaign_id)
+        state["battle_recovery"] = {
+            "status": "read_only" if access_mode == "read_only" else ("recovered" if recovered else checkpoint.status),
+            "access_mode": access_mode,
+            "read_only": access_mode == "read_only",
+            "checkpoint_version": checkpoint.room_version,
+            "updated_at": checkpoint.updated_at,
+            "restart_count": checkpoint.restart_count,
+            "message": (
+                "归档战役已按原账号恢复；地图、复盘和已完成战斗均为只读。"
+                if access_mode == "read_only"
+                else (
+                    "已从服务器检查点恢复到同一战斗进度。"
+                    if recovered
+                    else "战斗进度已保存到服务器检查点。"
+                )
+            ),
+        }
     strategy_campaign = sync_finished_strategy_battle_room(room)
     if strategy_campaign is not None:
         state["strategy_campaign"] = strategy_campaign
@@ -1288,11 +1873,111 @@ def extract_room_action(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 class WujiangHandler(BaseHTTPRequestHandler):
-    server_version = "WujiangHTTP/0.2"
+    server_version = "Wujiang"
+    sys_version = ""
+
+    def handle_one_request(self) -> None:
+        request_id, started_at = OBSERVABILITY.begin_request()
+        self.command = None
+        self._request_id = request_id
+        self._response_status = 500
+        self._rate_limit_scope = ""
+        try:
+            super().handle_one_request()
+        finally:
+            if getattr(self, "command", None):
+                OBSERVABILITY.record_request(
+                    request_id=request_id,
+                    method=str(self.command),
+                    raw_path=str(getattr(self, "path", "")),
+                    status=int(getattr(self, "_response_status", 500)),
+                    started_at=started_at,
+                    rate_limit_scope=str(getattr(self, "_rate_limit_scope", "")),
+                )
+            else:
+                OBSERVABILITY.cancel_request()
+
+    def send_response(self, code: int, message: str | None = None) -> None:
+        self._response_status = int(code)
+        super().send_response(code, message)
+
+    def end_headers(self) -> None:
+        self.send_header("X-Request-ID", str(getattr(self, "_request_id", "")))
+        for name, value in getattr(self, "_rate_limit_headers", {}).items():
+            self.send_header(name, value)
+        for name, value in response_security_headers(self, SECURITY_CONFIG).items():
+            self.send_header(name, value)
+        super().end_headers()
+
+    def _enforce_transport(self) -> bool:
+        try:
+            enforce_transport(self, SECURITY_CONFIG)
+        except RequestSecurityError as exc:
+            json_response(self, int(exc.status), {"error": str(exc)})
+            return False
+        return True
+
+    def _rate_limit(self, path: str, payload: dict[str, Any]) -> bool:
+        client_key = effective_client_ip(self, SECURITY_CONFIG) or "unknown"
+        checks: list[tuple[str, str]] = []
+        if path in {"/api/auth/register", "/api/auth/login"}:
+            identity = normalized_username_key(str(payload.get("username") or ""))
+            identity_hash = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+            checks = [("auth_ip", client_key), ("auth_identity", f"{path}:{identity_hash}")]
+        elif path == "/api/strategy/campaigns/join":
+            token = auth_token_from_request(self, payload=payload)
+            checks = [("join", client_key), ("join", f"actor:{session_token_hash(token)}")]
+        elif path == "/api/analytics/events":
+            checks = [("analytics", client_key)]
+        elif path.startswith("/api/"):
+            token = auth_token_from_request(self, payload=payload)
+            checks = [("mutation", client_key)]
+            if token:
+                checks.append(("mutation", f"actor:{session_token_hash(token)}"))
+        for scope, key in checks:
+            decision = RATE_LIMITER.check(scope, key)
+            self._rate_limit_headers = {
+                "RateLimit-Limit": str(decision.limit),
+                "RateLimit-Remaining": str(decision.remaining),
+                "RateLimit-Reset": str(decision.reset_after_seconds),
+            }
+            if not decision.allowed:
+                self._rate_limit_scope = scope
+                self._rate_limit_headers["Retry-After"] = str(decision.reset_after_seconds)
+                json_response(
+                    self,
+                    HTTPStatus.TOO_MANY_REQUESTS,
+                    {"error": "请求过于频繁，请稍后再试。", "retry_after": decision.reset_after_seconds},
+                )
+                return False
+        return True
 
     def do_GET(self) -> None:  # noqa: N802
+        self._rate_limit_headers = {}
+        if not self._enforce_transport():
+            return
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
+        if parsed.path == "/api/health/live":
+            json_response(
+                self, HTTPStatus.OK,
+                {"status": "ok", "service": "wujiang", "uptime_seconds": OBSERVABILITY.metrics()["uptime_seconds"]},
+            )
+            return
+        if parsed.path == "/api/health/ready":
+            ready, dependencies = readiness_status()
+            json_response(
+                self, HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE,
+                {"status": "ready" if ready else "not_ready", "dependencies": dependencies},
+            )
+            return
+        if parsed.path == "/api/metrics":
+            supplied_token = str(self.headers.get("X-Wujiang-Ops-Token") or "")
+            if not OBSERVABILITY.allows_metrics(supplied_token):
+                json_response(self, HTTPStatus.FORBIDDEN, {"error": "无权访问运维指标。"})
+                return
+            json_response(self, HTTPStatus.OK, OBSERVABILITY.metrics())
+            return
         if parsed.path == "/api/heroes":
             heroes = list_heroes()
             json_response(
@@ -1319,6 +2004,21 @@ class WujiangHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/analytics/funnel":
             json_response(self, HTTPStatus.OK, ANALYTICS_STORE.funnel())
+            return
+        if parsed.path == "/api/analytics/strategy":
+            filters = {
+                key: (query.get(key) or [""])[0]
+                for key in (
+                    "content_version", "balance_version", "variant_id", "seed",
+                    "human_count", "victory_route", "crisis_id", "crisis_stage", "month",
+                )
+            }
+            try:
+                dashboard = ANALYTICS_STORE.strategy_dashboard(filters)
+            except (AnalyticsError, TypeError, ValueError):
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": "战役分析筛选条件无效。"})
+                return
+            json_response(self, HTTPStatus.OK, dashboard)
             return
         if parsed.path == "/api/matches/recent":
             try:
@@ -1366,6 +2066,7 @@ class WujiangHandler(BaseHTTPRequestHandler):
                 self,
                 HTTPStatus.OK,
                 {
+                    "campaign_variants": campaign_variant_catalog_public(),
                     "campaigns": [
                         campaign.to_public_dict(resume_status=STRATEGY_STORE.resume_status(campaign.campaign_id))
                         for campaign in campaigns
@@ -1382,15 +2083,72 @@ class WujiangHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/rooms/state":
             room_id = (query.get("room_id") or query.get("room") or [""])[0]
             player_token = (query.get("player_token") or [""])[0] or None
+            auth_user = None
+            auth_token = auth_token_from_request(self, query=query)
+            if auth_token:
+                try:
+                    auth_user = AUTH_STORE.user_for_session(auth_token)
+                except AuthError as exc:
+                    auth_error_response(self, exc)
+                    return
+            recovered = False
             try:
                 room = ROOMS.get_room(room_id)
-            except RoomError as exc:
-                json_response(self, HTTPStatus.NOT_FOUND, {"error": "房间不存在，可能是房间码输错了。"})
-                return
+            except RoomError:
+                if auth_user is None:
+                    json_response(self, HTTPStatus.NOT_FOUND, {"error": "房间不存在；战略战斗参与者登录后可尝试服务器检查点恢复。"})
+                    return
+                try:
+                    room, _checkpoint = recover_strategy_battle_room(room_id, auth_user)
+                    recovered = True
+                except StrategyError as exc:
+                    json_response(
+                        self,
+                        exc.status,
+                        {
+                            "error": str(exc),
+                            "battle_recovery": {
+                                "status": "restart_required" if exc.status == HTTPStatus.CONFLICT else "unavailable",
+                                "can_restart_from_prebattle": exc.status == HTTPStatus.CONFLICT,
+                                "room_id": str(room_id or "").strip().upper(),
+                            },
+                        },
+                    )
+                    return
+                except RoomError as exc:
+                    json_response(
+                        self,
+                        HTTPStatus.CONFLICT,
+                        {
+                            "error": str(exc),
+                            "battle_recovery": {
+                                "status": "restart_required",
+                                "can_restart_from_prebattle": True,
+                                "room_id": str(room_id or "").strip().upper(),
+                            },
+                        },
+                    )
+                    return
+            if auth_user is not None and not room.seat_for_token(player_token):
+                checkpoint = STRATEGY_STORE.battle_checkpoint(room.room_id)
+                if checkpoint is not None and auth_user.user_id in checkpoint.participant_user_ids:
+                    STRATEGY_STORE.get_campaign_for_user(checkpoint.campaign_id, auth_user.user_id)
+                    recovered_token = strategy_room_token_for_user(room, auth_user.user_id)
+                    if recovered_token:
+                        player_token = recovered_token
+                        recovered = True
+            response = room_state_with_strategy_sync(
+                room,
+                player_token,
+                base_url=request_base_url(self),
+                recovered=recovered,
+            )
+            if recovered and player_token:
+                response["player_token"] = player_token
             json_response(
                 self,
                 HTTPStatus.OK,
-                room_state_with_strategy_sync(room, player_token, base_url=request_base_url(self)),
+                response,
             )
             return
         if parsed.path == "/api/rooms/replay":
@@ -1414,11 +2172,22 @@ class WujiangHandler(BaseHTTPRequestHandler):
         self.serve_static(parsed.path)
 
     def do_POST(self) -> None:  # noqa: N802
+        self._rate_limit_headers = {}
+        if not self._enforce_transport():
+            return
         parsed = urlparse(self.path)
         try:
+            enforce_post_origin(
+                self,
+                SECURITY_CONFIG,
+                additional_origins=(PUBLIC_BASE_URL,) if PUBLIC_BASE_URL else (),
+            )
             payload = request_json(self)
-        except json.JSONDecodeError:
-            json_response(self, HTTPStatus.BAD_REQUEST, {"error": "请求体不是有效 JSON。"})
+        except RequestSecurityError as exc:
+            json_response(self, int(exc.status), {"error": str(exc)})
+            return
+
+        if not self._rate_limit(parsed.path, payload):
             return
 
         auth_user = None
@@ -1517,11 +2286,50 @@ class WujiangHandler(BaseHTTPRequestHandler):
                     name=str(payload.get("name") or "新战役"),
                     seed=int(payload.get("seed", 1)),
                     neutral_city_states=True,
-                    campaign_contract=first_campaign_contract(),
+                    campaign_contract=first_campaign_contract(str(payload.get("variant_id") or "classic_frontier")),
                 )
                 resume_status = STRATEGY_STORE.mark_online(campaign.campaign_id, auth_user)
                 campaign = STRATEGY_STORE.get_campaign_for_user(campaign.campaign_id, auth_user.user_id)
+                record_strategy_snapshot_safe(campaign, checkpoint="created")
             except (TypeError, ValueError) as exc:
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": "战役参数格式不正确。"})
+                return
+            except StrategyError as exc:
+                strategy_error_response(self, exc)
+                return
+            json_response(
+                self,
+                HTTPStatus.OK,
+                {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+            )
+            return
+
+        if parsed.path == "/api/strategy/campaigns/quick-start":
+            try:
+                assert auth_user is not None
+                campaign = STRATEGY_STORE.create_campaign(
+                    owner=auth_user,
+                    name=str(payload.get("name") or "六个月边境决断"),
+                    seed=int(payload.get("seed", 1)),
+                    neutral_city_states=True,
+                    campaign_contract=quick_campaign_contract(),
+                )
+                record_strategy_snapshot_safe(campaign, checkpoint="created")
+                campaign = STRATEGY_STORE.lock_initial_players(campaign.campaign_id, auth_user.user_id)
+                from wujiang.strategy.ai_goals import ensure_ai_strategic_goal
+
+                for member in campaign.members:
+                    if str(getattr(member, "role", "")).lower() == "ai":
+                        ensure_ai_strategic_goal(campaign.world, member.faction_id)
+                campaign = STRATEGY_STORE.update_world(
+                    campaign.campaign_id,
+                    auth_user.user_id,
+                    campaign.world,
+                )
+                resume_status = STRATEGY_STORE.mark_online(campaign.campaign_id, auth_user)
+                campaign = STRATEGY_STORE.get_campaign_for_user(campaign.campaign_id, auth_user.user_id)
+                record_strategy_snapshot_safe(campaign, checkpoint="locked")
+            except (TypeError, ValueError):
                 json_response(self, HTTPStatus.BAD_REQUEST, {"error": "战役参数格式不正确。"})
                 return
             except StrategyError as exc:
@@ -1540,9 +2348,11 @@ class WujiangHandler(BaseHTTPRequestHandler):
                 campaign = STRATEGY_STORE.join_campaign_by_code(
                     str(payload.get("join_code") or ""),
                     auth_user,
+                    join_host_faction=bool(payload.get("join_host_faction", False)),
                 )
                 resume_status = STRATEGY_STORE.mark_online(campaign.campaign_id, auth_user)
                 campaign = STRATEGY_STORE.get_campaign_for_user(campaign.campaign_id, auth_user.user_id)
+                record_strategy_snapshot_safe(campaign, checkpoint="roster")
             except StrategyError as exc:
                 strategy_error_response(self, exc)
                 return
@@ -1566,6 +2376,7 @@ class WujiangHandler(BaseHTTPRequestHandler):
                 campaign = STRATEGY_STORE.update_world(campaign_id, auth_user.user_id, campaign.world)
                 resume_status = STRATEGY_STORE.mark_online(campaign.campaign_id, auth_user)
                 campaign = STRATEGY_STORE.get_campaign_for_user(campaign.campaign_id, auth_user.user_id)
+                record_strategy_snapshot_safe(campaign, checkpoint="locked")
             except (TypeError, ValueError) as exc:
                 json_response(self, HTTPStatus.BAD_REQUEST, {"error": "æˆ˜å½¹ ID å¿…é¡»æ˜¯æ•´æ•°ã€‚"})
                 return
@@ -1586,6 +2397,25 @@ class WujiangHandler(BaseHTTPRequestHandler):
                 campaign = STRATEGY_STORE.rotate_join_code(campaign_id, auth_user.user_id)
                 resume_status = STRATEGY_STORE.resume_status(campaign.campaign_id)
             except (TypeError, ValueError) as exc:
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": "战役 ID 必须是整数。"})
+                return
+            except StrategyError as exc:
+                strategy_error_response(self, exc)
+                return
+            json_response(
+                self,
+                HTTPStatus.OK,
+                {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+            )
+            return
+
+        if parsed.path == "/api/strategy/campaigns/revoke-join-code":
+            try:
+                assert auth_user is not None
+                campaign_id = int(payload.get("campaign_id"))
+                campaign = STRATEGY_STORE.revoke_join_code(campaign_id, auth_user.user_id)
+                resume_status = STRATEGY_STORE.resume_status(campaign.campaign_id)
+            except (TypeError, ValueError):
                 json_response(self, HTTPStatus.BAD_REQUEST, {"error": "战役 ID 必须是整数。"})
                 return
             except StrategyError as exc:
@@ -1692,6 +2522,35 @@ class WujiangHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/api/strategy/campaigns/quick-opening-choice":
+            try:
+                assert auth_user is not None
+                campaign_id = int(payload.get("campaign_id"))
+                campaign = STRATEGY_STORE.get_campaign_for_user(campaign_id, auth_user.user_id)
+                if campaign.status != "active":
+                    raise StrategyError("快速战役必须开始后才能选择开局国策。", status=HTTPStatus.CONFLICT)
+                require_campaign_orders_open(campaign.world)
+                faction_id = campaign_member_faction_id(campaign, auth_user.user_id)
+                next_world = apply_quick_campaign_opening_choice(
+                    campaign.world,
+                    faction_id=faction_id,
+                    choice_id=str(payload.get("choice_id") or ""),
+                )
+                campaign = STRATEGY_STORE.update_world(campaign_id, auth_user.user_id, next_world)
+                resume_status = STRATEGY_STORE.resume_status(campaign_id)
+            except (TypeError, ValueError):
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": "战役 ID 必须是整数。"})
+                return
+            except StrategyError as exc:
+                strategy_error_response(self, exc)
+                return
+            json_response(
+                self,
+                HTTPStatus.OK,
+                {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+            )
+            return
+
         if parsed.path == "/api/strategy/campaigns/guide-action":
             try:
                 assert auth_user is not None
@@ -1720,14 +2579,157 @@ class WujiangHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/api/strategy/campaigns/month-ready":
+            try:
+                assert auth_user is not None
+                campaign_id = int(payload.get("campaign_id"))
+                resume_status = STRATEGY_STORE.set_month_ready(
+                    campaign_id,
+                    auth_user.user_id,
+                    ready=bool(payload.get("ready", True)),
+                )
+                campaign = STRATEGY_STORE.get_campaign_for_user(campaign_id, auth_user.user_id)
+            except (TypeError, ValueError):
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": "战役 ID 必须是整数。"})
+                return
+            except StrategyError as exc:
+                strategy_error_response(self, exc)
+                return
+            json_response(
+                self,
+                HTTPStatus.OK,
+                {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+            )
+            return
+
+        if parsed.path == "/api/strategy/campaigns/office-change/request":
+            try:
+                assert auth_user is not None
+                campaign_id = int(payload.get("campaign_id"))
+                campaign = STRATEGY_STORE.request_office_change(
+                    campaign_id,
+                    auth_user.user_id,
+                    request_type=str(payload.get("request_type") or ""),
+                    office_id=str(payload.get("office_id") or ""),
+                    target_user_id=int(payload.get("target_user_id") or 0),
+                )
+                resume_status = STRATEGY_STORE.resume_status(campaign_id)
+            except (TypeError, ValueError):
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": "官职请求参数格式不正确。"})
+                return
+            except StrategyError as exc:
+                strategy_error_response(self, exc)
+                return
+            json_response(
+                self,
+                HTTPStatus.OK,
+                {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+            )
+            return
+
+        if parsed.path == "/api/strategy/campaigns/office-change/respond":
+            try:
+                assert auth_user is not None
+                campaign_id = int(payload.get("campaign_id"))
+                campaign = STRATEGY_STORE.respond_office_change(
+                    campaign_id,
+                    auth_user.user_id,
+                    request_id=int(payload.get("request_id")),
+                    accept=bool(payload.get("accept", False)),
+                )
+                resume_status = STRATEGY_STORE.resume_status(campaign_id)
+            except (TypeError, ValueError):
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": "官职确认参数格式不正确。"})
+                return
+            except StrategyError as exc:
+                strategy_error_response(self, exc)
+                return
+            json_response(
+                self,
+                HTTPStatus.OK,
+                {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+            )
+            return
+
+        if parsed.path == "/api/strategy/campaigns/office-takeover/grant":
+            try:
+                assert auth_user is not None
+                campaign_id = int(payload.get("campaign_id"))
+                campaign = STRATEGY_STORE.grant_office_takeover(
+                    campaign_id,
+                    auth_user.user_id,
+                    office_id=str(payload.get("office_id") or ""),
+                    delegate_user_id=int(payload.get("delegate_user_id")),
+                )
+                resume_status = STRATEGY_STORE.resume_status(campaign_id)
+            except (TypeError, ValueError):
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": "临时代管参数格式不正确。"})
+                return
+            except StrategyError as exc:
+                strategy_error_response(self, exc)
+                return
+            json_response(self, HTTPStatus.OK, {"campaign": campaign.to_public_dict(resume_status=resume_status)})
+            return
+
+        if parsed.path == "/api/strategy/campaigns/office-takeover/revoke":
+            try:
+                assert auth_user is not None
+                campaign_id = int(payload.get("campaign_id"))
+                campaign = STRATEGY_STORE.revoke_office_takeover(
+                    campaign_id,
+                    auth_user.user_id,
+                    takeover_id=int(payload.get("takeover_id")),
+                )
+                resume_status = STRATEGY_STORE.resume_status(campaign_id)
+            except (TypeError, ValueError):
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": "结束代管参数格式不正确。"})
+                return
+            except StrategyError as exc:
+                strategy_error_response(self, exc)
+                return
+            json_response(self, HTTPStatus.OK, {"campaign": campaign.to_public_dict(resume_status=resume_status)})
+            return
+
+        if parsed.path == "/api/strategy/campaigns/close-month-deadline":
+            try:
+                assert auth_user is not None
+                campaign_id = int(payload.get("campaign_id"))
+                resume_status = STRATEGY_STORE.close_month_deadline(
+                    campaign_id,
+                    auth_user.user_id,
+                )
+                campaign = STRATEGY_STORE.get_campaign_for_user(campaign_id, auth_user.user_id)
+            except (TypeError, ValueError):
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": "战役 ID 必须是整数。"})
+                return
+            except StrategyError as exc:
+                strategy_error_response(self, exc)
+                return
+            json_response(
+                self,
+                HTTPStatus.OK,
+                {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+            )
+            return
+
         if parsed.path == "/api/strategy/campaigns/advance-month":
             try:
                 assert auth_user is not None
                 campaign_id = int(payload.get("campaign_id"))
-                resume_status = STRATEGY_STORE.require_can_resume(campaign_id, auth_user.user_id)
                 campaign = STRATEGY_STORE.get_campaign_for_user(campaign_id, auth_user.user_id)
                 require_campaign_owner(campaign, auth_user.user_id)
                 require_campaign_orders_open(campaign.world)
+                quick_opening = quick_campaign_opening_status(
+                    campaign.world,
+                    campaign_member_faction_id(campaign, auth_user.user_id),
+                )
+                if quick_opening is not None and quick_opening["available"]:
+                    raise StrategyError("请先完成三选一开局国策，再推进到下一个月。")
+                resume_status = STRATEGY_STORE.require_can_advance_month(
+                    campaign_id,
+                    auth_user.user_id,
+                )
+                campaign = STRATEGY_STORE.get_campaign_for_user(campaign_id, auth_user.user_id)
                 action_month = campaign.world.current_month
                 previous_world = campaign.world
                 command_remaining_by_faction = {
@@ -1740,6 +2742,9 @@ class WujiangHandler(BaseHTTPRequestHandler):
                     for member in campaign.members
                     if str(getattr(member, "role", "")).lower() != "ai" and int(member.user_id) > 0
                 }
+                controlled_faction_ids.difference_update(
+                    STRATEGY_STORE.temporary_ai_faction_ids(campaign_id, action_month)
+                )
                 from wujiang.strategy.office_automation import apply_player_office_automation
 
                 next_world = apply_player_office_automation(
@@ -1751,8 +2756,13 @@ class WujiangHandler(BaseHTTPRequestHandler):
                 next_world = apply_strategy_ai_monthly_actions(
                     next_world,
                     controlled_faction_ids=controlled_faction_ids,
+                    command_remaining_by_faction=command_remaining_by_faction,
                 )
                 next_world = advance_month(next_world)
+                next_world = apply_strategy_ai_showdown_action(
+                    next_world,
+                    controlled_faction_ids=controlled_faction_ids,
+                )
                 from wujiang.strategy.monthly_cycle import record_monthly_report
 
                 next_world = record_monthly_report(
@@ -1762,7 +2772,10 @@ class WujiangHandler(BaseHTTPRequestHandler):
                 )
                 campaign = STRATEGY_STORE.update_world(campaign_id, auth_user.user_id, next_world)
                 STRATEGY_STORE.mark_queued_actions_resolved(campaign_id, auth_user.user_id, action_month)
-                campaign = STRATEGY_STORE.get_campaign_for_user(campaign_id, auth_user.user_id)
+                campaign = STRATEGY_STORE.expire_office_takeovers(campaign_id, auth_user.user_id)
+                persist_created_strategy_battle_rooms(campaign, battle_rooms)
+                resume_status = STRATEGY_STORE.resume_status(campaign_id)
+                record_strategy_snapshot_safe(campaign, checkpoint="month")
             except (TypeError, ValueError) as exc:
                 json_response(self, HTTPStatus.BAD_REQUEST, {"error": "战役 ID 必须是整数。"})
                 return
@@ -1788,6 +2801,7 @@ class WujiangHandler(BaseHTTPRequestHandler):
                 require_campaign_owner(campaign, auth_user.user_id)
                 next_world = continue_campaign_as_sandbox(campaign.world)
                 campaign = STRATEGY_STORE.update_world(campaign_id, auth_user.user_id, next_world)
+                record_strategy_snapshot_safe(campaign, checkpoint="sandbox")
             except (TypeError, ValueError) as exc:
                 json_response(self, HTTPStatus.BAD_REQUEST, {"error": "战役 ID 必须是整数。"})
                 return
@@ -1812,6 +2826,8 @@ class WujiangHandler(BaseHTTPRequestHandler):
 
                 next_world = archive_campaign(campaign.world)
                 campaign = STRATEGY_STORE.update_world(campaign_id, auth_user.user_id, next_world)
+                resume_status = STRATEGY_STORE.resume_status(campaign_id)
+                record_strategy_snapshot_safe(campaign, checkpoint="archived")
             except (TypeError, ValueError):
                 json_response(self, HTTPStatus.BAD_REQUEST, {"error": "战役 ID 必须是整数。"})
                 return
@@ -2048,6 +3064,131 @@ class WujiangHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/api/strategy/campaigns/resolve-world-crisis-showdown":
+            try:
+                assert auth_user is not None
+                campaign_id = int(payload.get("campaign_id"))
+                resolution_mode = str(payload.get("resolution_mode") or "quick").strip()
+                issuer_office_id = str(payload.get("issuer_office_id") or "").strip()
+                resume_status = STRATEGY_STORE.require_can_resume(
+                    campaign_id, auth_user.user_id
+                )
+                campaign = STRATEGY_STORE.get_campaign_for_user(
+                    campaign_id, auth_user.user_id
+                )
+                require_campaign_orders_open(campaign.world)
+                faction_id = campaign_member_faction_id(campaign, auth_user.user_id)
+                next_world, battle_room = start_world_crisis_showdown_for_world(
+                    campaign,
+                    campaign.world,
+                    auth_user,
+                    faction_id=faction_id,
+                    issuer_office_id=issuer_office_id,
+                    resolution_mode=resolution_mode,
+                )
+                campaign = STRATEGY_STORE.update_world(
+                    campaign_id, auth_user.user_id, next_world
+                )
+                if battle_room is not None:
+                    persist_created_strategy_battle_rooms(campaign, [battle_room])
+            except (TypeError, ValueError):
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": "战役 ID 必须是整数。"})
+                return
+            except StrategyError as exc:
+                strategy_error_response(self, exc)
+                return
+            json_response(
+                self,
+                HTTPStatus.OK,
+                {
+                    "campaign": campaign.to_public_dict(resume_status=resume_status),
+                    **({"battle_room": battle_room} if battle_room is not None else {}),
+                },
+            )
+            return
+
+        if parsed.path == "/api/strategy/campaigns/resolve-strategic-battle":
+            try:
+                assert auth_user is not None
+                campaign_id = int(payload.get("campaign_id"))
+                source_kind = str(payload.get("source_kind") or "").strip()
+                source_entity_id = str(payload.get("source_entity_id") or "").strip()
+                resolution_mode = str(payload.get("resolution_mode") or "quick").strip()
+                resume_status = STRATEGY_STORE.require_can_resume(campaign_id, auth_user.user_id)
+                campaign = STRATEGY_STORE.get_campaign_for_user(campaign_id, auth_user.user_id)
+                require_campaign_orders_open(campaign.world)
+                faction_id = campaign_member_faction_id(campaign, auth_user.user_id)
+                issuer_office_id = str(payload.get("issuer_office_id") or "")
+                issuer = next(
+                    (
+                        office for office in campaign.world.offices
+                        if office.office_id == issuer_office_id
+                        and office.faction_id == faction_id
+                        and office.status == "active"
+                    ),
+                    None,
+                )
+                if source_kind == "encounter":
+                    encounter = next(
+                        (item for item in campaign.world.encounters if item.encounter_id == source_entity_id),
+                        None,
+                    )
+                    if encounter is None or faction_id not in encounter.faction_army_ids:
+                        raise StrategyError("只能处理己方参与的遭遇战。", status=HTTPStatus.FORBIDDEN)
+                    commander_ids = {
+                        army.commander_office_id for army in campaign.world.armies
+                        if army.army_id in encounter.faction_army_ids[faction_id]
+                    }
+                    if issuer is None or issuer.office_id not in commander_ids:
+                        raise StrategyError("只有参战军队的玩家将军可以处理遭遇战。", status=HTTPStatus.FORBIDDEN)
+                elif source_kind == "siege":
+                    siege = next((item for item in campaign.world.sieges if item.siege_id == source_entity_id), None)
+                    if siege is None or faction_id not in {siege.attacker_faction_id, siege.defender_faction_id}:
+                        raise StrategyError("只能处理己方参与的围城战。", status=HTTPStatus.FORBIDDEN)
+                    if faction_id == siege.attacker_faction_id:
+                        commander_ids = {
+                            army.commander_office_id for army in campaign.world.armies
+                            if army.army_id in siege.attacker_army_ids
+                        }
+                        allowed = issuer is not None and issuer.office_id in commander_ids
+                    else:
+                        allowed = (
+                            issuer is not None
+                            and issuer.office_type == "governor"
+                            and siege.city_id in issuer.managed_entity_ids
+                        )
+                    if not allowed:
+                        raise StrategyError("只有参战将军或守城城主可以处理围城战。", status=HTTPStatus.FORBIDDEN)
+                else:
+                    raise StrategyError("战略战斗来源无效。")
+                next_world, battle_room = declare_strategy_engagement_for_world(
+                    campaign,
+                    campaign.world,
+                    auth_user,
+                    faction_id=faction_id,
+                    source_kind=source_kind,
+                    source_entity_id=source_entity_id,
+                    resolution_mode=resolution_mode,
+                )
+                campaign = STRATEGY_STORE.update_world(campaign_id, auth_user.user_id, next_world)
+                if battle_room is not None:
+                    persist_created_strategy_battle_rooms(campaign, [battle_room])
+            except (TypeError, ValueError):
+                json_response(self, HTTPStatus.BAD_REQUEST, {"error": "战役 ID 必须是整数。"})
+                return
+            except StrategyError as exc:
+                strategy_error_response(self, exc)
+                return
+            json_response(
+                self,
+                HTTPStatus.OK,
+                {
+                    "campaign": campaign.to_public_dict(resume_status=resume_status),
+                    **({"battle_room": battle_room} if battle_room is not None else {}),
+                },
+            )
+            return
+
         if parsed.path == "/api/strategy/campaigns/declare-attack":
             try:
                 assert auth_user is not None
@@ -2082,6 +3223,8 @@ class WujiangHandler(BaseHTTPRequestHandler):
                     attacker_office_id=attack_office.office_id,
                 )
                 campaign = STRATEGY_STORE.update_world(campaign_id, auth_user.user_id, next_world)
+                if battle_room is not None:
+                    persist_created_strategy_battle_rooms(campaign, [battle_room])
             except (TypeError, ValueError) as exc:
                 json_response(self, HTTPStatus.BAD_REQUEST, {"error": "战役 ID 必须是整数。"})
                 return
@@ -2094,6 +3237,68 @@ class WujiangHandler(BaseHTTPRequestHandler):
                 {
                     "campaign": campaign.to_public_dict(resume_status=resume_status),
                     **({"battle_room": battle_room} if battle_room is not None else {}),
+                },
+            )
+            return
+
+        if parsed.path == "/api/strategy/campaigns/restart-battle-from-snapshot":
+            try:
+                assert auth_user is not None
+                room_id = str(payload.get("room_id") or "").strip().upper()
+                checkpoint = STRATEGY_STORE.battle_checkpoint(room_id)
+                if checkpoint is None:
+                    raise StrategyError("没有可重开的战略战斗记录。", status=HTTPStatus.NOT_FOUND)
+                campaign = STRATEGY_STORE.get_campaign_for_user(checkpoint.campaign_id, auth_user.user_id)
+                if auth_user.user_id not in checkpoint.participant_user_ids:
+                    raise StrategyError("只有原战略战斗参与者可以安全重开。", status=HTTPStatus.FORBIDDEN)
+                battle = strategy_battle_for_room(campaign, room_id)
+                if battle is None or battle.battle_id != checkpoint.battle_id or battle.status != "pending":
+                    raise StrategyError("这场战略战斗已经结算或不再可重开。", status=HTTPStatus.CONFLICT)
+                checkpoint_healthy = (
+                    hashlib.sha256(checkpoint.room_blob).hexdigest() == checkpoint.checkpoint_hash
+                )
+                if checkpoint_healthy:
+                    try:
+                        restored = GameRoom.from_checkpoint_bytes(checkpoint.room_blob)
+                        checkpoint_healthy = restored.room_id == room_id
+                    except RoomError:
+                        checkpoint_healthy = False
+                if checkpoint_healthy:
+                    raise StrategyError("服务器检查点仍可正常恢复，无需从战前快照重开。", status=HTTPStatus.CONFLICT)
+                ROOMS.discard_room(room_id)
+                battle_room = create_strategy_battle_room(
+                    campaign,
+                    auth_user,
+                    battle,
+                    battle.resolution_mode,
+                    room_id=room_id,
+                )
+                room = ROOMS.get_room(room_id)
+                saved = persist_strategy_battle_room(
+                    room,
+                    campaign_id=campaign.campaign_id,
+                    battle_id=battle.battle_id,
+                    restarted=True,
+                )
+                battle_room["recovery"] = {
+                    "status": "restarted_from_prebattle",
+                    "restart_count": saved.restart_count if saved is not None else checkpoint.restart_count + 1,
+                    "message": "检查点不可恢复，已从战前不可变快照安全重开；未重复扣除战略成本，也未写入胜负。",
+                }
+            except StrategyError as exc:
+                strategy_error_response(self, exc)
+                return
+            except RoomError as exc:
+                json_response(self, HTTPStatus.CONFLICT, {"error": str(exc)})
+                return
+            json_response(
+                self,
+                HTTPStatus.OK,
+                {
+                    "campaign": campaign.to_public_dict(
+                        resume_status=STRATEGY_STORE.resume_status(campaign.campaign_id)
+                    ),
+                    "battle_room": battle_room,
                 },
             )
             return
@@ -2152,7 +3357,7 @@ class WujiangHandler(BaseHTTPRequestHandler):
                     player1_roster=list(config["player_hero_codes"]),
                     player2_roster=list(config["opponent_hero_codes"]),
                     start_immediately=True,
-                    ai_difficulty=str(config["ai_difficulty"]),
+        ai_difficulty=str(config["ai_difficulty"]),
                     host_account_user_id=auth_user.user_id,
                 )
                 room.experience_kind = "quick_ai"
@@ -2515,6 +3720,8 @@ class WujiangHandler(BaseHTTPRequestHandler):
             player_token = payload.get("player_token")
             try:
                 room = ROOMS.get_room(str(room_id))
+                assert auth_user is not None
+                require_strategy_room_mutation_allowed(room, auth_user, allow_battleplay=False)
                 record_finished_room_history(room)
                 room.restart_lobby(str(player_token or ""))
             except RoomError as exc:
@@ -2538,6 +3745,8 @@ class WujiangHandler(BaseHTTPRequestHandler):
             speed = payload.get("speed")
             try:
                 room = ROOMS.get_room(str(room_id))
+                assert auth_user is not None
+                require_strategy_room_mutation_allowed(room, auth_user)
                 room.control_simulation(str(player_token or ""), str(action or ""), speed=speed)
             except RoomError as exc:
                 room = None
@@ -2561,6 +3770,9 @@ class WujiangHandler(BaseHTTPRequestHandler):
             room_id = payload.get("room_id", "")
             player_token = str(payload.get("player_token") or "")
             try:
+                room = ROOMS.get_room(str(room_id))
+                assert auth_user is not None
+                require_strategy_room_mutation_allowed(room, auth_user, allow_battleplay=False)
                 ROOMS.delete_room(str(room_id), player_token)
             except RoomError as exc:
                 json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -2579,6 +3791,9 @@ class WujiangHandler(BaseHTTPRequestHandler):
             room_id = payload.get("room_id", "")
             player_token = str(payload.get("player_token") or "")
             try:
+                room = ROOMS.get_room(str(room_id))
+                assert auth_user is not None
+                require_strategy_room_mutation_allowed(room, auth_user, allow_battleplay=False)
                 deleted, leaving_player_id = ROOMS.leave_room(str(room_id), player_token)
             except RoomError as exc:
                 room = None
@@ -2605,6 +3820,8 @@ class WujiangHandler(BaseHTTPRequestHandler):
             player_token = payload.get("player_token")
             try:
                 room = ROOMS.get_room(str(room_id))
+                assert auth_user is not None
+                require_strategy_room_mutation_allowed(room, auth_user)
                 room.surrender(str(player_token or ""))
             except RoomError as exc:
                 room = None
@@ -2630,6 +3847,8 @@ class WujiangHandler(BaseHTTPRequestHandler):
             action_payload = extract_room_action(payload)
             try:
                 room = ROOMS.get_room(str(room_id))
+                assert auth_user is not None
+                require_strategy_room_mutation_allowed(room, auth_user)
                 room.perform_action(str(player_token or ""), action_payload)
             except RoomError as exc:
                 room = None
@@ -2669,9 +3888,24 @@ class WujiangHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
-def run_server(host: str = "127.0.0.1", port: int = 8000, public_base_url: str | None = None) -> None:
+def run_server(
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    public_base_url: str | None = None,
+    security_config: SecurityConfig | None = None,
+) -> None:
+    configure_security(security_config)
+    configure_observability()
     share_base_url = configure_public_base_url(public_base_url)
+    validate_production_configuration(
+        public_base_url=share_base_url,
+        security=SECURITY_CONFIG,
+        observability=OBSERVABILITY.config,
+    )
+    if SECURITY_CONFIG.require_https and share_base_url and not share_base_url.startswith("https://"):
+        raise ValueError("正式环境启用 HTTPS 强制时，public base URL 必须使用 https://。")
     httpd = ThreadingHTTPServer((host, port), WujiangHandler)
+    httpd.daemon_threads = True
     print(f"Wujiang server running at http://{host}:{port}")
     if host == "0.0.0.0":
         print(f"Local browser URL: http://127.0.0.1:{port}")
@@ -2680,4 +3914,17 @@ def run_server(host: str = "127.0.0.1", port: int = 8000, public_base_url: str |
         print(f"Copied room invite links will use: {share_base_url}/?room=ROOMID")
     elif host == "0.0.0.0":
         print(f"Share your LAN/public IP manually, for example: http://<your-ip>:{port}/")
-    httpd.serve_forever()
+    previous_handlers: dict[int, Any] = {}
+    if threading.current_thread() is threading.main_thread():
+        def request_shutdown(_signum: int, _frame: Any) -> None:
+            threading.Thread(target=httpd.shutdown, daemon=True).start()
+
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, request_shutdown)
+    try:
+        httpd.serve_forever()
+    finally:
+        httpd.server_close()
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
