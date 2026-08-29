@@ -12,9 +12,9 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from wujiang.heroes.registry import create_battle, create_hero  # noqa: E402
+from wujiang.tactical.heroes.registry import create_battle, create_hero  # noqa: E402
 from wujiang.tools.match_audit import FindingRecorder, action_diagnostic, parse_roster, record_candidate_gap, run_match_audit  # noqa: E402
-from wujiang.web.ai import difficulty_profile  # noqa: E402
+from wujiang.tactical.rooms.ai import difficulty_profile  # noqa: E402
 from wujiang.tools.batch_match_audit import build_match_plan, run_batch_audit  # noqa: E402
 from wujiang.tools.per_hero_ai_debug import build_per_hero_match_plan, run_per_hero_ai_debug  # noqa: E402
 

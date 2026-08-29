@@ -6,9 +6,9 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from wujiang.strategy.audit import read_operation_audit, verify_operation_audit_chain
-from wujiang.strategy.diagnostics import run_strategy_diagnostics
-from wujiang.strategy.store import strategy_database_path
+from wujiang.strategic.audit import read_operation_audit, verify_operation_audit_chain
+from wujiang.strategic.diagnostics import run_strategy_diagnostics
+from wujiang.strategic.store import strategy_database_path
 
 
 def _print_json(payload: Any) -> None:

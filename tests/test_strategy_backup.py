@@ -16,9 +16,9 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from wujiang.strategy import StrategyError, StrategyStore  # noqa: E402
-from wujiang.strategy.backup import StrategyBackupManager  # noqa: E402
-from wujiang.web.auth import AuthUser  # noqa: E402
+from wujiang.strategic import StrategyError, StrategyStore  # noqa: E402
+from wujiang.strategic.backup import StrategyBackupManager  # noqa: E402
+from wujiang.platform.auth import AuthUser  # noqa: E402
 from wujiang.tools.strategy_backup import main as strategy_backup_main  # noqa: E402
 
 

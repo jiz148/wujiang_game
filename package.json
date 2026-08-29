@@ -1,0 +1,9 @@
+{
+  "name": "wujiang-frontend",
+  "private": true,
+  "type": "module",
+  "description": "Declares static/ as ES modules so Node-based tooling loads them the same way the browser does. There is no npm dependency and no build step; the Python server serves static/ directly.",
+  "scripts": {
+    "verify:modules": "node tools/verify_frontend_modules.mjs"
+  }
+}

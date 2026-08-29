@@ -194,7 +194,7 @@ def build_report(batch_id: str, *, batch_root: Path = BATCH_ROOT) -> dict[str, A
     observations = _load_observations(paths)
     funnel = _empty_funnel()
     if paths["analytics"].exists():
-        from wujiang.web.analytics import AnalyticsStore
+        from wujiang.platform.analytics import AnalyticsStore
 
         funnel = AnalyticsStore(paths["analytics"]).funnel()
     desktop_count = sum(item.get("device") == "desktop" for item in observations)
@@ -359,7 +359,7 @@ def _run_server(args: argparse.Namespace) -> int:
     paths = prepare_batch(args.batch_id, resume=args.resume)
     os.environ["WUJIANG_ANALYTICS_DB"] = str(paths["analytics"])
     os.environ["WUJIANG_AUTH_DB"] = str(paths["accounts"])
-    from wujiang.web.server import normalize_public_base_url, run_server
+    from wujiang.platform.http.server import normalize_public_base_url, run_server
 
     public_base_url = normalize_public_base_url(args.public_base_url)
     local_host = "127.0.0.1" if args.host in {"0.0.0.0", "::"} else args.host

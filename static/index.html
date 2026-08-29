@@ -4,205 +4,130 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>武将</title>
-    <link rel="stylesheet" href="/styles.css?v=r3g" />
+    <link rel="stylesheet" href="/theme.css?v=r23" />
+    <link rel="stylesheet" href="/styles.css?v=r23" />
   </head>
-  <body>
+  <!-- 哪一屏该显示，要等 /api/auth/me 回来才知道。在那之前先什么都不显示，
+       否则标记里默认可见的那一屏会先闪出来，再被换掉。 -->
+  <body class="is-booting">
     <a class="skip-link" href="#main-content">跳到主要内容</a>
     <div class="shell">
       <header class="topbar">
-        <div>
-          <p class="eyebrow">Online Tactical Duel Prototype</p>
-          <h1>武将</h1>
-          <p class="subline" id="topbar-subline">创建房间、复制邀请链接，让玩家进入同一房间后在线对战。</p>
+        <!-- 左侧是"你在哪"，右侧是"你能做什么"。回合与房间状态属于前者。 -->
+        <div class="topbar-lead">
+          <span id="brand-title" class="brand">武将</span>
+          <span id="topbar-context" class="topbar-context"></span>
+          <div class="turn-pill hidden" id="turn-pill"></div>
         </div>
-        <div class="topbar-tools">
-          <div id="profile-pill" class="turn-pill">昵称 · 未命名玩家</div>
-          <button id="edit-profile" class="ghost">修改昵称</button>
-          <button id="nav-draft" class="ghost hidden">房间大厅</button>
-          <button id="nav-battle" class="ghost hidden">返回战场</button>
-          <button id="copy-invite-top" class="ghost hidden">复制邀请链接</button>
-          <div class="turn-pill" id="turn-pill">尚未进入房间</div>
-        </div>
+        <!-- 内容由 core/topbar.js 渲染：一个上下文动作 + 一个账号菜单。 -->
+        <div class="topbar-tools" id="topbar-tools"></div>
       </header>
 
       <main id="main-content" tabindex="-1">
-      <section id="draft-screen" class="screen draft-screen" aria-labelledby="lobby-title">
+      <section id="gate-screen" class="screen gate-screen hidden" aria-labelledby="gate-title"></section>
+      <section id="menu-screen" class="screen menu-screen hidden" aria-labelledby="menu-title"></section>
+
+      <section id="draft-screen" class="screen draft-screen hidden" aria-labelledby="lobby-title">
         <section class="draft panel">
           <div class="section-head">
             <div>
               <h2 id="lobby-title">在线房间</h2>
-              <p id="lobby-caption">先创建房间或输入房间码加入。进入房间后完成选将，再开始对局。</p>
+              <p id="lobby-caption"></p>
             </div>
             <div class="draft-head-actions">
               <button id="leave-room" class="ghost hidden">离开房间</button>
               <button id="delete-room" class="ghost hidden">删除房间</button>
               <button id="recover-room" class="ghost hidden">恢复席位</button>
               <button id="copy-invite" class="ghost hidden">复制邀请链接</button>
-              <button id="room-battle" class="ghost hidden">进入战场</button>
-              <button id="toggle-ready" class="ghost hidden">确认准备</button>
+              <button id="room-battle" class="primary room-battle-btn hidden" type="button">
+                <span class="room-battle-btn__mark" aria-hidden="true">⚔</span>
+                进入战场
+              </button>
               <button id="start-room" class="primary hidden">开始对局</button>
             </div>
           </div>
 
           <div id="room-home" class="room-home">
-            <section class="mode-gateway">
-              <div class="mode-gateway-copy">
-                <span class="meta-label">快速开始</span>
-                <strong>直接开战，也可以随时回到教学</strong>
-                <span class="meta-note">快速 AI 对战会自动使用入门阵容；第一次游玩可先进入固定新手教学。</span>
+            <!-- 遭遇战：不经营大地图，直接打一场。席位同样可以让真人顶替。 -->
+            <section id="skirmish-panel" class="flow-panel hidden">
+              <div class="flow-option">
+                <div class="flow-option__text">
+                  <h3>建立房间</h3>
+                  <p>自己选将，拿到邀请码后其他人可以顶替 AI 席位或旁观。</p>
+                </div>
+                <button id="create-room" class="ghost" type="button">建立房间</button>
               </div>
-              <div class="mode-gateway-actions">
-                <button id="quick-start-entry" class="primary" type="button">快速开始</button>
-                <button id="focus-strategy-mode" class="ghost" type="button">英灵城邦</button>
-                <button id="focus-duel-mode" class="ghost" type="button">自定义对战</button>
+              <div class="flow-option">
+                <div class="flow-option__text">
+                  <h3>加入房间</h3>
+                  <p>输入邀请码进入他人的房间。</p>
+                </div>
+                <div class="flow-option__form">
+                  <input id="join-room-code" type="text" maxlength="6" placeholder="房间码" aria-label="房间码" />
+                  <button id="join-room" class="ghost" type="button">加入</button>
+                </div>
               </div>
             </section>
-            <section id="quick-start-panel" class="quick-start-panel hidden">
-              <div>
-                <span class="meta-label">快速对战</span>
-                <strong>选择直接开战或新手教学</strong>
-                <span id="tutorial-resume-note" class="meta-note">固定阵容和地图，依次练习选中、移动、普攻、技能、连锁响应和结束回合。</span>
-              </div>
-              <div class="quick-start-actions">
-                <button id="start-quick-ai" class="primary" type="button">快速 AI 对战</button>
-                <button id="resume-tutorial" class="primary hidden" type="button">继续未完成教学</button>
-                <button id="start-tutorial" class="ghost" type="button">进入新手教学</button>
+
+            <!-- 只有一个动作，标题由页头承担，这里不再重复一遍。 -->
+            <section id="quick-start-panel" class="flow-panel hidden">
+              <div class="flow-option">
+                <div class="flow-option__text">
+                  <p id="tutorial-resume-note">固定阵容和地图，依次练习选中、移动、普攻、技能、连锁响应和结束回合。</p>
+                </div>
+                <div class="flow-option__form">
+                  <button id="resume-tutorial" class="primary hidden" type="button">继续未完成教学</button>
+                  <button id="start-tutorial" class="primary" type="button">进入新手教学</button>
+                </div>
               </div>
             </section>
             <section id="recent-matches-panel" class="recent-matches-panel hidden" aria-labelledby="recent-matches-title">
+              <!-- 标题由页头承担。这一层只留操作与一条补充说明的悬浮提示。 -->
               <div class="section-head recent-matches-head">
-                <div>
-                  <span class="meta-label">账号记录</span>
-                  <h3 id="recent-matches-title">最近战绩与回放</h3>
-                  <p>保留最近 10 场已结束对局；历史回放只对实际参战账号开放。</p>
-                </div>
+                <h3 id="recent-matches-title" class="visually-hidden">最近战绩与回放</h3>
+                <button type="button" class="hint" aria-label="战绩说明">i<span class="hint__bubble">历史回放只对实际参战的账号开放。</span></button>
                 <button id="refresh-recent-matches" class="ghost" type="button">刷新战绩</button>
               </div>
+              <div id="recent-matches-message" class="meta-note"></div>
+              <div id="recent-matches-list" class="recent-matches-list"></div>
               <section id="mastery-overview" class="mastery-overview" aria-labelledby="mastery-overview-title">
                 <div class="mastery-overview-head">
-                  <div>
-                    <span class="meta-label">Phase 2 成长档案</span>
-                    <h4 id="mastery-overview-title">武将熟练度</h4>
-                  </div>
+                  <h4 id="mastery-overview-title">武将熟练度</h4>
                   <span id="mastery-summary" class="meta-note">正在读取熟练度...</span>
                 </div>
                 <div id="mastery-next-goal" class="mastery-next-goal"></div>
                 <div id="mastery-hero-list" class="mastery-hero-list"></div>
               </section>
-              <div id="recent-matches-message" class="meta-note"></div>
-              <div id="recent-matches-list" class="recent-matches-list"></div>
             </section>
-            <section class="identity-card home-custom-section hidden">
-              <div>
-                <span class="meta-label">当前昵称</span>
-                <strong id="profile-display-name">未命名玩家</strong>
-                <span id="profile-display-note" class="meta-note">创建房间、加入房间和恢复席位都会使用这个昵称。</span>
-              </div>
-              <button id="identity-edit" class="ghost">修改昵称</button>
-            </section>
-
-            <section class="identity-card auth-card hidden">
-              <div>
-                <span class="meta-label">账号</span>
-                <strong id="auth-display-name">未登录</strong>
-                <span id="auth-display-note" class="meta-note">所有可玩模式都需要登录；昵称只负责游戏内显示，不能代替账号身份。</span>
-                <span id="auth-message" class="auth-message"></span>
-              </div>
-              <div id="auth-form" class="auth-form">
-                <div class="auth-fields">
-                  <label>
-                    <span>用户名</span>
-                    <input id="auth-username" type="text" maxlength="32" autocomplete="username" />
-                  </label>
-                  <label>
-                    <span>密码</span>
-                    <input id="auth-password" type="password" maxlength="128" autocomplete="current-password" />
-                  </label>
-                </div>
-                <div class="auth-actions">
-                  <button id="auth-login" class="ghost" type="button">登录</button>
-                  <button id="auth-register" class="primary" type="button">注册</button>
-                  <button id="auth-logout" class="ghost hidden" type="button">退出登录</button>
-                </div>
-              </div>
-            </section>
-
-            <div class="room-home-grid home-custom-section hidden">
-              <section class="room-entry-card">
-                <h3>创建房间</h3>
-                <p>登录后使用当前昵称创建房间，并生成可分享的邀请链接。</p>
-                <button id="create-room" class="primary">创建房间</button>
-              </section>
-
-              <section class="room-entry-card">
-                <h3>加入房间</h3>
-                <p>登录后输入房间码，以当前昵称加入朋友已经创建好的房间。</p>
-                <label>
-                  <span>房间码</span>
-                  <input id="join-room-code" type="text" maxlength="6" placeholder="例如：A7K9Q2" />
-                </label>
-                <button id="join-room" class="primary">加入房间</button>
-              </section>
-            </div>
-
             <section id="strategy-panel" class="strategy-panel hidden">
-              <div class="section-head">
-                <div>
-                  <h3>英灵城邦</h3>
-                  <p id="strategy-caption">先用 25～35 分钟快速战役体验完整抉择与结算，也可创建长期自定义战役。</p>
-                </div>
-                <div class="strategy-actions">
-                  <button id="strategy-exit-campaign" class="ghost hidden" type="button">战役列表</button>
-                  <button id="strategy-refresh" class="ghost" type="button">刷新</button>
-                  <button id="strategy-advance-month" class="primary" type="button">推进一月</button>
-                </div>
-              </div>
-              <section class="strategy-quick-start-card" aria-labelledby="strategy-quick-start-title">
-                <div>
-                  <p class="eyebrow">推荐首局</p>
-                  <h4 id="strategy-quick-start-title">六个月边境决断</h4>
-                  <p>5 城、固定主公、三选一开局国策；世界危机与圣物系统暂不加入，第一局先把真正的决策和冲突玩明白。</p>
-                  <p class="strategy-quick-facts">约 25～35 分钟 · 6 个月 · 单人对 AI · 自动开战</p>
-                </div>
-                <button id="strategy-quick-start" class="primary strategy-quick-start-button" type="button">开始快速战役</button>
-              </section>
-              <div class="strategy-create-row">
-                <label>
-                  <span>战役名</span>
-                  <input id="strategy-name" type="text" maxlength="40" value="英灵城邦" />
-                </label>
-                <label>
-                  <span>种子</span>
-                  <input id="strategy-seed" type="number" step="1" value="1" />
-                </label>
-                <label>
-                  <span>开局变体</span>
-                  <select id="strategy-variant">
-                    <option value="classic_frontier">经典边境</option>
-                    <option value="hungry_frontier">粮荒前线</option>
-                    <option value="fortified_leagues">坚城联盟</option>
-                    <option value="ether_tide">以太潮汐</option>
-                  </select>
-                </label>
-                <label>
-                  <span>主要势力</span>
-                  <input id="strategy-player-count" type="number" value="2" disabled />
-                </label>
-                <button id="strategy-create" class="primary" type="button">创建战役</button>
-                <label>
-                  <span>加入码</span>
-                  <input id="strategy-join-code" type="text" maxlength="6" placeholder="ABC234" />
-                </label>
-                <label class="strategy-join-side">
-                  <input id="strategy-join-host-faction" type="checkbox" />
-                  <span>加入房主势力（合作官职）</span>
-                </label>
-                <button id="strategy-join" class="ghost" type="button">加入战役</button>
-                <p id="strategy-variant-preview" class="strategy-meta strategy-variant-preview" role="status">经典边境：在雪鬼危机到来前，平衡城邦外交、战争准备与圣物经营。使用标准开局资源。</p>
-                <p class="strategy-meta strategy-create-note">长期战役：固定为 8 城、2 个主要势力、6 个中立城邦、12 个月；支持 2～4 名真人，每个势力最多 2 人。</p>
+              <!-- 这三个按钮的可用性判断只写一处，战役屏里的资源条和推进条都照抄
+                   它们的 disabled 并转发 click，所以它们必须留在 DOM 里，但没有
+                   哪一屏需要把它们摆出来。 -->
+              <div class="strategy-actions">
+                <button id="strategy-exit-campaign" class="ghost hidden" type="button">战役列表</button>
+                <button id="strategy-refresh" class="ghost" type="button">刷新</button>
+                <button id="strategy-advance-month" class="primary" type="button">推进一月</button>
               </div>
               <div id="strategy-message" class="strategy-message"></div>
-              <div id="strategy-campaign-list" class="strategy-campaign-list"></div>
+              <!-- 战役列表 + 一个新建入口。创建本身是个独立流程（见
+                   #strategy-create），不再把一整排设置摊在列表上方。 -->
+              <section id="strategy-browser" class="strategy-browser">
+                <div class="strategy-browser__head">
+                  <h3>我的战役</h3>
+                  <div class="strategy-browser__actions">
+                    <input id="strategy-join-code" type="text" maxlength="6" placeholder="加入码" aria-label="战役加入码" />
+                    <label class="strategy-join-side">
+                      <input id="strategy-join-host-faction" type="checkbox" />
+                      <span>加入房主势力</span>
+                    </label>
+                    <button id="strategy-join" class="ghost" type="button">加入</button>
+                    <button id="strategy-browser-refresh" class="ghost" type="button">刷新</button>
+                    <button id="strategy-new-campaign" class="primary" type="button">新建战役</button>
+                  </div>
+                </div>
+                <div id="strategy-campaign-list" class="strategy-campaign-list"></div>
+              </section>
+              <div id="strategy-create" class="strategy-create hidden"></div>
               <div id="strategy-current" class="strategy-current"></div>
             </section>
 
@@ -211,255 +136,246 @@
               <button id="resume-room" class="ghost">继续原身份</button>
             </div>
 
-            <div class="draft-note home-custom-section hidden">
-              当前联机测试版采用房间制与 HTTP 轮询同步。部署到 Windows 机器并开放端口后，朋友就能通过同一房间链接进入并在线对战。
-            </div>
-
-            <section class="room-directory home-custom-section hidden">
+            <!-- 公开房间列表。也是玩家离开房间后回去的路——从主菜单另选去处
+                 会清掉当前房间视图，房间本身仍在这里等着。 -->
+            <section id="room-directory" class="room-directory hidden">
               <div class="section-head room-directory-head">
-                <div>
-                  <h3>已有房间</h3>
-                  <p>可直接加入正在等人的房间，或查看已经开战的房间。</p>
-                </div>
+                <h3>已有房间</h3>
+                <button type="button" class="hint" aria-label="房间说明">i<span class="hint__bubble">可直接加入正在等人的房间，也可以查看已经开战的房间。</span></button>
               </div>
               <div id="room-list" class="room-list"></div>
             </section>
-
-            <div id="home-hero-cards" class="hero-grid home-custom-section hidden"></div>
           </div>
 
+          <!-- 建房页只回答两件事：这是哪个房间，以及每个席位坐着谁、带哪些
+               武将。模式与席位数是开局前定一次的设置，选将是一次性的挑选动作，
+               两者都收进弹窗——摊在页面上只会把席位挤到屏幕外。 -->
           <div id="room-lobby" class="room-lobby hidden">
             <div class="room-overview">
-              <div class="room-meta-card">
-                <span class="meta-label">房间码</span>
-                <strong id="room-code-label">------</strong>
-                <span id="room-status-label" class="meta-note">等待双方进入</span>
+              <div class="room-fact">
+                <span class="room-fact__label">房间码</span>
+                <strong id="room-code-label" class="room-fact__value">------</strong>
               </div>
-              <div class="room-meta-card">
-                <span class="meta-label">当前身份</span>
-                <strong id="viewer-seat-label">访客</strong>
-                <span id="viewer-seat-note" class="meta-note">加入房间后可选将</span>
+              <div class="room-fact">
+                <span class="room-fact__label">身份</span>
+                <strong id="viewer-seat-label" class="room-fact__value">访客</strong>
+                <span id="viewer-seat-note" class="room-fact__note"></span>
               </div>
-              <div class="room-meta-card">
-                <span class="meta-label">邀请链接</span>
-                <strong id="invite-path-label">未生成</strong>
-                <span class="meta-note">把链接发给另一位玩家即可加入同一房间</span>
+              <div class="room-fact">
+                <span class="room-fact__label">状态</span>
+                <strong id="room-status-label" class="room-fact__value">等待双方进入</strong>
               </div>
+              <button id="auto-configure-room" class="ghost hidden" type="button">自动配置</button>
+              <span id="invite-path-label" class="visually-hidden">未生成</span>
             </div>
 
-            <div id="room-message" class="draft-note">等待双方进入房间。</div>
-            <div id="room-connection-summary" class="connection-summary" role="status" aria-live="polite"></div>
-            <section class="room-meta-card room-mode-card">
-              <span class="meta-label">模式</span>
-              <strong id="room-mode-label">标准选将</strong>
-              <span id="room-mode-note" class="meta-note">双方在大厅里先选将，再开始对局。</span>
-              <label class="room-mode-control" for="room-mode-select">
-                <span>房主设置</span>
-                <select id="room-mode-select"></select>
-              </label>
-              <label class="room-mode-control" for="room-seat-count-input">
-                <span>席位数</span>
-                <input id="room-seat-count-input" type="number" min="2" max="6" step="1" value="2" />
-                <span id="room-seat-count-note" class="meta-note">进入房间后可由房主调整到 2~6 席。</span>
-              </label>
-              <label id="random-roster-size-control" class="room-mode-control hidden" for="random-roster-size-input">
-                <span>随机模式 n</span>
-                <input id="random-roster-size-input" type="number" min="1" step="1" value="1" />
-                <span id="random-roster-size-note" class="meta-note">开局时双方各随机获得 1 个武将。</span>
-              </label>
+            <section class="room-setup">
+              <div class="room-setup__facts">
+                <span class="room-setup__fact">
+                  <span class="room-setup__label">模式</span>
+                  <strong id="room-mode-label" class="room-setup__value">标准选将</strong>
+                </span>
+                <span class="room-setup__fact">
+                  <span class="room-setup__label">席位数</span>
+                  <strong id="room-seat-count-label" class="room-setup__value">2</strong>
+                </span>
+                <span id="room-random-size-fact" class="room-setup__fact hidden">
+                  <span class="room-setup__label">每队随机武将数</span>
+                  <strong id="room-random-size-label" class="room-setup__value">1</strong>
+                </span>
+                <span id="room-hero-limit-fact" class="room-setup__fact hidden">
+                  <span class="room-setup__label">武将上限</span>
+                  <strong id="room-hero-limit-label" class="room-setup__value">5</strong>
+                </span>
+                <span class="room-setup__fact">
+                  <span class="room-setup__label">回合时限</span>
+                  <strong id="room-turn-timeout-label" class="room-setup__value">无限</strong>
+                </span>
+                <span class="room-setup__fact">
+                  <span class="room-setup__label">战场大小</span>
+                  <strong id="room-board-size-label" class="room-setup__value">10×10</strong>
+                </span>
+              </div>
+              <div class="room-setup__actions">
+                <button id="toggle-ready" class="ghost hidden" type="button">确认准备</button>
+                <button id="open-room-setup" class="ghost" type="button">修改设置</button>
+              </div>
             </section>
-            <div id="seat-cards" class="seat-grid"></div>
 
-            <div class="section-head room-hero-head">
-              <div>
-                <h3>房间选将</h3>
-                <p>默认显示新手武将；也可一键使用推荐阵容或展开完整武将库。</p>
-              </div>
-              <button id="toggle-full-roster" class="ghost" type="button">查看完整武将库</button>
-            </div>
-            <div id="team-readiness" class="team-readiness" role="status" aria-live="polite"></div>
-            <div id="recommended-rosters" class="recommended-rosters"></div>
-            <div id="hero-browser-toolbar" class="hero-browser-toolbar">
-              <label class="hero-search-field" for="hero-search">
-                <span>搜索武将</span>
-                <input id="hero-search" type="search" autocomplete="off" placeholder="名称、属性、技能或机制" />
-              </label>
-              <label for="hero-role-filter">
-                <span>定位</span>
-                <select id="hero-role-filter"><option value="">全部定位</option></select>
-              </label>
-              <label for="hero-difficulty-filter">
-                <span>难度</span>
-                <select id="hero-difficulty-filter">
-                  <option value="">全部难度</option>
-                  <option value="简单">简单</option>
-                  <option value="标准">标准</option>
-                  <option value="进阶">进阶</option>
-                </select>
-              </label>
-              <button id="clear-hero-filters" class="ghost" type="button">清空筛选</button>
-              <span id="hero-filter-result" class="meta-note" aria-live="polite"></span>
-            </div>
-            <div id="hero-filter-empty" class="draft-note hidden">没有符合当前筛选的武将。可以清空筛选或换一个关键词。</div>
-            <div id="hero-cards" class="hero-grid"></div>
+            <div id="seat-cards" class="seat-grid"></div>
           </div>
         </section>
       </section>
 
       <section id="battle-screen" class="screen battle-screen hidden" aria-labelledby="battle-screen-title">
+        <h2 id="battle-screen-title" class="visually-hidden">战场</h2>
+        <p id="board-caption" class="visually-hidden"></p>
         <section class="arena">
-          <aside id="battle-left-rail" class="battle-rail battle-left-rail">
-            <section class="panel info-panel fixed-panel">
-              <div class="section-head sidebar-section-head">
-                <div>
-                  <h2>当前信息</h2>
-                  <p id="message">尚未开始对局。</p>
-                  <div id="battle-turn-timer" class="battle-turn-timer hidden" role="timer" aria-live="polite"></div>
-                  <div id="battle-connection-summary" class="battle-connection-summary" role="status" aria-live="polite"></div>
-                </div>
+          <div id="battle-console" class="battle-console is-collapsed" aria-label="战场操纵板">
+            <div class="battle-console__body">
+              <div id="replay-toolbar" class="battle-console__group replay-toolbar hidden">
+                <button id="replay-step-back" class="ghost" type="button">上一步</button>
+                <button id="replay-pause" class="ghost" type="button">暂停</button>
+                <button id="replay-live" class="ghost" type="button">最新</button>
+                <button id="replay-step-forward" class="ghost" type="button">下一步</button>
+                <label class="replay-speed-control" for="replay-speed">
+                  <span>速度</span>
+                  <select id="replay-speed">
+                    <option value="0.5">0.5x</option>
+                    <option value="1" selected>1x</option>
+                    <option value="2">2x</option>
+                    <option value="4">4x</option>
+                  </select>
+                </label>
+                <label class="replay-omniscient-toggle">
+                  <input id="replay-omniscient" type="checkbox" />
+                  <span>全知</span>
+                </label>
+                <input id="replay-timeline" class="replay-timeline" type="range" min="0" max="0" step="1" value="0" />
+                <span id="replay-status" class="replay-status">实时</span>
               </div>
-              <div id="selected-card" class="selected-card">点击棋子后，这里会显示该武将的数值、技能与状态。</div>
-            </section>
+              <div id="board-zoom-controls" class="battle-console__group zoom-controls hidden">
+                <button id="board-zoom-out" type="button" class="ghost">缩小</button>
+                <button id="board-zoom-reset" type="button" class="ghost">复位</button>
+                <button id="board-zoom-in" type="button" class="ghost">放大</button>
+                <span id="board-zoom-value" class="zoom-value">100%</span>
+              </div>
+            </div>
+          </div>
 
-            <section class="panel command-panel fixed-panel">
-              <div class="section-head sidebar-section-head">
-                <div>
-                  <h2>行动与连锁</h2>
-                  <p>行动按钮围绕战场中的当前单位显示；这里保留提示、可操作单位与连锁响应。</p>
-                </div>
-              </div>
-              <div class="sidebar-content is-static">
-                <div class="stack-block">
-                  <div class="section-head">
-                    <div>
-                      <h2>行动提示</h2>
-                      <p>当前可用动作会跟随所选单位显示在战场内。</p>
-                    </div>
-                  </div>
-                  <div id="action-panel" class="action-panel"></div>
-                  <div id="action-forecast" class="action-forecast"></div>
-                </div>
-                <div class="stack-block">
-                  <div class="section-head">
-                    <div>
-                      <h2>行动队列</h2>
-                      <p>当前由你可操作的单位会显示在这里。</p>
-                    </div>
-                  </div>
+          <div class="battle-field">
+            <div class="battle-hud">
+              <div class="battle-hud__lead">
+                <div class="unit-strip-block">
+                  <span id="unit-strip-label" class="unit-strip-label hidden">当前操作武将</span>
                   <div id="unit-strip" class="unit-strip"></div>
                 </div>
-                <div class="stack-block">
-                  <div class="section-head">
-                    <div>
-                      <h2>连锁窗口</h2>
-                      <p id="chain-caption">当前没有待响应的连锁。</p>
-                    </div>
-                  </div>
-                  <div id="chain-panel" class="chain-panel"></div>
+                <div class="battle-hud__targets">
+                  <button id="complete-targeting" class="primary hidden">完成选择</button>
+                  <button id="cancel-targeting" class="ghost hidden">取消选择</button>
                 </div>
               </div>
-            </section>
-
-            <section id="hover-card" class="hover-card panel is-empty" aria-live="polite"></section>
-          </aside>
-
-          <section class="board-wrap panel">
-            <section id="tutorial-guide" class="tutorial-guide hidden" aria-live="polite">
-              <div class="tutorial-progress"><span id="tutorial-step-count">步骤 1/7</span><span id="tutorial-objective">目标：完成第一次教学战</span></div>
-              <h3 id="tutorial-title">选中你的武将</h3>
-              <p id="tutorial-instruction">点击火葬者，先认识血量、魔力和行动。</p>
-              <div class="tutorial-guide-actions">
-                <button id="tutorial-back-note" class="ghost" type="button">上一步说明</button>
-                <button id="tutorial-retry" class="ghost" type="button">重试本步</button>
-                <button id="tutorial-skip-note" class="ghost" type="button">跳过说明</button>
-                <button id="tutorial-exit" class="ghost" type="button">退出教学</button>
+              <div id="battle-chain-bar" class="battle-chain-bar hidden" role="status">
+                <strong>连锁</strong>
+                <span id="battle-chain-text"></span>
               </div>
-            </section>
-            <div class="section-head">
-              <div>
-                  <h2 id="battle-screen-title">战场</h2>
-                <p id="board-caption">等待房间开始对局。</p>
-              </div>
-              <div class="legend">
-                <span><i class="dot player1"></i>玩家 1</span>
-                <span><i class="dot player2"></i>玩家 2</span>
+              <div class="battle-hud__actions">
+                <div id="battle-turn-timer" class="battle-turn-timer hidden" role="timer" aria-live="polite"></div>
+                <button id="skip-chain" class="ghost hidden">放弃连锁</button>
+                <button id="end-turn" class="primary">结束回合</button>
+                <button id="toggle-battle-console" type="button" class="ghost" aria-expanded="false" title="展开控制">展开控制</button>
               </div>
             </div>
-            <div id="battle-effects" class="battle-effects"></div>
-            <div class="battle-accessibility-toolbar" aria-label="战斗反馈与无障碍设置">
-              <button id="toggle-battle-sound" class="ghost" type="button" aria-pressed="false">声音：关</button>
-              <button id="toggle-colorblind-mode" class="ghost" type="button" aria-pressed="false">色弱高对比：关</button>
-              <button id="toggle-reduced-motion" class="ghost" type="button" aria-pressed="false">动态：跟随系统</button>
-              <button id="open-keyboard-help" class="ghost" type="button" aria-haspopup="dialog">键盘帮助</button>
-            </div>
-            <div id="combat-feedback-feed" class="combat-feedback-feed" aria-label="最近战斗反馈"></div>
-            <div id="battle-announcer" class="visually-hidden" role="status" aria-live="assertive" aria-atomic="true"></div>
-            <div id="battle-stage-row" class="battle-stage-row">
-              <div id="board-stage" class="board-stage">
-                <div id="board" class="board"></div>
-                <div id="battle-vfx" class="battle-vfx"></div>
-                <div id="action-wheel" class="action-wheel"></div>
-                <div id="board-alert" class="board-alert hidden"></div>
-                <div id="game-over-overlay" class="game-over-overlay hidden">
-                  <div class="game-over-card">
-                    <p class="eyebrow">Battle Over</p>
-                    <h3 id="game-over-title">游戏结束</h3>
-                    <p id="game-over-text">本局对战已经结束。</p>
-                    <section id="postgame-summary" class="postgame-summary hidden" aria-label="赛后总结">
-                      <div class="postgame-result-head">
-                        <strong id="postgame-reason">胜负原因待生成</strong>
-                        <span id="postgame-meta"></span>
+
+            <div class="battle-canvas">
+              <section id="tutorial-guide" class="tutorial-guide hidden" aria-live="polite">
+                <div class="tutorial-progress"><span id="tutorial-step-count">步骤 1/7</span><span id="tutorial-objective">目标：完成第一次教学战</span></div>
+                <h3 id="tutorial-title">选中你的武将</h3>
+                <p id="tutorial-instruction">点击火葬者，先认识血量、魔力和行动。</p>
+                <div class="tutorial-guide-actions">
+                  <button id="tutorial-back-note" class="ghost" type="button">上一步说明</button>
+                  <button id="tutorial-retry" class="ghost" type="button">重试本步</button>
+                  <button id="tutorial-skip-note" class="ghost" type="button">跳过说明</button>
+                  <button id="tutorial-exit" class="ghost" type="button">退出教学</button>
+                </div>
+              </section>
+              <button id="surrender-battle" class="battle-surrender danger hidden">投降</button>
+              <div id="battle-effects" class="battle-effects hidden"></div>
+              <div id="combat-feedback-feed" class="combat-feedback-feed" aria-label="最近战斗反馈"></div>
+              <section id="hover-card" class="hover-card panel is-empty" aria-live="polite"></section>
+              <div id="battle-announcer" class="visually-hidden" role="status" aria-live="assertive" aria-atomic="true"></div>
+              <div id="battle-stage-row" class="battle-stage-row">
+                <div id="board-stage" class="board-stage">
+                  <div id="board-world" class="board-world">
+                    <div id="board" class="board"></div>
+                    <div id="board-pieces" class="board-pieces"></div>
+                  </div>
+                  <div id="battle-vfx" class="battle-vfx"></div>
+                  <div id="action-wheel" class="action-wheel"></div>
+                  <div id="board-alert" class="board-alert board-hint hidden"></div>
+                  <div id="game-over-overlay" class="game-over-overlay hidden">
+                    <div class="game-over-card">
+                      <div class="game-over-card__head">
+                        <h2 id="game-over-title" class="game-over-title">玩家获胜</h2>
+                        <button id="game-over-details-toggle" class="ghost" type="button">战斗详情</button>
                       </div>
-                      <div id="postgame-team-stats" class="postgame-team-stats"></div>
-                      <article id="postgame-mvp" class="postgame-mvp"></article>
-                      <article id="postgame-next-goal" class="postgame-next-goal" aria-live="polite"></article>
-                      <div class="postgame-section-head">
-                        <strong>武将明细</strong>
-                        <span id="postgame-formula"></span>
+                      <section id="postgame-summary" class="postgame-summary hidden" aria-label="赛后总结">
+                        <div id="game-over-overview" class="game-over-pane">
+                          <div class="postgame-result-head">
+                            <strong id="postgame-reason">胜负原因待生成</strong>
+                            <span id="postgame-meta"></span>
+                          </div>
+                          <div id="postgame-team-stats" class="postgame-team-stats"></div>
+                          <article id="postgame-mvp" class="postgame-mvp"></article>
+                        </div>
+                        <div id="game-over-details" class="game-over-pane hidden">
+                          <div class="postgame-section-head">
+                            <strong>武将明细</strong>
+                            <span id="postgame-formula"></span>
+                          </div>
+                          <div class="postgame-table-wrap">
+                            <table class="postgame-table">
+                              <thead><tr><th>武将</th><th>伤害</th><th>治疗</th><th>承伤</th><th>击破</th><th>破盾</th><th>连锁</th></tr></thead>
+                              <tbody id="postgame-hero-stats"></tbody>
+                            </table>
+                          </div>
+                          <hr class="game-over-rule" />
+                          <div class="postgame-section-head"><strong>关键回合</strong></div>
+                          <div id="postgame-key-turns" class="postgame-key-turns"></div>
+                        </div>
+                      </section>
+                      <div class="game-over-actions">
+                        <button id="game-over-strategy" class="ghost hidden">返回战役</button>
+                        <button id="game-over-rematch" class="primary">重新开始选将</button>
+                        <button id="game-over-back" class="ghost">返回房间大厅</button>
                       </div>
-                      <div class="postgame-table-wrap">
-                        <table class="postgame-table">
-                          <thead><tr><th>武将</th><th>伤害</th><th>治疗</th><th>承伤</th><th>击破</th><th>破盾</th><th>连锁</th></tr></thead>
-                          <tbody id="postgame-hero-stats"></tbody>
-                        </table>
-                      </div>
-                      <div class="postgame-section-head"><strong>关键回合</strong><span>点击可跳到对应回放步骤</span></div>
-                      <div id="postgame-key-turns" class="postgame-key-turns"></div>
-                    </section>
-                    <div class="game-over-actions">
-                      <button id="game-over-strategy" class="ghost hidden">返回战役</button>
-                      <button id="game-over-rematch" class="primary">重新开始选将</button>
-                      <button id="game-over-back" class="ghost">返回房间大厅</button>
                     </div>
                   </div>
                 </div>
               </div>
-            </div>
-            <div class="board-footer">
-              <div class="board-footer-actions">
-                <button id="surrender-battle" class="danger hidden">投降</button>
-                <button id="skip-chain" class="ghost hidden">放弃当前连锁</button>
-                <button id="complete-targeting" class="ghost hidden">完成选择</button>
-                <button id="cancel-targeting" class="ghost hidden">取消选择</button>
-              </div>
-              <button id="end-turn" class="primary">结束回合</button>
-            </div>
-          </section>
 
-          <aside id="battle-right-rail" class="battle-rail battle-right-rail">
-            <section class="panel right-rail-shell">
-              <div class="section-head sidebar-section-head">
-                <div>
-                  <h2>战斗记录</h2>
-                  <p>房间内双方的最新结算会固定显示在这里。</p>
+              <aside id="battle-right-rail" class="battle-dock is-collapsed" aria-label="战场信息">
+                <nav class="battle-dock__tabs" role="tablist">
+                  <button type="button" class="battle-dock__tab is-active" data-battle-tab="info" role="tab" aria-selected="true">信息</button>
+                  <button type="button" class="battle-dock__tab" data-battle-tab="queue" role="tab" aria-selected="false">行动</button>
+                  <button type="button" class="battle-dock__tab" data-battle-tab="log" role="tab" aria-selected="false">记录</button>
+                  <button type="button" class="battle-dock__tab" data-battle-tab="more" role="tab" aria-selected="false">更多</button>
+                  <button id="toggle-right-rail" type="button" class="battle-dock__toggle" aria-expanded="false" title="展开操作面板">‹</button>
+                </nav>
+                <div class="battle-dock__body">
+                  <div id="battle-left-rail" class="battle-dock__page" data-battle-page="info">
+                    <p id="message"></p>
+                    <div id="battle-connection-summary" class="battle-connection-summary hidden" role="status" aria-live="polite"></div>
+                    <div id="selected-card" class="selected-card"></div>
+                  </div>
+                  <div class="battle-dock__page hidden" data-battle-page="queue">
+                    <p id="chain-caption"></p>
+                    <div id="action-panel" class="action-panel"></div>
+                    <div id="action-forecast" class="action-forecast"></div>
+                    <div id="chain-panel" class="chain-panel"></div>
+                  </div>
+                  <div class="battle-dock__page hidden" data-battle-page="log">
+                    <div id="logs" class="logs"></div>
+                  </div>
+                  <div class="battle-dock__page hidden" data-battle-page="more">
+                    <div class="legend">
+                      <span><i class="dot player1"></i>玩家 1</span>
+                      <span><i class="dot player2"></i>玩家 2</span>
+                    </div>
+                    <div class="battle-accessibility-toolbar" aria-label="战斗反馈与无障碍设置">
+                      <button id="toggle-battle-sound" class="ghost" type="button" aria-pressed="false">声音：关</button>
+                      <button id="toggle-colorblind-mode" class="ghost" type="button" aria-pressed="false">色弱高对比：关</button>
+                      <button id="toggle-combat-feed" class="ghost" type="button" aria-pressed="true">行动记录：开</button>
+                      <button id="toggle-reduced-motion" class="ghost" type="button" aria-pressed="false">动态：跟随系统</button>
+                      <button id="open-keyboard-help" class="ghost" type="button" aria-haspopup="dialog">键盘帮助</button>
+                    </div>
+                    <hr class="battle-more-divider" />
+                    <button id="return-room-lobby" class="ghost battle-more-lobby" type="button">房间大厅</button>
+                  </div>
                 </div>
-                <button id="toggle-right-rail" type="button" class="ghost rail-toggle" aria-expanded="true">收起</button>
-              </div>
-              <div class="sidebar-content is-static">
-                <div id="logs" class="logs"></div>
-              </div>
-            </section>
-          </aside>
+              </aside>
+            </div>
+          </div>
         </section>
       </section>
       </main>
@@ -486,25 +402,123 @@
       </div>
     </section>
 
-    <div id="profile-modal" class="profile-modal hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="profile-modal-title" aria-describedby="profile-modal-text">
-      <div class="profile-modal-card">
-        <p class="eyebrow">Player Identity</p>
-        <h2 id="profile-modal-title">先设置你的昵称</h2>
-        <p id="profile-modal-text">这个昵称会用于创建房间和加入房间。留空也可以，系统会自动给你默认昵称。</p>
-        <label>
-          <span>昵称</span>
-          <input id="profile-name-input" type="text" maxlength="20" placeholder="例如：暗人玩家" />
-        </label>
-        <div class="profile-modal-actions">
-          <button id="profile-cancel" class="ghost hidden" type="button">取消</button>
-          <button id="profile-save" class="primary">进入大厅</button>
+    <!-- 房间设置。改完按确定才生效：席位数一改就增删席位，中途的过渡值不该
+         被当成一次真实的调整发给服务端。 -->
+    <div id="room-setup-dialog" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="room-setup-title">
+      <div class="modal-card modal-card--narrow">
+        <div class="modal-card__head">
+          <h2 id="room-setup-title" class="modal-card__title">房间设置</h2>
+        </div>
+        <div class="modal-card__body">
+          <label class="field" for="room-mode-select">
+            <span class="field__label">模式</span>
+            <select id="room-mode-select" class="select"></select>
+          </label>
+          <label class="field" for="room-seat-count-input">
+            <span class="field__label">席位数</span>
+            <input id="room-seat-count-input" class="input" type="number" min="2" max="6" step="1" value="2" />
+          </label>
+          <label id="random-roster-size-control" class="field hidden" for="random-roster-size-input">
+            <span class="field__label">每队随机武将数</span>
+            <input id="random-roster-size-input" class="input" type="number" min="1" step="1" value="1" />
+          </label>
+          <label class="field field--switch" for="room-hero-limit-enabled">
+            <span class="field__label">限定武将数量</span>
+            <input id="room-hero-limit-enabled" type="checkbox" />
+          </label>
+          <label id="room-hero-limit-control" class="field hidden" for="room-hero-limit-input">
+            <span class="field__label">每席最多</span>
+            <input id="room-hero-limit-input" class="input" type="number" min="1" max="20" step="1" value="5" />
+          </label>
+          <label class="field" for="room-turn-timeout-select">
+            <span class="field__label">回合时限</span>
+            <select id="room-turn-timeout-select" class="select">
+              <option value="0" selected>无限</option>
+              <option value="30">30 秒</option>
+              <option value="60">60 秒</option>
+              <option value="120">120 秒</option>
+            </select>
+          </label>
+          <div class="field">
+            <span class="field__label">战场大小</span>
+            <div class="board-size-inputs">
+              <input id="room-board-width-input" class="input" type="number" min="6" max="100" step="1" value="10" aria-label="战场宽度" />
+              <span class="board-size-sep" aria-hidden="true">×</span>
+              <input id="room-board-height-input" class="input" type="number" min="6" max="100" step="1" value="10" aria-label="战场高度" />
+            </div>
+            <span class="field__hint">宽 × 高，每边 6 到 100 格。默认 10×10。</span>
+          </div>
+        </div>
+        <div class="modal-card__actions">
+          <button id="room-setup-cancel" class="ghost" type="button">取消</button>
+          <button id="room-setup-confirm" class="primary" type="button">确定</button>
         </div>
       </div>
     </div>
 
-    <script src="/home-ui.js?v=p761a" defer></script>
-    <script src="/replay-ui.js?v=p761a" defer></script>
-    <script src="/battle-feedback.js?v=p761a" defer></script>
-    <script src="/app.js?v=r3g" defer></script>
+    <!-- 选将。每一行是一张标签：名字、等级、攻守速范魔。技能和特性点进去才看。 -->
+    <div id="hero-picker" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="hero-picker-title">
+      <div class="modal-card modal-card--wide">
+        <div class="modal-card__head">
+          <h2 id="hero-picker-title" class="modal-card__title">选择武将</h2>
+          <button id="hero-picker-close" class="primary" type="button">完成</button>
+        </div>
+        <div class="hero-picker__toolbar">
+          <input id="hero-search" class="input" type="search" autocomplete="off" placeholder="按名称搜索" aria-label="按名称搜索武将" />
+          <select id="hero-sort" class="select" aria-label="排序依据">
+            <option value="name">名称</option>
+            <option value="level">等级</option>
+            <option value="attack">攻击</option>
+            <option value="defense">防御</option>
+            <option value="speed">速度</option>
+            <option value="attack_range">范围</option>
+            <option value="mana">魔法</option>
+          </select>
+          <button id="hero-sort-order" class="ghost" type="button" aria-label="切换升降序">升序</button>
+        </div>
+        <div id="hero-picker-rosters" class="hero-picker__rosters"></div>
+        <div id="hero-picker-list" class="hero-picker__list"></div>
+      </div>
+    </div>
+
+    <div id="hero-detail" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="hero-detail-title">
+      <div class="modal-card modal-card--narrow">
+        <div class="modal-card__head">
+          <div class="hero-detail__heading">
+            <h2 id="hero-detail-title" class="modal-card__title">武将详情</h2>
+            <span id="hero-detail-level" class="hero-level-tag hidden"></span>
+          </div>
+          <button id="hero-detail-close" class="ghost" type="button">关闭</button>
+        </div>
+        <div id="hero-detail-body" class="modal-card__body hero-detail"></div>
+      </div>
+    </div>
+
+    <!-- 用户信息。既是首次登录时设昵称的那一步，也是之后从账号菜单进来查看与
+         修改账号的地方——两者是同一件事的两个时机，不必是两个弹窗。改密码等
+         后续项会加在昵称下面。 -->
+    <div id="profile-modal" class="profile-modal hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="profile-modal-title" aria-describedby="profile-modal-text">
+      <div class="profile-modal-card">
+        <h2 id="profile-modal-title">用户信息</h2>
+        <p id="profile-modal-text">这个昵称会用于创建房间和加入房间。留空也可以，系统会自动给你默认昵称。</p>
+        <div id="profile-account-row" class="profile-account-row hidden">
+          <span class="profile-account-label">登录账号</span>
+          <strong id="profile-account-name" class="profile-account-value">—</strong>
+        </div>
+        <label class="profile-field">
+          <span>昵称</span>
+          <input id="profile-name-input" class="input" type="text" maxlength="20" placeholder="例如：暗人玩家" />
+        </label>
+        <div class="profile-modal-actions">
+          <button id="profile-cancel" class="btn btn--subtle hidden" type="button">取消</button>
+          <button id="profile-save" class="btn btn--primary" type="button">进入大厅</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/platform/home-ui.js?v=r13" defer></script>
+    <script src="/tactical/replay-ui.js?v=r13" defer></script>
+    <script src="/tactical/battle-feedback.js?v=r15" defer></script>
+    <script type="module" src="/app.js?v=r23"></script>
   </body>
 </html>

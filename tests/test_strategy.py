@@ -15,7 +15,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from wujiang.strategy import (  # noqa: E402
+from wujiang.strategic import (  # noqa: E402
     FACTION_MONTHLY_COMMAND_POINTS,
     SNOW_GHOST_COLD_ROUTE_MIN_SUPPLY,
     SNOW_GHOST_FACTION_ID,
@@ -154,16 +154,16 @@ from wujiang.strategy import (  # noqa: E402
     strategic_route_key,
     world_crises_public,
 )
-from wujiang.strategy.models import City, DiplomaticAgreement, Faction, MapNode, PendingBattle, ResourceBundle, StoryEvent, WorldState  # noqa: E402
-from wujiang.strategy.migrations import CURRENT_STRATEGY_SAVE_VERSION, migrate_world_payload  # noqa: E402
-from wujiang.strategy.monthly_cycle import forecast_city_month, monthly_cycle_public, record_monthly_report  # noqa: E402
-from wujiang.strategy.campaign_tutorial import campaign_tutorial_public, update_campaign_tutorial  # noqa: E402
-from wujiang.strategy.office_automation import apply_player_office_automation, office_coordination_public  # noqa: E402
-from wujiang.strategy.occupation import mark_city_captured  # noqa: E402
-from wujiang.strategy.political_ai import apply_major_political_ai_actions  # noqa: E402
-from wujiang.strategy.rebellion import set_rebellion_force_troops  # noqa: E402
-from wujiang.web.auth import AuthUser  # noqa: E402
-from wujiang.heroes.registry import create_battle, list_heroes  # noqa: E402
+from wujiang.strategic.models import City, DiplomaticAgreement, Faction, MapNode, PendingBattle, ResourceBundle, StoryEvent, WorldState  # noqa: E402
+from wujiang.strategic.migrations import CURRENT_STRATEGY_SAVE_VERSION, migrate_world_payload  # noqa: E402
+from wujiang.strategic.monthly_cycle import forecast_city_month, monthly_cycle_public, record_monthly_report  # noqa: E402
+from wujiang.strategic.campaign_tutorial import campaign_tutorial_public, update_campaign_tutorial  # noqa: E402
+from wujiang.strategic.office_automation import apply_player_office_automation, office_coordination_public  # noqa: E402
+from wujiang.strategic.occupation import mark_city_captured  # noqa: E402
+from wujiang.strategic.political_ai import apply_major_political_ai_actions  # noqa: E402
+from wujiang.strategic.rebellion import set_rebellion_force_troops  # noqa: E402
+from wujiang.platform.auth import AuthUser  # noqa: E402
+from wujiang.tactical.heroes.registry import create_battle, list_heroes  # noqa: E402
 
 
 class StrategyGenerationTests(unittest.TestCase):
@@ -6339,7 +6339,7 @@ class StrategySimulationTests(unittest.TestCase):
         autonomy_world = WorldState.from_dict(world.to_dict())
         autonomy_city = next(item for item in autonomy_world.cities if item.city_id == city.city_id)
         autonomy_city.support_by_faction["local_autonomy"] = 80
-        from wujiang.strategy.rebellion import set_rebellion_force_troops
+        from wujiang.strategic.rebellion import set_rebellion_force_troops
         set_rebellion_force_troops(autonomy_city, 200, month=1)
         restored = advance_month(autonomy_world)
         restored_city = next(item for item in restored.cities if item.city_id == city.city_id)

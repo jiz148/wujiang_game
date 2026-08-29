@@ -11,8 +11,8 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from wujiang.web.security import SecurityConfig, normalize_origin  # noqa: E402
-from wujiang.web.server import normalize_public_base_url, run_server  # noqa: E402
+from wujiang.platform.security import SecurityConfig, normalize_origin  # noqa: E402
+from wujiang.platform.http.server import normalize_public_base_url, run_server  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:

@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from tools.phase0_playtest import build_report, prepare_batch, record_observation, render_report
-from wujiang.web.analytics import AnalyticsStore
+from wujiang.platform.analytics import AnalyticsStore
 
 
 class Phase0PlaytestBatchTests(unittest.TestCase):

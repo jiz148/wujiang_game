@@ -18,14 +18,16 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-import wujiang.web.server as server_module  # noqa: E402
-from wujiang.strategy import StrategyStore  # noqa: E402
-from wujiang.web.analytics import AnalyticsStore  # noqa: E402
-from wujiang.web.auth import UserStore  # noqa: E402
-from wujiang.web.match_history import MatchHistoryStore  # noqa: E402
-from wujiang.web.observability import Observability, ObservabilityConfig, route_template  # noqa: E402
-from wujiang.web.security import SecurityConfig  # noqa: E402
-from wujiang.web.server import WujiangHandler, configure_observability, configure_security  # noqa: E402
+import wujiang.platform.http.server as server_module  # noqa: E402
+import wujiang.strategic.campaign_runtime as campaign_runtime  # noqa: E402
+import wujiang.platform.http.runtime as http_runtime  # noqa: E402
+from wujiang.strategic import StrategyStore  # noqa: E402
+from wujiang.platform.analytics import AnalyticsStore  # noqa: E402
+from wujiang.platform.auth import UserStore  # noqa: E402
+from wujiang.platform.match_history import MatchHistoryStore  # noqa: E402
+from wujiang.platform.observability import Observability, ObservabilityConfig, route_template  # noqa: E402
+from wujiang.platform.security import SecurityConfig  # noqa: E402
+from wujiang.platform.http.server import WujiangHandler, configure_observability, configure_security  # noqa: E402
 
 
 class ObservabilityUnitTests(unittest.TestCase):
@@ -111,10 +113,10 @@ class ObservabilityBehaviorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         root = Path(self.tmpdir.name)
-        server_module.AUTH_STORE = UserStore(root / "auth.sqlite3")
-        server_module.ANALYTICS_STORE = AnalyticsStore(root / "analytics.sqlite3")
-        server_module.MATCH_HISTORY_STORE = MatchHistoryStore(root / "history.sqlite3")
-        server_module.STRATEGY_STORE = StrategyStore(root / "strategy.sqlite3")
+        http_runtime.AUTH_STORE = UserStore(root / "auth.sqlite3")
+        http_runtime.ANALYTICS_STORE = AnalyticsStore(root / "analytics.sqlite3")
+        http_runtime.MATCH_HISTORY_STORE = MatchHistoryStore(root / "history.sqlite3")
+        campaign_runtime.STRATEGY_STORE = StrategyStore(root / "strategy.sqlite3")
         configure_security(SecurityConfig(environment="test", require_https=False))
         configure_observability(Observability(ObservabilityConfig(environment="test")))
 
@@ -141,7 +143,7 @@ class ObservabilityBehaviorTests(unittest.TestCase):
         self.assertEqual(ready["status"], "ready")
         self.assertTrue(all(value == "ok" for value in ready["dependencies"].values()))
 
-        server_module.AUTH_STORE = SimpleNamespace(healthcheck=lambda: (_ for _ in ()).throw(OSError("secret path")))
+        http_runtime.AUTH_STORE = SimpleNamespace(healthcheck=lambda: (_ for _ in ()).throw(OSError("secret path")))
         status, unavailable, _ = self._get("/api/health/ready")
         self.assertEqual(status, 503)
         self.assertEqual(unavailable["dependencies"]["auth"], "failed")

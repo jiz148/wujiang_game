@@ -1,0 +1,860 @@
+/* ============================================================================
+ * 设计令牌与组件层
+ *
+ * 这是全站视觉的单一事实来源，必须在 styles.css 之前加载。
+ *
+ * styles.css 里有六千余行按特性写死的样式，它们大量引用 --panel / --ink 这类
+ * 旧名字。本文件在底部把旧名字重新指向下面的暗色令牌，因此那些历史样式无需
+ * 逐条改写就会跟着翻成暗色。新写的界面一律用新令牌和组件类。
+ * ========================================================================== */
+
+:root {
+  /* ---- 表面分级：0 最深（页面），数字越大越靠前 ---------------------- */
+  --surface-0: #0d1013;
+  --surface-1: #14181d;
+  --surface-2: #1b2129;
+  --surface-3: #232b34;
+  --surface-4: #2d3742;
+
+  /* ---- 描边 ---------------------------------------------------------- */
+  --line: #262f38;
+  --line-strong: #38434f;
+
+  /* ---- 文字分级 ------------------------------------------------------ */
+  --text-1: #e6ebf0;
+  --text-2: #a5b1bd;
+  --text-3: #6d7885;
+
+  /* ---- 强调色（延续原有金色识别） ------------------------------------ */
+  --accent: #d4a340;
+  --accent-hi: #e8ba55;
+  --accent-lo: #a87d29;
+  --accent-ink: #16120a;
+  --accent-soft: rgba(212, 163, 64, 0.14);
+
+  /* ---- 语义色 -------------------------------------------------------- */
+  --info: #4b8fd6;
+  --success: #4a9d6e;
+  --warn: #d19a3c;
+  --danger: #c4553f;
+  --info-soft: rgba(75, 143, 214, 0.16);
+  --success-soft: rgba(74, 157, 110, 0.16);
+  --warn-soft: rgba(209, 154, 60, 0.16);
+  --danger-soft: rgba(196, 85, 63, 0.16);
+
+  /* ---- 阵营色（需在暗底上互相区分） ---------------------------------- */
+  --player1: #c97a4a;
+  --player2: #4a90a8;
+
+  /* ---- 战场地面 ------------------------------------------------------
+   * 棋盘自成一套配色，原本是浅色羊皮纸，在暗色外壳里会变成一块刺眼的白板。
+   * 它比外壳略亮，让视线落在战场上，但仍属于暗色一侧。 */
+  --board-surface: #171c22;
+  --board-cell: #1f262e;
+  --board-cell-hi: #27303a;
+  --board-line: rgba(255, 255, 255, 0.06);
+
+  /* ---- 圆角：只有这四档，不要再引入别的 ------------------------------ */
+  --r-1: 4px;
+  --r-2: 6px;
+  --r-3: 8px;
+  --r-pill: 999px;
+
+  /* ---- 间距阶梯 ------------------------------------------------------ */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-7: 32px;
+
+  /* ---- 字号阶梯 ------------------------------------------------------ */
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-base: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+  --fs-2xl: 26px;
+
+  /* ---- 控件高度：按钮与输入框共用，保证同排对齐 ---------------------- */
+  --ctl-sm: 26px;
+  --ctl-md: 32px;
+  --ctl-lg: 40px;
+
+  /* ---- 阴影：暗色下靠加深而非扩散 ------------------------------------ */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.45);
+  --shadow-3: 0 12px 32px rgba(0, 0, 0, 0.55);
+
+  --focus-ring: 0 0 0 2px var(--surface-0), 0 0 0 4px var(--accent);
+
+  --font-ui: "Noto Sans SC", "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-display: "Noto Serif SC", "Source Han Serif SC", "Songti SC", serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+}
+
+/* ============================================================================
+ * 基础
+ * ========================================================================== */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+/* 全站滚动条：细、圆、不抢眼，避免 Windows 原生那条粗杠。 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(165, 177, 189, 0.38) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: rgba(165, 177, 189, 0.32);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(165, 177, 189, 0.5);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--text-1);
+  background: var(--surface-0);
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 启动期：屏幕的归属要等账号接口回来才能定，在那之前不能让标记里的默认屏
+   先露一面。用 visibility 而非 display，布局照常算，切换时不会跳动。 */
+body.is-booting .shell {
+  visibility: hidden;
+}
+
+h1,
+h2,
+h3,
+h4,
+p {
+  margin: 0;
+}
+
+/* ============================================================================
+ * 按钮
+ *
+ * 变体控制语义（主/次/危险），尺寸控制高度，两者正交。
+ * 需要自定义强调色时覆盖 --btn-accent 即可，不要新写一套背景色。
+ * ========================================================================== */
+
+.btn {
+  --btn-accent: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-2);
+  height: var(--ctl-md);
+  padding: 0 var(--s-3);
+  border: 1px solid transparent;
+  border-radius: var(--r-2);
+  background: var(--surface-3);
+  color: var(--text-1);
+  font-family: inherit;
+  font-size: var(--fs-base);
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--surface-4);
+}
+
+.btn:active:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.btn--primary {
+  background: var(--btn-accent);
+  color: var(--accent-ink);
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--accent-hi);
+}
+
+.btn--primary:active:not(:disabled) {
+  background: var(--accent-lo);
+}
+
+.btn--ghost {
+  background: transparent;
+  border-color: var(--line-strong);
+  color: var(--text-2);
+}
+
+.btn--ghost:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text-1);
+}
+
+.btn--ghost:active:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.btn--subtle {
+  background: transparent;
+  color: var(--text-2);
+}
+
+.btn--subtle:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text-1);
+}
+
+.btn--danger {
+  background: var(--danger);
+  color: #fff;
+}
+
+.btn--danger:hover:not(:disabled) {
+  background: #d2624b;
+}
+
+.btn--sm {
+  height: var(--ctl-sm);
+  padding: 0 var(--s-2);
+  font-size: var(--fs-sm);
+}
+
+.btn--lg {
+  height: var(--ctl-lg);
+  padding: 0 var(--s-5);
+  font-size: var(--fs-md);
+}
+
+.btn--block {
+  width: 100%;
+}
+
+.btn--icon {
+  width: var(--ctl-md);
+  padding: 0;
+}
+
+.btn--icon.btn--sm {
+  width: var(--ctl-sm);
+}
+
+.btn--icon.btn--lg {
+  width: var(--ctl-lg);
+}
+
+/* 选中态：用于分段控件与工具栏开关 */
+.btn.is-active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-hi);
+}
+
+/* ============================================================================
+ * 表单控件
+ * ========================================================================== */
+
+.input,
+.select,
+.textarea {
+  width: 100%;
+  height: var(--ctl-md);
+  padding: 0 var(--s-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-2);
+  background: var(--surface-0);
+  color: var(--text-1);
+  font-family: inherit;
+  font-size: var(--fs-base);
+}
+
+.select,
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 2rem;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%238a7462' d='M1.2 1.4L6 6.2l4.8-4.8'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.7rem center;
+  background-size: 12px 8px;
+}
+
+.textarea {
+  height: auto;
+  min-height: 72px;
+  padding: var(--s-2) var(--s-3);
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.input::placeholder,
+.textarea::placeholder {
+  color: var(--text-3);
+}
+
+.input:hover,
+.select:hover,
+.textarea:hover {
+  border-color: var(--text-3);
+}
+
+.input:focus,
+.select:focus,
+.textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.input:disabled,
+.select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.input--sm,
+.select--sm {
+  height: var(--ctl-sm);
+  padding: 0 var(--s-2);
+  font-size: var(--fs-sm);
+}
+
+/* 标签 + 控件的竖向组合 */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  min-width: 0;
+}
+
+.field__label {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+.field--switch {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.field--switch input[type="checkbox"] {
+  width: auto;
+  height: auto;
+  min-width: 18px;
+  min-height: 18px;
+  accent-color: var(--accent);
+}
+
+.field__error {
+  color: var(--danger);
+  font-size: var(--fs-sm);
+}
+
+.field__hint {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+}
+
+.board-size-inputs {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.board-size-inputs .input {
+  width: 5.5rem;
+  flex: 1 1 auto;
+}
+
+.board-size-sep {
+  color: var(--text-3);
+  font-weight: 700;
+}
+
+.field-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+}
+
+/* ============================================================================
+ * 面板与卡片
+ * ========================================================================== */
+
+.panel {
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  background: var(--surface-1);
+  padding: var(--s-4);
+}
+
+.panel--flush {
+  padding: 0;
+}
+
+.panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  padding-bottom: var(--s-3);
+  margin-bottom: var(--s-3);
+  border-bottom: 1px solid var(--line);
+}
+
+.panel__title {
+  font-size: var(--fs-md);
+  font-weight: 700;
+  color: var(--text-1);
+}
+
+.panel__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.card {
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  background: var(--surface-2);
+  padding: var(--s-3);
+}
+
+.card--interactive {
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.card--interactive:hover {
+  background: var(--surface-3);
+  border-color: var(--line-strong);
+}
+
+.card--interactive.is-selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* ============================================================================
+ * 标签页：真正切换内容，不是滚动定位
+ * ========================================================================== */
+
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  border-bottom: 1px solid var(--line);
+}
+
+.tab {
+  height: var(--ctl-md);
+  padding: 0 var(--s-3);
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: var(--r-1) var(--r-1) 0 0;
+  background: transparent;
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: var(--fs-base);
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+
+.tab:hover {
+  background: var(--surface-2);
+  color: var(--text-1);
+}
+
+.tab[aria-selected="true"] {
+  color: var(--accent-hi);
+  border-bottom-color: var(--accent);
+}
+
+.tab:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* ============================================================================
+ * 标记
+ * ========================================================================== */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  height: 20px;
+  padding: 0 var(--s-2);
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.chip--accent { background: var(--accent-soft); color: var(--accent-hi); }
+.chip--info { background: var(--info-soft); color: var(--info); }
+.chip--success { background: var(--success-soft); color: var(--success); }
+.chip--warn { background: var(--warn-soft); color: var(--warn); }
+.chip--danger { background: var(--danger-soft); color: var(--danger); }
+
+/* 键值对：替代满屏的说明段落 */
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.stat__label {
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.stat__value {
+  color: var(--text-1);
+  font-size: var(--fs-md);
+  font-weight: 700;
+}
+
+/* ============================================================================
+ * 提示气泡
+ *
+ * 界面上原本常驻的说明文字改用它承载：默认只是一个小叹号，悬浮或聚焦才展开。
+ * ========================================================================== */
+
+.hint {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 1px solid var(--text-3);
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--text-3);
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+  flex: 0 0 auto;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+
+.hint:hover,
+.hint:focus-visible {
+  color: var(--accent-hi);
+  border-color: var(--accent);
+  outline: none;
+}
+
+.hint__bubble {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  width: max-content;
+  max-width: 260px;
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-2);
+  background: var(--surface-3);
+  box-shadow: var(--shadow-2);
+  color: var(--text-1);
+  font-size: var(--fs-sm);
+  font-weight: 400;
+  line-height: 1.5;
+  text-align: left;
+  white-space: normal;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 120ms ease, visibility 120ms;
+}
+
+.hint:hover .hint__bubble,
+.hint:focus-visible .hint__bubble {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* 贴边时改为向右展开，避免溢出视口 */
+.hint--start .hint__bubble {
+  left: 0;
+  transform: none;
+}
+
+.hint--end .hint__bubble {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
+/* ============================================================================
+ * 下拉菜单
+ *
+ * 收纳次要操作。把所有操作都摊在表面会让人看不出哪个重要，而次要操作往往
+ * 只在特定时刻才有意义。
+ * ========================================================================== */
+
+.menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.menu__trigger {
+  gap: var(--s-2);
+}
+
+.menu__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu__caret {
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 4px solid currentColor;
+  opacity: 0.7;
+  flex: 0 0 auto;
+  transition: transform 120ms ease;
+}
+
+.menu.is-open .menu__caret {
+  transform: rotate(180deg);
+}
+
+.menu__list {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 70;
+  min-width: 160px;
+  padding: var(--s-1);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-2);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-2);
+  display: flex;
+  flex-direction: column;
+}
+
+/* [hidden] 的 display:none 来自浏览器默认样式，作者样式表里的 display:flex
+   权重更高，会把它盖掉——不写这一条，浮层就永远是展开的。 */
+.menu__list[hidden] {
+  display: none;
+}
+
+.menu--start .menu__list {
+  right: auto;
+  left: 0;
+}
+
+/* 权重要压过 .ghost / .btn 这些被收进来的按钮自带的边框与底色。
+   高度必须由这里说了算：收进来的按钮各自带着 .btn / .primary / .ghost 的
+   padding 与 line-height，不统一就会几条高几条矮，浮层看起来像没对齐。
+   所以给一个固定行高，不依赖各按钮自带的内在高度。 */
+.menu__list .menu__item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 32px;
+  padding: 0 var(--s-3);
+  line-height: 1;
+  border: 0;
+  border-radius: var(--r-1);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-1);
+  font-family: inherit;
+  font-size: var(--fs-base);
+  font-weight: 400;
+  letter-spacing: normal;
+  text-align: left;
+  text-transform: none;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.menu__list .menu__item:hover:not(:disabled) {
+  background: var(--surface-3);
+}
+
+.menu__list .menu__item:disabled {
+  color: var(--text-3);
+  cursor: default;
+}
+
+.menu__list .menu__item--danger {
+  color: var(--danger);
+}
+
+/* 全都藏起来时，触发按钮也不该独自杵着。 */
+.menu.is-empty {
+  display: none;
+}
+
+.menu__separator {
+  height: 1px;
+  margin: var(--s-1) 0;
+  background: var(--line);
+}
+
+/* ============================================================================
+ * 确认弹窗
+ * ========================================================================== */
+
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: var(--s-4);
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.dialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  width: min(100%, 380px);
+  padding: var(--s-4);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-2);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-2);
+}
+
+.dialog__title {
+  margin: 0;
+  color: var(--text-1);
+  font-size: var(--fs-md);
+}
+
+.dialog__body {
+  margin: 0;
+  color: var(--text-2);
+  font-size: var(--fs-base);
+  line-height: 1.6;
+}
+
+.dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s-2);
+}
+
+/* ============================================================================
+ * 空态
+ * ========================================================================== */
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-2);
+  padding: var(--s-6) var(--s-4);
+  color: var(--text-3);
+  font-size: var(--fs-base);
+  text-align: center;
+}
+
+/* 单行空态：内容区还没有东西可显示时的一句话，不值得占满一屏高度。 */
+.empty-line {
+  margin: 0;
+  padding: var(--s-4) 0;
+  color: var(--text-3);
+  font-size: var(--fs-base);
+}
+
+/* ============================================================================
+ * 旧令牌兼容层
+ *
+ * styles.css 中的历史样式仍在引用这些名字。把它们指向上面的暗色令牌，
+ * 历史样式即可整体翻暗，无需逐条改写。--muted 与 --font-display 此前被引用
+ * 却从未定义过，这里一并补上。
+ * ========================================================================== */
+
+:root {
+  --bg-1: var(--surface-0);
+  --bg-2: var(--surface-0);
+  --ink: var(--text-1);
+  --ink-soft: var(--text-2);
+  --muted: var(--text-3);
+  --panel: var(--surface-1);
+  --panel-strong: var(--surface-2);
+  --primary: var(--accent);
+  --primary-2: var(--accent-hi);
+  --select: var(--accent);
+  --range: rgba(75, 143, 214, 0.85);
+  --range-soft: rgba(75, 143, 214, 0.2);
+  --target: rgba(196, 85, 63, 0.95);
+  --target-soft: rgba(196, 85, 63, 0.26);
+  --secondary: rgba(75, 143, 214, 0.22);
+  --shadow: var(--shadow-2);
+}

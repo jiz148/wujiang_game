@@ -12,10 +12,10 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from wujiang.engine.core import Position, QueuedAction, ReactionWindow  # noqa: E402
-from wujiang.heroes.registry import create_battle  # noqa: E402
-from wujiang.web.multiplayer import RoomError, RoomRegistry, hero_lookup, random_room_hero_codes  # noqa: E402
-from wujiang.web.server import normalize_public_base_url  # noqa: E402
+from wujiang.tactical.engine.core import Position, QueuedAction, ReactionWindow  # noqa: E402
+from wujiang.tactical.heroes.registry import create_battle  # noqa: E402
+from wujiang.tactical.rooms.multiplayer import RoomError, RoomRegistry, hero_lookup, random_room_hero_codes  # noqa: E402
+from wujiang.platform.http.server import normalize_public_base_url  # noqa: E402
 
 
 class MultiplayerRoomTests(unittest.TestCase):
@@ -59,7 +59,7 @@ class MultiplayerRoomTests(unittest.TestCase):
         self.assertIn("excel_r035", selectable_codes)
         self.assertNotIn("excel_r038", selectable_codes)
 
-        with mock.patch("wujiang.web.multiplayer.random.sample", side_effect=lambda population, count: list(population)[:count]):
+        with mock.patch("wujiang.tactical.rooms.multiplayer.random.sample", side_effect=lambda population, count: list(population)[:count]):
             player1_roster, player2_roster = random_room_hero_codes(3)
         self.assertNotIn("excel_r038", set(player1_roster + player2_roster))
 
@@ -162,6 +162,94 @@ class MultiplayerRoomTests(unittest.TestCase):
         self.assertFalse(room_state["can_start"])
         self.assertIn("确认准备", room_state["start_blocker"])
 
+    def test_host_can_limit_heroes_and_trim_overflow_from_the_end(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        room.join("Bob")
+        room.select_hero(host_token, "ellie")
+        room.select_hero(host_token, "ellie")
+        room.select_hero(host_token, "bard")
+        self.assertEqual(room.seats[1].hero_counts, {"ellie": 2, "bard": 1})
+
+        room.set_hero_limit(host_token, 2)
+
+        self.assertEqual(room.hero_limit, 2)
+        # 标签从下往上砍：最后加的 bard 先掉，留下两个 ellie。
+        self.assertEqual(room.seats[1].hero_counts, {"ellie": 2})
+        self.assertEqual(room.serialize_state(host_token)["room"]["hero_limit"], 2)
+
+        with self.assertRaises(RoomError) as exc:
+            room.select_hero(host_token, "bard")
+        self.assertIn("最多选择 2", str(exc.exception))
+
+        room.set_hero_limit(host_token, 0)
+        room.select_hero(host_token, "bard")
+        self.assertEqual(room.seats[1].hero_counts, {"ellie": 2, "bard": 1})
+
+    def test_recommended_roster_cannot_exceed_hero_limit(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        room.set_hero_limit(host_token, 1)
+
+        with self.assertRaises(RoomError) as exc:
+            room.set_roster(host_token, ["ellie", "bard"])
+        self.assertIn("最多选择 1", str(exc.exception))
+        self.assertEqual(room.seats[1].hero_counts, {})
+
+    def test_host_can_set_turn_timeout_or_disable_it(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        self.assertEqual(room.turn_timeout_seconds, 0)
+
+        room.set_turn_timeout(host_token, 30)
+        self.assertEqual(room.turn_timeout_seconds, 30)
+        self.assertEqual(room.serialize_state(host_token)["room"]["turn_timeout_seconds"], 30)
+
+        room.set_turn_timeout(host_token, 0)
+        self.assertEqual(room.turn_timeout_seconds, 0)
+        self.assertEqual(room.serialize_state(host_token)["room"]["turn_timeout_seconds"], 0)
+        self.assertEqual(room.serialize_state(host_token)["room"]["turn_timer"]["duration_seconds"], 0)
+
+        with self.assertRaises(RoomError):
+            room.set_turn_timeout(host_token, 90)
+
+    def test_host_can_set_board_size_used_by_battle(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        self.assertEqual(room.board_width, 10)
+        self.assertEqual(room.board_height, 10)
+        self.assertEqual(room.serialize_state(host_token)["room"]["board_width"], 10)
+
+        room.set_board_size(host_token, 12, 8)
+        self.assertEqual((room.board_width, room.board_height), (12, 8))
+
+        with self.assertRaises(RoomError):
+            room.set_board_size(host_token, 5, 10)
+        with self.assertRaises(RoomError):
+            room.set_board_size(host_token, 10, 101)
+
+        room.set_seat_controller(host_token, 2, "ai")
+        room.select_hero(host_token, "ellie")
+        room.select_hero(host_token, "bard", seat_id=2)
+        room.start_battle(host_token)
+        self.assertEqual(room.battle.width, 12)
+        self.assertEqual(room.battle.height, 8)
+
+    def test_auto_configure_fills_open_seats_with_ai_and_heroes(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        room.set_hero_limit(host_token, 2)
+        room.auto_configure(host_token)
+
+        seats = room.serialize_state(host_token)["room"]["seats"]
+        self.assertTrue(seats[1]["is_ai"])
+        self.assertEqual(seats[0]["hero_total_count"], 2)
+        self.assertEqual(seats[1]["hero_total_count"], 2)
+        self.assertTrue(seats[0]["is_human"])
+
+    def test_hero_limit_rejects_values_outside_1_to_20(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+
+        with self.assertRaises(RoomError):
+            room.set_hero_limit(host_token, 21)
+        with self.assertRaises(RoomError):
+            room.set_hero_limit(host_token, -1)
+
     def test_random_mode_does_not_allow_manual_hero_selection(self) -> None:
         room, _, host_token = self.registry.create_room("Alice", mode="random")
 
@@ -194,7 +282,7 @@ class MultiplayerRoomTests(unittest.TestCase):
 
         roster1 = ["bard", "dark_human", "fire_funeral"]
         roster2 = ["doomlight_dragon", "elite_soldier", "ellie"]
-        with mock.patch("wujiang.web.multiplayer.random_room_hero_codes", return_value=(roster1, roster2)):
+        with mock.patch("wujiang.tactical.rooms.multiplayer.random_room_hero_codes", return_value=(roster1, roster2)):
             room.start_battle(host_token)
 
         self.assertEqual(room.status, "battle")
@@ -206,8 +294,8 @@ class MultiplayerRoomTests(unittest.TestCase):
         self.assertEqual(len(room.battle.hero_units(2)), 3)
 
         expected_battle = create_battle(roster1, roster2)
-        self.assertEqual(room.battle.width, expected_battle.width)
-        self.assertEqual(room.battle.height, expected_battle.height)
+        self.assertEqual(room.battle.width, room.board_width)
+        self.assertEqual(room.battle.height, room.board_height)
         self.assertEqual(
             [room.battle.get_unit(unit_id).hero_code for unit_id in room.battle.turn_order_unit_ids],
             [expected_battle.get_unit(unit_id).hero_code for unit_id in expected_battle.turn_order_unit_ids],
@@ -281,7 +369,7 @@ class MultiplayerRoomTests(unittest.TestCase):
 
         roster1 = ["bard", "dark_human"]
         roster2 = ["doomlight_dragon", "elite_soldier"]
-        with mock.patch("wujiang.web.multiplayer.random_room_hero_codes", return_value=(roster1, roster2)):
+        with mock.patch("wujiang.tactical.rooms.multiplayer.random_room_hero_codes", return_value=(roster1, roster2)):
             with mock.patch.object(room, "_resolve_ai_until_human_input"):
                 room.start_battle(host_token)
 
@@ -522,7 +610,7 @@ class MultiplayerRoomTests(unittest.TestCase):
         room.join("Bob")
 
         with mock.patch(
-            "wujiang.web.multiplayer.random_room_hero_codes",
+            "wujiang.tactical.rooms.multiplayer.random_room_hero_codes",
             return_value=(["fire_funeral"], ["elite_soldier"]),
         ):
             room.start_battle(host_token)
@@ -658,7 +746,7 @@ class MultiplayerRoomTests(unittest.TestCase):
         caster = next(unit for unit in room.battle.hero_units(1) if unit.hero_code == "n")
         caster.position = Position(4, 4)
 
-        with mock.patch("wujiang.heroes.next_five.random.choice", side_effect=lambda seq: seq[0]):
+        with mock.patch("wujiang.tactical.heroes.next_five.random.choice", side_effect=lambda seq: seq[0]):
             room.perform_action(
                 host_token,
                 {
@@ -691,7 +779,7 @@ class MultiplayerRoomTests(unittest.TestCase):
         caster = next(unit for unit in room.battle.hero_units(1) if unit.hero_code == "n")
         caster.position = Position(4, 4)
 
-        with mock.patch("wujiang.heroes.next_five.random.choice", side_effect=lambda seq: seq[0]):
+        with mock.patch("wujiang.tactical.heroes.next_five.random.choice", side_effect=lambda seq: seq[0]):
             room.perform_action(
                 host_token,
                 {
@@ -788,15 +876,20 @@ class MultiplayerRoomTests(unittest.TestCase):
         with self.assertRaises(RoomError):
             self.registry.get_room(room.room_id)
 
-    def test_player_cannot_leave_while_battle_is_running(self) -> None:
+    def test_player_leave_during_battle_surrenders_and_exits(self) -> None:
         room, _, host_token = self.registry.create_room("Alice")
         _, guest_token = room.join("Bob")
         room.select_hero(host_token, "ellie")
         room.select_hero(guest_token, "bard")
         room.start_battle(host_token)
 
-        with self.assertRaises(RoomError):
-            self.registry.leave_room(room.room_id, guest_token)
+        deleted, leaving_player_id = self.registry.leave_room(room.room_id, guest_token)
+
+        self.assertFalse(deleted)
+        self.assertEqual(leaving_player_id, 2)
+        self.assertEqual(room.status, "finished")
+        self.assertEqual(room.battle.winner, 1)
+        self.assertFalse(room.serialize_state(host_token)["room"]["seats"][1]["occupied"])
 
     def test_player_can_surrender_and_finish_battle(self) -> None:
         room, _, host_token = self.registry.create_room("Alice")
@@ -863,6 +956,7 @@ class MultiplayerRoomTests(unittest.TestCase):
 
     def test_ai_only_6v6_with_split_actor_prepares_without_enumerating_combinations(self) -> None:
         room, _, host_token = self.registry.create_room("Alice")
+        room.set_board_size(host_token, 16, 16)
         room.set_seat_controller(host_token, 2, "ai")
         for hero_code in ["bard", "dark_human", "elite_soldier", "fire_funeral", "ellie", "jade"]:
             room.select_hero(host_token, hero_code, seat_id=1)

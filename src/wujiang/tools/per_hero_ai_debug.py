@@ -9,10 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from wujiang.heroes.registry import list_heroes
+from wujiang.tactical.heroes.registry import list_heroes
 from wujiang.tools.batch_match_audit import HIGH_SIGNAL_CATEGORIES, read_jsonl
 from wujiang.tools.match_audit import DEFAULT_MAX_STEPS, parse_roster, run_match_audit, sanitize_label, write_json, write_jsonl
-from wujiang.web import ai as ai_policy
+from wujiang.tactical.rooms import ai as ai_policy
 
 
 DEFAULT_PER_HERO_DIR = Path("reports") / "per-hero-ai-debug"

@@ -11,13 +11,13 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from wujiang.engine.core import ActionError, DamageContext, HealContext, Position, StatusEffect  # noqa: E402
-from wujiang.heroes.first_five import GreatFireFuneralField, MedusaSummon  # noqa: E402
-from wujiang.heroes.common import SlowStatus  # noqa: E402
-from wujiang.heroes.next_five import BloodDanceLockStatus, ErasureCounterStatus, RockAbsorbFootprintStatus, SandstormWeatherEffect, StandardCloneSummon  # noqa: E402
-from wujiang.heroes.excel_roster import EXCEL_HERO_REGISTRY, MountainGodCounterStatus  # noqa: E402
-from wujiang.heroes.registry import HERO_REGISTRY, RANDOM_HERO_BATTLE_MODE, create_battle, create_classic_battle, create_hero, list_heroes  # noqa: E402
-from wujiang.web.ai import attack_payloads_for_action, build_attack_candidates, difficulty_profile, reaction_payloads_for_option, skill_payloads_for_action  # noqa: E402
+from wujiang.tactical.engine.core import ActionError, DamageContext, HealContext, Position, StatusEffect  # noqa: E402
+from wujiang.tactical.heroes.first_five import GreatFireFuneralField, MedusaSummon  # noqa: E402
+from wujiang.tactical.heroes.common import SlowStatus  # noqa: E402
+from wujiang.tactical.heroes.next_five import BloodDanceLockStatus, ErasureCounterStatus, RockAbsorbFootprintStatus, SandstormWeatherEffect, StandardCloneSummon  # noqa: E402
+from wujiang.tactical.heroes.excel_roster import EXCEL_HERO_REGISTRY, MountainGodCounterStatus  # noqa: E402
+from wujiang.tactical.heroes.registry import HERO_REGISTRY, RANDOM_HERO_BATTLE_MODE, create_battle, create_classic_battle, create_hero, list_heroes  # noqa: E402
+from wujiang.tactical.rooms.ai import attack_payloads_for_action, build_attack_candidates, difficulty_profile, reaction_payloads_for_option, skill_payloads_for_action  # noqa: E402
 
 
 def primary_hero(battle, player_id: int):
@@ -229,7 +229,7 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertEqual(panther.current_mana, panther.max_mana())
 
     def test_d_panther_ai_generates_copied_skill_payloads(self) -> None:
-        from wujiang.web.ai import build_skill_candidates, difficulty_profile
+        from wujiang.tactical.rooms.ai import build_skill_candidates, difficulty_profile
 
         battle = create_battle("excel_r022", "bard")
         panther = primary_hero(battle, 1)
@@ -283,7 +283,7 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(soldier.current_hp, 0.75)
 
     def test_fried_ai_generates_inspire_and_royal_soldier_payloads(self) -> None:
-        from wujiang.web.ai import build_skill_candidates, difficulty_profile
+        from wujiang.tactical.rooms.ai import build_skill_candidates, difficulty_profile
 
         battle = create_battle(["excel_r024", "bard"], "ellie")
         fried = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r024")
@@ -336,7 +336,7 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertEqual(ellie.current_mana, 2.0)
 
     def test_agency_ai_generates_contract_and_borrowed_skill_payloads(self) -> None:
-        from wujiang.web.ai import build_skill_candidates, difficulty_profile
+        from wujiang.tactical.rooms.ai import build_skill_candidates, difficulty_profile
 
         battle = create_battle(["excel_r025", "bard"], "ellie")
         mubie = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r025")
@@ -413,7 +413,7 @@ class BattleSmokeTests(unittest.TestCase):
 
         battle.perform_action({"type": "skill", "unit_id": wuchang.unit_id, "skill_code": "wuchang_mist"})
         battle.perform_action({"type": "end_turn"})
-        with mock.patch("wujiang.heroes.excel_roster.random.random", return_value=0.1):
+        with mock.patch("wujiang.tactical.heroes.excel_roster.random.random", return_value=0.1):
             battle.perform_action({"type": "attack", "unit_id": bard.unit_id, "target_unit_id": wuchang.unit_id, "x": 1, "y": 1})
             resolve_pending_chain(battle)
 
@@ -1513,7 +1513,7 @@ class BattleSmokeTests(unittest.TestCase):
         bard.current_hp = 2
         bard.shields = 1
 
-        with mock.patch("wujiang.heroes.excel_roster.random.random", return_value=0.9):
+        with mock.patch("wujiang.tactical.heroes.excel_roster.random.random", return_value=0.9):
             battle.perform_action(
                 {
                     "type": "skill",
@@ -1539,7 +1539,7 @@ class BattleSmokeTests(unittest.TestCase):
         bard.current_hp = 2
         fuma.current_mana = 1
 
-        with mock.patch("wujiang.heroes.excel_roster.random.random", return_value=0.1):
+        with mock.patch("wujiang.tactical.heroes.excel_roster.random.random", return_value=0.1):
             battle.perform_action({"type": "skill", "unit_id": fuma.unit_id, "skill_code": "fuma_trap", "x": 2, "y": 1})
         resolve_pending_chain(battle)
 
@@ -1557,7 +1557,7 @@ class BattleSmokeTests(unittest.TestCase):
         bard.max_health = 2
         bard.current_hp = 2
 
-        with mock.patch("wujiang.heroes.excel_roster.random.random", return_value=0.9):
+        with mock.patch("wujiang.tactical.heroes.excel_roster.random.random", return_value=0.9):
             battle.perform_action(
                 {
                     "type": "skill",
@@ -2302,7 +2302,7 @@ class BattleSmokeTests(unittest.TestCase):
         bard.current_mana = 2
         bard.shields = 1
 
-        with mock.patch("wujiang.heroes.excel_roster.random.random", side_effect=[0.75, 0.75, 0.75]):
+        with mock.patch("wujiang.tactical.heroes.excel_roster.random.random", side_effect=[0.75, 0.75, 0.75]):
             battle.perform_action(
                 {
                     "type": "skill",
@@ -2369,6 +2369,35 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertEqual(target.position, Position(4, 4))
         self.assertTrue(target.cannot_normal_move)
 
+    def test_ellie_crystal_ball_lets_drain_mana_target_off_line(self) -> None:
+        battle = create_battle("ellie", "fire_funeral")
+        ellie = battle.player_units(1)[0]
+        target = battle.player_units(2)[0]
+        ellie.position = Position(1, 1)
+        target.position = Position(4, 2)
+        target.current_mana = 3
+        drain = ellie.get_skill("drain_mana")
+
+        def drain_preview():
+            return battle.filter_preview_targets(
+                ellie,
+                drain.preview(battle, ellie),
+                replace_cells=True,
+                require_line_targeting=True,
+                line_target_range=drain.direct_unit_target_range(battle, ellie, {}),
+            )
+
+        self.assertNotIn(target.unit_id, drain_preview()["target_unit_ids"])
+        battle.perform_action({"type": "skill", "unit_id": ellie.unit_id, "skill_code": "crystal_ball"})
+        self.assertIn(target.unit_id, drain_preview()["target_unit_ids"])
+
+        before = target.current_mana
+        battle.perform_action(
+            {"type": "skill", "unit_id": ellie.unit_id, "skill_code": "drain_mana", "target_unit_id": target.unit_id}
+        )
+        resolve_pending_chain(battle)
+        self.assertEqual(target.current_mana, before - 1)
+
     def test_battle_randomly_resolves_winner_after_turn_timeout(self) -> None:
         battle = create_battle("bard", "ellie")
         self.assertEqual(battle.initial_hero_count, 2)
@@ -2380,7 +2409,7 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertIsNone(battle.winner)
         self.assertEqual(battle.completed_turns, 39)
 
-        with mock.patch("wujiang.engine.core.random.choice", return_value=2):
+        with mock.patch("wujiang.tactical.engine.core.random.choice", return_value=2):
             battle.perform_action({"type": "end_turn"})
 
         self.assertEqual(battle.completed_turns, 40)
@@ -3225,7 +3254,7 @@ class BattleSmokeTests(unittest.TestCase):
         bard.position = Position(5, 4)
         bard.shields = 1
 
-        with mock.patch("wujiang.heroes.common.random.random", return_value=0.2):
+        with mock.patch("wujiang.tactical.heroes.common.random.random", return_value=0.2):
             battle.perform_action({"type": "attack", "unit_id": soldier.unit_id, "target_unit_id": bard.unit_id})
 
         self.assertEqual(bard.shields, 0)
@@ -3670,7 +3699,7 @@ class BattleSmokeTests(unittest.TestCase):
         dark.position = Position(4, 4)
         bard.position = Position(6, 4)
 
-        with mock.patch("wujiang.heroes.first_five.random.random", return_value=0.6):
+        with mock.patch("wujiang.tactical.heroes.first_five.random.random", return_value=0.6):
             battle.perform_action({"type": "skill", "unit_id": dark.unit_id, "skill_code": "fate_kick", "x": 5, "y": 4})
         self.assertEqual(dark.position, Position(5, 4))
         self.assertIsNotNone(battle.pending_chain)
@@ -3694,7 +3723,7 @@ class BattleSmokeTests(unittest.TestCase):
         dark.position = Position(4, 4)
         bard.position = Position(6, 4)
 
-        with mock.patch("wujiang.heroes.first_five.random.random", return_value=0.4):
+        with mock.patch("wujiang.tactical.heroes.first_five.random.random", return_value=0.4):
             battle.perform_action({"type": "skill", "unit_id": dark.unit_id, "skill_code": "fate_kick", "x": 5, "y": 4})
 
         self.assertEqual(dark.position, Position(5, 4))
@@ -3710,7 +3739,7 @@ class BattleSmokeTests(unittest.TestCase):
         bard.position = Position(6, 4)
         bard.shields = 1
 
-        with mock.patch("wujiang.heroes.first_five.random.random", return_value=0.6):
+        with mock.patch("wujiang.tactical.heroes.first_five.random.random", return_value=0.6):
             battle.perform_action({"type": "skill", "unit_id": dark.unit_id, "skill_code": "fate_kick", "x": 5, "y": 4})
 
         self.assertEqual(dark.position, Position(5, 4))
@@ -4143,7 +4172,7 @@ class BattleSmokeTests(unittest.TestCase):
         dark.position = Position(4, 4)
         bard.position = Position(6, 4)
 
-        with mock.patch("wujiang.heroes.first_five.random.random", return_value=0.6):
+        with mock.patch("wujiang.tactical.heroes.first_five.random.random", return_value=0.6):
             battle.perform_action({"type": "skill", "unit_id": dark.unit_id, "skill_code": "fate_kick", "x": 5, "y": 4})
             self.assertIsNotNone(battle.pending_chain)
             battle.perform_action({"type": "chain_skip"})
@@ -4159,7 +4188,7 @@ class BattleSmokeTests(unittest.TestCase):
         dark.position = Position(4, 4)
         bard.position = Position(6, 4)
 
-        with mock.patch("wujiang.heroes.first_five.random.random", return_value=0.6):
+        with mock.patch("wujiang.tactical.heroes.first_five.random.random", return_value=0.6):
             battle.perform_action({"type": "skill", "unit_id": dark.unit_id, "skill_code": "fate_kick", "x": 5, "y": 4})
             self.assertIsNotNone(battle.pending_chain)
             battle.perform_action({"type": "chain_skip"})
@@ -5070,7 +5099,7 @@ class BattleSmokeTests(unittest.TestCase):
         first_bard.position = Position(6, 3)
         battle.add_unit(second_bard, Position(6, 4))
 
-        with mock.patch("wujiang.engine.core.random.random", side_effect=[0.9, 0.1]):
+        with mock.patch("wujiang.tactical.engine.core.random.random", side_effect=[0.9, 0.1]):
             battle.perform_action(
                 {
                     "type": "skill",
@@ -5443,7 +5472,7 @@ class BattleSmokeTests(unittest.TestCase):
         roster2 = ["rock_god", "elite_soldier", "ellie"]
 
         classic_battle = create_battle(roster1, roster2)
-        with mock.patch("wujiang.heroes.registry.random.choice", side_effect=lambda seq: seq[-1]):
+        with mock.patch("wujiang.tactical.heroes.registry.random.choice", side_effect=lambda seq: seq[-1]):
             random_battle = create_battle(roster1, roster2, mode=RANDOM_HERO_BATTLE_MODE)
 
         self.assertEqual(random_battle.width, classic_battle.width)
@@ -5924,7 +5953,7 @@ class NTests(unittest.TestCase):
         original_position = Position(4, 4)
         destinations = [Position(3, 3), Position(3, 4), Position(4, 3)]
 
-        with mock.patch("wujiang.heroes.next_five.random.choice", side_effect=lambda seq: seq[0]):
+        with mock.patch("wujiang.tactical.heroes.next_five.random.choice", side_effect=lambda seq: seq[0]):
             battle.perform_action(
                 {
                     "type": "skill",

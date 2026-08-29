@@ -8,9 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from wujiang.engine.core import ActionError, Battle, Position, QueuedAction, Unit
-from wujiang.heroes.registry import CLASSIC_BATTLE_MODE, create_battle
-from wujiang.web import ai as ai_policy
+from wujiang.tactical.engine.core import ActionError, Battle, Position, QueuedAction, Unit
+from wujiang.tactical.heroes.registry import CLASSIC_BATTLE_MODE, create_battle
+from wujiang.tactical.rooms import ai as ai_policy
 
 
 DEFAULT_AUDIT_DIR = Path("reports") / "match-audit"

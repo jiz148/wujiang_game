@@ -14,14 +14,16 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-import wujiang.web.server as server_module  # noqa: E402
-from wujiang.deployment import run_production_audit, validate_production_configuration  # noqa: E402
-from wujiang.strategy import StrategyStore  # noqa: E402
-from wujiang.web.analytics import AnalyticsStore  # noqa: E402
-from wujiang.web.auth import UserStore  # noqa: E402
-from wujiang.web.match_history import MatchHistoryStore  # noqa: E402
-from wujiang.web.observability import Observability, ObservabilityConfig  # noqa: E402
-from wujiang.web.security import SecurityConfig  # noqa: E402
+import wujiang.platform.http.server as server_module  # noqa: E402
+import wujiang.strategic.campaign_runtime as campaign_runtime  # noqa: E402
+import wujiang.platform.http.runtime as http_runtime  # noqa: E402
+from wujiang.platform.deployment import run_production_audit, validate_production_configuration  # noqa: E402
+from wujiang.strategic import StrategyStore  # noqa: E402
+from wujiang.platform.analytics import AnalyticsStore  # noqa: E402
+from wujiang.platform.auth import UserStore  # noqa: E402
+from wujiang.platform.match_history import MatchHistoryStore  # noqa: E402
+from wujiang.platform.observability import Observability, ObservabilityConfig  # noqa: E402
+from wujiang.platform.security import SecurityConfig  # noqa: E402
 
 
 def production_configuration() -> tuple[SecurityConfig, ObservabilityConfig]:
@@ -131,11 +133,11 @@ class ProductionDeploymentTests(unittest.TestCase):
         self.assertNotIn(secret, serialized)
 
     def test_maintenance_failure_removes_readiness_and_restart_recovers(self) -> None:
-        server_module.AUTH_STORE = self.auth
-        server_module.ANALYTICS_STORE = self.analytics
-        server_module.MATCH_HISTORY_STORE = self.history
-        server_module.STRATEGY_STORE = self.strategy
-        server_module.OBSERVABILITY = Observability(ObservabilityConfig(environment="test"))
+        http_runtime.AUTH_STORE = self.auth
+        http_runtime.ANALYTICS_STORE = self.analytics
+        http_runtime.MATCH_HISTORY_STORE = self.history
+        campaign_runtime.STRATEGY_STORE = self.strategy
+        http_runtime.OBSERVABILITY = Observability(ObservabilityConfig(environment="test"))
         ready, dependencies = server_module.readiness_status()
         self.assertTrue(ready)
         marker = self.shared_db.with_name(f"{self.shared_db.name}.maintenance.json")
@@ -144,7 +146,7 @@ class ProductionDeploymentTests(unittest.TestCase):
         self.assertFalse(ready)
         self.assertEqual(dependencies["strategy"], "failed")
         marker.unlink()
-        server_module.STRATEGY_STORE = StrategyStore(self.shared_db, backup_dir=self.backup_dir)
+        campaign_runtime.STRATEGY_STORE = StrategyStore(self.shared_db, backup_dir=self.backup_dir)
         ready, dependencies = server_module.readiness_status()
         self.assertTrue(ready)
         self.assertEqual(dependencies["strategy"], "ok")

@@ -17,9 +17,9 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from wujiang.strategy.diagnostics import run_strategy_diagnostics  # noqa: E402
-from wujiang.strategy.errors import StrategyError  # noqa: E402
-from wujiang.strategy.repair import (  # noqa: E402
+from wujiang.strategic.diagnostics import run_strategy_diagnostics  # noqa: E402
+from wujiang.strategic.errors import StrategyError  # noqa: E402
+from wujiang.strategic.repair import (  # noqa: E402
     REPAIR_TOKEN_ENV,
     StrategyRepairPlan,
     apply_repair_plan,
@@ -27,9 +27,9 @@ from wujiang.strategy.repair import (  # noqa: E402
     create_restore_plan,
     maintenance_marker_path,
 )
-from wujiang.strategy.store import StrategyStore  # noqa: E402
+from wujiang.strategic.store import StrategyStore  # noqa: E402
 from wujiang.tools.strategy_repair import main as repair_main  # noqa: E402
-from wujiang.web.auth import AuthUser  # noqa: E402
+from wujiang.platform.auth import AuthUser  # noqa: E402
 
 
 class StrategyRepairTests(unittest.TestCase):

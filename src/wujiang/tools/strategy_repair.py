@@ -7,15 +7,15 @@ import os
 from pathlib import Path
 from typing import Any
 
-from wujiang.strategy.errors import StrategyError
-from wujiang.strategy.repair import (
+from wujiang.strategic.errors import StrategyError
+from wujiang.strategic.repair import (
     REPAIR_TOKEN_ENV,
     StrategyRepairPlan,
     apply_repair_plan,
     create_repair_plan,
     create_restore_plan,
 )
-from wujiang.strategy.store import strategy_database_path
+from wujiang.strategic.store import strategy_database_path
 
 
 def _print_json(payload: Any) -> None:

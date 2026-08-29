@@ -5,14 +5,14 @@ import json
 import os
 from pathlib import Path
 
-from wujiang.deployment import run_production_audit
-from wujiang.strategy.backup import strategy_backup_directory
-from wujiang.strategy.store import strategy_database_path
-from wujiang.web.analytics import analytics_database_path
-from wujiang.web.auth import auth_database_path
-from wujiang.web.match_history import match_history_database_path
-from wujiang.web.observability import ObservabilityConfig
-from wujiang.web.security import SecurityConfig
+from wujiang.platform.deployment import run_production_audit
+from wujiang.strategic.backup import strategy_backup_directory
+from wujiang.strategic.store import strategy_database_path
+from wujiang.platform.analytics import analytics_database_path
+from wujiang.platform.auth import auth_database_path
+from wujiang.platform.match_history import match_history_database_path
+from wujiang.platform.observability import ObservabilityConfig
+from wujiang.platform.security import SecurityConfig
 
 
 def build_parser() -> argparse.ArgumentParser:

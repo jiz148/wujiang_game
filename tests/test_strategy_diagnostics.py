@@ -15,11 +15,11 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from wujiang.strategy.audit import read_operation_audit, verify_operation_audit_chain  # noqa: E402
-from wujiang.strategy.diagnostics import run_strategy_diagnostics  # noqa: E402
-from wujiang.strategy.store import StrategyStore  # noqa: E402
+from wujiang.strategic.audit import read_operation_audit, verify_operation_audit_chain  # noqa: E402
+from wujiang.strategic.diagnostics import run_strategy_diagnostics  # noqa: E402
+from wujiang.strategic.store import StrategyStore  # noqa: E402
 from wujiang.tools.strategy_diagnostics import main as diagnostics_main  # noqa: E402
-from wujiang.web.auth import AuthUser  # noqa: E402
+from wujiang.platform.auth import AuthUser  # noqa: E402
 
 
 class StrategyDiagnosticsTests(unittest.TestCase):

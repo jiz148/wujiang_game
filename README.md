@@ -1,9 +1,27 @@
 # Wujiang Game
 
+## Architecture
+
+Code is organised by domain so that strategic and tactical work stay independent:
+
+- `src/wujiang/platform/` — HTTP kernel, accounts, analytics, match history, security. Knows nothing about gameplay.
+- `src/wujiang/tactical/` — the grid battle: engine, heroes, rooms, battle endpoints.
+- `src/wujiang/strategic/` — the campaign: world, cities, armies, diplomacy, relics, campaign endpoints.
+- `src/wujiang/bridge/` — the only channel between the two game domains.
+- `static/` mirrors the same split as ES modules, with `static/bridge/campaign-battle.js` as its seam.
+
+The two game domains must not import each other. See [docs/架构分层说明.md](docs/架构分层说明.md) for the full layering rules, the bridge contracts and a path map from the older docs.
+
 ## Quick Start
 
 - Local single-machine run:
   - `python run.py`
+- Tests (run from the repository root; `replays/` resolves relative to the working directory):
+  - `python -m unittest discover -s tests`
+  - `node tools/verify_frontend_modules.mjs` link-checks the frontend module graph.
+  - `python tools/verify_frontend_globals.py` scans for identifiers no module imports or declares.
+  - `python tools/verify_frontend_dom_ids.py` finds `$("...")` lookups whose element no longer exists in the markup.
+  - `python tools/verify_frontend_boot.py` drives a real browser through gate, menu, campaign and battle. Static checks cannot see a runtime DOM error, and a failed render reaches the player as a blank screen. Skips itself when no browser is installed.
 - Windows online test by double-click:
   - Double-click [start_windows_server.bat](/C:/Users/jiz14/TeamGH/wujiang_game/start_windows_server.bat)
   - The launcher now defaults to a temporary public HTTPS tunnel, so friends outside your LAN can open the generated link directly.

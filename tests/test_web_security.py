@@ -18,14 +18,16 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-import wujiang.web.server as server_module  # noqa: E402
-from wujiang.strategy import StrategyStore  # noqa: E402
-from wujiang.web.analytics import AnalyticsStore  # noqa: E402
-from wujiang.web.auth import UserStore  # noqa: E402
-from wujiang.web.match_history import MatchHistoryStore  # noqa: E402
-from wujiang.web.rate_limit import RateLimiter, RateLimitPolicy  # noqa: E402
-from wujiang.web.security import SecurityConfig, effective_client_ip, effective_host, effective_scheme  # noqa: E402
-from wujiang.web.server import (  # noqa: E402
+import wujiang.platform.http.server as server_module  # noqa: E402
+import wujiang.strategic.campaign_runtime as campaign_runtime  # noqa: E402
+import wujiang.platform.http.runtime as http_runtime  # noqa: E402
+from wujiang.strategic import StrategyStore  # noqa: E402
+from wujiang.platform.analytics import AnalyticsStore  # noqa: E402
+from wujiang.platform.auth import UserStore  # noqa: E402
+from wujiang.platform.match_history import MatchHistoryStore  # noqa: E402
+from wujiang.platform.rate_limit import RateLimiter, RateLimitPolicy  # noqa: E402
+from wujiang.platform.security import SecurityConfig, effective_client_ip, effective_host, effective_scheme  # noqa: E402
+from wujiang.platform.http.server import (  # noqa: E402
     WujiangHandler, configure_public_base_url, configure_rate_limiter, configure_security,
 )
 
@@ -76,10 +78,10 @@ class WebSecurityBehaviorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         root = Path(self.tmpdir.name)
-        server_module.AUTH_STORE = UserStore(root / "auth.sqlite3")
-        server_module.ANALYTICS_STORE = AnalyticsStore(root / "analytics.sqlite3")
-        server_module.MATCH_HISTORY_STORE = MatchHistoryStore(root / "history.sqlite3")
-        server_module.STRATEGY_STORE = StrategyStore(root / "strategy.sqlite3")
+        http_runtime.AUTH_STORE = UserStore(root / "auth.sqlite3")
+        http_runtime.ANALYTICS_STORE = AnalyticsStore(root / "analytics.sqlite3")
+        http_runtime.MATCH_HISTORY_STORE = MatchHistoryStore(root / "history.sqlite3")
+        campaign_runtime.STRATEGY_STORE = StrategyStore(root / "strategy.sqlite3")
         configure_public_base_url(None)
         configure_security(SecurityConfig(environment="test", require_https=False, max_json_body_bytes=1024))
         configure_rate_limiter()

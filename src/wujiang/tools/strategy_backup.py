@@ -5,9 +5,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from wujiang.strategy.backup import DEFAULT_AUTOMATIC_BACKUP_RETENTION, StrategyBackupManager
-from wujiang.strategy.errors import StrategyError
-from wujiang.strategy.store import StrategyStore, strategy_database_path
+from wujiang.strategic.backup import DEFAULT_AUTOMATIC_BACKUP_RETENTION, StrategyBackupManager
+from wujiang.strategic.errors import StrategyError
+from wujiang.strategic.store import StrategyStore, strategy_database_path
 
 
 def _print_json(payload: Any) -> None:

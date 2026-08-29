@@ -14,7 +14,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from wujiang.web.auth import (
+from wujiang.platform.auth import (
     AuthError,
     PASSWORD_HASH_ITERATIONS,
     UserStore,
