@@ -4727,6 +4727,8 @@ class Battle:
             }
             if attack_payload:
                 action_entry["attack_payload"] = attack_payload
+            if spec.get("is_attack_variant"):
+                action_entry["is_attack_variant"] = True
             actions.append(action_entry)
         for skill in unit.skills:
             data = skill.to_public_dict(self)

@@ -395,7 +395,6 @@ export async function surrenderBattle() {
       applyRoomPayload(error.state, { preserveScreen: true });
       render();
     }
-    $("message").textContent = error.error || "投降失败。";
   }
 }
 
@@ -852,8 +851,7 @@ export async function completeTutorialUnitSelection(unitId) {
     await recordProductEvent("tutorial_step", {tutorial_id: "first_battle", step_id: previousStep, status: "completed"});
     await recordProductEvent("tutorial_step", {tutorial_id: "first_battle", step_id: tutorialState()?.step_id, status: "started"});
     render();
-  } catch (error) {
-    $("message").textContent = error.error || "请点击你控制的火葬者。";
+  } catch {
   }
 }
 
@@ -962,8 +960,7 @@ export async function loadReplayStep(stepIndex, { omniscient = state.replayOmnis
     state.battle = payload.battle || null;
     syncSelectedUnitAfterStateChange();
     render();
-  } catch (error) {
-    $("message").textContent = error.error || "\u52a0\u8f7d\u56de\u653e\u6b65\u6570\u5931\u8d25\u3002";
+  } catch {
   }
 }
 
@@ -989,7 +986,6 @@ export async function controlSimulation(action, speed = null) {
       applyRoomPayload(error.state, { preserveScreen: true });
       render();
     }
-    $("message").textContent = error.error || "\u63a7\u5236 AI \u6a21\u62df\u5931\u8d25\u3002";
   }
 }
 
@@ -1029,7 +1025,6 @@ export async function performAction(payload) {
       applyRoomPayload(error.state, { preserveScreen: true });
       render();
     }
-    $("message").textContent = error.error || "执行失败。";
     recordProductEvent("invalid_action", {
       match_id: state.room?.room_id || "",
       mode: tutorialState() ? "tutorial" : state.room?.mode || "room",
@@ -1107,7 +1102,6 @@ export async function retryTutorialStep() {
   if (!tutorial) return;
   clearActionSelection();
   if (!tutorial.can_retry_checkpoint) {
-    $("message").textContent = "本步战局仍然有效，请按金色提示重新操作。";
     render();
     return;
   }
@@ -1119,8 +1113,7 @@ export async function retryTutorialStep() {
     applyRoomPayload(payload, {preserveScreen: false});
     recordProductEvent("tutorial_step", {tutorial_id: "first_battle", step_id: tutorial.step_id, status: "retried"});
     render();
-  } catch (error) {
-    $("message").textContent = error.error || "无法恢复教学检查点。";
+  } catch {
   }
 }
 
@@ -1225,14 +1218,5 @@ export function attackTargetIdAtCell(action, x, y, occupant) {
     .map((unit) => unit.id)[0] || "";
 }
 
-export function explainInvalidBoardChoice(action, occupant = null) {
-  let reason = "该格不属于当前行动的合法范围，请选择高亮格。";
-  if (action?.kind === "move") reason = "该格无法作为移动路径的下一步：可能超出剩余速度、被单位阻挡或会让完整身形越界。";
-  else if (action?.kind === "attack") reason = occupant
-    ? "该单位不在当前攻击范围或合法直线上。"
-    : "这里没有可攻击的单位，请点击高亮目标。";
-  else if (action?.kind === "skill") reason = occupant
-    ? "该单位不是此技能当前可选择的合法目标。"
-    : "该格不符合技能的范围、方向或形状要求。";
-  $("message").textContent = reason;
+export function explainInvalidBoardChoice(_action = null, _occupant = null) {
 }

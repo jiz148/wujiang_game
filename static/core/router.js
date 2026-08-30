@@ -12,18 +12,17 @@ export const SCREENS = ["gate", "menu", "draft", "battle"];
 
 const DEFAULT_SCREEN = "draft";
 
-// draft 屏是个容器，同一个 `#draft` 可能是战役、遭遇战、教学或档案中的任意一个，
+// draft 屏是个容器，同一个 `#draft` 可能是战役、遭遇战或档案中的任意一个，
 // 重开时无从还原是哪一个——地址栏因此必须写玩家实际所在的去处，而不是容器名。
 // 这也是先前那个 bug 的根源：旧的 screenHash() 把 menu 也写成 `#draft`，
 // 于是主菜单会在地址栏留下 `#draft`，下次打开就直接跳进内层，退不回菜单。
-export const FLOWS = ["campaign", "skirmish", "tutorial", "archive"];
+export const FLOWS = ["campaign", "skirmish", "archive"];
 
 // 左上角写的是"你在哪"。此前它恒为「武将」，于是战役和遭遇战顶着同一个标题，
 // 而这两条路线除了共用一个外壳之外没有任何关系。
 const ROUTE_TITLES = {
   campaign: "战役",
   skirmish: "战场对战",
-  tutorial: "新手教学",
   archive: "战绩与回放",
 };
 

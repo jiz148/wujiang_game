@@ -1,5 +1,5 @@
 // DOM event wiring for every screen.
-import { activeBundles, activeOccupantAt, allUnits, canInteract, currentRespawnPrompt, fetchJson, hasBattle, hasRoom, inputPlayer, isChainMode, isGameOver, isReplayMode, isRespawnMode, recordProductEvent, replayMeta, roomQueryId, simulationMeta, stagedBackstepRetreatCell, stagedBackstepTargetId, stagedTarget, syncLocation, toggleSidebarPanel, unitById, viewerPlayerId, visibleUnitAt } from '../core/net.js';
+import { activeBundles, activeOccupantAt, allUnits, canInteract, currentRespawnPrompt, fetchJson, hasBattle, hasRoom, inputPlayer, isChainMode, isGameOver, isReplayMode, isRespawnMode, recordProductEvent, replayMeta, roomQueryId, simulationMeta, stagedBackstepRetreatCell, stagedBackstepTargetId, syncLocation, toggleSidebarPanel, unitById, viewerPlayerId, visibleUnitAt } from '../core/net.js';
 import { refreshState, render } from '../core/render.js';
 import { state, ui } from '../core/state.js';
 import { setScreen, syncScreen } from '../core/ui.js';
@@ -13,7 +13,7 @@ import { closeKeyboardHelp, focusMainContent, handleBattleKeyboard, onBoardClick
 import { canEditRoomSetup, canManageSeatRoster, closeHeroDetail, closeHeroPicker, closeRoomSetup, confirmRoomSetup, isSeatLocked, openHeroDetail, openHeroPicker, openRoomSetup, renderHeroPicker, renderRoomSetupDialog, roomHeroLimit, seatHeroEntries, updateRoomSetupDraft } from '../tactical/room-lobby.js';
 import { applyRoomPayload, autoConfigureRoom, canReclaimSeatByName, controlSimulation, copyInviteLink, createRoom, deleteRoom, exitTutorial, isRandomRoomMode, joinRoom, leaveReplayMode, leaveRoom, loadReplayStep, performAction, renderTutorialGuide, restartFromGameOver, resumeStoredSeat, resumeTutorialBattle, retryTutorialStep, roomModeMeta, selectRoomHero, setRoomSeatController, setRoomSeatTeam, setSeatRandomQuota, shouldShowLobbyPanel, startRoomBattle, startTutorialBattle, surrenderBattle, toggleRoomReady } from '../tactical/room-api.js';
 import { clearActionSelection, loadStoredIdentity } from '../tactical/session.js';
-import { actionNeedsTarget, actionTitle, bodyDirectionSelection, canCompleteTargetSelection, choicePatternSelection, controllerTypeLabel, currentRoomSeat, hasCancelableTargetSelection, isBoardTargetSelectionActive, movePathSelection, multiUnitSelection, patternSelection, randomRoomRosterSize, reviveUnitCellSelection, roomSummaries, sanitizeRandomRosterSizeInput, seatHeroSummary, setStagedBodyDirection, setStagedPatternChoice, setStagedReviveUnitId, setStagedStatName, stagedBodyCells, stagedBodyDirection, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, statCellSelection } from '../tactical/targeting.js';
+import { bodyDirectionSelection, canCompleteTargetSelection, choicePatternSelection, controllerTypeLabel, currentRoomSeat, hasCancelableTargetSelection, isBoardTargetSelectionActive, movePathSelection, multiUnitSelection, patternSelection, randomRoomRosterSize, reviveUnitCellSelection, roomSummaries, sanitizeRandomRosterSizeInput, seatHeroSummary, setStagedAttackVariant, setStagedBodyDirection, setStagedPatternChoice, setStagedReviveUnitId, setStagedStatName, stagedAttackActionPayload, stagedBodyCells, stagedBodyDirection, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, statCellSelection } from '../tactical/targeting.js';
 import { clearBattleVfx, selectedAction, tutorialState } from '../tactical/vfx.js';
 import { createMenu } from './components.js';
 import { $ } from './dom.js';
@@ -179,8 +179,11 @@ export function bindEvents() {
     const target = event.target instanceof Element ? event.target : null;
     if (event.button !== 0) return;
     if (!target || target.closest("input, select, textarea, label, .board-alert, .board-hint, .battle-surrender, .game-over-overlay")) return;
-    if (isBoardTargetSelectionActive() && (target.closest(".cell") || target.closest(".piece"))) return;
     const boardCell = target.closest(".cell");
+    const clickedPiece = target.closest(".piece");
+    if (clickedPiece) return;
+    if (boardCell && board?.contains(boardCell) && visibleUnitAt(Number(boardCell.dataset.x), Number(boardCell.dataset.y))) return;
+    if (isBoardTargetSelectionActive() && boardCell) return;
     const clickedBoardCell = Boolean(board && boardCell && board.contains(boardCell));
     if (!clickedBoardCell && target.closest("button")) return;
     ui.boardDragState = {
@@ -300,6 +303,14 @@ export function bindEvents() {
   });
   document.addEventListener("click", (event) => {
     const target = event.target instanceof Element ? event.target : null;
+    const attackVariantButton = target?.closest("[data-attack-variant]");
+    if (attackVariantButton) {
+      const action = selectedAction();
+      if (!action || action.kind !== "attack") return;
+      setStagedAttackVariant(attackVariantButton.getAttribute("data-attack-variant") || "");
+      render();
+      return;
+    }
     const patternChoiceButton = target?.closest("[data-pattern-choice]");
     if (patternChoiceButton) {
       const action = selectedAction();
@@ -406,14 +417,12 @@ export function bindEvents() {
       return;
     }
     if (action.kind === "attack" && patternSelection(action)) {
-      const payload = {
+      performAction({
         type: "attack",
         unit_id: state.selectedUnitId,
         cells: stagedPatternCells(action),
-        ...(action.attack_payload || {}),
-      };
-      if (choicePatternSelection(action)) payload.choice_code = stagedPatternChoiceCode(action);
-      performAction(payload);
+        ...stagedAttackActionPayload(action),
+      });
       return;
     }
     const payload = {
@@ -475,6 +484,17 @@ export function bindEvents() {
     const x = Number(cell.dataset.x);
     const y = Number(cell.dataset.y);
     onBoardClick(x, y, activeOccupantAt(x, y));
+  });
+  $("board-world")?.addEventListener("click", (event) => {
+    if (Date.now() < ui.boardDragSuppressUntil) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest(".cell")) return;
+    const piece = target?.closest(".board-piece");
+    if (!piece || !$("board-pieces")?.contains(piece)) return;
+    const x = Number(piece.dataset.x);
+    const y = Number(piece.dataset.y);
+    const occupant = unitById(piece.dataset.unitId || "") || activeOccupantAt(x, y);
+    onBoardClick(x, y, occupant);
   });
   $("board").addEventListener("keydown", (event) => {
     const cell = event.target?.closest?.(".cell");
@@ -1176,7 +1196,11 @@ export function ensureSelectedUnit() {
   const action = selectedAction();
   if (!state.battle) {
     state.selectedUnitId = "";
+    state.inspectedUnitId = "";
     return;
+  }
+  if (state.inspectedUnitId && !unitById(state.inspectedUnitId)) {
+    state.inspectedUnitId = "";
   }
   if (isRespawnMode()) {
     state.selectedUnitId = currentRespawnPrompt()?.unit_id || "";
@@ -1208,58 +1232,6 @@ export function ensureSelectedUnit() {
 }
 
 export function renderMessage() {
-  const node = $("message");
-  if (!state.battle) {
-    node.textContent = hasRoom() ? "\u623f\u95f4\u5df2\u5efa\u7acb,\u4f46\u5bf9\u5c40\u8fd8\u6ca1\u5f00\u59cb\u3002" : "\u5c1a\u672a\u8fdb\u5165\u623f\u95f4\u3002";
-    return;
-  }
-  if (isReplayMode()) {
-    node.textContent = `\u5f53\u524d\u6b63\u5728\u67e5\u770b\u56de\u653e\u7b2c ${state.replayStepIndex}/${replayMeta().last_step_index} \u6b65\u3002`;
-    return;
-  }
-  if (isGameOver()) {
-    node.textContent = `\u73a9\u5bb6 ${state.battle.winner} \u5df2\u83b7\u80dc\u3002\u6218\u573a\u5df2\u9501\u5b9a,\u53ef\u56de\u5230\u623f\u95f4\u5927\u5385\u67e5\u770b\u672c\u5c40\u623f\u95f4\u3002`;
-    return;
-  }
-  if (!canInteract()) {
-    node.textContent = `\u5f53\u524d\u8f6e\u5230\u73a9\u5bb6 ${inputPlayer()} \u64cd\u4f5c\u3002\u4f60\u53ef\u4ee5\u7ee7\u7eed\u89c2\u5bdf\u6218\u573a,\u7b49\u5f85\u5bf9\u624b\u884c\u52a8\u5b8c\u6210\u3002`;
-    return;
-  }
-  if (isRespawnMode()) {
-    const prompt = currentRespawnPrompt();
-    const unit = unitById(prompt?.unit_id || "");
-    node.textContent = `${unit?.name || "\u6d88\u5931\u5355\u4f4d"} \u9700\u8981\u5148\u91cd\u65b0\u51fa\u73b0\u3002\u8bf7\u70b9\u51fb\u84dd\u8272\u9ad8\u4eae\u7684\u6700\u8fd1\u843d\u70b9\u3002`;
-    return;
-  }
-  if (state.selectedActionCode === "mana_pull" && !state.stagedPayload?.targetUnitId) {
-    node.textContent = "\u9b54\u529b\u7275\u5f15\u5206\u4e24\u6b65:\u5148\u9009\u5355\u4f4d,\u518d\u9009\u843d\u70b9\u3002";
-    return;
-  }
-  if (state.stagedPayload?.targetUnitId && state.selectedActionCode === "mana_pull") {
-    node.textContent = `\u5df2\u9009\u4e2d ${stagedTarget()?.name || "\u88ab\u7275\u5f15\u76ee\u6807"},\u8bf7\u70b9\u51fb\u84dd\u8272\u9ad8\u4eae\u843d\u70b9\u3002`;
-    return;
-  }
-  if (state.selectedActionCode === "descent_moment" && !state.stagedPayload?.targetUnitId) {
-    node.textContent = "降临时刻分两步：先选择带有抹杀计数点的对方单位，再选择周围落点。";
-    return;
-  }
-  if (state.stagedPayload?.targetUnitId && state.selectedActionCode === "descent_moment") {
-    node.textContent = `已选中 ${stagedTarget()?.name || "降临目标"}，请点击蓝色高亮落点。`;
-    return;
-  }
-  if (isChainMode()) {
-    const current = unitById(state.battle.pending_chain?.current_unit_id || "");
-    const source = unitById(state.battle.pending_chain?.queued_action?.actor_id || "");
-    const actionName = state.battle.pending_chain?.queued_action?.display_name || "\u539f\u52a8\u4f5c";
-    node.textContent = `${current?.name || "\u5f53\u524d\u5355\u4f4d"} \u53ef\u4ee5\u5bf9 ${source?.name || "\u5bf9\u65b9\u5355\u4f4d"} \u7684\u3010${actionName}\u3011\u8fdb\u884c\u8fde\u9501,\u70b9\u51fb\u5176\u5468\u56f4\u52a8\u4f5c\u6309\u94ae\u6216\u653e\u5f03\u8fde\u9501\u3002`;
-    return;
-  }
-  const action = selectedAction();
-  if (action) {
-    node.textContent = `\u5df2\u9009\u62e9\u3010${actionTitle(action)}\u3011\u3002${actionNeedsTarget(action) ? "\u8bf7\u5728\u68cb\u76d8\u4e0a\u70b9\u51fb\u84dd\u8272\u9ad8\u4eae\u76ee\u6807\u3002" : "\u518d\u6b21\u70b9\u51fb\u4f1a\u7acb\u5373\u7ed3\u7b97\u3002"} `;
-    return;
-  }
-  node.textContent = `\u5f53\u524d\u7531\u73a9\u5bb6 ${inputPlayer()} \u64cd\u4f5c\u3002`;
 }
 
 // 顶栏只放"你是谁"，不放操作说明——后者归当前屏幕的正文。

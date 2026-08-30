@@ -8031,8 +8031,9 @@ class FrontendBehaviorTests(unittest.TestCase):
         # 容器名不再作为地址出现，菜单和各流程都有自己的去处。
         self.assertNotIn("screenHash", net)
         self.assertIn("screenRoute", net)
-        for flow in ("campaign", "skirmish", "tutorial", "archive"):
+        for flow in ("campaign", "skirmish", "archive"):
             self.assertIn(flow, router)
+        self.assertNotIn("tutorial", router)
 
     @unittest.skipIf(quickjs is None, "quickjs is required to evaluate frontend modules")
     def test_scenario_stray_draft_hash_lands_on_the_menu(self) -> None:
@@ -8048,6 +8049,7 @@ class FrontendBehaviorTests(unittest.TestCase):
             globalThis.unknownFlowRoute = routeOf("draft", "");
             globalThis.strayHash = JSON.stringify(routeTarget("draft"));
             globalThis.flowHash = JSON.stringify(routeTarget("campaign"));
+            globalThis.tutorialHash = JSON.stringify(routeTarget("tutorial"));
             """
         )
 
@@ -8062,6 +8064,10 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertEqual(
             {"screen": "draft", "flow": "campaign"},
             json.loads(ctx.eval("globalThis.flowHash")),
+        )
+        self.assertEqual(
+            {"screen": "menu", "flow": ""},
+            json.loads(ctx.eval("globalThis.tutorialHash")),
         )
 
     def test_scenario_home_entry_prioritizes_game_modes_and_hides_reference_roster(self) -> None:

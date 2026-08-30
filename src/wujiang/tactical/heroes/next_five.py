@@ -2154,6 +2154,7 @@ class TripleStrikeAttackTrait(Trait):
                 "name": "三连重斩",
                 "description": "普攻变体：占用 3 次普攻次数；这次普攻伤害 +3 并半破魔。",
                 "attack_payload": {"attack_variant": "triple"},
+                "is_attack_variant": True,
             }
         ]
 

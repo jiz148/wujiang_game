@@ -7,6 +7,7 @@ export const state = {
   battle: null,
   liveBattle: null,
   selectedUnitId: "",
+  inspectedUnitId: "",
   selectedActionCode: "",
   selectedActionSnapshot: null,
   hoveredActionCode: "",

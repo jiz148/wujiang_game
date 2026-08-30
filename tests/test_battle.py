@@ -5690,6 +5690,30 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(masamune.current_hp, 0.75)
         self.assertLess(bard.current_hp, 4)
 
+    def test_masamune_triple_strike_is_marked_as_attack_variant(self) -> None:
+        battle = create_battle("masamune", "bard")
+        masamune = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        mount = summon_by_code(battle, 1, "motor_horse")
+
+        battle.clear_mounted_state(masamune)
+        masamune.position = Position(4, 4)
+        mount.position = Position(1, 1)
+        bard.position = Position(5, 4)
+        bard.current_mana = 0
+
+        battle.perform_action({"type": "skill", "unit_id": masamune.unit_id, "skill_code": "six_blade_style"})
+        snapshot = battle.action_snapshot_for(masamune)
+        attacks = [entry for entry in snapshot["actions"] if entry.get("kind") == "attack"]
+        self.assertEqual({entry["code"] for entry in attacks}, {"attack", "attack_triple"})
+        primary = next(entry for entry in attacks if entry["code"] == "attack")
+        triple = next(entry for entry in attacks if entry["code"] == "attack_triple")
+        self.assertFalse(primary.get("is_attack_variant"))
+        self.assertTrue(triple.get("is_attack_variant"))
+        self.assertEqual(primary["preview"]["selection"]["mode"], "choice_pattern")
+        right = next(entry for entry in primary["preview"]["selection"]["choices"] if entry["code"] == "right")
+        self.assertTrue(any({"x": 5, "y": 4} in pattern or pattern == [{"x": 5, "y": 4}] for pattern in right["patterns"]))
+
     def test_masamune_block_and_counter_only_exist_after_dismount(self) -> None:
         battle = create_battle("fire_funeral", "masamune")
         fire = primary_hero(battle, 1)

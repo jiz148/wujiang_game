@@ -221,7 +221,6 @@ export async function refreshState({ preserveScreen = true } = {}) {
       if (!state.connectionLostAt) state.connectionLostAt = Date.now();
       markPollFailure();
       render();
-      $("message").textContent = fault.error || "连接中断，正在保留当前房间身份等待重新同步。";
     }
   } finally {
     ui.refreshInFlight = false;

@@ -42,6 +42,7 @@ export function leaveRoomView() {
   state.replayStepIndex = 0;
   state.replayOmniscient = false;
   state.selectedUnitId = "";
+  state.inspectedUnitId = "";
   clearActionSelection();
   syncLocation(state.screen, "");
 }
@@ -57,6 +58,7 @@ export function resetRoomSession({ rooms = state.rooms, roomId = roomQueryId() }
   state.replayOmniscient = false;
   state.roomError = "";
   state.selectedUnitId = "";
+  state.inspectedUnitId = "";
   state.roomForm.joinRoomCode = "";
   state.rooms = rooms || [];
   clearActionSelection();
@@ -92,7 +94,11 @@ export function ensureDraftSelection() {
 export function syncSelectedUnitAfterStateChange() {
   if (!state.battle) {
     state.selectedUnitId = "";
+    state.inspectedUnitId = "";
     return;
+  }
+  if (state.inspectedUnitId && !unitById(state.inspectedUnitId)) {
+    state.inspectedUnitId = "";
   }
   if (isRespawnMode()) {
     state.selectedUnitId = currentRespawnPrompt()?.unit_id || "";

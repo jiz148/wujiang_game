@@ -123,22 +123,67 @@ export function stagedPatternChoiceCode(action = selectedAction()) {
   return String(state.stagedPayload?.choiceCode || "").trim();
 }
 
+function stagedPatternState({ choiceCode = "", cells = [], attackVariant = "" } = {}) {
+  const nextChoice = String(choiceCode || "").trim();
+  const nextCells = normalizedPatternCells(cells);
+  const nextVariant = String(attackVariant || "").trim();
+  if (!nextChoice && !nextCells.length && !nextVariant) return null;
+  return {
+    ...(nextChoice ? { choiceCode: nextChoice } : {}),
+    ...(nextCells.length ? { cells: nextCells } : {}),
+    ...(nextVariant ? { attackVariant: nextVariant } : {}),
+  };
+}
+
+export function stagedAttackVariantCode(action = selectedAction()) {
+  if (!action || state.selectedActionCode !== action.code || action.kind !== "attack") return "";
+  return String(state.stagedPayload?.attackVariant || "").trim();
+}
+
+export function setStagedAttackVariant(variantCode) {
+  const action = selectedAction();
+  if (!action || action.kind !== "attack") return;
+  const next = String(variantCode || "").trim();
+  const valid = !next || (action.attackVariants || []).some((entry) => String(entry.code || "") === next);
+  if (!valid) return;
+  state.stagedPayload = stagedPatternState({
+    choiceCode: stagedPatternChoiceCode(action),
+    cells: stagedPatternCells(action),
+    attackVariant: next,
+  });
+}
+
+export function stagedAttackActionPayload(action = selectedAction()) {
+  const payload = { ...(action?.attack_payload || {}) };
+  const variant = (action?.attackVariants || []).find(
+    (entry) => String(entry.code || "") === stagedAttackVariantCode(action),
+  );
+  if (variant?.attack_payload) Object.assign(payload, variant.attack_payload);
+  const choiceCode = stagedPatternChoiceCode(action);
+  if (choiceCode) payload.choice_code = choiceCode;
+  return payload;
+}
+
 export function setStagedPatternChoice(choiceCode) {
   const action = selectedAction();
   if (!choicePatternSelection(action)) return;
   const next = String(choiceCode || "").trim();
   const keepCells = next && next === stagedPatternChoiceCode(action) ? stagedPatternCells(action) : [];
-  state.stagedPayload = next || keepCells.length
-    ? { ...(next ? { choiceCode: next } : {}), ...(keepCells.length ? { cells: keepCells } : {}) }
-    : null;
+  state.stagedPayload = stagedPatternState({
+    choiceCode: next,
+    cells: keepCells,
+    attackVariant: stagedAttackVariantCode(action),
+  });
 }
 
 export function setStagedPatternCells(cells) {
   const normalized = normalizedPatternCells(cells);
   const choiceCode = stagedPatternChoiceCode();
-  state.stagedPayload = normalized.length || choiceCode
-    ? { ...(choiceCode ? { choiceCode } : {}), ...(normalized.length ? { cells: normalized } : {}) }
-    : null;
+  state.stagedPayload = stagedPatternState({
+    choiceCode,
+    cells: normalized,
+    attackVariant: stagedAttackVariantCode(),
+  });
 }
 
 export function stagedMovePath(action = selectedAction()) {
@@ -544,6 +589,35 @@ export function currentPreview() {
       cellKeys: new Set(),
       targetIds: targetIdsToSet(followUpTargetIds),
       secondaryCellKeys: positionsToSet([...(action.preview?.secondary_cells || []), retreatCell]),
+      destinationCellKeys: new Set(),
+    };
+  }
+  if (attackChoicePatternSelection(action)) {
+    const choice = stagedPatternChoiceCode(action);
+    if (!choice) {
+      return { cellKeys: new Set(), targetIds: new Set(), secondaryCellKeys: new Set(), destinationCellKeys: new Set() };
+    }
+    const choiceEntry = (attackChoicePatternSelection(action).choices || []).find(
+      (entry) => String(entry.code || "") === choice,
+    );
+    const directionCells = [];
+    const seen = new Set();
+    (choiceEntry?.patterns || []).forEach((pattern) => {
+      normalizedPatternCells(pattern).forEach((cell) => {
+        const key = positionKey(cell);
+        if (seen.has(key)) return;
+        seen.add(key);
+        directionCells.push(cell);
+      });
+    });
+    const allowedIds = new Set((action.preview?.target_unit_ids || []).map((id) => String(id)));
+    const targetIds = unitIdsAtCells(directionCells).filter((id) => (
+      allowedIds.has(id) && unitIsSelectableTarget(unitById(id))
+    ));
+    return {
+      cellKeys: positionsToSet(directionCells),
+      targetIds: targetIdsToSet(targetIds),
+      secondaryCellKeys: new Set(),
       destinationCellKeys: new Set(),
     };
   }

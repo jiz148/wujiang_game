@@ -5741,8 +5741,9 @@ body.battle-mode .hover-card {
   transform: translateY(-4px);
 }
 
-.board-hint:hover .board-hint__pop,
-.board-hint:focus-within .board-hint__pop {
+.board-hint__icon:hover + .board-hint__pop,
+.board-hint__icon:focus-visible + .board-hint__pop,
+.board-hint__icon:focus + .board-hint__pop {
   opacity: 1;
   visibility: visible;
   transform: none;
@@ -6187,6 +6188,18 @@ body.battle-mode .right-rail-shell {
 
 .selected-card.is-empty {
   color: var(--ink-soft);
+}
+
+.selected-card.is-inspecting .selected-card__who strong::after {
+  content: "查看中";
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(196, 90, 45, 0.16);
+  color: #c45a2d;
+  font-size: 11px;
+  font-weight: 700;
+  vertical-align: middle;
 }
 
 .selected-card__head {
