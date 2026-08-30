@@ -481,6 +481,7 @@ class PendingBattle:
     defender_army_ids: list[str] = field(default_factory=list)
     army_snapshots: dict[str, dict[str, Any]] = field(default_factory=dict)
     attacker_composition: dict[str, int] = field(default_factory=dict)
+    defender_composition: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.month = int(self.month)
@@ -510,6 +511,11 @@ class PendingBattle:
         self.attacker_composition = {
             str(unit_type): max(0, int(count))
             for unit_type, count in self.attacker_composition.items()
+            if str(unit_type) and int(count) > 0
+        }
+        self.defender_composition = {
+            str(unit_type): max(0, int(count))
+            for unit_type, count in self.defender_composition.items()
             if str(unit_type) and int(count) > 0
         }
         if self.attacker_troops < 0 or self.defender_troops < 0:
@@ -545,6 +551,7 @@ class PendingBattle:
             "defender_army_ids": list(self.defender_army_ids),
             "army_snapshots": {army_id: dict(snapshot) for army_id, snapshot in self.army_snapshots.items()},
             "attacker_composition": dict(self.attacker_composition),
+            "defender_composition": dict(self.defender_composition),
         }
 
     @classmethod
@@ -584,6 +591,7 @@ class PendingBattle:
                 if isinstance(snapshot, dict)
             },
             attacker_composition=_int_dict(raw.get("attacker_composition")),
+            defender_composition=_int_dict(raw.get("defender_composition")),
         )
 
 

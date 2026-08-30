@@ -16,6 +16,7 @@ from wujiang.strategic.simulation import clamp, owner_support
 BATTLE_RESOLUTION_MODES = {"manual", "ai_auto", "watch_ai", "quick", "formula", "pending_choice"}
 BATTLE_PLAYER_CHOICES = {"manual", "ai_auto", "formula", "siege", "retreat"}
 BATTLE_UNIT_TROOP_COSTS = {"infantry": 10, "archer": 20, "cavalry": 50}
+AUTO_COMPOSED_UNITS = 30
 MIN_ATTACK_TROOPS = 50
 ATTACK_COMMITMENT_NUMERATOR = 3
 ATTACK_COMMITMENT_DENOMINATOR = 4
@@ -32,6 +33,85 @@ RESOLUTION_MODE_LABELS = {
     "siege": "围城",
     "retreat": "撤退",
 }
+
+
+FEATURE_COMPOSITION_BIAS = {
+    "弓兵": {"archer": 18},
+    "以太侦察兵": {"archer": 10},
+    "骑兵": {"cavalry": 16},
+    "守备兵": {"infantry": 10},
+    "山地兵": {"infantry": 8},
+    "城墙工兵": {"infantry": 8},
+}
+
+
+def auto_battle_composition(
+    troop_budget: int,
+    *,
+    city: City | None = None,
+    limit: int = AUTO_COMPOSED_UNITS,
+) -> dict[str, int]:
+    budget = max(0, int(troop_budget))
+    infantry_cost = BATTLE_UNIT_TROOP_COSTS["infantry"]
+    archer_cost = BATTLE_UNIT_TROOP_COSTS["archer"]
+    cavalry_cost = BATTLE_UNIT_TROOP_COSTS["cavalry"]
+    if budget < infantry_cost:
+        return {}
+    slots = min(max(1, int(limit)), budget // infantry_cost)
+    infantry_weight = 50
+    archer_weight = 35
+    cavalry_weight = 15
+    for feature in getattr(city, "troop_features", None) or []:
+        bias = FEATURE_COMPOSITION_BIAS.get(str(feature) or "")
+        if not bias:
+            continue
+        infantry_weight += int(bias.get("infantry") or 0)
+        archer_weight += int(bias.get("archer") or 0)
+        cavalry_weight += int(bias.get("cavalry") or 0)
+    infantry_weight = max(20, infantry_weight)
+    archer_weight = max(10, archer_weight)
+    cavalry_weight = max(0, cavalry_weight)
+    total_weight = infantry_weight + archer_weight + cavalry_weight
+    cavalry_budget = budget * cavalry_weight // total_weight
+    archer_budget = budget * archer_weight // total_weight
+    infantry_budget = budget - cavalry_budget - archer_budget
+    cavalry = min(slots, cavalry_budget // cavalry_cost)
+    archer = min(slots - cavalry, archer_budget // archer_cost)
+    infantry = min(slots - cavalry - archer, infantry_budget // infantry_cost)
+    remaining_slots = slots - cavalry - archer - infantry
+    remaining_budget = budget - cavalry * cavalry_cost - archer * archer_cost - infantry * infantry_cost
+    extra_infantry = min(remaining_slots, remaining_budget // infantry_cost)
+    infantry += extra_infantry
+    remaining_slots -= extra_infantry
+    remaining_budget -= extra_infantry * infantry_cost
+    extra_archer = min(remaining_slots, remaining_budget // archer_cost)
+    archer += extra_archer
+    remaining_budget -= extra_archer * archer_cost
+    extra_cavalry = min(remaining_slots - extra_archer, remaining_budget // cavalry_cost)
+    cavalry += extra_cavalry
+    composition = {
+        "infantry": infantry,
+        "archer": archer,
+        "cavalry": cavalry,
+    }
+    return {unit_type: count for unit_type, count in composition.items() if count > 0}
+
+
+def _composition_unit_count(composition: dict[str, int] | None) -> int:
+    raw = composition if isinstance(composition, dict) else {}
+    return sum(max(0, int(count or 0)) for count in raw.values())
+
+
+def _side_initial_grid_units(battle: PendingBattle, side: str) -> int:
+    composition = getattr(battle, f"{side}_composition", None)
+    if _composition_unit_count(composition) > 0:
+        return min(MAX_COMPOSED_UNITS, _composition_unit_count(composition))
+    registered = getattr(battle, f"{side}_registered_units", {}) or {}
+    troops = battle.attacker_troops if side == "attacker" else battle.defender_troops
+    return min(
+        MAX_GRID_UNITS_PER_SIDE,
+        _registered_unit_count(registered) + _grid_unit_count_for_troops(troops),
+    )
 
 
 def normalize_battle_composition(
@@ -359,7 +439,7 @@ def simulate_formula_city_attack(world: WorldState, battle: PendingBattle) -> di
     if defender_codes is None:
         defender_codes = strategic_defender_hero_codes_for_faction(world, battle.defender_faction_id)
     defender_power = (
-        max(0, int(battle.defender_troops))
+        _composition_combat_power(getattr(battle, "defender_composition", None), battle.defender_troops)
         + _registered_unit_power(battle.defender_registered_units)
         + target.defense * 80
         + support * 3
@@ -568,6 +648,8 @@ def declare_city_attack(
         attacker_office_id=attacker_office.office_id if attacker_office is not None else None,
         attacker_registered_units=attacker_registered_units,
         defender_registered_units=defender_registered_units,
+        attacker_composition=auto_battle_composition(attacker_troops, city=source),
+        defender_composition=auto_battle_composition(defender_troops, city=target),
         report=[f"{source.name}派出 {attacker_troops} 兵力进攻{target.name}。"],
     )
     next_world.pending_battles.append(battle)
@@ -1183,21 +1265,15 @@ def _apply_battle_outcome(
     source = _city(next_world, battle.source_city_id)
     support = owner_support(target)
     defender_score = (
-        battle.defender_troops
+        _composition_combat_power(getattr(battle, "defender_composition", None), battle.defender_troops)
         + _registered_unit_power(battle.defender_registered_units)
         + target.defense * 80
         + support * 3
     )
     if preface:
         battle.report.append(preface)
-    attacker_initial_grid_units = min(
-        MAX_GRID_UNITS_PER_SIDE,
-        _registered_unit_count(battle.attacker_registered_units) + _grid_unit_count_for_troops(battle.attacker_troops),
-    )
-    defender_initial_grid_units = min(
-        MAX_GRID_UNITS_PER_SIDE,
-        _registered_unit_count(battle.defender_registered_units) + _grid_unit_count_for_troops(battle.defender_troops),
-    )
+    attacker_initial_grid_units = _side_initial_grid_units(battle, "attacker")
+    defender_initial_grid_units = _side_initial_grid_units(battle, "defender")
     attacker_remaining_from_room: int | None = None
     defender_remaining_from_room: int | None = None
     control_change: dict | None = None
@@ -1517,12 +1593,20 @@ def resolve_pending_battle(world: WorldState, *, battle_id: str) -> WorldState:
 
     target = _city(next_world, battle.target_city_id)
     support = owner_support(target)
-    attacker_score = battle.attacker_troops + _registered_unit_power(battle.attacker_registered_units)
+    attacker_score = (
+        _composition_combat_power(getattr(battle, "attacker_composition", None), battle.attacker_troops)
+        + _registered_unit_power(battle.attacker_registered_units)
+        + _hero_combat_power(battle.attacker_hero_codes)
+    )
+    defender_codes = battle.defender_hero_codes
+    if defender_codes is None:
+        defender_codes = strategic_defender_hero_codes_for_faction(next_world, battle.defender_faction_id)
     defender_score = (
-        battle.defender_troops
+        _composition_combat_power(getattr(battle, "defender_composition", None), battle.defender_troops)
         + _registered_unit_power(battle.defender_registered_units)
         + target.defense * 80
         + support * 3
+        + _hero_combat_power(defender_codes)
     )
     return _apply_battle_outcome(next_world, battle, attacker_wins=attacker_score >= defender_score)
 

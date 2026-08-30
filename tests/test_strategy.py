@@ -53,6 +53,7 @@ from wujiang.strategic import (  # noqa: E402
     accept_hero_recruitment,
     recommend_hero_recruitment,
     attach_battle_room,
+    auto_battle_composition,
     city_troop_conversion,
     choose_player_hero_path,
     archive_campaign,
@@ -3167,6 +3168,13 @@ class StrategyBattleTests(unittest.TestCase):
             invite_path="/?room=ROOM_TEST",
         )
 
+        pending_battle = pending.pending_battles[-1]
+        attacker_grid = sum(pending_battle.attacker_composition.values())
+        defender_grid = sum(pending_battle.defender_composition.values())
+        attacker_remaining = round(pending_battle.attacker_troops * 4 / attacker_grid)
+        defender_remaining = round(pending_battle.defender_troops * 1 / defender_grid)
+        source_after_declare = pending.cities[0].resources.troops
+
         resolved = resolve_battle_room_result(
             attached,
             battle_room_id="ROOM_TEST",
@@ -3179,23 +3187,23 @@ class StrategyBattleTests(unittest.TestCase):
         self.assertEqual(battle.status, "resolved")
         self.assertEqual(battle.winner_faction_id, "faction_2")
         self.assertEqual(resolved.cities[1].owner_faction_id, "faction_2")
-        self.assertEqual(resolved.cities[0].resources.troops, 1200)
-        self.assertEqual(resolved.cities[1].resources.troops, 60)
+        self.assertEqual(resolved.cities[0].resources.troops, source_after_declare + attacker_remaining)
+        self.assertEqual(resolved.cities[1].resources.troops, defender_remaining)
         self.assertEqual(battle.battle_result["winner_side"], "defender")
         self.assertEqual(battle.battle_result["loser_side"], "attacker")
         self.assertEqual(battle.battle_result["resolution_source"], "real_grid")
         self.assertFalse(battle.battle_result["city_captured"])
-        self.assertEqual(battle.battle_result["lost_troops_by_side"]["attacker"], 1200)
-        self.assertEqual(battle.battle_result["lost_troops_by_side"]["defender"], 60)
-        self.assertEqual(battle.battle_result["remaining_troops_by_side"]["attacker"], 600)
-        self.assertEqual(battle.battle_result["remaining_troops_by_side"]["defender"], 60)
-        self.assertEqual(battle.battle_result["initial_grid_units_by_side"]["attacker"], 12)
-        self.assertEqual(battle.battle_result["initial_grid_units_by_side"]["defender"], 2)
+        self.assertEqual(battle.battle_result["lost_troops_by_side"]["attacker"], pending_battle.attacker_troops - attacker_remaining)
+        self.assertEqual(battle.battle_result["lost_troops_by_side"]["defender"], pending_battle.defender_troops - defender_remaining)
+        self.assertEqual(battle.battle_result["remaining_troops_by_side"]["attacker"], attacker_remaining)
+        self.assertEqual(battle.battle_result["remaining_troops_by_side"]["defender"], defender_remaining)
+        self.assertEqual(battle.battle_result["initial_grid_units_by_side"]["attacker"], attacker_grid)
+        self.assertEqual(battle.battle_result["initial_grid_units_by_side"]["defender"], defender_grid)
         self.assertEqual(battle.battle_result["surviving_grid_units_by_side"]["attacker"], 4)
         self.assertEqual(battle.battle_result["surviving_grid_units_by_side"]["defender"], 1)
         self.assertIn("真实战场", battle.battle_result["battle_log_summary"])
-        self.assertTrue(any("攻方 4/12" in row for row in battle.report))
-        self.assertTrue(any("守方 1/2" in row for row in battle.report))
+        self.assertTrue(any(f"攻方 4/{attacker_grid}" in row for row in battle.report))
+        self.assertTrue(any(f"守方 1/{defender_grid}" in row for row in battle.report))
         self.assertTrue(any("ROOM_TEST" in row for row in battle.report))
         self.assertEqual(
             sum(1 for event in resolved.event_log if event.category == "battle_resolved"),
@@ -3297,6 +3305,27 @@ class StrategyBattleTests(unittest.TestCase):
         sieged = convert_pending_battle_to_siege(pending, battle_id=battle.battle_id, faction_id="faction_1")
         self.assertEqual(sieged.pending_battles[-1].resolution_mode, "siege")
         self.assertTrue(sieged.sieges)
+
+    def test_city_attack_auto_composes_defender_for_real_battle(self) -> None:
+        world = generate_random_world(seed=79, city_count=4, faction_count=2)
+        world.cities[0].resources.troops = 1200
+        world.cities[1].resources.troops = 300
+        pending = declare_city_attack(
+            world,
+            faction_id="faction_1",
+            source_city_id="city_1",
+            target_city_id="city_2",
+            resolution_mode="manual",
+        )
+        battle = pending.pending_battles[-1]
+        expected = auto_battle_composition(300, city=pending.cities[1])
+        rosters = strategy_battle_rosters(pending, battle)
+        defender_soldiers = [code for code in rosters.defender.roster if str(code).startswith("strategy_")]
+
+        self.assertEqual(battle.defender_composition, expected)
+        self.assertGreaterEqual(sum(battle.defender_composition.values()), 15)
+        self.assertGreater(len(defender_soldiers), 12)
+        self.assertEqual(len(defender_soldiers), sum(expected.values()))
 
     def test_city_attack_rejects_heroes_not_stationed_at_source(self) -> None:
         world = generate_random_world(seed=58, city_count=4, faction_count=2)
@@ -6523,7 +6552,7 @@ class StrategySimulationTests(unittest.TestCase):
         self.assertEqual(battle.attacker_faction_id, "faction_2")
         self.assertEqual(battle.resolution_mode, "quick")
         self.assertEqual(battle.status, "resolved")
-        self.assertEqual(battle.attacker_hero_codes, [hero["code"]])
+        self.assertIn(hero["code"], battle.attacker_hero_codes)
         self.assertEqual(updated_target.owner_faction_id, "faction_2")
         plan = next(
             event
@@ -6531,11 +6560,42 @@ class StrategySimulationTests(unittest.TestCase):
             if event.category == "strategy_ai_plan" and event.related_ids[0] == "faction_2"
         )
         command_used = sum(
-            2 if action.startswith("attack:") else 0 if action.startswith("defender:") else 1
+            2 if action.startswith("attack:") else 0 if action.startswith(("defender:", "duty:")) else 1
             for action in plan.related_ids[1:]
         )
         self.assertLessEqual(command_used, FACTION_MONTHLY_COMMAND_POINTS)
         self.assertTrue(any(action.startswith("attack:") for action in plan.related_ids))
+
+    def test_strategy_ai_stations_heroes_and_can_levy_or_build(self) -> None:
+        world = generate_random_world(seed=402, city_count=4, faction_count=2)
+        for city in world.cities:
+            if city.owner_faction_id != "faction_2":
+                continue
+            city.resources.troops = 40
+            city.resources.population = 2400
+            city.resources.food = 500
+            city.resources.money = 300
+        updated = apply_strategy_ai_monthly_actions(
+            world,
+            controlled_faction_ids={"faction_1"},
+            enable_attacks=False,
+        )
+        plan = next(
+            event
+            for event in updated.event_log
+            if event.category == "strategy_ai_plan" and event.related_ids[0] == "faction_2"
+        )
+        serving = [
+            hero
+            for hero in updated.strategic_heroes
+            if hero.faction_id == "faction_2" and hero.status == "serving"
+        ]
+        stationed = [hero for hero in serving if hero.assignment_type in {"garrison", "campaign"} and hero.city_id]
+        self.assertTrue(stationed or any(action.startswith("duty:") for action in plan.related_ids))
+        self.assertTrue(
+            any(action.startswith(("duty:", "levy:", "build:")) for action in plan.related_ids)
+            or any(event.category in {"strategic_hero_assignment", "city_garrison_levied", "city_building_constructed"} for event in updated.event_log)
+        )
 
     def test_strategy_ai_skips_exiled_factions(self) -> None:
         world = generate_random_world(seed=38, city_count=4, faction_count=2)

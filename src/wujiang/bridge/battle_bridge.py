@@ -25,6 +25,35 @@ from wujiang.strategic import strategy_battle_rosters
 
 STRATEGY_BATTLE_BOARD_WIDTH = 32
 STRATEGY_BATTLE_BOARD_HEIGHT = 22
+STRATEGY_AI_SIMULATION_MAX_STEPS = 12000
+
+
+def _run_strategy_ai_simulation(room):
+    return room.run_ai_simulation_to_end(max_steps=STRATEGY_AI_SIMULATION_MAX_STEPS)
+
+
+def _resolve_strategy_ai_simulation(next_world, room, battle_room: dict[str, Any], battle_id: str):
+    simulation_steps = _run_strategy_ai_simulation(room)
+    battle_room["status"] = room.status
+    battle_room["winner"] = getattr(getattr(room, "battle", None), "winner", None)
+    battle_room["simulation_steps"] = simulation_steps
+    winner_team_id = battle_room["winner"]
+    if winner_team_id in {1, 2}:
+        return resolve_strategy_battle_room_result(
+            next_world,
+            battle_room_id=str(battle_room["room_id"]),
+            winner_team_id=int(winner_team_id),
+            battle_summary=strategy_room_battle_summary(room),
+            surviving_grid_units_by_team=strategy_room_survivors_by_team(room),
+            surviving_hero_codes_by_team=strategy_room_surviving_hero_codes_by_team(room),
+        ), battle_room
+    pending = next(item for item in next_world.pending_battles if item.battle_id == battle_id)
+    pending.resolution_mode = "formula"
+    next_world = resolve_pending_battle(next_world, battle_id=battle_id)
+    settled = next(item for item in next_world.pending_battles if item.battle_id == battle_id)
+    battle_room["status"] = "finished"
+    battle_room["winner"] = 1 if settled.winner_faction_id == settled.attacker_faction_id else 2
+    return next_world, battle_room
 
 
 def siege_wall_cells(width: int, height: int) -> set[tuple[int, int]]:
@@ -194,20 +223,9 @@ def declare_strategy_attack_for_world(
     )
     if resolution_mode == "ai_auto":
         room = ROOMS.get_room(str(battle_room["room_id"]))
-        simulation_steps = room.run_ai_simulation_to_end()
-        battle_room["status"] = room.status
-        battle_room["winner"] = getattr(room.battle, "winner", None)
-        battle_room["simulation_steps"] = simulation_steps
-        winner_team_id = getattr(room.battle, "winner", None)
-        if winner_team_id in {1, 2}:
-            next_world = resolve_strategy_battle_room_result(
-                next_world,
-                battle_room_id=str(battle_room["room_id"]),
-                winner_team_id=int(winner_team_id),
-                battle_summary=strategy_room_battle_summary(room),
-                surviving_grid_units_by_team=strategy_room_survivors_by_team(room),
-                surviving_hero_codes_by_team=strategy_room_surviving_hero_codes_by_team(room),
-            )
+        next_world, battle_room = _resolve_strategy_ai_simulation(
+            next_world, room, battle_room, pending_battle.battle_id
+        )
     return next_world, battle_room
 
 
@@ -246,20 +264,9 @@ def declare_strategy_engagement_for_world(
     )
     if resolution_mode == "ai_auto":
         room = ROOMS.get_room(str(battle_room["room_id"]))
-        simulation_steps = room.run_ai_simulation_to_end()
-        battle_room["status"] = room.status
-        battle_room["winner"] = getattr(room.battle, "winner", None)
-        battle_room["simulation_steps"] = simulation_steps
-        winner_team_id = getattr(room.battle, "winner", None)
-        if winner_team_id in {1, 2}:
-            next_world = resolve_strategy_battle_room_result(
-                next_world,
-                battle_room_id=str(battle_room["room_id"]),
-                winner_team_id=int(winner_team_id),
-                battle_summary=strategy_room_battle_summary(room),
-                surviving_grid_units_by_team=strategy_room_survivors_by_team(room),
-                surviving_hero_codes_by_team=strategy_room_surviving_hero_codes_by_team(room),
-            )
+        next_world, battle_room = _resolve_strategy_ai_simulation(
+            next_world, room, battle_room, pending_battle.battle_id
+        )
     return next_world, battle_room
 
 
@@ -305,20 +312,9 @@ def start_world_crisis_showdown_for_world(
     )
     if resolution_mode == "ai_auto":
         room = ROOMS.get_room(str(battle_room["room_id"]))
-        simulation_steps = room.run_ai_simulation_to_end()
-        battle_room["status"] = room.status
-        battle_room["winner"] = getattr(room.battle, "winner", None)
-        battle_room["simulation_steps"] = simulation_steps
-        winner_team_id = getattr(room.battle, "winner", None)
-        if winner_team_id in {1, 2}:
-            next_world = resolve_strategy_battle_room_result(
-                next_world,
-                battle_room_id=str(battle_room["room_id"]),
-                winner_team_id=int(winner_team_id),
-                battle_summary=strategy_room_battle_summary(room),
-                surviving_grid_units_by_team=strategy_room_survivors_by_team(room),
-                surviving_hero_codes_by_team=strategy_room_surviving_hero_codes_by_team(room),
-            )
+        next_world, battle_room = _resolve_strategy_ai_simulation(
+            next_world, room, battle_room, pending_battle.battle_id
+        )
     return next_world, battle_room
 
 
@@ -511,24 +507,13 @@ def resolve_strategy_battle_player_choice(
         return resolve_pending_battle(next_world, battle_id=pending.battle_id), None
     if pending.battle_room_id and choice == "ai_auto":
         room = ROOMS.get_room(str(pending.battle_room_id))
-        simulation_steps = room.run_ai_simulation_to_end()
         battle_room = {
             "room_id": room.room_id,
             "invite_path": room.invite_path(),
-            "status": room.status,
-            "winner": getattr(room.battle, "winner", None),
-            "simulation_steps": simulation_steps,
         }
-        winner_team_id = getattr(room.battle, "winner", None)
-        if winner_team_id in {1, 2}:
-            next_world = resolve_strategy_battle_room_result(
-                next_world,
-                battle_room_id=str(pending.battle_room_id),
-                winner_team_id=int(winner_team_id),
-                battle_summary=strategy_room_battle_summary(room),
-                surviving_grid_units_by_team=strategy_room_survivors_by_team(room),
-                surviving_hero_codes_by_team=strategy_room_surviving_hero_codes_by_team(room),
-            )
+        next_world, battle_room = _resolve_strategy_ai_simulation(
+            next_world, room, battle_room, pending.battle_id
+        )
         return next_world, battle_room
     if pending.battle_room_id:
         return next_world, {
@@ -549,18 +534,7 @@ def resolve_strategy_battle_player_choice(
     )
     if choice == "ai_auto":
         room = ROOMS.get_room(str(battle_room["room_id"]))
-        simulation_steps = room.run_ai_simulation_to_end()
-        battle_room["status"] = room.status
-        battle_room["winner"] = getattr(room.battle, "winner", None)
-        battle_room["simulation_steps"] = simulation_steps
-        winner_team_id = getattr(room.battle, "winner", None)
-        if winner_team_id in {1, 2}:
-            next_world = resolve_strategy_battle_room_result(
-                next_world,
-                battle_room_id=str(battle_room["room_id"]),
-                winner_team_id=int(winner_team_id),
-                battle_summary=strategy_room_battle_summary(room),
-                surviving_grid_units_by_team=strategy_room_survivors_by_team(room),
-                surviving_hero_codes_by_team=strategy_room_surviving_hero_codes_by_team(room),
-            )
+        next_world, battle_room = _resolve_strategy_ai_simulation(
+            next_world, room, battle_room, pending.battle_id
+        )
     return next_world, battle_room

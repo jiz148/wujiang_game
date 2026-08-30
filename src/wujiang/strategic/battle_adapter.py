@@ -266,10 +266,17 @@ def strategy_battle_rosters(world: WorldState, battle: PendingBattle) -> Strateg
             battle.attacker_registered_units,
             available_hero_codes=available_codes,
         )
-    defender_units = roster_for_registered_units(
-        battle.defender_registered_units,
-        available_hero_codes=available_codes,
-    )
+    if getattr(battle, "defender_composition", None):
+        defender_units = roster_for_registered_units(
+            dict(battle.defender_composition),
+            available_hero_codes=available_codes,
+            limit=MAX_COMPOSED_UNITS,
+        )
+    else:
+        defender_units = roster_for_registered_units(
+            battle.defender_registered_units,
+            available_hero_codes=available_codes,
+        )
     attacker_roster = (
         attacker_units
         if battle.source_kind in {"encounter", "siege", "world_crisis"} or getattr(battle, "attacker_composition", None)
@@ -285,7 +292,7 @@ def strategy_battle_rosters(world: WorldState, battle: PendingBattle) -> Strateg
     )
     defender_roster = (
         defender_units
-        if battle.source_kind in {"encounter", "world_crisis"}
+        if battle.source_kind in {"encounter", "world_crisis"} or getattr(battle, "defender_composition", None)
         else _merge_rosters(
             defender_units,
             roster_for_city_troops(
