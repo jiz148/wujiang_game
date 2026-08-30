@@ -1,20 +1,19 @@
 // Pointer and keyboard interaction on the battle board.
 import { $ } from '../core/dom.js';
-import { backstepFollowUpTargetIds, canInteract, currentRespawnPrompt, isChainMode, isRespawnMode, setStagedBackstepRetreatCell, stagedBackstepRetreatCell, unitById } from '../core/net.js';
+import { backstepFollowUpTargetIds, canInteract, currentRespawnPrompt, inspectBoardUnit, isChainMode, isRespawnMode, setStagedBackstepRetreatCell, stagedBackstepRetreatCell, unitById } from '../core/net.js';
 import { render } from '../core/render.js';
 import { state, ui } from '../core/state.js';
 import { keyboardHelpIsOpen, syncModalIsolation } from '../core/ui.js';
 import { closeProfileModal, profileModalVisible } from '../platform/auth.js';
 import { attackTargetIdAtCell, completeTutorialUnitSelection, explainInvalidBoardChoice, performAction } from '../tactical/room-api.js';
 import { clearActionSelection } from '../tactical/session.js';
-import { actionNeedsTarget, attackChoicePatternSelection, bodyDirectionSelection, currentPreview, movePathAnchorForClickedCell, movePathIndexForClickedCell, movePathSelection, multiUnitSelection, patternSelection, patternSelectionIsOrdered, reviveSelectionCells, reviveUnitCellSelection, sameCell, setStagedBodyCells, setStagedMovePath, setStagedMultiTargetIds, setStagedPatternCells, setStagedReviveCell, setStagedStatCells, stagedBodyCells, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, statCellRequired, statCellSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
+import { actionNeedsTarget, attackChoicePatternSelection, bodyDirectionSelection, currentPreview, movePathAnchorForClickedCell, movePathIndexForClickedCell, movePathSelection, multiUnitSelection, patternSelection, patternSelectionIsOrdered, reviveSelectionCells, reviveUnitCellSelection, sameCell, setStagedBodyCells, setStagedMovePath, setStagedMultiTargetIds, setStagedPatternCells, setStagedReviveCell, setStagedStatCells, stagedAttackActionPayload, stagedBodyCells, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, statCellRequired, statCellSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
 import { positionKey, positionsToSet, selectedAction, targetIdsToSet } from '../tactical/vfx.js';
 
 export function onBoardClick(x, y, occupant) {
   if (!canInteract()) {
     clearActionSelection();
-    state.selectedUnitId = occupant?.id || "";
-    if (occupant) state.sidebarExpanded = "info";
+    inspectBoardUnit(occupant);
     render();
     return;
   }
@@ -66,13 +65,14 @@ export function onBoardClick(x, y, occupant) {
   }
 
   if (!state.selectedActionCode) {
-    state.selectedUnitId = occupant?.id || "";
-    if (occupant) state.sidebarExpanded = "info";
+    inspectBoardUnit(occupant, { adoptIfControllable: true });
     clearActionSelection();
     if (occupant) completeTutorialUnitSelection(occupant.id);
     render();
     return;
   }
+
+  if (occupant) inspectBoardUnit(occupant, { openInfo: false });
 
   if (!action) {
     clearActionSelection();
@@ -129,17 +129,22 @@ export function onBoardClick(x, y, occupant) {
   if (attackChoicePatternSelection(action)) {
     const choiceCode = stagedPatternChoiceCode(action);
     if (!choiceCode) return;
-    if (!canUseCell && !canUseUnit) return;
+    if (!canUseCell && !canUseUnit) {
+      explainInvalidBoardChoice(action, occupant);
+      return;
+    }
     const targetUnitId = attackTargetIdAtCell(action, x, y, occupant);
-    if (!targetUnitId) return;
+    if (!targetUnitId) {
+      explainInvalidBoardChoice(action, occupant);
+      return;
+    }
     performAction({
       type: "attack",
       unit_id: state.selectedUnitId,
       target_unit_id: targetUnitId,
       x,
       y,
-      choice_code: choiceCode,
-      ...(action.attack_payload || {}),
+      ...stagedAttackActionPayload(action),
     });
     return;
   }
@@ -267,7 +272,7 @@ export function onBoardClick(x, y, occupant) {
       target_unit_id: targetUnitId,
       x,
       y,
-      ...(action.attack_payload || {}),
+      ...stagedAttackActionPayload(action),
     });
     return;
   }

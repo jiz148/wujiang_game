@@ -94,11 +94,27 @@ export function displayActions() {
     });
     return filterTutorialActions(reactions);
   }
-  return filterTutorialActions((bundle.actions.actions || []).filter((action) => {
+  const visible = filterTutorialActions((bundle.actions.actions || []).filter((action) => {
     if (!action.available) return false;
     if (action.kind === "move" || action.kind === "attack") return true;
     return action.timing === "active";
   }));
+  return mergeAttackVariants(visible);
+}
+
+function mergeAttackVariants(actions) {
+  const primaryAttack = actions.find((action) => action.kind === "attack" && !action.is_attack_variant)
+    || actions.find((action) => action.kind === "attack");
+  if (!primaryAttack) return actions;
+  const attackVariants = actions.filter((action) => (
+    action.kind === "attack"
+    && action.is_attack_variant
+    && action !== primaryAttack
+  ));
+  if (!attackVariants.length) return actions;
+  return actions
+    .filter((action) => action.kind !== "attack" || action === primaryAttack)
+    .map((action) => (action === primaryAttack ? { ...action, attackVariants } : action));
 }
 
 export function tutorialState() {

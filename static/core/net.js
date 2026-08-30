@@ -289,6 +289,28 @@ export function selectedUnit() {
   return unitById(state.selectedUnitId);
 }
 
+export function inspectedUnit() {
+  return unitById(state.inspectedUnitId) || selectedUnit();
+}
+
+export function inspectBoardUnit(unit, { openInfo = true, adoptIfControllable = false } = {}) {
+  if (!unit) {
+    state.inspectedUnitId = "";
+    return;
+  }
+  state.inspectedUnitId = unit.id;
+  if (openInfo) {
+    state.battleDockTab = "info";
+    state.rightRailCollapsed = false;
+    state.sidebarExpanded = "info";
+  }
+  if (!adoptIfControllable) return;
+  const controllable = activeBundles().map((entry) => entry.unit_id);
+  if (!controllable.length || controllable.includes(unit.id)) {
+    state.selectedUnitId = unit.id;
+  }
+}
+
 export function stagedTarget() {
   return unitById(state.stagedPayload?.targetUnitId || "");
 }

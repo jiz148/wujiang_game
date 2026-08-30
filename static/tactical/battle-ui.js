@@ -1,14 +1,14 @@
 // Battle screen rendering: board, units, action panel and log.
 import { $ } from '../core/dom.js';
 import { applyBoardCamera, boardBasePixels, clampBoardZoom } from '../core/events.js';
-import { activeBundles, allUnits, backstepFollowUpTargetIds, boardPieceZIndex, bundleFor, canInteract, currentRespawnPrompt, hasBattle, hasRoom, hoveredUnit, isChainMode, isGameOver, isReplayMode, isRespawnMode, selectedUnit, stagedBackstepRetreatCell, stagedTarget, unitById, unitFootprintBounds, unitHasLargeFootprint, unitOccupiedCells, unitsAtCell, viewerPlayerId } from '../core/net.js';
+import { activeBundles, allUnits, backstepFollowUpTargetIds, boardPieceZIndex, bundleFor, canInteract, currentRespawnPrompt, hasBattle, hasRoom, hoveredUnit, inspectBoardUnit, inspectedUnit, isChainMode, isGameOver, isReplayMode, isRespawnMode, selectedUnit, stagedBackstepRetreatCell, stagedTarget, unitById, unitFootprintBounds, unitHasLargeFootprint, unitOccupiedCells, unitsAtCell, viewerPlayerId, viewerTeamId } from '../core/net.js';
 import { render } from '../core/render.js';
 import { applyScreen } from '../core/router.js';
 import { state, ui } from '../core/state.js';
 import { effectiveProfileName } from '../platform/auth.js';
 import { isRandomRoomMode, loadReplayStep, onActionClick, roomModeMeta, shouldShowLobbyPanel } from '../tactical/room-api.js';
 import { clearActionSelection } from '../tactical/session.js';
-import { actionLabel, actionLimitLabel, actionManaLabel, actionNeedsTarget, actionTierLabel, actionTimingLabel, actionTitle, bodyDirectionSelection, canCompleteTargetSelection, choicePatternSelection, currentPreview, fieldEffectMarker, fieldEffectsByCell, hasCancelableTargetSelection, movePathSelection, multiUnitSelection, normalizedPatternCells, patternSelection, patternSelectionCanComplete, randomRoomFallbackSummary, randomRoomRosterSize, reviveUnitCellSelection, stagedBodyCells, stagedBodyDirection, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, statCellRequired, statCellSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
+import { actionLabel, actionLimitLabel, actionManaLabel, actionNeedsTarget, actionTierLabel, actionTimingLabel, actionTitle, bodyDirectionSelection, canCompleteTargetSelection, choicePatternSelection, currentPreview, fieldEffectMarker, fieldEffectsByCell, hasCancelableTargetSelection, movePathSelection, multiUnitSelection, normalizedPatternCells, patternSelection, patternSelectionCanComplete, randomRoomFallbackSummary, randomRoomRosterSize, reviveUnitCellSelection, stagedAttackVariantCode, stagedBodyCells, stagedBodyDirection, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, statCellRequired, statCellSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
 import { actionByCode, actionWheelLayer, displayActions, fieldEffectDuration, fieldEffects, hoveredAction, hpRatio, manaDisplayClass, manaPipsMarkup, positionKey, positionsToSet, renderBattleVfx, selectedAction, trimNumber, tutorialState, unitBoundsRelativeToStage, unitStatusSummary } from '../tactical/vfx.js';
 
 export function renderScreens() {
@@ -34,6 +34,18 @@ function showBoardHint(title, body, actionsHtml = "") {
     </div>
     ${actionsHtml ? `<div class="board-hint__actions board-alert-actions">${actionsHtml}</div>` : ""}
   `;
+}
+
+function attackVariantButtons(action) {
+  const variants = action?.attackVariants || [];
+  if (!variants.length) return "";
+  const selected = stagedAttackVariantCode(action);
+  return [
+    `<button type="button" class="board-alert-choice ${selected ? "" : "is-selected"}" data-attack-variant="">普攻</button>`,
+    ...variants.map((entry) => `
+      <button type="button" class="board-alert-choice ${selected === String(entry.code) ? "is-selected" : ""}" data-attack-variant="${entry.code}">${entry.name}</button>
+    `),
+  ].join("");
 }
 
 function renderBoardAlert() {
@@ -160,11 +172,21 @@ function renderBoardAlert() {
       <button type="button" class="board-alert-choice ${choiceCode === String(entry.code) ? "is-selected" : ""}" data-pattern-choice="${entry.code}">${entry.label}</button>
     `).join("");
     if (action.kind === "attack") {
+      const variantName = (action.attackVariants || []).find((entry) => String(entry.code) === stagedAttackVariantCode(action))?.name || "普攻";
+      const actionButtons = `${attackVariantButtons(action)}${choiceButtons}`;
       if (!choiceCode) {
-        showBoardHint(actionTitle(action), "先声明这次普攻的前方方向，再点击该方向外侧高亮出来的可攻击目标。", choiceButtons);
+        showBoardHint(
+          actionTitle(action),
+          `${action.attackVariants?.length ? `当前是${variantName}。` : ""}先声明这次普攻的前方方向，再点击该方向外侧高亮出来的可攻击目标。`.trim(),
+          actionButtons,
+        );
         return;
       }
-      showBoardHint(actionTitle(action), `已声明方向“${choiceLabel}”。现在点击该方向外侧高亮出来的目标格或目标单位即可普攻；若想换方向，直接重新点方向按钮。`, choiceButtons);
+      showBoardHint(
+        actionTitle(action),
+        `${action.attackVariants?.length ? `当前是${variantName}。` : ""}已声明方向“${choiceLabel}”。现在点击该方向外侧高亮出来的目标格或目标单位即可普攻；若想换方向，直接重新点方向按钮。`.trim(),
+        actionButtons,
+      );
       return;
     }
     if (!choiceCode) {
@@ -237,7 +259,7 @@ export function renderBoard() {
   board.innerHTML = "";
   if (piecesLayer) piecesLayer.innerHTML = "";
   const preview = currentPreview();
-  const selected = selectedUnit();
+  const selected = inspectedUnit();
 
   if (!state.battle) {
     board.classList.remove("is-large-board");
@@ -380,6 +402,11 @@ export function renderBoard() {
         : "";
       const piece = document.createElement("div");
       piece.className = `piece board-piece player-${unit.player_id} ${largeFootprint ? "is-footprint" : ""} ${isStealthed ? "is-stealthed" : ""}`;
+      piece.dataset.unitId = unit.id;
+      if (unit.position) {
+        piece.dataset.x = String(unit.position.x);
+        piece.dataset.y = String(unit.position.y);
+      }
       piece.style.zIndex = String(boardPieceZIndex(unit));
       piece.style.setProperty("--hp-angle", `${hpRatio(unit) * 360}deg`);
       piece.innerHTML = `
@@ -752,7 +779,7 @@ function unitMaxMana(unit) {
 
 export function renderSelectedCard() {
   const panel = $("selected-card");
-  const unit = selectedUnit();
+  const unit = inspectedUnit();
   if (!unit) {
     panel.className = "selected-card is-empty";
     panel.textContent = isGameOver()
@@ -769,12 +796,16 @@ export function renderSelectedCard() {
   const maxMana = unitMaxMana(unit);
   const hpPercent = Math.round(resourceRatio(unit.hp, unit.max_hp) * 100);
   const manaPercent = Math.round(resourceRatio(unit.mana, maxMana) * 100);
-  panel.className = "selected-card";
+  const viewer = viewerTeamId();
+  const sideLabel = viewer == null
+    ? `玩家 ${unit.player_id}`
+    : (unit.player_id === viewer ? "己方" : "对方");
+  panel.className = unit.id !== state.selectedUnitId ? "selected-card is-inspecting" : "selected-card";
   panel.innerHTML = `
     <div class="selected-card__head">
       <div class="selected-card__who">
         <strong>${unit.name}</strong>
-        <span>玩家 ${unit.player_id} · ${unit.role} / ${unit.attribute} / ${unit.race}</span>
+        <span>${sideLabel} · 玩家 ${unit.player_id} · ${unit.role} / ${unit.attribute} / ${unit.race}</span>
       </div>
       <span class="hero-level-tag">Lv ${trimNumber(unit.level || 1)}</span>
     </div>
@@ -847,8 +878,7 @@ export function renderUnitStrip() {
     `;
     btn.addEventListener("click", () => {
       if (!canInteract()) return;
-      state.selectedUnitId = unit.id;
-      state.sidebarExpanded = "info";
+      inspectBoardUnit(unit, { adoptIfControllable: true });
       clearActionSelection();
       render();
     });

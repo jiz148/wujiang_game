@@ -206,9 +206,12 @@ def main() -> int:
             ".menu-entry": "主菜单条目",
         })
         text = page.evaluate("document.querySelector('.menu-layout').textContent") or ""
-        for label in ("继续战役", "战役", "遭遇战", "新手教学", "战绩与回放"):
+        for label in ("战役", "遭遇战", "战绩与回放"):
             if label not in text:
                 problems.append(f"主菜单缺少「{label}」")
+        for label in ("继续战役", "新手教学"):
+            if label in text:
+                problems.append(f"主菜单仍保留「{label}」")
         # 主菜单不该在地址栏留下内层容器名，否则重开就跳过菜单直奔内层。
         if page.evaluate("location.hash") not in ("", "#menu"):
             problems.append(f"主菜单把地址写成了 {page.evaluate('location.hash')}")
@@ -470,15 +473,27 @@ def main() -> int:
             return fail(page, "BATTLE FAILED: 回不到主菜单")
         page.evaluate(
             "[...document.querySelectorAll('.menu-entry')]"
-            ".find((node) => node.querySelector('.menu-entry__title').textContent === '新手教学').click()"
+            ".find((node) => node.querySelector('.menu-entry__title').textContent === '遭遇战').click()"
         )
         if not page.wait_for(
-            "!document.getElementById('quick-start-panel').classList.contains('hidden')",
+            "!document.getElementById('skirmish-panel').classList.contains('hidden')",
             timeout=20,
         ):
-            return fail(page, "BATTLE FAILED: 打不开新手教学入口")
-
-        page.evaluate("document.getElementById('start-tutorial').click()")
+            return fail(page, "BATTLE FAILED: 打不开遭遇战入口")
+        page.evaluate("document.getElementById('create-room').click()")
+        if not page.wait_for(
+            "!document.getElementById('room-lobby').classList.contains('hidden')"
+            " && !!document.getElementById('auto-configure-room')",
+            timeout=25,
+        ):
+            return fail(page, "BATTLE FAILED: 建房后进不了房间大厅")
+        page.evaluate("document.getElementById('auto-configure-room').click()")
+        if not page.wait_for(
+            "!document.getElementById('start-room').disabled",
+            timeout=25,
+        ):
+            return fail(page, "BATTLE FAILED: 自动配置后仍不能开战")
+        page.evaluate("document.getElementById('start-room').click()")
         if not page.wait_for(
             "document.body.classList.contains('screen-battle')"
             " && document.querySelectorAll('#board .cell').length > 0",
