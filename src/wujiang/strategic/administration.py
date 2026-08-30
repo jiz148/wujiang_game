@@ -10,13 +10,122 @@ from wujiang.strategic.models import EventLogEntry, OfficeOrder, StrategyError, 
 FIELD_LEVY = {"population": 120, "food": 60, "money": 40, "troops": 140}
 GARRISON_LEVY = {"population": 80, "food": 40, "money": 25, "troops": 90, "defense": 1}
 BUILDING_PROJECTS: dict[str, dict[str, Any]] = {
-    "academy": {"name": "学院", "money": 120, "food": 10, "effect": "研究与高级建筑前置"},
-    "fields": {"name": "田地", "money": 80, "food": 20, "effect": "每级每月粮食 +60"},
-    "barracks": {"name": "兵营", "money": 100, "food": 30, "effect": "注册步兵"},
-    "stables": {"name": "马厩", "money": 130, "food": 35, "effect": "注册骑兵"},
-    "archery_range": {"name": "靶场", "money": 115, "food": 25, "effect": "注册弓兵"},
-    "ritual_site": {"name": "祭祀场", "money": 140, "food": 10, "effect": "每级每月以太 +8；允许祭祀"},
-    "walls": {"name": "城墙", "money": 120, "food": 20, "defense": 2, "effect": "每级城防 +2"},
+    "fields": {
+        "name": "农业区",
+        "money": 80,
+        "food": 20,
+        "effect": "每月粮食 +60 / 级",
+        "monthly_food": 60,
+    },
+    "barracks": {
+        "name": "军营",
+        "money": 100,
+        "food": 30,
+        "effect": "每月兵力 +15 / 级",
+        "monthly_troops": 15,
+    },
+    "ritual_site": {
+        "name": "祭坛",
+        "money": 140,
+        "food": 10,
+        "effect": "每月以太 +8 / 级；可安放圣物",
+        "monthly_ether": 8,
+    },
+    "academy": {
+        "name": "学院",
+        "money": 120,
+        "food": 10,
+        "effect": "每月以太 +6 / 级",
+        "monthly_ether": 6,
+    },
+    "market": {
+        "name": "商业区",
+        "money": 110,
+        "food": 15,
+        "effect": "每月金钱 +50 / 级",
+        "monthly_money": 50,
+    },
+    "industrial": {
+        "name": "工业区",
+        "money": 130,
+        "food": 25,
+        "effect": "每月金钱 +35 / 级、兵力 +8 / 级",
+        "monthly_money": 35,
+        "monthly_troops": 8,
+    },
+    "walls": {
+        "name": "城墙",
+        "money": 120,
+        "food": 20,
+        "defense": 2,
+        "effect": "每级城防 +2",
+        "fortress_only": True,
+    },
+    "castle": {
+        "name": "城堡",
+        "money": 160,
+        "food": 30,
+        "defense": 1,
+        "effect": "每级城防 +1，每月兵力 +20 / 级",
+        "monthly_troops": 20,
+        "fortress_only": True,
+    },
+    "stables": {
+        "name": "马厩",
+        "money": 130,
+        "food": 35,
+        "effect": "注册骑兵",
+        "visible": False,
+    },
+    "archery_range": {
+        "name": "靶场",
+        "money": 115,
+        "food": 25,
+        "effect": "注册弓兵",
+        "visible": False,
+    },
+}
+
+SETTLEMENT_LABELS = {
+    "village": "村庄",
+    "town": "城镇",
+    "city": "城市",
+    "fortress": "要塞",
+}
+SETTLEMENT_BUILDING_RANK = {
+    "village": 1,
+    "town": 2,
+    "city": 3,
+    "fortress": 3,
+}
+SETTLEMENT_UPGRADES: dict[str, dict[str, Any]] = {
+    "town": {
+        "from_settlement": "village",
+        "name": "城镇",
+        "population": 1400,
+        "food": 700,
+        "money": 180,
+        "level": 2,
+        "defense": 0,
+    },
+    "city": {
+        "from_settlement": "town",
+        "name": "城市",
+        "population": 2600,
+        "food": 1200,
+        "money": 320,
+        "level": 3,
+        "defense": 1,
+    },
+    "fortress": {
+        "from_settlement": "town",
+        "name": "要塞",
+        "population": 2000,
+        "food": 900,
+        "money": 260,
+        "level": 2,
+        "defense": 4,
+    },
 }
 
 REGISTERED_UNIT_TYPES: dict[str, dict[str, Any]] = {
@@ -41,6 +150,19 @@ def _office(world: WorldState, office_id: str, faction_id: str, office_type: str
     if office is None or office.faction_id != faction_id or office.office_type != office_type:
         raise StrategyError("当前职位无权执行这项行动。")
     return office
+
+
+def _building_office(world: WorldState, office_id: str, faction_id: str, city, verb: str = "建设"):
+    office = next((item for item in world.offices if item.office_id == str(office_id)), None)
+    if office is None or office.faction_id != faction_id:
+        raise StrategyError("当前职位无权执行这项行动。")
+    if office.office_type == "lord":
+        return office
+    if office.office_type == "governor":
+        if city.city_id not in office.managed_entity_ids:
+            raise StrategyError(f"城主只能{verb}所辖城市。")
+        return office
+    raise StrategyError("当前职位无权执行这项行动。")
 
 
 def _owned_city(world: WorldState, city_id: str, faction_id: str):
@@ -194,6 +316,15 @@ def register_city_soldiers(
     return next_world
 
 
+def city_building_max_level(city, building_id: str) -> int:
+    project = BUILDING_PROJECTS.get(str(building_id))
+    if project is None:
+        return 0
+    if project.get("fortress_only") and str(getattr(city, "settlement", "") or "") != "fortress":
+        return 0
+    return min(3, int(SETTLEMENT_BUILDING_RANK.get(str(getattr(city, "settlement", "") or "village"), 1)))
+
+
 def construct_city_building(
     world: WorldState,
     *,
@@ -203,19 +334,16 @@ def construct_city_building(
     issuer_office_id: str,
 ) -> WorldState:
     next_world = _clone_world(world)
-    office = _office(next_world, issuer_office_id, faction_id, "governor")
     city = _owned_city(next_world, city_id, faction_id)
-    if city.city_id not in office.managed_entity_ids:
-        raise StrategyError("城主只能建设所辖城市。")
+    office = _building_office(next_world, issuer_office_id, faction_id, city, "建设")
     project_id = str(building_id or "").strip()
     project = BUILDING_PROJECTS.get(project_id)
     if project is None:
         raise StrategyError("建筑项目不存在。")
-    from wujiang.strategic.tactics import building_max_level
-
-    faction = next(item for item in next_world.factions if item.faction_id == faction_id)
     current_level = int(city.building_levels.get(project_id, 0))
-    maximum_level = building_max_level(faction, project_id)
+    maximum_level = city_building_max_level(city, project_id)
+    if maximum_level <= 0:
+        raise StrategyError("只有要塞可以建造这座建筑。")
     if current_level >= maximum_level:
         raise StrategyError(f"该建筑当前最高只能达到 {maximum_level} 级。")
     next_level = current_level + 1
@@ -229,12 +357,84 @@ def construct_city_building(
     if project_id not in city.buildings:
         city.buildings.append(project_id)
     city.defense += int(project.get("defense", 0))
+    if project_id == "ritual_site":
+        from wujiang.strategic.relics import ensure_city_relic_altar
+
+        ensure_city_relic_altar(next_world, city)
     next_world.event_log.append(
         EventLogEntry(
             month=next_world.current_month,
             category="city_building_constructed",
             message=f"{city.name}的{project['name']}升至 {next_level} 级。",
             related_ids=[faction_id, office.office_id, city.city_id, project_id],
+        )
+    )
+    next_world.validate()
+    return next_world
+
+
+def settlement_upgrade_options(city) -> list[dict[str, Any]]:
+    current = str(getattr(city, "settlement", "") or "")
+    options: list[dict[str, Any]] = []
+    for target, spec in SETTLEMENT_UPGRADES.items():
+        if spec["from_settlement"] != current:
+            continue
+        population = int(spec["population"])
+        food = int(spec["food"])
+        money = int(spec["money"])
+        options.append(
+            {
+                "id": target,
+                "name": spec["name"],
+                "from_settlement": spec["from_settlement"],
+                "population": population,
+                "food": food,
+                "money": money,
+                "available": (
+                    int(city.resources.population) >= population
+                    and int(city.resources.food) >= food
+                    and int(city.resources.money) >= money
+                ),
+            }
+        )
+    return options
+
+
+def settlement_upgrades_public() -> list[dict[str, Any]]:
+    return [{"id": target, **spec} for target, spec in SETTLEMENT_UPGRADES.items()]
+
+
+def upgrade_city_settlement(
+    world: WorldState,
+    *,
+    faction_id: str,
+    city_id: str,
+    settlement: str,
+    issuer_office_id: str,
+) -> WorldState:
+    next_world = _clone_world(world)
+    city = _owned_city(next_world, city_id, faction_id)
+    office = _building_office(next_world, issuer_office_id, faction_id, city, "升级")
+    target = str(settlement or "").strip()
+    spec = SETTLEMENT_UPGRADES.get(target)
+    if spec is None:
+        raise StrategyError("未知的城市升级目标。")
+    if city.settlement != spec["from_settlement"]:
+        from_name = SETTLEMENT_LABELS.get(str(spec["from_settlement"]), str(spec["from_settlement"]))
+        raise StrategyError(f"只有{from_name}可以升级为{spec['name']}。")
+    if city.resources.population < int(spec["population"]):
+        raise StrategyError(f"人口不足：升级为{spec['name']}需要人口 {spec['population']}。")
+    _spend_city_resources(city, population=0, food=int(spec["food"]), money=int(spec["money"]))
+    city.settlement = target
+    city.level = max(int(city.level), int(spec["level"]))
+    if int(spec.get("defense") or 0):
+        city.defense += int(spec["defense"])
+    next_world.event_log.append(
+        EventLogEntry(
+            month=next_world.current_month,
+            category="city_settlement_upgraded",
+            message=f"{city.name}升级为{spec['name']}。",
+            related_ids=[faction_id, office.office_id, city.city_id, target],
         )
     )
     next_world.validate()
@@ -359,8 +559,39 @@ def approve_registered_unit_request(
     return next_world
 
 
+def city_building_monthly_bonus(city) -> dict[str, int]:
+    food = money = ether = troops = 0
+    for building_id, level in dict(getattr(city, "building_levels", {}) or {}).items():
+        project = BUILDING_PROJECTS.get(str(building_id))
+        if project is None:
+            continue
+        grade = max(0, int(level or 0))
+        food += int(project.get("monthly_food", 0)) * grade
+        money += int(project.get("monthly_money", 0)) * grade
+        ether += int(project.get("monthly_ether", 0)) * grade
+        troops += int(project.get("monthly_troops", 0)) * grade
+    return {"food": food, "money": money, "ether": ether, "troops": troops}
+
+
 def building_projects_public() -> list[dict[str, Any]]:
-    return [{"id": project_id, **project, "max_level": 3} for project_id, project in BUILDING_PROJECTS.items()]
+    return [
+        {
+            "id": project_id,
+            "name": project["name"],
+            "money": int(project["money"]),
+            "food": int(project["food"]),
+            "effect": str(project.get("effect") or ""),
+            "defense": int(project.get("defense") or 0),
+            "monthly_food": int(project.get("monthly_food") or 0),
+            "monthly_money": int(project.get("monthly_money") or 0),
+            "monthly_ether": int(project.get("monthly_ether") or 0),
+            "monthly_troops": int(project.get("monthly_troops") or 0),
+            "fortress_only": bool(project.get("fortress_only")),
+            "visible": project.get("visible", True) is not False,
+            "max_level": 3,
+        }
+        for project_id, project in BUILDING_PROJECTS.items()
+    ]
 
 
 def registered_unit_types_public() -> list[dict[str, Any]]:

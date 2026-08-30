@@ -59,8 +59,13 @@ def _apply_policy(city: City, events: list[EventLogEntry], month: int) -> None:
     ether_income = int((8 + level * 4) * income_multiplier)
     troop_growth = int((18 + city.resources.population // 250) * level)
     defense_growth = 0
-    food_income += int(city.building_levels.get("fields", 0)) * 60
-    ether_income += int(city.building_levels.get("ritual_site", 0)) * 8
+    from wujiang.strategic.administration import city_building_monthly_bonus
+
+    building_bonus = city_building_monthly_bonus(city)
+    food_income += int(building_bonus["food"])
+    money_income += int(building_bonus["money"])
+    ether_income += int(building_bonus["ether"])
+    troop_growth += int(building_bonus["troops"])
 
     if city.policy == "粮食优先":
         food_income += 80 * level
@@ -253,6 +258,9 @@ def advance_month(world: WorldState) -> WorldState:
     from wujiang.strategic.diplomacy import advance_diplomacy_month
 
     next_world = advance_diplomacy_month(next_world)
+    from wujiang.strategic.tactics import advance_tactic_research
+
+    next_world = advance_tactic_research(next_world)
     next_world = ensure_strategic_hero_system(ensure_office_system(next_world))
     next_world.validate()
     return next_world

@@ -70,6 +70,45 @@ def _key_event_payload(event: dict[str, Any], replay: Optional[ReplayRecorder]) 
     }
 
 
+def _is_strategy_soldier(entry: dict[str, Any]) -> bool:
+    return str(entry.get("hero_code") or "").startswith("strategy_")
+
+
+def _aggregate_soldier_stats(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[int, str], dict[str, Any]] = {}
+    for entry in entries:
+        if not _is_strategy_soldier(entry):
+            continue
+        key = (int(entry.get("player_id") or 0), str(entry.get("hero_code") or ""))
+        existing = grouped.get(key)
+        if existing is None:
+            item = dict(entry)
+            item["unit_count"] = 1
+            item["unit_id"] = f"soldier:{key[0]}:{key[1]}"
+            grouped[key] = item
+            continue
+        for field in ("damage_dealt", "healing_done", "damage_taken", "healing_received"):
+            existing[field] = _rounded(float(existing.get(field) or 0) + float(entry.get(field) or 0))
+        for field in ("kills", "deaths", "shields_broken", "chain_reactions", "actions"):
+            existing[field] = int(existing.get(field) or 0) + int(entry.get(field) or 0)
+        existing["unit_count"] = int(existing.get("unit_count") or 0) + 1
+        existing["contribution_score"] = _mvp_score(existing)
+    aggregated: list[dict[str, Any]] = []
+    for item in grouped.values():
+        count = max(1, int(item.get("unit_count") or 1))
+        base_name = str(item.get("name") or "士兵")
+        item["name"] = f"{base_name} ×{count}"
+        aggregated.append(item)
+    aggregated.sort(
+        key=lambda item: (
+            int(item.get("player_id") or 0),
+            -float(item.get("contribution_score") or 0),
+            str(item.get("hero_code") or ""),
+        )
+    )
+    return aggregated
+
+
 def _select_key_events(events: list[dict[str, Any]], replay: Optional[ReplayRecorder]) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
     seen: set[int] = set()
@@ -133,7 +172,19 @@ def build_postgame_summary(
             }
         )
 
-    winner_entries = [entry for entry in normalized_entries if int(entry.get("player_id") or 0) == battle.winner]
+    hero_stats = [entry for entry in normalized_entries if not _is_strategy_soldier(entry)]
+    soldier_stats = _aggregate_soldier_stats(normalized_entries)
+    winner_entries = [
+        entry
+        for entry in hero_stats
+        if int(entry.get("player_id") or 0) == battle.winner
+    ]
+    if not winner_entries:
+        winner_entries = [
+            entry
+            for entry in soldier_stats
+            if int(entry.get("player_id") or 0) == battle.winner
+        ]
     winner_entries.sort(
         key=lambda item: (
             -float(item["contribution_score"]),
@@ -163,7 +214,8 @@ def build_postgame_summary(
         "completed_turns": int(battle.completed_turns),
         "duration_seconds": max(0, int(finished_at - started_at)),
         "team_stats": team_stats,
-        "hero_stats": normalized_entries,
+        "hero_stats": hero_stats,
+        "soldier_stats": soldier_stats,
         "mvp": mvp,
         "mvp_formula": "伤害×4 + 治疗×3 + 承伤×1.5 + 击破×2 + 破盾×0.5 + 连锁×0.5",
         "key_turns": _select_key_events(list(battle.summary_events), replay),

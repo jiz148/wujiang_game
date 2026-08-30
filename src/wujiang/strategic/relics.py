@@ -17,6 +17,192 @@ RELIC_REPAIR_ETHER_COST = 20
 RELIC_ALTAR_MONTHLY_ACTIONS = 1
 RELIC_ALTAR_VICTORY_REQUIRED_MONTHS = 3
 RELIC_VICTORY_VERSION = "relic_altar_p6_6_v1"
+RELIC_BONUS_VERSION = "relic_bonus_p1_v1"
+RELIC_CATALOG: dict[str, dict[str, Any]] = {
+    "harvest_cup": {
+        "name": "丰饶之杯",
+        "scope": "city",
+        "summary": "所在城市每月粮食 +80",
+        "monthly_food": 80,
+        "maintenance_ether_cost": 10,
+    },
+    "gold_seal": {
+        "name": "金穗印",
+        "scope": "city",
+        "summary": "所在城市每月金钱 +50",
+        "monthly_money": 50,
+        "maintenance_ether_cost": 10,
+    },
+    "ward_stone": {
+        "name": "镇城石",
+        "scope": "city",
+        "summary": "安放期间城防 +2",
+        "defense": 2,
+        "maintenance_ether_cost": 8,
+    },
+    "muster_drum": {
+        "name": "募兵鼓",
+        "scope": "city",
+        "summary": "所在城市每月兵力 +20",
+        "monthly_troops": 20,
+        "maintenance_ether_cost": 10,
+    },
+    "spirit_well": {
+        "name": "灵泉瓶",
+        "scope": "city",
+        "summary": "所在城市每月以太 +10",
+        "monthly_ether": 10,
+        "maintenance_ether_cost": 8,
+    },
+    "hegemony_seal": {
+        "name": "霸业玺",
+        "scope": "faction",
+        "summary": "势力金库每月金钱 +40",
+        "monthly_money": 40,
+        "maintenance_ether_cost": 12,
+    },
+    "war_banner": {
+        "name": "军神旗",
+        "scope": "faction",
+        "summary": "都城每月兵力 +15",
+        "monthly_troops": 15,
+        "maintenance_ether_cost": 12,
+    },
+    "envoy_jade": {
+        "name": "外交玉",
+        "scope": "faction",
+        "summary": "势力声望每月 +2",
+        "monthly_reputation": 2,
+        "maintenance_ether_cost": 10,
+    },
+    "sage_scroll": {
+        "name": "智者之卷",
+        "scope": "faction",
+        "summary": "势力金库每月以太 +8",
+        "monthly_ether": 8,
+        "maintenance_ether_cost": 10,
+    },
+    "people_mirror": {
+        "name": "民心镜",
+        "scope": "faction",
+        "summary": "所有己方城市支持度每月 +1",
+        "monthly_support": 1,
+        "maintenance_ether_cost": 12,
+    },
+}
+
+
+def catalog_relic_id(effect_id: str) -> str:
+    return f"relic:{effect_id}"
+
+
+def relic_effect_spec(relic: RelicState | str) -> dict[str, Any]:
+    effect_id = relic.effect_id if isinstance(relic, RelicState) else str(relic or "")
+    spec = RELIC_CATALOG.get(effect_id)
+    return dict(spec) if spec else {}
+
+
+def relic_effect_public(relic: RelicState | str) -> dict[str, Any]:
+    spec = relic_effect_spec(relic)
+    if not spec:
+        return {
+            "id": relic.effect_id if isinstance(relic, RelicState) else str(relic or ""),
+            "name": "",
+            "scope": "",
+            "scope_label": "",
+            "summary": "",
+        }
+    effect_id = relic.effect_id if isinstance(relic, RelicState) else str(relic or "")
+    return {
+        "id": effect_id,
+        "name": str(spec.get("name") or ""),
+        "scope": str(spec.get("scope") or ""),
+        "scope_label": "城市" if spec.get("scope") == "city" else "势力",
+        "summary": str(spec.get("summary") or ""),
+    }
+
+
+def _ritual_site_level(city) -> int:
+    return int((getattr(city, "building_levels", {}) or {}).get("ritual_site", 0) or 0)
+
+
+def ensure_city_relic_altar(world: WorldState, city) -> RelicAltar | None:
+    level = _ritual_site_level(city)
+    if level < 1:
+        return None
+    altar = next((item for item in world.relic_altars if item.city_id == city.city_id), None)
+    if altar is None:
+        altar = RelicAltar(
+            altar_id=f"relic_altar:{city.city_id}",
+            city_id=city.city_id,
+            name=f"{city.name}圣物祭坛",
+            level=level,
+            capacity=max(1, level),
+            state="dormant",
+            history=[
+                {
+                    "month": world.current_month,
+                    "event": "altar_opened",
+                    "summary": f"{city.name}的祭坛已可安放圣物。",
+                }
+            ],
+        )
+        world.relic_altars.append(altar)
+        world.relic_altars.sort(key=lambda item: item.altar_id)
+    altar.level = max(1, level)
+    altar.capacity = max(1, level)
+    if altar.altar_id not in city.altars:
+        city.altars.append(altar.altar_id)
+        city.altars.sort()
+    return altar
+
+
+def _set_relic_effect_active(world: WorldState, relic: RelicState, city, active: bool) -> None:
+    spec = relic_effect_spec(relic)
+    defense = int(spec.get("defense", 0) or 0)
+    if relic.effect_active == active:
+        return
+    if defense and city is not None:
+        if active:
+            city.defense += defense
+        else:
+            city.defense = max(0, city.defense - defense)
+    relic.effect_active = active
+
+
+def apply_relic_monthly_bonus(world: WorldState, relic: RelicState, city, faction) -> None:
+    spec = relic_effect_spec(relic)
+    if not spec or relic.condition != "intact":
+        return
+    scope = str(spec.get("scope") or "")
+    if scope == "city" and city is not None:
+        city.resources.food += int(spec.get("monthly_food", 0) or 0)
+        city.resources.money += int(spec.get("monthly_money", 0) or 0)
+        city.resources.ether += int(spec.get("monthly_ether", 0) or 0)
+        city.resources.troops += int(spec.get("monthly_troops", 0) or 0)
+        return
+    if scope != "faction" or faction is None:
+        return
+    faction.resources.money += int(spec.get("monthly_money", 0) or 0)
+    faction.resources.ether += int(spec.get("monthly_ether", 0) or 0)
+    troops = int(spec.get("monthly_troops", 0) or 0)
+    if troops:
+        capital = next(
+            (item for item in world.cities if item.city_id == faction.capital_city_id),
+            city,
+        )
+        if capital is not None:
+            capital.resources.troops += troops
+    reputation = int(spec.get("monthly_reputation", 0) or 0)
+    if reputation:
+        faction.diplomatic_reputation = min(100, faction.diplomatic_reputation + reputation)
+    support = int(spec.get("monthly_support", 0) or 0)
+    if support:
+        for owned in world.cities:
+            if owned.owner_faction_id != faction.faction_id:
+                continue
+            current = int(owned.support_by_faction.get(faction.faction_id, 50))
+            owned.support_by_faction[faction.faction_id] = min(100, current + support)
 
 
 def _clone_world(world: WorldState) -> WorldState:
@@ -225,13 +411,17 @@ def apply_city_control_change_consequences(
             altar,
             month=next_world.current_month,
             cause=f"city_control_change:{cause}",
-            summary=f"{city.name}控制权变化，原圣物胜利准备清零。",
+            summary=f"{city.name}控制权变化，祭坛圣物加成暂停。",
         )
         altar.action_month = next_world.current_month
         altar.actions_used = max(altar.actions_used, RELIC_ALTAR_MONTHLY_ACTIONS)
         if altar.bound_relic_ids:
             altar.state = "damaged"
             altar.damaged_until_month = next_world.current_month
+            for relic_id in altar.bound_relic_ids:
+                bound = next((item for item in next_world.relics if item.relic_id == relic_id), None)
+                if bound is not None:
+                    _set_relic_effect_active(next_world, bound, city, False)
         else:
             altar.state = "dormant"
             altar.damaged_until_month = None
@@ -659,7 +849,7 @@ def bind_relic(
         altar,
         month=next_world.current_month,
         cause="binding_changed",
-        summary=f"{altar.name}更换绑定圣物，胜利准备从下一次维护重新开始。",
+        summary=f"{altar.name}更换绑定圣物。",
     )
     city.relics_stored = [item for item in city.relics_stored if item != relic.relic_id]
     altar.bound_relic_ids.append(relic.relic_id)
@@ -672,6 +862,9 @@ def bind_relic(
     relic.owner_faction_id = faction_id
     relic.altar_id = altar.altar_id
     relic.last_changed_month = next_world.current_month
+    _set_relic_effect_active(next_world, relic, city, True)
+    effect = relic_effect_public(relic)
+    effect_text = f"{effect['summary']}开始生效。" if effect.get("summary") else "圣物加成开始生效。"
     relic.history.append(
         {
             "month": next_world.current_month,
@@ -679,7 +872,7 @@ def bind_relic(
             "faction_id": faction_id,
             "city_id": city.city_id,
             "altar_id": altar.altar_id,
-            "summary": f"圣物在{city.name}绑定到{altar.name}。",
+            "summary": f"圣物在{city.name}安放到{altar.name}。",
         }
     )
     altar.history.append(
@@ -687,14 +880,14 @@ def bind_relic(
             "month": next_world.current_month,
             "event": "relic_bound",
             "relic_id": relic.relic_id,
-            "summary": f"{relic.name}完成祭坛绑定。",
+            "summary": f"{relic.name}已安放到祭坛。",
         }
     )
     next_world.event_log.append(
         EventLogEntry(
             month=next_world.current_month,
             category="relic_bound",
-            message=f"{faction.name}将{relic.name}绑定到{altar.name}。",
+            message=f"{faction.name}将{relic.name}安放到{altar.name}，{effect_text}",
             related_ids=[faction_id, city.city_id, altar.altar_id, relic.relic_id, issuer_office_id],
         )
     )
@@ -759,11 +952,12 @@ def release_relic(
     altar = next(item for item in next_world.relic_altars if item.altar_id == relic.altar_id)
     city = _city(next_world, altar.city_id)
     _use_relic_altar_action(next_world, altar)
+    _set_relic_effect_active(next_world, relic, city, False)
     _reset_altar_consecration(
         altar,
         month=next_world.current_month,
         cause="relic_released",
-        summary=f"{relic.name}被主动释放，{altar.name}的胜利准备清零。",
+        summary=f"{relic.name}被主动释放，{altar.name}的圣物加成停止。",
     )
     new_node_id = _released_relic_node_id(next_world, relic)
     altar.bound_relic_ids = [item for item in altar.bound_relic_ids if item != relic.relic_id]
@@ -826,7 +1020,7 @@ def advance_relic_maintenance(world: WorldState) -> WorldState:
                 altar,
                 month=next_world.current_month,
                 cause="altar_empty",
-                summary=f"{altar.name}没有绑定圣物，胜利准备清零。",
+                summary=f"{altar.name}没有安放圣物。",
             )
             altar.state = "dormant"
             altar.damaged_until_month = None
@@ -861,104 +1055,25 @@ def advance_relic_maintenance(world: WorldState) -> WorldState:
                 ),
                 None,
             )
-            eligible_relic = (
-                bound_relics[0]
-                if len(bound_relics) == 1 and bound_relics[0].condition == "intact"
-                else None
-            )
-            if owner is not None and owner.is_major and eligible_relic is not None:
-                was_complete = (
-                    altar.consecration_faction_id == owner.faction_id
-                    and altar.consecration_relic_id == eligible_relic.relic_id
-                    and altar.consecration_progress >= altar.consecration_required
-                )
-                continues = (
-                    altar.consecration_faction_id == owner.faction_id
-                    and altar.consecration_relic_id == eligible_relic.relic_id
-                    and altar.consecration_last_month == next_world.current_month - 1
-                )
-                if not continues:
-                    _reset_altar_consecration(
-                        altar,
-                        month=next_world.current_month,
-                        cause="consecration_restarted",
-                        summary=f"{altar.name}重新开始连续维护准备。",
-                    )
-                    altar.consecration_faction_id = owner.faction_id
-                    altar.consecration_relic_id = eligible_relic.relic_id
-                    altar.consecration_progress = 1
-                    altar.consecration_started_month = next_world.current_month
+            for relic in bound_relics:
+                if owner is not None and relic.condition == "intact":
+                    _set_relic_effect_active(next_world, relic, city, True)
+                    apply_relic_monthly_bonus(next_world, relic, city, owner)
                 else:
-                    altar.consecration_progress = min(
-                        altar.consecration_required,
-                        altar.consecration_progress + 1,
-                    )
-                altar.consecration_last_month = next_world.current_month
-                consecration_complete = (
-                    altar.consecration_progress >= altar.consecration_required
-                )
-                if not was_complete:
-                    consecration_summary = (
-                        f"{owner.name}在{altar.name}完成圣物胜利准备。"
-                        if consecration_complete
-                        else (
-                            f"{owner.name}在{altar.name}的圣物胜利准备推进至 "
-                            f"{altar.consecration_progress}/{altar.consecration_required}。"
-                        )
-                    )
-                    altar.history.append(
-                        {
-                            "month": next_world.current_month,
-                            "event": (
-                                "consecration_completed"
-                                if consecration_complete
-                                else "consecration_advanced"
-                            ),
-                            "faction_id": owner.faction_id,
-                            "relic_id": eligible_relic.relic_id,
-                            "progress": altar.consecration_progress,
-                            "required": altar.consecration_required,
-                            "summary": consecration_summary,
-                        }
-                    )
-                    next_world.event_log.append(
-                        EventLogEntry(
-                            month=next_world.current_month,
-                            category=(
-                                "relic_altar_consecration_completed"
-                                if consecration_complete
-                                else "relic_altar_consecration_advanced"
-                            ),
-                            message=consecration_summary,
-                            related_ids=[
-                                owner.faction_id,
-                                city.city_id,
-                                altar.altar_id,
-                                eligible_relic.relic_id,
-                            ],
-                        )
-                    )
-            else:
-                _reset_altar_consecration(
-                    altar,
-                    month=next_world.current_month,
-                    cause="ineligible_altar",
-                    summary=f"{altar.name}不满足主要势力完整圣物准备条件，进度清零。",
-                )
+                    _set_relic_effect_active(next_world, relic, city, False)
         else:
-            progress_reset = _reset_altar_consecration(
+            _reset_altar_consecration(
                 altar,
                 month=next_world.current_month,
                 cause="maintenance_failed",
-                summary=f"{city.name}维护失败，{altar.name}的胜利准备清零。",
+                summary=f"{city.name}维护失败，{altar.name}的圣物加成暂停。",
             )
+            for relic in bound_relics:
+                _set_relic_effect_active(next_world, relic, city, False)
             altar.state = "damaged"
             altar.damaged_until_month = next_world.current_month
             event_name = "maintenance_failed"
-            summary = (
-                f"{city.name}无法全额支付 {maintenance_cost} 以太，祭坛进入失养"
-                + ("，圣物胜利准备清零。" if progress_reset else "。")
-            )
+            summary = f"{city.name}无法全额支付 {maintenance_cost} 以太，祭坛进入失养，圣物加成暂停。"
             category = "relic_maintenance_failed"
         altar.history.append(
             {
@@ -1002,13 +1117,7 @@ def _initial_relic_node_id(world: WorldState, hero_code: str) -> str | None:
 
 
 def _initial_altar_city_ids(world: WorldState) -> list[str]:
-    return sorted(
-        {
-            str(faction.capital_city_id)
-            for faction in world.factions
-            if faction.is_major and faction.capital_city_id
-        }
-    )
+    return sorted(city.city_id for city in world.cities if _ritual_site_level(city) >= 1)
 
 
 def _initial_clue_node_id(world: WorldState, faction_id: str) -> str | None:
@@ -1037,90 +1146,86 @@ def _initial_clue_node_id(world: WorldState, faction_id: str) -> str | None:
     return candidates[_stable_index(world, f"initial-relic-clue-city:{faction_id}", len(candidates))].node_id
 
 
+def _legacy_relic_effect_id(world: WorldState, relic: RelicState) -> str:
+    keys = list(RELIC_CATALOG)
+    return keys[_stable_index(world, f"legacy-relic-effect:{relic.relic_id}", len(keys))]
+
+
+def _has_catalog_relics(world: WorldState) -> bool:
+    catalog_ids = {catalog_relic_id(effect_id) for effect_id in RELIC_CATALOG}
+    return any(relic.relic_id in catalog_ids for relic in world.relics)
+
+
+def _relic_bonus_system_current(world: WorldState) -> bool:
+    expected_altar_city_ids = set(_initial_altar_city_ids(world))
+    routes = list(world.campaign_contract.get("available_victory_routes") or [])
+    if "relic_altar_victory" in routes:
+        return False
+    if RELIC_BONUS_VERSION not in world.memory_tags:
+        return False
+    if not expected_altar_city_ids.issubset({item.city_id for item in world.relic_altars}):
+        return False
+    if not world.relics or any(not item.effect_id for item in world.relics):
+        return False
+    if _has_catalog_relics(world) or not world.relics:
+        return {item.effect_id for item in world.relics}.issuperset(RELIC_CATALOG)
+    return True
+
+
 def ensure_relic_system(world: WorldState) -> WorldState:
     if not relic_system_enabled(world):
         return world
-    expected_altar_city_ids = set(_initial_altar_city_ids(world))
-    system_complete = (
-        {item.hero_code for item in world.relics}
-        == {item.hero_code for item in world.strategic_heroes}
-        and {item.city_id for item in world.relic_altars}.issuperset(expected_altar_city_ids)
-    )
-    available_routes = list(world.campaign_contract.get("available_victory_routes") or [])
-    locked_systems = list(world.campaign_contract.get("locked_systems") or [])
-    contract_current = (
-        "relic_altar_victory" in available_routes
-        and "relic_altar" not in locked_systems
-        and RELIC_VICTORY_VERSION in world.memory_tags
-    )
-    if system_complete and contract_current:
+    if _relic_bonus_system_current(world):
         return world
 
     next_world = _clone_world(world)
-    available_routes = list(next_world.campaign_contract.get("available_victory_routes") or [])
-    if "relic_altar_victory" not in available_routes:
-        available_routes.append("relic_altar_victory")
+    available_routes = [
+        item
+        for item in next_world.campaign_contract.get("available_victory_routes", [])
+        if item != "relic_altar_victory"
+    ]
     next_world.campaign_contract["available_victory_routes"] = available_routes
     next_world.campaign_contract["locked_systems"] = [
         item
         for item in next_world.campaign_contract.get("locked_systems", [])
         if item != "relic_altar"
     ]
-    if RELIC_VICTORY_VERSION not in next_world.memory_tags:
-        next_world.memory_tags.append(RELIC_VICTORY_VERSION)
-    if system_complete:
-        next_world.validate()
-        return next_world
-    from wujiang.strategic.heroes import strategic_hero_pool_public
+    if RELIC_BONUS_VERSION not in next_world.memory_tags:
+        next_world.memory_tags.append(RELIC_BONUS_VERSION)
 
-    hero_names = {
-        str(item.get("code") or ""): str(item.get("name") or item.get("code") or "")
-        for item in strategic_hero_pool_public(next_world)
-    }
-    relics_by_hero = {item.hero_code: item for item in next_world.relics}
-    for hero in sorted(next_world.strategic_heroes, key=lambda item: item.hero_code):
-        if hero.hero_code in relics_by_hero:
-            continue
-        hero_name = hero_names.get(hero.hero_code, hero.hero_code)
-        relics_by_hero[hero.hero_code] = RelicState(
-            relic_id=f"relic:{hero.hero_code}",
-            hero_code=hero.hero_code,
-            name=f"{hero_name}的圣物",
-            state="scattered",
-            condition="intact",
-            location_node_id=_initial_relic_node_id(next_world, hero.hero_code),
-            maintenance_ether_cost=DEFAULT_RELIC_MAINTENANCE_ETHER,
-            last_changed_month=next_world.current_month,
-        )
-    next_world.relics = sorted(relics_by_hero.values(), key=lambda item: item.relic_id)
+    if not next_world.relics or _has_catalog_relics(next_world):
+        relics_by_id = {item.relic_id: item for item in next_world.relics}
+        for effect_id, spec in RELIC_CATALOG.items():
+            relic_id = catalog_relic_id(effect_id)
+            existing = relics_by_id.get(relic_id)
+            if existing is not None:
+                existing.effect_id = effect_id
+                existing.name = existing.name or str(spec.get("name") or effect_id)
+                existing.maintenance_ether_cost = int(
+                    spec.get("maintenance_ether_cost", existing.maintenance_ether_cost)
+                )
+                continue
+            relics_by_id[relic_id] = RelicState(
+                relic_id=relic_id,
+                hero_code="",
+                name=str(spec.get("name") or effect_id),
+                state="scattered",
+                condition="intact",
+                effect_id=effect_id,
+                location_node_id=_initial_relic_node_id(next_world, effect_id),
+                maintenance_ether_cost=int(
+                    spec.get("maintenance_ether_cost", DEFAULT_RELIC_MAINTENANCE_ETHER)
+                ),
+                last_changed_month=next_world.current_month,
+            )
+        next_world.relics = sorted(relics_by_id.values(), key=lambda item: item.relic_id)
+    else:
+        for relic in next_world.relics:
+            if not relic.effect_id:
+                relic.effect_id = _legacy_relic_effect_id(next_world, relic)
 
-    altars_by_city = {item.city_id: item for item in next_world.relic_altars}
-    for city_id in _initial_altar_city_ids(next_world):
-        if city_id in altars_by_city:
-            continue
-        city = next(city for city in next_world.cities if city.city_id == city_id)
-        altar = RelicAltar(
-            altar_id=f"relic_altar:{city_id}",
-            city_id=city_id,
-            name=f"{city.name}圣物祭坛",
-            state="dormant",
-            history=[
-                {
-                    "month": next_world.current_month,
-                    "event": "altar_archived",
-                    "summary": "古代祭坛已登记；P6.1 暂不开放绑定行动。",
-                }
-            ],
-        )
-        next_world.relic_altars.append(altar)
-        altars_by_city[city_id] = altar
-    next_world.relic_altars.sort(key=lambda item: item.altar_id)
-    altar_ids_by_city = {item.city_id: item.altar_id for item in next_world.relic_altars}
     for city in next_world.cities:
-        altar_id = altar_ids_by_city.get(city.city_id)
-        if altar_id and altar_id not in city.altars:
-            city.altars.append(altar_id)
-            city.altars.sort()
+        ensure_city_relic_altar(next_world, city)
 
     available_relics = list(next_world.relics)
     for faction in sorted(
@@ -1173,7 +1278,7 @@ def _relic_public(relic: RelicState, world: WorldState) -> dict[str, Any]:
         "state_label": {
             "scattered": "散落",
             "stored": "保管",
-            "bound_to_altar": "祭坛绑定",
+            "bound_to_altar": "祭坛安放",
             "released": "已释放",
         }.get(relic.state, relic.state),
         "condition": relic.condition,
@@ -1184,6 +1289,8 @@ def _relic_public(relic: RelicState, world: WorldState) -> dict[str, Any]:
         "location_city_name": city.name if city is not None else "",
         "owner_faction_id": relic.owner_faction_id,
         "altar_id": relic.altar_id,
+        "effect": relic_effect_public(relic),
+        "effect_active": relic.effect_active,
         "maintenance_ether_cost": relic.maintenance_ether_cost,
         "last_changed_month": relic.last_changed_month,
     }
@@ -1331,6 +1438,7 @@ def relic_system_public(world: WorldState) -> dict[str, Any]:
                             "altar_name": altar.name,
                             "city_id": source.city_id,
                             "city_name": source.name,
+                            "effect": relic_effect_public(relic),
                             "available": (
                                 source.owner_faction_id == faction.faction_id
                                 and relic_altar_actions_remaining(ensured, altar) > 0
@@ -1357,6 +1465,7 @@ def relic_system_public(world: WorldState) -> dict[str, Any]:
                     "altar_name": altar.name,
                     "city_id": city.city_id,
                     "city_name": city.name,
+                    "effect": relic_effect_public(relic),
                     "available": relic_altar_actions_remaining(ensured, altar) > 0,
                     "command_cost": 1,
                     "altar_actions_remaining": relic_altar_actions_remaining(ensured, altar),
@@ -1381,6 +1490,15 @@ def relic_system_public(world: WorldState) -> dict[str, Any]:
             if relic.relic_id in altar.bound_relic_ids
         ]
         maintenance_cost = sum(relic.maintenance_ether_cost for relic in bound_relics)
+        bound_public = [
+            {
+                "id": relic.relic_id,
+                "name": relic.name,
+                "effect": relic_effect_public(relic),
+                "effect_active": relic.effect_active,
+            }
+            for relic in bound_relics
+        ]
         altars.append(
             {
                 "id": altar.altar_id,
@@ -1397,6 +1515,12 @@ def relic_system_public(world: WorldState) -> dict[str, Any]:
                 }.get(altar.state, altar.state),
                 "capacity": altar.capacity,
                 "bound_count": len(altar.bound_relic_ids),
+                "bound_relics": bound_public,
+                "active_effects": [
+                    item["effect"]
+                    for item in bound_public
+                    if item["effect"].get("summary") and item["effect_active"]
+                ],
                 "damaged_until_month": altar.damaged_until_month,
                 "monthly_maintenance_ether": maintenance_cost,
                 "maintenance_affordable": (
@@ -1406,36 +1530,28 @@ def relic_system_public(world: WorldState) -> dict[str, Any]:
                 ),
                 "actions_used": altar.actions_used if altar.action_month == ensured.current_month else 0,
                 "actions_remaining": relic_altar_actions_remaining(ensured, altar),
-                "consecration": {
-                    "faction_id": altar.consecration_faction_id,
-                    "relic_id": altar.consecration_relic_id,
-                    "progress": altar.consecration_progress,
-                    "required": altar.consecration_required,
-                    "started_month": altar.consecration_started_month,
-                    "last_progress_month": altar.consecration_last_month,
-                    "earliest_completion_month": (
-                        ensured.current_month
-                        + max(0, altar.consecration_required - altar.consecration_progress)
-                        if altar.bound_relic_ids and city is not None
-                        else None
-                    ),
-                    "active": altar.consecration_progress > 0,
-                    "completed": (
-                        altar.consecration_progress >= altar.consecration_required
-                    ),
-                },
             }
         )
     return {
         "enabled": True,
-        "phase": "p6_6_relic_victory",
-        "version": RELIC_SYSTEM_VERSION,
+        "phase": "relic_bonus",
+        "version": RELIC_BONUS_VERSION,
         "total_relics": len(ensured.relics),
         "altars": altars,
         "intel_by_faction": intel_by_faction,
+        "catalog": [
+            {
+                "id": effect_id,
+                **relic_effect_public(effect_id),
+                "maintenance_ether_cost": int(
+                    spec.get("maintenance_ether_cost", DEFAULT_RELIC_MAINTENANCE_ETHER)
+                ),
+            }
+            for effect_id, spec in RELIC_CATALOG.items()
+        ],
         "rules": {
-            "ritual_site": "祭祀场：1 军令 + 30 城市以太，确定性随机召唤未绑定英灵。",
-            "relic_altar": "圣物祭坛：绑定完整圣物后，连续完成 3 次月初全额维护即可达成圣物胜利；断供、释放或易主会清零进度。",
-            "current_scope": "P6.6 已开放圣物祭坛胜利、公开准备进度与同规则 AI 竞速/反制。",
+            "ritual_site": "祭坛建筑：城市拥有 1 级祭坛后即可安放圣物；等级决定安放容量。",
+            "relic_altar": "圣物必须安放到祭坛才会生效。城市圣物只加强所在城，势力圣物加强整个势力。每月需支付以太维持，断供、释放或易主会暂停加成。",
+            "current_scope": "圣物是可争夺的长期加成，不再作为胜利条件。",
         },
     }

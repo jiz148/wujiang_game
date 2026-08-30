@@ -333,6 +333,23 @@ def _apply_specialty_effect(world: WorldState, hero: StrategicHeroState) -> str:
     return f"{city.name}以太 +10"
 
 
+def _apply_generic_duty_effect(world: WorldState, hero: StrategicHeroState) -> str:
+    city = _assignment_city(world, hero)
+    if city is None:
+        return ""
+    if hero.assignment_type == "training":
+        city.resources.troops += 15
+        return f"{city.name}兵力 +15"
+    if hero.assignment_type == "garrison":
+        city.resources.troops += 10
+        return f"{city.name}兵力 +10"
+    if hero.assignment_type == "administration":
+        city.resources.money += 15
+        city.resources.food += 10
+        return f"{city.name}钱 +15、粮 +10"
+    return ""
+
+
 def advance_hero_personal_states(world: WorldState) -> WorldState:
     next_world = _clone_world(world)
     initialize_hero_personal_state(next_world)
@@ -361,6 +378,24 @@ def advance_hero_personal_states(world: WorldState) -> WorldState:
                         month=next_world.current_month,
                         category="strategic_hero_specialty",
                         message=f"{_hero_name(hero.hero_code)}的{specialty['name']}生效：{effect}。",
+                        related_ids=[hero.hero_code, hero.faction_id],
+                    )
+                )
+        elif hero.assignment_type in {"training", "garrison", "administration"}:
+            effect = _apply_generic_duty_effect(next_world, hero)
+            if effect:
+                _history(
+                    hero,
+                    next_world,
+                    "generic_duty_applied",
+                    f"驻城职责生效：{effect}。",
+                    assignment_type=hero.assignment_type,
+                )
+                next_world.event_log.append(
+                    EventLogEntry(
+                        month=next_world.current_month,
+                        category="strategic_hero_duty",
+                        message=f"{_hero_name(hero.hero_code)}驻城生效：{effect}。",
                         related_ids=[hero.hero_code, hero.faction_id],
                     )
                 )

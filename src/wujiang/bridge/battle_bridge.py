@@ -13,13 +13,65 @@ from typing import Any
 from wujiang.platform.auth import AuthUser
 from wujiang.strategic import StrategyError
 from wujiang.strategic import attach_battle_room
+from wujiang.strategic import convert_pending_battle_to_siege
 from wujiang.strategic import declare_city_attack
 from wujiang.strategic import declare_strategic_battle
 from wujiang.strategic import resolve_battle_room_result as resolve_strategy_battle_room_result
+from wujiang.strategic import resolve_pending_battle
+from wujiang.strategic import retreat_pending_battle
+from wujiang.strategic import set_pending_battle_composition
 from wujiang.strategic import set_world_crisis_showdown_resolution
 from wujiang.strategic import strategy_battle_rosters
+
+STRATEGY_BATTLE_BOARD_WIDTH = 32
+STRATEGY_BATTLE_BOARD_HEIGHT = 22
+STRATEGY_AI_SIMULATION_MAX_STEPS = 12000
+
+
+def _run_strategy_ai_simulation(room):
+    return room.run_ai_simulation_to_end(max_steps=STRATEGY_AI_SIMULATION_MAX_STEPS)
+
+
+def _resolve_strategy_ai_simulation(next_world, room, battle_room: dict[str, Any], battle_id: str):
+    simulation_steps = _run_strategy_ai_simulation(room)
+    battle_room["status"] = room.status
+    battle_room["winner"] = getattr(getattr(room, "battle", None), "winner", None)
+    battle_room["simulation_steps"] = simulation_steps
+    winner_team_id = battle_room["winner"]
+    if winner_team_id in {1, 2}:
+        return resolve_strategy_battle_room_result(
+            next_world,
+            battle_room_id=str(battle_room["room_id"]),
+            winner_team_id=int(winner_team_id),
+            battle_summary=strategy_room_battle_summary(room),
+            surviving_grid_units_by_team=strategy_room_survivors_by_team(room),
+            surviving_hero_codes_by_team=strategy_room_surviving_hero_codes_by_team(room),
+        ), battle_room
+    pending = next(item for item in next_world.pending_battles if item.battle_id == battle_id)
+    pending.resolution_mode = "formula"
+    next_world = resolve_pending_battle(next_world, battle_id=battle_id)
+    settled = next(item for item in next_world.pending_battles if item.battle_id == battle_id)
+    battle_room["status"] = "finished"
+    battle_room["winner"] = 1 if settled.winner_faction_id == settled.attacker_faction_id else 2
+    return next_world, battle_room
+
+
+def siege_wall_cells(width: int, height: int) -> set[tuple[int, int]]:
+    band = max(4, min(8, width // 4))
+    wall_x = max(band + 2, width - band - 2)
+    gate = {height // 2, height // 2 - 1}
+    blocked: set[tuple[int, int]] = set()
+    for y in range(1, height - 1):
+        if y in gate:
+            continue
+        blocked.add((wall_x, y))
+    for x, y in ((wall_x + 1, 1), (wall_x + 1, height - 2), (wall_x - 1, 2), (wall_x - 1, height - 3)):
+        if 0 <= x < width and 0 <= y < height:
+            blocked.add((x, y))
+    return blocked
 from wujiang.strategic.campaign_runtime import strategy_city_name
 from wujiang.tactical.rooms.history import record_finished_room_history
+from wujiang.tactical.rooms.launch import bind_campaign_launch, make_launch_context
 from wujiang.tactical.rooms.multiplayer import GameRoom
 from wujiang.tactical.rooms.multiplayer import ROOMS
 from wujiang.tactical.rooms.multiplayer import RoomError
@@ -39,6 +91,14 @@ def create_strategy_battle_room(
         raise StrategyError("战略战斗参战单位不足，无法创建真实格子战房间。", status=HTTPStatus.CONFLICT)
     source_name = strategy_city_name(campaign, battle.source_city_id)
     target_name = strategy_city_name(campaign, battle.target_city_id)
+    campaign_id = getattr(campaign, "campaign_id", None)
+    if campaign_id is None:
+        campaign_id = getattr(campaign, "id", None)
+    launch_context = make_launch_context(
+        "campaign",
+        campaign_id=campaign_id,
+        battle_id=getattr(battle, "battle_id", ""),
+    )
     room, _player_id, player_token = ROOMS.create_preconfigured_battle_room(
         host_name=f"{auth_user.username} · {source_name}",
         opponent_name=f"{target_name}守军",
@@ -48,7 +108,18 @@ def create_strategy_battle_room(
         host_becomes_ai_after_start=resolution_mode in {"watch_ai", "ai_auto"},
         host_account_user_id=auth_user.user_id,
         room_id=room_id,
+        board_width=STRATEGY_BATTLE_BOARD_WIDTH,
+        board_height=STRATEGY_BATTLE_BOARD_HEIGHT,
+        experience_kind="strategy_campaign",
+        launch_context=launch_context,
     )
+    bind_campaign_launch(room, campaign_id=campaign_id, battle_id=str(getattr(battle, "battle_id", "") or ""))
+    if getattr(room, "battle", None) is not None and str(getattr(battle, "source_kind", "") or "legacy_city_attack") in {
+        "legacy_city_attack",
+        "siege",
+        "",
+    }:
+        room.battle.blocked_cells = siege_wall_cells(room.battle.width, room.battle.height)
     return {
         "room_id": room.room_id,
         "invite_path": room.invite_path(),
@@ -61,6 +132,8 @@ def create_strategy_battle_room(
         "defender_roster": rosters.defender.roster,
         "attacker_roster_manifest": rosters.attacker.manifest,
         "defender_roster_manifest": rosters.defender.manifest,
+        "launch_context": dict(room.launch_context),
+        "experience_kind": room.experience_kind,
     }
 
 
@@ -119,6 +192,7 @@ def declare_strategy_attack_for_world(
     resolution_mode: str,
     attacker_hero_codes: list[str] | tuple[str, ...] | set[str] | None = None,
     attacker_office_id: str = "",
+    committed_troops: int | None = None,
 ) -> tuple[Any, dict[str, Any] | None]:
     next_world = declare_city_attack(
         world,
@@ -126,9 +200,10 @@ def declare_strategy_attack_for_world(
         source_city_id=source_city_id,
         target_city_id=target_city_id,
         resolution_mode=resolution_mode,
-        auto_resolve=resolution_mode == "quick",
+        auto_resolve=resolution_mode in {"quick", "formula"},
         attacker_hero_codes=attacker_hero_codes,
         attacker_office_id=attacker_office_id,
+        committed_troops=committed_troops,
     )
     if resolution_mode not in {"manual", "watch_ai", "ai_auto"}:
         return next_world, None
@@ -148,20 +223,9 @@ def declare_strategy_attack_for_world(
     )
     if resolution_mode == "ai_auto":
         room = ROOMS.get_room(str(battle_room["room_id"]))
-        simulation_steps = room.run_ai_simulation_to_end()
-        battle_room["status"] = room.status
-        battle_room["winner"] = getattr(room.battle, "winner", None)
-        battle_room["simulation_steps"] = simulation_steps
-        winner_team_id = getattr(room.battle, "winner", None)
-        if winner_team_id in {1, 2}:
-            next_world = resolve_strategy_battle_room_result(
-                next_world,
-                battle_room_id=str(battle_room["room_id"]),
-                winner_team_id=int(winner_team_id),
-                battle_summary=strategy_room_battle_summary(room),
-                surviving_grid_units_by_team=strategy_room_survivors_by_team(room),
-                surviving_hero_codes_by_team=strategy_room_surviving_hero_codes_by_team(room),
-            )
+        next_world, battle_room = _resolve_strategy_ai_simulation(
+            next_world, room, battle_room, pending_battle.battle_id
+        )
     return next_world, battle_room
 
 
@@ -181,7 +245,7 @@ def declare_strategy_engagement_for_world(
         source_kind=source_kind,
         source_entity_id=source_entity_id,
         resolution_mode=resolution_mode,
-        auto_resolve=resolution_mode == "quick",
+        auto_resolve=resolution_mode in {"quick", "formula"},
     )
     if resolution_mode not in {"manual", "watch_ai", "ai_auto"}:
         return next_world, None
@@ -200,20 +264,9 @@ def declare_strategy_engagement_for_world(
     )
     if resolution_mode == "ai_auto":
         room = ROOMS.get_room(str(battle_room["room_id"]))
-        simulation_steps = room.run_ai_simulation_to_end()
-        battle_room["status"] = room.status
-        battle_room["winner"] = getattr(room.battle, "winner", None)
-        battle_room["simulation_steps"] = simulation_steps
-        winner_team_id = getattr(room.battle, "winner", None)
-        if winner_team_id in {1, 2}:
-            next_world = resolve_strategy_battle_room_result(
-                next_world,
-                battle_room_id=str(battle_room["room_id"]),
-                winner_team_id=int(winner_team_id),
-                battle_summary=strategy_room_battle_summary(room),
-                surviving_grid_units_by_team=strategy_room_survivors_by_team(room),
-                surviving_hero_codes_by_team=strategy_room_surviving_hero_codes_by_team(room),
-            )
+        next_world, battle_room = _resolve_strategy_ai_simulation(
+            next_world, room, battle_room, pending_battle.battle_id
+        )
     return next_world, battle_room
 
 
@@ -231,7 +284,7 @@ def start_world_crisis_showdown_for_world(
         faction_id=faction_id,
         issuer_office_id=issuer_office_id,
         resolution_mode=resolution_mode,
-        auto_resolve=resolution_mode == "quick",
+        auto_resolve=resolution_mode in {"quick", "formula"},
     )
     if resolution_mode not in {"manual", "watch_ai", "ai_auto"}:
         return next_world, None
@@ -259,20 +312,9 @@ def start_world_crisis_showdown_for_world(
     )
     if resolution_mode == "ai_auto":
         room = ROOMS.get_room(str(battle_room["room_id"]))
-        simulation_steps = room.run_ai_simulation_to_end()
-        battle_room["status"] = room.status
-        battle_room["winner"] = getattr(room.battle, "winner", None)
-        battle_room["simulation_steps"] = simulation_steps
-        winner_team_id = getattr(room.battle, "winner", None)
-        if winner_team_id in {1, 2}:
-            next_world = resolve_strategy_battle_room_result(
-                next_world,
-                battle_room_id=str(battle_room["room_id"]),
-                winner_team_id=int(winner_team_id),
-                battle_summary=strategy_room_battle_summary(room),
-                surviving_grid_units_by_team=strategy_room_survivors_by_team(room),
-                surviving_hero_codes_by_team=strategy_room_surviving_hero_codes_by_team(room),
-            )
+        next_world, battle_room = _resolve_strategy_ai_simulation(
+            next_world, room, battle_room, pending_battle.battle_id
+        )
     return next_world, battle_room
 
 
@@ -405,6 +447,14 @@ def room_state_with_strategy_sync(
     state = room.serialize_state(player_token, base_url=base_url)
     checkpoint = persist_strategy_battle_room(room)
     if checkpoint is not None:
+        bind_campaign_launch(
+            room,
+            campaign_id=checkpoint.campaign_id,
+            battle_id=checkpoint.battle_id,
+        )
+        state["room"]["experience_kind"] = room.experience_kind
+        state["room"]["launch_context"] = dict(room.launch_context)
+        state["room"]["can_rematch"] = False
         access_mode = campaign_runtime.STRATEGY_STORE.campaign_access_mode(checkpoint.campaign_id)
         state["battle_recovery"] = {
             "status": "read_only" if access_mode == "read_only" else ("recovered" if recovered else checkpoint.status),
@@ -427,3 +477,64 @@ def room_state_with_strategy_sync(
     if strategy_campaign is not None:
         state["strategy_campaign"] = strategy_campaign
     return state
+
+
+def resolve_strategy_battle_player_choice(
+    campaign,
+    world,
+    auth_user,
+    *,
+    faction_id: str,
+    battle_id: str,
+    choice: str,
+    composition: dict[str, object] | None = None,
+) -> tuple[Any, dict[str, Any] | None]:
+    battle = next((item for item in world.pending_battles if item.battle_id == str(battle_id)), None)
+    if battle is None or battle.status != "pending":
+        raise StrategyError("没有可处理的待决战斗。")
+    if faction_id != battle.attacker_faction_id:
+        raise StrategyError("只有攻方可以决定这场战斗的处理方式。")
+    if choice == "retreat":
+        return retreat_pending_battle(world, battle_id=battle.battle_id, faction_id=faction_id), None
+    if choice == "siege":
+        return convert_pending_battle_to_siege(world, battle_id=battle.battle_id, faction_id=faction_id), None
+    if choice not in {"manual", "ai_auto", "formula"}:
+        raise StrategyError("未知的战斗处理方式。")
+    next_world = set_pending_battle_composition(world, battle_id=battle.battle_id, composition=composition)
+    pending = next(item for item in next_world.pending_battles if item.battle_id == battle.battle_id)
+    pending.resolution_mode = choice
+    if choice == "formula":
+        return resolve_pending_battle(next_world, battle_id=pending.battle_id), None
+    if pending.battle_room_id and choice == "ai_auto":
+        room = ROOMS.get_room(str(pending.battle_room_id))
+        battle_room = {
+            "room_id": room.room_id,
+            "invite_path": room.invite_path(),
+        }
+        next_world, battle_room = _resolve_strategy_ai_simulation(
+            next_world, room, battle_room, pending.battle_id
+        )
+        return next_world, battle_room
+    if pending.battle_room_id:
+        return next_world, {
+            "room_id": pending.battle_room_id,
+            "invite_path": pending.battle_room_invite_path,
+        }
+    battle_room = create_strategy_battle_room(
+        campaign=SimpleNamespace(world=next_world),
+        auth_user=auth_user,
+        battle=pending,
+        resolution_mode=choice,
+    )
+    next_world = attach_battle_room(
+        next_world,
+        battle_id=pending.battle_id,
+        room_id=battle_room["room_id"],
+        invite_path=battle_room["invite_path"],
+    )
+    if choice == "ai_auto":
+        room = ROOMS.get_room(str(battle_room["room_id"]))
+        next_world, battle_room = _resolve_strategy_ai_simulation(
+            next_world, room, battle_room, pending.battle_id
+        )
+    return next_world, battle_room

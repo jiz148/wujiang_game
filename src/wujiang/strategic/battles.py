@@ -2,22 +2,143 @@ from __future__ import annotations
 
 import copy
 
-from wujiang.strategic.battle_adapter import MAX_GRID_UNITS_PER_SIDE, TROOPS_PER_GRID_UNIT
+from wujiang.strategic.battle_adapter import MAX_COMPOSED_UNITS, MAX_GRID_UNITS_PER_SIDE, TROOPS_PER_GRID_UNIT
 from wujiang.strategic.heroes import (
     normalize_strategic_hero_deployment,
     record_strategic_hero_battle_losses,
     strategic_defender_hero_codes_for_faction,
     strategic_hero_deployment_limit,
 )
-from wujiang.strategic.models import City, EventLogEntry, PendingBattle, StrategicArmy, StrategyError, WorldState
+from wujiang.strategic.models import City, EventLogEntry, PendingBattle, StrategicArmy, StrategicSiege, StrategyError, WorldState
 from wujiang.strategic.simulation import clamp, owner_support
 
 
-BATTLE_RESOLUTION_MODES = {"manual", "ai_auto", "watch_ai", "quick"}
+BATTLE_RESOLUTION_MODES = {"manual", "ai_auto", "watch_ai", "quick", "formula", "pending_choice"}
+BATTLE_PLAYER_CHOICES = {"manual", "ai_auto", "formula", "siege", "retreat"}
+BATTLE_UNIT_TROOP_COSTS = {"infantry": 10, "archer": 20, "cavalry": 50}
+AUTO_COMPOSED_UNITS = 30
 MIN_ATTACK_TROOPS = 50
 ATTACK_COMMITMENT_NUMERATOR = 3
 ATTACK_COMMITMENT_DENOMINATOR = 4
 REGISTERED_UNIT_TROOP_VALUES = {"infantry": 100, "archer": 140, "cavalry": 180}
+COMPOSITION_COMBAT_POWER = {"infantry": 12, "archer": 24, "cavalry": 56}
+FORMULA_HERO_POWER = 90
+RESOLUTION_MODE_LABELS = {
+    "manual": "手动开战",
+    "ai_auto": "AI 推演",
+    "watch_ai": "观看 AI",
+    "quick": "快速结算",
+    "formula": "快速结算",
+    "pending_choice": "待决",
+    "siege": "围城",
+    "retreat": "撤退",
+}
+
+
+FEATURE_COMPOSITION_BIAS = {
+    "弓兵": {"archer": 18},
+    "以太侦察兵": {"archer": 10},
+    "骑兵": {"cavalry": 16},
+    "守备兵": {"infantry": 10},
+    "山地兵": {"infantry": 8},
+    "城墙工兵": {"infantry": 8},
+}
+
+
+def auto_battle_composition(
+    troop_budget: int,
+    *,
+    city: City | None = None,
+    limit: int = AUTO_COMPOSED_UNITS,
+) -> dict[str, int]:
+    budget = max(0, int(troop_budget))
+    infantry_cost = BATTLE_UNIT_TROOP_COSTS["infantry"]
+    archer_cost = BATTLE_UNIT_TROOP_COSTS["archer"]
+    cavalry_cost = BATTLE_UNIT_TROOP_COSTS["cavalry"]
+    if budget < infantry_cost:
+        return {}
+    slots = min(max(1, int(limit)), budget // infantry_cost)
+    infantry_weight = 50
+    archer_weight = 35
+    cavalry_weight = 15
+    for feature in getattr(city, "troop_features", None) or []:
+        bias = FEATURE_COMPOSITION_BIAS.get(str(feature) or "")
+        if not bias:
+            continue
+        infantry_weight += int(bias.get("infantry") or 0)
+        archer_weight += int(bias.get("archer") or 0)
+        cavalry_weight += int(bias.get("cavalry") or 0)
+    infantry_weight = max(20, infantry_weight)
+    archer_weight = max(10, archer_weight)
+    cavalry_weight = max(0, cavalry_weight)
+    total_weight = infantry_weight + archer_weight + cavalry_weight
+    cavalry_budget = budget * cavalry_weight // total_weight
+    archer_budget = budget * archer_weight // total_weight
+    infantry_budget = budget - cavalry_budget - archer_budget
+    cavalry = min(slots, cavalry_budget // cavalry_cost)
+    archer = min(slots - cavalry, archer_budget // archer_cost)
+    infantry = min(slots - cavalry - archer, infantry_budget // infantry_cost)
+    remaining_slots = slots - cavalry - archer - infantry
+    remaining_budget = budget - cavalry * cavalry_cost - archer * archer_cost - infantry * infantry_cost
+    extra_infantry = min(remaining_slots, remaining_budget // infantry_cost)
+    infantry += extra_infantry
+    remaining_slots -= extra_infantry
+    remaining_budget -= extra_infantry * infantry_cost
+    extra_archer = min(remaining_slots, remaining_budget // archer_cost)
+    archer += extra_archer
+    remaining_budget -= extra_archer * archer_cost
+    extra_cavalry = min(remaining_slots - extra_archer, remaining_budget // cavalry_cost)
+    cavalry += extra_cavalry
+    composition = {
+        "infantry": infantry,
+        "archer": archer,
+        "cavalry": cavalry,
+    }
+    return {unit_type: count for unit_type, count in composition.items() if count > 0}
+
+
+def _composition_unit_count(composition: dict[str, int] | None) -> int:
+    raw = composition if isinstance(composition, dict) else {}
+    return sum(max(0, int(count or 0)) for count in raw.values())
+
+
+def _side_initial_grid_units(battle: PendingBattle, side: str) -> int:
+    composition = getattr(battle, f"{side}_composition", None)
+    if _composition_unit_count(composition) > 0:
+        return min(MAX_COMPOSED_UNITS, _composition_unit_count(composition))
+    registered = getattr(battle, f"{side}_registered_units", {}) or {}
+    troops = battle.attacker_troops if side == "attacker" else battle.defender_troops
+    return min(
+        MAX_GRID_UNITS_PER_SIDE,
+        _registered_unit_count(registered) + _grid_unit_count_for_troops(troops),
+    )
+
+
+def normalize_battle_composition(
+    composition: dict[str, object] | None,
+    troop_budget: int,
+    *,
+    limit: int = MAX_COMPOSED_UNITS,
+) -> dict[str, int]:
+    raw = composition if isinstance(composition, dict) else {}
+    counts = {unit_type: max(0, int(raw.get(unit_type, 0) or 0)) for unit_type in BATTLE_UNIT_TROOP_COSTS}
+    spent = sum(counts[unit_type] * BATTLE_UNIT_TROOP_COSTS[unit_type] for unit_type in counts)
+    total_units = sum(counts.values())
+    if total_units <= 0:
+        raise StrategyError("至少配置一个作战单位。")
+    if total_units > limit:
+        raise StrategyError(f"战场最多投入 {limit} 个单位。")
+    if spent > max(0, int(troop_budget)):
+        raise StrategyError(f"配兵超过可用兵力 {troop_budget}。")
+    return {unit_type: count for unit_type, count in counts.items() if count > 0}
+
+
+def hero_is_stationed_in_city(world: WorldState, hero_code: str, city_id: str) -> bool:
+    hero = next((item for item in world.strategic_heroes if item.hero_code == str(hero_code)), None)
+    if hero is None:
+        return False
+    stationed = str(hero.city_id or hero.assignment_target_id or "")
+    return stationed == str(city_id)
 
 
 def city_attack_commitment(troops: int) -> int:
@@ -27,8 +148,51 @@ def city_attack_commitment(troops: int) -> int:
     return max(MIN_ATTACK_TROOPS, available * ATTACK_COMMITMENT_NUMERATOR // ATTACK_COMMITMENT_DENOMINATOR)
 
 
+def pending_battle_hero_codes(world: WorldState, *, exclude_battle_id: str = "") -> set[str]:
+    codes: set[str] = set()
+    excluded = str(exclude_battle_id or "")
+    for battle in world.pending_battles:
+        if battle.status != "pending":
+            continue
+        if excluded and battle.battle_id == excluded:
+            continue
+        codes.update(str(code) for code in (battle.attacker_hero_codes or []) if code)
+        codes.update(str(code) for code in (battle.defender_hero_codes or []) if code)
+    return codes
+
+
+def normalize_committed_attack_troops(value: object, available: int) -> int:
+    if value in {None, ""}:
+        committed = city_attack_commitment(available)
+    else:
+        committed = int(value)
+    if committed < MIN_ATTACK_TROOPS:
+        raise StrategyError(f"出征至少需要带走 {MIN_ATTACK_TROOPS} 兵力。")
+    if committed > max(0, int(available)):
+        raise StrategyError(f"出发城可带走兵力不足：可用 {available}，本次要带走 {committed}。")
+    return committed
+
+
 def _clone_world(world: WorldState) -> WorldState:
     return WorldState.from_dict(copy.deepcopy(world.to_dict()))
+
+
+def _mode_label(mode: str) -> str:
+    return RESOLUTION_MODE_LABELS.get(str(mode or ""), str(mode or "待决"))
+
+
+def _faction_label(world: WorldState, faction_id: str) -> str:
+    faction = next((item for item in world.factions if item.faction_id == faction_id), None)
+    return faction.name if faction is not None else str(faction_id or "未知势力")
+
+
+def _maybe_city(world: WorldState, city_id: str) -> City | None:
+    if not city_id:
+        return None
+    try:
+        return _city(world, city_id)
+    except StrategyError:
+        return None
 
 
 def _city(world: WorldState, city_id: str) -> City:
@@ -243,6 +407,68 @@ def _registered_unit_power(units: dict[str, int]) -> int:
     return sum(REGISTERED_UNIT_TROOP_VALUES.get(unit_type, 100) * max(0, int(count)) for unit_type, count in units.items())
 
 
+def _clamp_rate(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _composition_combat_power(composition: dict[str, int] | None, troops: int) -> int:
+    raw = composition if isinstance(composition, dict) else {}
+    quality = 0
+    spent = 0
+    for unit_type, cost in BATTLE_UNIT_TROOP_COSTS.items():
+        count = max(0, int(raw.get(unit_type, 0) or 0))
+        quality += count * COMPOSITION_COMBAT_POWER.get(unit_type, cost)
+        spent += count * cost
+    leftover = max(0, int(troops) - spent)
+    return quality + leftover
+
+
+def _hero_combat_power(codes: list[str] | tuple[str, ...] | set[str] | None) -> int:
+    return FORMULA_HERO_POWER * len([code for code in (codes or []) if str(code or "").strip()])
+
+
+def simulate_formula_city_attack(world: WorldState, battle: PendingBattle) -> dict[str, object]:
+    target = _city(world, battle.target_city_id)
+    support = owner_support(target)
+    attacker_power = (
+        _composition_combat_power(getattr(battle, "attacker_composition", None), battle.attacker_troops)
+        + _registered_unit_power(battle.attacker_registered_units)
+        + _hero_combat_power(battle.attacker_hero_codes)
+    )
+    defender_codes = battle.defender_hero_codes
+    if defender_codes is None:
+        defender_codes = strategic_defender_hero_codes_for_faction(world, battle.defender_faction_id)
+    defender_power = (
+        _composition_combat_power(getattr(battle, "defender_composition", None), battle.defender_troops)
+        + _registered_unit_power(battle.defender_registered_units)
+        + target.defense * 80
+        + support * 3
+        + _hero_combat_power(defender_codes)
+    )
+    attacker_wins = attacker_power >= defender_power
+    ratio = attacker_power / max(1, defender_power)
+    if attacker_wins:
+        attacker_rate = _clamp_rate(0.20 + 0.40 / max(ratio, 0.55), 0.18, 0.68)
+        defender_rate = _clamp_rate(0.55 + 0.25 * ratio, 0.55, 0.97)
+    else:
+        attacker_rate = _clamp_rate(0.50 + 0.30 / max(ratio, 0.35), 0.48, 0.88)
+        defender_rate = _clamp_rate(0.14 + 0.28 * ratio, 0.12, 0.52)
+    attacker_losses = min(int(battle.attacker_troops), max(0, round(int(battle.attacker_troops) * attacker_rate)))
+    defender_losses = min(int(battle.defender_troops), max(0, round(int(battle.defender_troops) * defender_rate)))
+    if attacker_losses <= 0 and battle.attacker_troops > 0:
+        attacker_losses = min(int(battle.attacker_troops), 1)
+    if defender_losses <= 0 and battle.defender_troops > 0:
+        defender_losses = min(int(battle.defender_troops), 1)
+    return {
+        "attacker_wins": attacker_wins,
+        "attacker_power": attacker_power,
+        "defender_power": defender_power,
+        "attacker_losses": attacker_losses,
+        "defender_losses": defender_losses,
+        "defender_hero_codes": list(defender_codes or []),
+    }
+
+
 def _commit_registered_units(inventory: dict[str, int]) -> dict[str, int]:
     committed: dict[str, int] = {}
     remaining = MAX_GRID_UNITS_PER_SIDE
@@ -352,6 +578,7 @@ def declare_city_attack(
     auto_resolve: bool = True,
     attacker_hero_codes: list[str] | tuple[str, ...] | set[str] | None = None,
     attacker_office_id: str = "",
+    committed_troops: int | None = None,
 ) -> WorldState:
     if resolution_mode not in BATTLE_RESOLUTION_MODES:
         raise StrategyError("Unknown battle resolution mode.")
@@ -375,15 +602,35 @@ def declare_city_attack(
     available_registered_power = _registered_unit_power(attacker_office.unit_inventory) if attacker_office else 0
     if source.resources.troops < MIN_ATTACK_TROOPS and available_registered_power < MIN_ATTACK_TROOPS:
         raise StrategyError("Source city does not have enough troops.")
-    selected_attacker_hero_codes = normalize_strategic_hero_deployment(
-        next_world,
-        faction_id,
-        [] if attacker_hero_codes is None else attacker_hero_codes,
-    )
+    if attacker_hero_codes is None:
+        selected_attacker_hero_codes = []
+    else:
+        selected_attacker_hero_codes = normalize_strategic_hero_deployment(
+            next_world,
+            faction_id,
+            attacker_hero_codes,
+        )
+        remote_heroes = [
+            code
+            for code in selected_attacker_hero_codes
+            if not hero_is_stationed_in_city(next_world, code, source.city_id)
+        ]
+        if remote_heroes:
+            raise StrategyError("只能投入驻扎在出发城的武将。请先把武将调集到出发城。")
+        busy_heroes = pending_battle_hero_codes(next_world) & set(selected_attacker_hero_codes)
+        if busy_heroes:
+            raise StrategyError("这些武将已参加其他出征，不能同时出现在两场进攻里。")
 
     attacker_registered_units = _commit_registered_units(attacker_office.unit_inventory) if attacker_office else {}
     defender_registered_units = _commit_registered_units(target.registered_units)
-    attacker_troops = city_attack_commitment(source.resources.troops)
+    if (
+        committed_troops in {None, ""}
+        and source.resources.troops < MIN_ATTACK_TROOPS
+        and available_registered_power >= MIN_ATTACK_TROOPS
+    ):
+        attacker_troops = max(0, int(source.resources.troops))
+    else:
+        attacker_troops = normalize_committed_attack_troops(committed_troops, source.resources.troops)
     defender_troops = target.resources.troops
     source.resources.troops -= attacker_troops
     battle = PendingBattle(
@@ -401,18 +648,20 @@ def declare_city_attack(
         attacker_office_id=attacker_office.office_id if attacker_office is not None else None,
         attacker_registered_units=attacker_registered_units,
         defender_registered_units=defender_registered_units,
-        report=[f"{source.name} sends {attacker_troops} troops to attack {target.name}."],
+        attacker_composition=auto_battle_composition(attacker_troops, city=source),
+        defender_composition=auto_battle_composition(defender_troops, city=target),
+        report=[f"{source.name}派出 {attacker_troops} 兵力进攻{target.name}。"],
     )
     next_world.pending_battles.append(battle)
     next_world.event_log.append(
         EventLogEntry(
             month=next_world.current_month,
             category="battle_declared",
-            message=f"{source.name} attacks {target.name}; mode: {resolution_mode}.",
+            message=f"{source.name}进攻{target.name}，处理方式：{_mode_label(resolution_mode)}。",
             related_ids=[battle.battle_id, source_city_id, target_city_id],
         )
     )
-    if auto_resolve and resolution_mode == "quick":
+    if auto_resolve and resolution_mode in {"quick", "formula"}:
         return resolve_pending_battle(next_world, battle_id=battle.battle_id)
     next_world.validate()
     return next_world
@@ -433,18 +682,144 @@ def attach_battle_room(
         raise StrategyError("Only pending strategy battles can bind a real battle room.")
     battle.battle_room_id = str(room_id or "")
     battle.battle_room_invite_path = str(invite_path or "")
-    battle.report.append(f"Real grid battle room created: {battle.battle_room_id}.")
+    source = _maybe_city(next_world, battle.source_city_id)
+    target = _maybe_city(next_world, battle.target_city_id)
+    battle_label = (
+        f"{source.name}进攻{target.name}"
+        if source is not None and target is not None
+        else "这场战斗"
+    )
+    battle.report.append(f"已创建真实战场，房间 {battle.battle_room_id}。")
     next_world.event_log.append(
         EventLogEntry(
             month=next_world.current_month,
             category="battle_room_created",
-            message=f"Strategy battle {battle.battle_id} created real grid room {battle.battle_room_id}.",
+            message=f"{battle_label}已创建真实战场，房间 {battle.battle_room_id}。",
             related_ids=[battle.battle_id, battle.battle_room_id],
         )
     )
     from wujiang.strategic.objectives import record_strategic_status_events
 
     next_world = record_strategic_status_events(next_world)
+    next_world.validate()
+    return next_world
+
+
+def retreat_pending_battle(world: WorldState, *, battle_id: str, faction_id: str) -> WorldState:
+    next_world = _clone_world(world)
+    battle = next((item for item in next_world.pending_battles if item.battle_id == battle_id), None)
+    if battle is None or battle.status != "pending":
+        raise StrategyError("没有可撤退的待处理战斗。")
+    if faction_id != battle.attacker_faction_id:
+        raise StrategyError("只有攻方可以下令撤退。")
+    source = _city(next_world, battle.source_city_id)
+    returned = (battle.attacker_troops * 7) // 10
+    lost = max(0, battle.attacker_troops - returned)
+    source.resources.troops += returned
+    battle.status = "resolved"
+    battle.resolution_mode = "retreat"
+    battle.winner_faction_id = None
+    battle.battle_result = {"outcome": "retreat", "troops_returned": returned, "troops_lost": lost}
+    battle.report.append(f"攻方撤退，收回 {returned} 兵力，折损 {lost}。")
+    next_world.event_log.append(
+        EventLogEntry(
+            month=next_world.current_month,
+            category="battle_retreated",
+            message=f"{source.name}撤出对{_city(next_world, battle.target_city_id).name}的进攻，收回 {returned}、折损 {lost}。",
+            related_ids=[battle.battle_id, source.city_id, battle.target_city_id],
+        )
+    )
+    next_world.validate()
+    return next_world
+
+
+def convert_pending_battle_to_siege(world: WorldState, *, battle_id: str, faction_id: str) -> WorldState:
+    next_world = _clone_world(world)
+    battle = next((item for item in next_world.pending_battles if item.battle_id == battle_id), None)
+    if battle is None or battle.status != "pending":
+        raise StrategyError("没有可转入围城的待处理战斗。")
+    if faction_id != battle.attacker_faction_id:
+        raise StrategyError("只有攻方可以转入围城。")
+    if battle.source_kind not in {"legacy_city_attack", ""}:
+        raise StrategyError("只有攻城战可以转入围城。")
+    target = _city(next_world, battle.target_city_id)
+    source = _city(next_world, battle.source_city_id)
+    if any(item.status in {"active", "contested", "breached", "battle_pending"} and item.city_id == target.city_id for item in next_world.sieges):
+        raise StrategyError("该城已经处于围城之中。")
+    general = next(
+        (
+            office
+            for office in next_world.offices
+            if office.faction_id == battle.attacker_faction_id
+            and office.office_type == "general"
+            and office.status == "active"
+            and not any(
+                army.commander_office_id == office.office_id and army.status not in {"disbanded", "destroyed"}
+                for army in next_world.armies
+            )
+        ),
+        None,
+    )
+    if general is None:
+        raise StrategyError("没有空闲将军接管围城。请先任命将军，或选择交战。")
+    commander = str(general.holder_id or (battle.attacker_hero_codes or [""])[0] or "")
+    army = StrategicArmy(
+        army_id=f"army:siege:{battle.battle_id}",
+        faction_id=battle.attacker_faction_id,
+        commander_office_id=general.office_id,
+        commander_hero_code=commander,
+        location_node_id=target.node_id,
+        home_city_id=source.city_id,
+        unit_inventory={"infantry": max(1, battle.attacker_troops // 100)},
+        manpower=max(1, battle.attacker_troops),
+        supply=max(50, battle.attacker_troops // 2),
+        supply_capacity=max(80, battle.attacker_troops),
+        status="besieging",
+        current_order="besiege",
+        created_month=next_world.current_month,
+    )
+    next_world.armies.append(army)
+    fortification = max(20, target.defense * 10)
+    siege = StrategicSiege(
+        siege_id=f"siege:{target.city_id}:{next_world.current_month}:{len(next_world.sieges) + 1}",
+        city_id=target.city_id,
+        node_id=target.node_id,
+        attacker_faction_id=battle.attacker_faction_id,
+        defender_faction_id=battle.defender_faction_id,
+        attacker_army_ids=[army.army_id],
+        started_month=next_world.current_month,
+        fortification_initial=fortification,
+        fortification_remaining=fortification,
+        attacker_stance="blockade",
+    )
+    next_world.sieges.append(siege)
+    battle.status = "resolved"
+    battle.resolution_mode = "siege"
+    battle.battle_result = {"outcome": "siege", "siege_id": siege.siege_id}
+    battle.report.append(f"转入围城，围困{target.name}。")
+    next_world.event_log.append(
+        EventLogEntry(
+            month=next_world.current_month,
+            category="strategy_siege_started",
+            message=f"{source.name}对{target.name}转入围城，不再强攻。",
+            related_ids=[siege.siege_id, battle.battle_id, target.city_id],
+        )
+    )
+    next_world.validate()
+    return next_world
+
+
+def set_pending_battle_composition(
+    world: WorldState,
+    *,
+    battle_id: str,
+    composition: dict[str, object] | None,
+) -> WorldState:
+    next_world = _clone_world(world)
+    battle = next((item for item in next_world.pending_battles if item.battle_id == battle_id), None)
+    if battle is None or battle.status != "pending":
+        raise StrategyError("没有可配置的待处理战斗。")
+    battle.attacker_composition = normalize_battle_composition(composition, battle.attacker_troops)
     next_world.validate()
     return next_world
 
@@ -475,14 +850,14 @@ def set_battle_defender_hero(
     defender_hero_codes = normalize_strategic_hero_deployment(next_world, faction_id, raw_codes)
     battle.defender_hero_codes = defender_hero_codes
     if defender_hero_codes:
-        battle.report.append(f"Defender commits strategic heroes {', '.join(defender_hero_codes)} to this battle.")
+        battle.report.append(f"守方投入武将：{'、'.join(defender_hero_codes)}。")
     else:
-        battle.report.append("Defender commits no strategic hero to this battle.")
+        battle.report.append("守方未投入武将。")
     next_world.event_log.append(
         EventLogEntry(
             month=next_world.current_month,
             category="battle_defender_hero_set",
-            message=f"Defender hero deployment updated for strategy battle {battle.battle_id}.",
+            message=f"{_faction_label(next_world, faction_id)}调整了守城武将。",
             related_ids=[battle.battle_id, faction_id, *defender_hero_codes],
         )
     )
@@ -710,8 +1085,8 @@ def _apply_strategic_army_outcome(
     defender_remaining = max(0, round(battle.defender_troops * defender_rate))
     battle.winner_faction_id = battle.attacker_faction_id if attacker_wins else battle.defender_faction_id
     battle.report.append(
-        f"Strategic writeback: attacker {attacker_remaining}/{battle.attacker_troops}, "
-        f"defender {defender_remaining}/{battle.defender_troops}."
+        f"战况回写：攻方剩余 {attacker_remaining}/{battle.attacker_troops}，"
+        f"守方剩余 {defender_remaining}/{battle.defender_troops}。"
     )
     battle.battle_result = _battle_result_payload(
         battle,
@@ -807,8 +1182,8 @@ def _apply_world_crisis_outcome(
         battle.attacker_faction_id if attacker_wins else battle.defender_faction_id
     )
     battle.report.append(
-        f"World crisis writeback: attacker {attacker_survivors}/{attacker_initial}, "
-        f"defender {defender_survivors}/{defender_initial}; no city ownership changed."
+        f"北境决战回写：攻方存活 {attacker_survivors}/{attacker_initial}，"
+        f"守方存活 {defender_survivors}/{defender_initial}；城市归属不变。"
     )
     battle.battle_result = _battle_result_payload(
         battle,
@@ -884,26 +1259,21 @@ def _apply_battle_outcome(
     preface: str = "",
     surviving_grid_units_by_team: dict[int, int] | None = None,
     surviving_hero_codes_by_team: dict[int, set[str] | list[str] | tuple[str, ...]] | None = None,
+    formula_outcome: dict[str, object] | None = None,
 ) -> WorldState:
     target = _city(next_world, battle.target_city_id)
     source = _city(next_world, battle.source_city_id)
     support = owner_support(target)
     defender_score = (
-        battle.defender_troops
+        _composition_combat_power(getattr(battle, "defender_composition", None), battle.defender_troops)
         + _registered_unit_power(battle.defender_registered_units)
         + target.defense * 80
         + support * 3
     )
     if preface:
         battle.report.append(preface)
-    attacker_initial_grid_units = min(
-        MAX_GRID_UNITS_PER_SIDE,
-        _registered_unit_count(battle.attacker_registered_units) + _grid_unit_count_for_troops(battle.attacker_troops),
-    )
-    defender_initial_grid_units = min(
-        MAX_GRID_UNITS_PER_SIDE,
-        _registered_unit_count(battle.defender_registered_units) + _grid_unit_count_for_troops(battle.defender_troops),
-    )
+    attacker_initial_grid_units = _side_initial_grid_units(battle, "attacker")
+    defender_initial_grid_units = _side_initial_grid_units(battle, "defender")
     attacker_remaining_from_room: int | None = None
     defender_remaining_from_room: int | None = None
     control_change: dict | None = None
@@ -919,15 +1289,19 @@ def _apply_battle_outcome(
             surviving_grid_units=surviving_grid_units_by_team.get(2, 0),
         )
         battle.report.append(
-            "Real grid survivors: "
-            f"attacker {surviving_grid_units_by_team.get(1, 0)}/{attacker_initial_grid_units}, "
-            f"defender {surviving_grid_units_by_team.get(2, 0)}/{defender_initial_grid_units}."
+            "真实战场存活："
+            f"攻方 {surviving_grid_units_by_team.get(1, 0)}/{attacker_initial_grid_units}，"
+            f"守方 {surviving_grid_units_by_team.get(2, 0)}/{defender_initial_grid_units}。"
         )
     if attacker_wins:
         previous_owner_faction_id = target.owner_faction_id
         if attacker_remaining_from_room is None:
-            attacker_losses = min(battle.attacker_troops, max(10, defender_score // 3))
-            defender_losses = min(target.resources.troops, max(20, battle.attacker_troops // 2))
+            if formula_outcome:
+                attacker_losses = min(battle.attacker_troops, max(0, int(formula_outcome.get("attacker_losses") or 0)))
+                defender_losses = min(target.resources.troops, max(0, int(formula_outcome.get("defender_losses") or 0)))
+            else:
+                attacker_losses = min(battle.attacker_troops, max(10, defender_score // 3))
+                defender_losses = min(target.resources.troops, max(20, battle.attacker_troops // 2))
             survivors = max(0, battle.attacker_troops - attacker_losses)
             defender_remaining = max(0, battle.defender_troops - defender_losses)
         else:
@@ -958,8 +1332,8 @@ def _apply_battle_outcome(
         battle.winner_faction_id = battle.attacker_faction_id
         battle.report.extend(
             [
-                f"Attacker wins, attacker losses {attacker_losses}, defender losses {defender_losses}.",
-                f"{target.name} changes owner; occupying troops {survivors}.",
+                f"攻方胜利，攻方损失 {attacker_losses}，守方损失 {defender_losses}。",
+                f"{target.name}易主，占领军 {survivors}。",
             ]
         )
         battle.battle_result = _battle_result_payload(
@@ -991,8 +1365,12 @@ def _apply_battle_outcome(
             battle.battle_result["city_control_change"] = control_change
     else:
         if attacker_remaining_from_room is None:
-            attacker_losses = max(10, battle.attacker_troops * 2 // 3)
-            defender_losses = min(target.resources.troops, max(10, battle.attacker_troops // 4))
+            if formula_outcome:
+                attacker_losses = min(battle.attacker_troops, max(0, int(formula_outcome.get("attacker_losses") or 0)))
+                defender_losses = min(target.resources.troops, max(0, int(formula_outcome.get("defender_losses") or 0)))
+            else:
+                attacker_losses = max(10, battle.attacker_troops * 2 // 3)
+                defender_losses = min(target.resources.troops, max(10, battle.attacker_troops // 4))
             defender_survivors = max(0, target.resources.troops - defender_losses)
             attacker_survivors = max(0, battle.attacker_troops - attacker_losses)
         else:
@@ -1010,8 +1388,8 @@ def _apply_battle_outcome(
         battle.winner_faction_id = battle.defender_faction_id
         battle.report.extend(
             [
-                f"Defender wins, attacker losses {attacker_losses}, defender losses {defender_losses}.",
-                f"{source.name} gathers routed troops {attacker_survivors}.",
+                f"守方胜利，攻方损失 {attacker_losses}，守方损失 {defender_losses}。",
+                f"{source.name}收容溃军 {attacker_survivors}。",
             ]
         )
         battle.battle_result = _battle_result_payload(
@@ -1081,7 +1459,10 @@ def _apply_battle_outcome(
         EventLogEntry(
             month=next_world.current_month,
             category="battle_resolved",
-            message=f"{target.name} battle resolved; winner: {battle.winner_faction_id}; mode: {battle.resolution_mode}.",
+            message=(
+                f"{target.name}的战斗已结算，胜方为{_faction_label(next_world, battle.winner_faction_id)}，"
+                f"处理方式：{_mode_label(battle.resolution_mode)}。"
+            ),
             related_ids=[battle.battle_id, source.city_id, target.city_id],
         )
     )
@@ -1187,14 +1568,45 @@ def resolve_pending_battle(world: WorldState, *, battle_id: str) -> WorldState:
             resolution_source="quick",
         )
 
+    if battle.resolution_mode == "formula":
+        outcome = simulate_formula_city_attack(next_world, battle)
+        defender_codes = [str(code) for code in (outcome.get("defender_hero_codes") or [])]
+        hero_survivors = {
+            1: set(battle.attacker_hero_codes or []) if outcome["attacker_wins"] else set(),
+            2: set(defender_codes) if not outcome["attacker_wins"] else set(),
+        }
+        resolved = _apply_battle_outcome(
+            next_world,
+            battle,
+            attacker_wins=bool(outcome["attacker_wins"]),
+            preface=(
+                f"快速结算：攻方战力 {int(outcome['attacker_power'])}，"
+                f"守方战力 {int(outcome['defender_power'])}。"
+            ),
+            surviving_hero_codes_by_team=hero_survivors,
+            formula_outcome=outcome,
+        )
+        settled = next(item for item in resolved.pending_battles if item.battle_id == battle.battle_id)
+        if settled.battle_result is not None:
+            settled.battle_result["resolution_source"] = "formula"
+        return resolved
+
     target = _city(next_world, battle.target_city_id)
     support = owner_support(target)
-    attacker_score = battle.attacker_troops + _registered_unit_power(battle.attacker_registered_units)
+    attacker_score = (
+        _composition_combat_power(getattr(battle, "attacker_composition", None), battle.attacker_troops)
+        + _registered_unit_power(battle.attacker_registered_units)
+        + _hero_combat_power(battle.attacker_hero_codes)
+    )
+    defender_codes = battle.defender_hero_codes
+    if defender_codes is None:
+        defender_codes = strategic_defender_hero_codes_for_faction(next_world, battle.defender_faction_id)
     defender_score = (
-        battle.defender_troops
+        _composition_combat_power(getattr(battle, "defender_composition", None), battle.defender_troops)
         + _registered_unit_power(battle.defender_registered_units)
         + target.defense * 80
         + support * 3
+        + _hero_combat_power(defender_codes)
     )
     return _apply_battle_outcome(next_world, battle, attacker_wins=attacker_score >= defender_score)
 
@@ -1227,8 +1639,8 @@ def resolve_battle_room_result(
     if battle.status != "pending":
         return next_world
     attacker_wins = int(winner_team_id) == 1
-    side_name = "attacker" if attacker_wins else "defender"
-    detail = f"Real grid room {room_id} finished; winning side: {side_name}."
+    side_name = "攻方" if attacker_wins else "守方"
+    detail = f"真实战场 {room_id} 已结束，胜方为{side_name}。"
     if battle_summary:
         detail = f"{detail} {str(battle_summary).strip()}"
     if battle.source_kind == "world_crisis":

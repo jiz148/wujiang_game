@@ -36,6 +36,7 @@ export function isSeatLocked(seat) {
 /** 这个席位的阵容归谁管：自己的席位，或房主手上的 AI 席位。准备锁定另算。 */
 export function canManageSeatRoster(seat) {
   if (!seat || !hasRoom() || state.room?.status !== "lobby") return false;
+  if (state.room?.launch_context && state.room.launch_context.allow_roster_edit === false) return false;
   if (isRandomRoomMode()) return false;
   if (seat.player_id === viewerPlayerId()) return true;
   return Boolean(state.room?.viewer_is_host && seat.is_ai);
@@ -58,6 +59,7 @@ export function seatAtHeroLimit(seat) {
 }
 
 export function canEditRoomSetup() {
+  if (state.room?.launch_context && state.room.launch_context.allow_roster_edit === false) return false;
   return Boolean(hasRoom() && state.room?.viewer_is_host && state.room?.status === "lobby");
 }
 

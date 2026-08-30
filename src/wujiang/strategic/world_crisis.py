@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 from typing import Any
 
 from wujiang.strategic.models import (
@@ -59,6 +60,15 @@ SHOWDOWN_BRANCH_SPECS = {
     "shattered_line": {"threshold": 0, "coalition_units": 4, "snow_ghost_units": 10},
 }
 
+CRISIS_CONFIG_DEFAULTS = {
+    "earliest_year": 10,
+    "base_monthly_chance": 0.08,
+    "chance_increase_per_year": 0.06,
+    "max_monthly_chance": 0.90,
+    "guarantee_after_years": 20,
+    "stage_gap_months": 2,
+}
+
 
 def _clone_world(world: WorldState) -> WorldState:
     return WorldState.from_dict(copy.deepcopy(world.to_dict()))
@@ -66,6 +76,114 @@ def _clone_world(world: WorldState) -> WorldState:
 
 def _fixed_campaign_enabled(world: WorldState) -> bool:
     return str(world.campaign_contract.get("id") or "") == FIRST_CAMPAIGN_SCENARIO_ID
+
+
+def campaign_year(month: int) -> int:
+    return (max(1, int(month)) - 1) // 12 + 1
+
+
+def campaign_month_in_year(month: int) -> int:
+    return ((max(1, int(month)) - 1) % 12) + 1
+
+
+def campaign_calendar_label(month: int) -> str:
+    return f"第{campaign_year(month)}年{campaign_month_in_year(month)}月"
+
+
+def first_month_of_year(year: int) -> int:
+    return (max(1, int(year)) - 1) * 12 + 1
+
+
+def normalize_crisis_config(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict) or not raw:
+        return None
+    earliest = max(1, min(100, int(raw.get("earliest_year", CRISIS_CONFIG_DEFAULTS["earliest_year"]))))
+    return {
+        "earliest_year": earliest,
+        "base_monthly_chance": min(1.0, max(0.0, float(raw.get("base_monthly_chance", CRISIS_CONFIG_DEFAULTS["base_monthly_chance"])))),
+        "chance_increase_per_year": min(1.0, max(0.0, float(raw.get("chance_increase_per_year", CRISIS_CONFIG_DEFAULTS["chance_increase_per_year"])))),
+        "max_monthly_chance": min(1.0, max(0.0, float(raw.get("max_monthly_chance", CRISIS_CONFIG_DEFAULTS["max_monthly_chance"])))),
+        "guarantee_after_years": max(1, int(raw.get("guarantee_after_years", CRISIS_CONFIG_DEFAULTS["guarantee_after_years"]))),
+        "stage_gap_months": max(1, int(raw.get("stage_gap_months", CRISIS_CONFIG_DEFAULTS["stage_gap_months"]))),
+    }
+
+
+def crisis_schedule_config(world: WorldState) -> dict[str, Any] | None:
+    contract = world.campaign_contract if isinstance(world.campaign_contract, dict) else {}
+    return normalize_crisis_config(contract.get("crisis_config"))
+
+
+def apply_campaign_play_settings(
+    contract: dict[str, Any],
+    *,
+    crisis_earliest_year: int = 10,
+    year_limit: int = 0,
+) -> dict[str, Any]:
+    next_contract = dict(contract)
+    year_limit = max(0, min(100, int(year_limit)))
+    earliest = max(1, min(100, int(crisis_earliest_year)))
+    next_contract["year_limit"] = year_limit
+    next_contract["month_limit"] = year_limit * 12 if year_limit else 0
+    next_contract["assessment_label"] = f"第{year_limit}年评议" if year_limit else "战役评议"
+    next_contract["crisis_config"] = {
+        **CRISIS_CONFIG_DEFAULTS,
+        "earliest_year": earliest,
+    }
+    routes = [str(item) for item in (next_contract.get("available_victory_routes") or [])]
+    if year_limit == 0:
+        next_contract["available_victory_routes"] = [item for item in routes if item != "time_limit_assessment"]
+    elif "time_limit_assessment" not in routes:
+        next_contract["available_victory_routes"] = [*routes, "time_limit_assessment"]
+    return next_contract
+
+
+def monthly_crisis_chance(year: int, config: dict[str, Any]) -> float:
+    earliest = int(config["earliest_year"])
+    if int(year) < earliest:
+        return 0.0
+    overdue = int(year) - earliest
+    if overdue >= int(config["guarantee_after_years"]):
+        return 1.0
+    return min(
+        float(config["max_monthly_chance"]),
+        float(config["base_monthly_chance"]) + overdue * float(config["chance_increase_per_year"]),
+    )
+
+
+def crisis_omen_roll(world: WorldState, month: int) -> float:
+    material = f"{int(world.seed)}:{SNOW_GHOST_CRISIS_ID}:{int(month)}".encode("utf-8")
+    return int(hashlib.sha256(material).hexdigest()[:8], 16) / 0xFFFFFFFF
+
+
+def crisis_omen_triggers(world: WorldState, config: dict[str, Any]) -> bool:
+    chance = monthly_crisis_chance(campaign_year(world.current_month), config)
+    if chance <= 0:
+        return False
+    if chance >= 1:
+        return True
+    return crisis_omen_roll(world, world.current_month) < chance
+
+
+def relative_crisis_clock(omen_month: int, gap: int = 2) -> dict[str, int]:
+    omen_month = max(1, int(omen_month))
+    gap = max(1, int(gap))
+    return {
+        "omen": omen_month,
+        "border_pressure": omen_month + gap,
+        "spread": omen_month + (2 * gap),
+        "mobilization": omen_month + (3 * gap),
+        "showdown": omen_month + (4 * gap),
+    }
+
+
+def _in_mobilization_window(world: WorldState, crisis: WorldCrisis | None) -> bool:
+    if crisis is None or crisis.stage != "mobilization":
+        return False
+    start = int(crisis.stage_started_month or 0)
+    end = crisis.next_stage_month
+    if end is None:
+        return world.current_month >= start
+    return start <= world.current_month < int(end)
 
 
 def _node_sort_key(node: Any) -> tuple[int, int, str]:
@@ -111,17 +229,24 @@ def snow_ghost_cold_route_keys(world: WorldState) -> set[str]:
     return set(crisis.affected_route_keys)
 
 
-def _activate_snow_ghost_omen(world: WorldState, crisis: WorldCrisis) -> None:
+def _activate_snow_ghost_omen(
+    world: WorldState,
+    crisis: WorldCrisis,
+    *,
+    at_month: int | None = None,
+    next_month: int | None = None,
+) -> None:
+    month = int(at_month or SNOW_GHOST_OMEN_MONTH)
     crisis.status = "active"
     crisis.stage = "omen"
-    crisis.started_month = SNOW_GHOST_OMEN_MONTH
-    crisis.stage_started_month = SNOW_GHOST_OMEN_MONTH
-    crisis.next_stage_month = SNOW_GHOST_BORDER_PRESSURE_MONTH
+    crisis.started_month = month
+    crisis.stage_started_month = month
+    crisis.next_stage_month = int(next_month or SNOW_GHOST_BORDER_PRESSURE_MONTH)
     crisis.pressure = 10
     if not any(item.get("event") == "northern_omen_confirmed" for item in crisis.history):
         crisis.history.append(
             {
-                "month": SNOW_GHOST_OMEN_MONTH,
+                "month": month,
                 "stage": "omen",
                 "event": "northern_omen_confirmed",
             }
@@ -142,17 +267,24 @@ def _activate_snow_ghost_omen(world: WorldState, crisis: WorldCrisis) -> None:
         )
 
 
-def _activate_snow_ghost_border_pressure(world: WorldState, crisis: WorldCrisis) -> None:
+def _activate_snow_ghost_border_pressure(
+    world: WorldState,
+    crisis: WorldCrisis,
+    *,
+    at_month: int | None = None,
+    next_month: int | None = None,
+) -> None:
+    month = int(at_month or SNOW_GHOST_BORDER_PRESSURE_MONTH)
     crisis.status = "active"
     crisis.stage = "border_pressure"
-    crisis.stage_started_month = SNOW_GHOST_BORDER_PRESSURE_MONTH
-    crisis.next_stage_month = SNOW_GHOST_SPREAD_MONTH
+    crisis.stage_started_month = month
+    crisis.next_stage_month = int(next_month or SNOW_GHOST_SPREAD_MONTH)
     crisis.pressure = 30
     crisis.affected_route_keys = _snow_ghost_cold_route_keys(crisis)
     if not any(item.get("event") == "border_pressure_started" for item in crisis.history):
         crisis.history.append(
             {
-                "month": SNOW_GHOST_BORDER_PRESSURE_MONTH,
+                "month": month,
                 "stage": "border_pressure",
                 "event": "border_pressure_started",
                 "affected_route_keys": list(crisis.affected_route_keys),
@@ -256,11 +388,18 @@ def _ensure_snow_ghost_vanguard(world: WorldState, crisis: WorldCrisis) -> Strat
     return army
 
 
-def _activate_snow_ghost_spread(world: WorldState, crisis: WorldCrisis) -> None:
+def _activate_snow_ghost_spread(
+    world: WorldState,
+    crisis: WorldCrisis,
+    *,
+    at_month: int | None = None,
+    next_month: int | None = None,
+) -> None:
+    month = int(at_month or SNOW_GHOST_SPREAD_MONTH)
     crisis.status = "active"
     crisis.stage = "spread"
-    crisis.stage_started_month = SNOW_GHOST_SPREAD_MONTH
-    crisis.next_stage_month = 9
+    crisis.stage_started_month = month
+    crisis.next_stage_month = int(next_month or SNOW_GHOST_MOBILIZATION_MONTH)
     crisis.pressure = 60
     crisis.affected_route_keys = _snow_ghost_spread_route_keys(world, crisis)
     crisis.threatened_city_ids = sorted(
@@ -270,7 +409,7 @@ def _activate_snow_ghost_spread(world: WorldState, crisis: WorldCrisis) -> None:
     if not any(item.get("event") == "snow_ghost_spread_started" for item in crisis.history):
         crisis.history.append(
             {
-                "month": SNOW_GHOST_SPREAD_MONTH,
+                "month": month,
                 "stage": "spread",
                 "event": "snow_ghost_spread_started",
                 "affected_route_keys": list(crisis.affected_route_keys),
@@ -297,11 +436,17 @@ def _activate_snow_ghost_spread(world: WorldState, crisis: WorldCrisis) -> None:
         )
 
 
-def _activate_snow_ghost_mobilization(world: WorldState, crisis: WorldCrisis) -> None:
+def _activate_snow_ghost_mobilization(
+    world: WorldState,
+    crisis: WorldCrisis,
+    *,
+    at_month: int | None = None,
+    next_month: int | None = None,
+) -> None:
     crisis.status = "active"
     crisis.stage = "mobilization"
-    crisis.stage_started_month = SNOW_GHOST_MOBILIZATION_MONTH
-    crisis.next_stage_month = SNOW_GHOST_SHOWDOWN_MONTH
+    crisis.stage_started_month = int(at_month or SNOW_GHOST_MOBILIZATION_MONTH)
+    crisis.next_stage_month = int(next_month or SNOW_GHOST_SHOWDOWN_MONTH)
     crisis.pressure = 80
     crisis.affected_route_keys = _snow_ghost_spread_route_keys(world, crisis)
     crisis.threatened_city_ids = sorted(
@@ -389,12 +534,17 @@ def _coalition_registered_units(unit_count: int) -> dict[str, int]:
     }
 
 
-def _activate_snow_ghost_showdown(world: WorldState, crisis: WorldCrisis) -> None:
+def _activate_snow_ghost_showdown(
+    world: WorldState,
+    crisis: WorldCrisis,
+    *,
+    at_month: int | None = None,
+) -> None:
     if crisis.showdown_outcome is not None:
         return
     crisis.status = "active"
     crisis.stage = "showdown"
-    crisis.stage_started_month = SNOW_GHOST_SHOWDOWN_MONTH
+    crisis.stage_started_month = int(at_month or SNOW_GHOST_SHOWDOWN_MONTH)
     crisis.next_stage_month = None
     crisis.pressure = 100
     crisis.affected_route_keys = _snow_ghost_spread_route_keys(world, crisis)
@@ -514,8 +664,8 @@ def _mobilization_crisis(world: WorldState) -> WorldCrisis:
         (item for item in world.world_crises if item.crisis_id == SNOW_GHOST_CRISIS_ID),
         None,
     )
-    if crisis is None or crisis.stage != "mobilization" or world.current_month not in {9, 10}:
-        raise StrategyError("雪鬼联军动员只在第 9～10 月开放。")
+    if not _in_mobilization_window(world, crisis):
+        raise StrategyError("雪鬼联军动员只在动员窗口内开放。")
     return crisis
 
 
@@ -533,9 +683,7 @@ def world_crisis_choice_options(world: WorldState, faction_id: str) -> list[dict
         (item for item in world.world_crises if item.crisis_id == SNOW_GHOST_CRISIS_ID),
         None,
     )
-    window_open = bool(
-        crisis is not None and crisis.stage == "mobilization" and world.current_month in {9, 10}
-    )
+    window_open = _in_mobilization_window(world, crisis)
     already_chosen = bool(
         crisis is not None and _choice_already_resolved(crisis, faction.faction_id, world.current_month)
     )
@@ -814,15 +962,21 @@ def ensure_world_crises(world: WorldState) -> WorldState:
         (item for item in next_world.world_crises if item.crisis_id == SNOW_GHOST_CRISIS_ID),
         None,
     )
+    config = crisis_schedule_config(next_world)
     if crisis is None:
         origin_node_id, frontier_node_ids = _snow_ghost_frontier(next_world)
+        earliest_month = (
+            first_month_of_year(config["earliest_year"])
+            if config is not None
+            else SNOW_GHOST_OMEN_MONTH
+        )
         crisis = WorldCrisis(
             crisis_id=SNOW_GHOST_CRISIS_ID,
             crisis_type="snow_ghost",
             status="dormant",
             stage="dormant",
             stage_started_month=1,
-            next_stage_month=SNOW_GHOST_OMEN_MONTH,
+            next_stage_month=earliest_month,
             pressure=0,
             origin_node_id=origin_node_id,
             frontier_node_ids=frontier_node_ids,
@@ -835,24 +989,93 @@ def ensure_world_crises(world: WorldState) -> WorldState:
             ],
         )
         next_world.world_crises.append(crisis)
-    if next_world.current_month >= SNOW_GHOST_OMEN_MONTH and crisis.stage == "dormant":
-        _activate_snow_ghost_omen(next_world, crisis)
-    if next_world.current_month >= SNOW_GHOST_BORDER_PRESSURE_MONTH and crisis.stage == "omen":
-        _activate_snow_ghost_border_pressure(next_world, crisis)
-    if next_world.current_month >= SNOW_GHOST_SPREAD_MONTH and crisis.stage == "border_pressure":
-        _activate_snow_ghost_spread(next_world, crisis)
-    elif crisis.stage == "spread":
-        _activate_snow_ghost_spread(next_world, crisis)
-    if next_world.current_month >= SNOW_GHOST_MOBILIZATION_MONTH and crisis.stage == "spread":
-        _activate_snow_ghost_mobilization(next_world, crisis)
-    elif crisis.stage == "mobilization":
-        _activate_snow_ghost_mobilization(next_world, crisis)
-    if next_world.current_month >= SNOW_GHOST_SHOWDOWN_MONTH and crisis.stage == "mobilization":
-        _activate_snow_ghost_showdown(next_world, crisis)
-    elif crisis.stage == "showdown":
-        _activate_snow_ghost_showdown(next_world, crisis)
+    _advance_snow_ghost_stages(next_world, crisis, config)
     next_world.validate()
     return next_world
+
+
+def _advance_snow_ghost_stages(
+    world: WorldState,
+    crisis: WorldCrisis,
+    config: dict[str, Any] | None,
+) -> None:
+    if config is None:
+        if world.current_month >= SNOW_GHOST_OMEN_MONTH and crisis.stage == "dormant":
+            _activate_snow_ghost_omen(world, crisis)
+        if world.current_month >= SNOW_GHOST_BORDER_PRESSURE_MONTH and crisis.stage == "omen":
+            _activate_snow_ghost_border_pressure(world, crisis)
+        if world.current_month >= SNOW_GHOST_SPREAD_MONTH and crisis.stage == "border_pressure":
+            _activate_snow_ghost_spread(world, crisis)
+        elif crisis.stage == "spread":
+            _activate_snow_ghost_spread(world, crisis)
+        if world.current_month >= SNOW_GHOST_MOBILIZATION_MONTH and crisis.stage == "spread":
+            _activate_snow_ghost_mobilization(world, crisis)
+        elif crisis.stage == "mobilization":
+            _activate_snow_ghost_mobilization(world, crisis)
+        if world.current_month >= SNOW_GHOST_SHOWDOWN_MONTH and crisis.stage == "mobilization":
+            _activate_snow_ghost_showdown(world, crisis)
+        elif crisis.stage == "showdown":
+            _activate_snow_ghost_showdown(world, crisis)
+        return
+
+    if crisis.stage == "dormant":
+        earliest_month = first_month_of_year(config["earliest_year"])
+        if world.current_month < earliest_month:
+            crisis.next_stage_month = earliest_month
+            return
+        if crisis_omen_triggers(world, config):
+            clock = relative_crisis_clock(world.current_month, config["stage_gap_months"])
+            _activate_snow_ghost_omen(
+                world,
+                crisis,
+                at_month=clock["omen"],
+                next_month=clock["border_pressure"],
+            )
+        else:
+            crisis.next_stage_month = world.current_month + 1
+            return
+
+    omen_month = int(crisis.started_month or world.current_month)
+    clock = relative_crisis_clock(omen_month, config["stage_gap_months"])
+    if world.current_month >= clock["border_pressure"] and crisis.stage == "omen":
+        _activate_snow_ghost_border_pressure(
+            world,
+            crisis,
+            at_month=clock["border_pressure"],
+            next_month=clock["spread"],
+        )
+    if world.current_month >= clock["spread"] and crisis.stage == "border_pressure":
+        _activate_snow_ghost_spread(
+            world,
+            crisis,
+            at_month=clock["spread"],
+            next_month=clock["mobilization"],
+        )
+    elif crisis.stage == "spread":
+        _activate_snow_ghost_spread(
+            world,
+            crisis,
+            at_month=crisis.stage_started_month,
+            next_month=clock["mobilization"],
+        )
+    if world.current_month >= clock["mobilization"] and crisis.stage == "spread":
+        _activate_snow_ghost_mobilization(
+            world,
+            crisis,
+            at_month=clock["mobilization"],
+            next_month=clock["showdown"],
+        )
+    elif crisis.stage == "mobilization":
+        _activate_snow_ghost_mobilization(
+            world,
+            crisis,
+            at_month=crisis.stage_started_month,
+            next_month=clock["showdown"],
+        )
+    if world.current_month >= clock["showdown"] and crisis.stage == "mobilization":
+        _activate_snow_ghost_showdown(world, crisis, at_month=clock["showdown"])
+    elif crisis.stage == "showdown":
+        _activate_snow_ghost_showdown(world, crisis, at_month=crisis.stage_started_month)
 
 
 def advance_world_crises(world: WorldState) -> WorldState:
@@ -872,7 +1095,7 @@ def require_world_crisis_showdown_complete_before_advance(world: WorldState) -> 
             None,
         )
         if battle is None or battle.status != "resolved":
-            raise StrategyError("北境决战尚未完成，不能进入第 12 月。")
+            raise StrategyError("北境决战尚未完成，不能推进月份。")
 
 
 def set_world_crisis_showdown_resolution(
@@ -1079,7 +1302,10 @@ def world_crises_public(world: WorldState) -> list[dict[str, Any]]:
     nodes_by_id = {node.node_id: node for node in world.nodes}
     cities_by_node = {city.node_id: city for city in world.cities}
     payload: list[dict[str, Any]] = []
+    schedule = crisis_schedule_config(world)
     for crisis in world.world_crises:
+        if schedule is not None and crisis.stage == "dormant":
+            continue
         origin = nodes_by_id.get(crisis.origin_node_id)
         frontier = []
         for node_id in crisis.frontier_node_ids:
@@ -1124,12 +1350,12 @@ def world_crises_public(world: WorldState) -> list[dict[str, Any]]:
             ]
             effect_summary = (
                 f"北境进入联军动员，{len(active_crisis_armies)} 支雪鬼军队仍在活动；"
-                "第 9～10 月主要势力可独立贡献、建立双向合作，或背弃已成立的合作。"
+                "动员窗口内主要势力可独立贡献、建立双向合作，或背弃已成立的合作。"
             )
         elif crisis.stage == "showdown":
-            effect_summary = "第 11 月北境决战已经开启；必须通过统一战斗入口结算，决战完成前不能进入第 12 月。"
+            effect_summary = "北境决战已经开启；必须通过统一战斗入口结算，决战完成前不能推进月份。"
         elif crisis.stage == "aftermath":
-            effect_summary = "北境决战失利，寒潮余波仍在前线持续；第 12 月将按正常战役规则进入评议。"
+            effect_summary = "北境决战失利，寒潮余波仍在前线持续；随后将按正常战役规则进入评议。"
         else:
             effect_summary = "北境决战获胜，寒潮、受威胁路线与雪鬼危机军队已经平息。"
         route_effects = []

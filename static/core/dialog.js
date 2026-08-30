@@ -106,3 +106,104 @@ export function confirmDialog({
     cancel.focus();
   });
 }
+
+export function closeAppOverlay() {
+  if (!activeDialog) return;
+  if (typeof activeDialog.remove === "function") activeDialog.remove();
+  activeDialog = null;
+  if (typeof document.removeEventListener === "function") {
+    document.removeEventListener("keydown", onKeydown, true);
+  }
+}
+
+/**
+ * 可承载自定义内容的应用内弹层，给战役结束、危机爆发这类必须看见的通知用。
+ * actions.onClick 返回 false 时不关闭。
+ */
+export function openAppOverlay({
+  title = "",
+  body = null,
+  className = "",
+  actions = [],
+  dismissible = false,
+} = {}) {
+  if (activeDialog) return false;
+  if (typeof document === "undefined" || !document.body || typeof document.body.append !== "function") {
+    return false;
+  }
+
+  const overlay = document.createElement("div");
+  overlay.className = `dialog-overlay campaign-notice-overlay${className ? ` ${className}` : ""}`;
+
+  const card = document.createElement("div");
+  card.className = "dialog campaign-notice";
+  if (typeof card.setAttribute === "function") {
+    card.setAttribute("role", "alertdialog");
+    card.setAttribute("aria-modal", "true");
+  }
+
+  if (title) {
+    const heading = document.createElement("h2");
+    heading.className = "dialog__title";
+    heading.textContent = title;
+    heading.id = "campaign-notice-title";
+    if (typeof card.setAttribute === "function") card.setAttribute("aria-labelledby", heading.id);
+    card.append(heading);
+  }
+
+  if (typeof body === "string" && body) {
+    const text = document.createElement("p");
+    text.className = "dialog__body";
+    text.textContent = body;
+    card.append(text);
+  } else if (body) {
+    const content = document.createElement("div");
+    content.className = "campaign-notice__body";
+    content.append(body);
+    card.append(content);
+  }
+
+  const actionRow = document.createElement("div");
+  actionRow.className = "dialog__actions";
+  const buttons = [];
+  actions.forEach((item) => {
+    const button = createButton({
+      label: item.label,
+      variant: item.variant || (item.tone === "danger" ? "danger" : "primary"),
+      onClick: async () => {
+        const result = await item.onClick?.();
+        if (result === false) return;
+        closeAppOverlay();
+      },
+    });
+    buttons.push(button);
+    actionRow.append(button);
+  });
+  if (buttons.length) card.append(actionRow);
+
+  overlay.addEventListener("click", () => {
+    if (!dismissible) return;
+    closeAppOverlay();
+  });
+  card.addEventListener("click", (event) => event.stopPropagation());
+
+  onKeydown = (event) => {
+    if (event.key === "Escape" && dismissible) {
+      event.stopPropagation();
+      closeAppOverlay();
+      return;
+    }
+    if (event.key !== "Tab" || !buttons.length) return;
+    const index = buttons.indexOf(document.activeElement);
+    event.preventDefault();
+    const next = event.shiftKey ? index - 1 : index + 1;
+    buttons[(next + buttons.length) % buttons.length].focus();
+  };
+  document.addEventListener("keydown", onKeydown, true);
+
+  overlay.append(card);
+  document.body.append(overlay);
+  activeDialog = overlay;
+  buttons[0]?.focus();
+  return true;
+}

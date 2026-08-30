@@ -202,9 +202,151 @@ TACTIC_TECH_TREE: tuple[TacticTech, ...] = (
         office_capacity_effects={"grand_general": 2},
         prerequisites=("military_reform_2",),
     ),
+    TacticTech(
+        tech_id="civic_edict",
+        name="律令布告",
+        description="统一城内法令口径，降低治理摩擦。",
+        money_cost=70,
+        ether_cost=0,
+        branch="office",
+    ),
+    TacticTech(
+        tech_id="census_roll",
+        name="编户齐民",
+        description="清查户口，方便后续征收与征发。",
+        money_cost=90,
+        ether_cost=0,
+        branch="office",
+    ),
+    TacticTech(
+        tech_id="militia_drill",
+        name="教阅法",
+        description="定期校场教阅，提高乡勇出战效率。",
+        money_cost=70,
+        ether_cost=0,
+    ),
+    TacticTech(
+        tech_id="market_levy",
+        name="市集课税",
+        description="规范市集抽成，提高每回合金钱收入。",
+        money_cost=80,
+        ether_cost=0,
+        branch="building",
+    ),
+    TacticTech(
+        tech_id="caravan_charter",
+        name="商路特许",
+        description="发放商队路引，拓宽城际贸易。",
+        money_cost=100,
+        ether_cost=0,
+        branch="building",
+    ),
+    TacticTech(
+        tech_id="wall_mason",
+        name="夯土城垣",
+        description="加固城垣夯土，提高基础城防。",
+        money_cost=80,
+        ether_cost=0,
+        branch="building",
+    ),
+    TacticTech(
+        tech_id="irrigation",
+        name="沟渠灌溉",
+        description="整修沟渠，提高田地产出。",
+        money_cost=70,
+        ether_cost=0,
+        branch="building",
+        building_level_effects={"fields": 0},
+    ),
+    TacticTech(
+        tech_id="granary",
+        name="常平仓",
+        description="设置常平仓，缓和粮价与缺粮冲击。",
+        money_cost=90,
+        ether_cost=0,
+        branch="building",
+    ),
+    TacticTech(
+        tech_id="envoy_office",
+        name="行人制度",
+        description="设立行人官，方便遣使与回访。",
+        money_cost=80,
+        ether_cost=0,
+        branch="office",
+    ),
+    TacticTech(
+        tech_id="guest_rite",
+        name="宾礼",
+        description="完善宾礼，改善与邻邦的交涉余地。",
+        money_cost=90,
+        ether_cost=0,
+        branch="office",
+    ),
+    TacticTech(
+        tech_id="spirit_rite",
+        name="社稷常祀",
+        description="按时祭祀社稷，稳定城内以太来源。",
+        money_cost=80,
+        ether_cost=10,
+        branch="building",
+        building_level_effects={"ritual_site": 0},
+    ),
+    TacticTech(
+        tech_id="talent_call",
+        name="求贤令",
+        description="广发求贤令，提高在野武将投效意愿。",
+        money_cost=80,
+        ether_cost=0,
+        branch="office",
+        hero_deployment_limit_bonus=0,
+    ),
 )
 
 TACTIC_TECHS_BY_ID = {tech.tech_id: tech for tech in TACTIC_TECH_TREE}
+
+TECH_CATEGORY_LABELS = {
+    "politics": "政治",
+    "military": "军事",
+    "economy": "经济",
+    "construction": "建设",
+    "agriculture": "农业",
+    "diplomacy": "外交",
+    "ritual": "祭祀",
+    "heroes": "武将",
+}
+
+# 父类只负责分组展示；研究费用、回合和前置都挂在子科技上。
+# 既有科技暂定为 1 回合，避免打断现有月结测试；新编占位科技用 2～3 回合。
+TECH_PRESENTATION: dict[str, tuple[str, int]] = {
+    "civic_edict": ("politics", 2),
+    "census_roll": ("politics", 2),
+    "command_staff_1": ("politics", 1),
+    "command_staff_2": ("politics", 1),
+    "local_militia": ("military", 1),
+    "militia_drill": ("military", 2),
+    "city_doctrine": ("military", 1),
+    "combined_arms": ("military", 1),
+    "fortified_garrison": ("military", 1),
+    "archery_corps": ("military", 1),
+    "cavalry_corps": ("military", 1),
+    "military_reform_1": ("military", 1),
+    "military_reform_2": ("military", 1),
+    "military_reform_3": ("military", 1),
+    "market_levy": ("economy", 2),
+    "caravan_charter": ("economy", 3),
+    "civic_architecture_2": ("construction", 1),
+    "military_architecture_2": ("construction", 1),
+    "architecture_3": ("construction", 1),
+    "wall_mason": ("construction", 2),
+    "irrigation": ("agriculture", 2),
+    "granary": ("agriculture", 2),
+    "envoy_office": ("diplomacy", 2),
+    "guest_rite": ("diplomacy", 3),
+    "sacred_architecture_2": ("ritual", 1),
+    "spirit_rite": ("ritual", 2),
+    "hero_command": ("heroes", 1),
+    "talent_call": ("heroes", 2),
+}
 
 BASE_UNIT_UNLOCKS = {"infantry"}
 
@@ -250,8 +392,20 @@ def tactic_tech_tree_public(faction: Faction) -> list[dict[str, Any]]:
     payload: list[dict[str, Any]] = []
     for tech in TACTIC_TECH_TREE:
         item = tech.to_dict()
+        category, research_months = TECH_PRESENTATION.get(tech.tech_id, ("military", 1))
+        item["category"] = category
+        item["category_label"] = TECH_CATEGORY_LABELS.get(category, "军事")
+        item["research_months"] = research_months
+        researching = faction.researching or {}
+        researching_id = str(researching.get("tech_id") or "")
+        months_done = int(researching.get("months_done") or 0)
         item["unlocked"] = tech.tech_id in unlocked
-        item["available"] = tech.tech_id not in unlocked and all(prereq in unlocked for prereq in tech.prerequisites)
+        item["available"] = (
+            tech.tech_id not in unlocked
+            and all(prereq in unlocked for prereq in tech.prerequisites)
+        )
+        item["researching"] = researching_id == tech.tech_id
+        item["research_progress"] = months_done if researching_id == tech.tech_id else 0
         payload.append(item)
     return payload
 
@@ -324,7 +478,8 @@ def city_troop_conversion(city: City, faction: Faction) -> list[dict[str, Any]]:
 
 
 def enrich_world_public_state(world: WorldState) -> dict[str, Any]:
-    from wujiang.strategic.battles import BATTLE_RESOLUTION_MODES
+    from wujiang.strategic.battles import BATTLE_RESOLUTION_MODES, BATTLE_UNIT_TROOP_COSTS
+    from wujiang.strategic.campaign_runtime import CITY_MONTHLY_ORDER_LIMIT
     from wujiang.strategic.exile import exile_action_choices_public
     from wujiang.strategic.heroes import (
         hero_ritual_capacity,
@@ -337,9 +492,16 @@ def enrich_world_public_state(world: WorldState) -> dict[str, Any]:
     from wujiang.strategic.rebellion import rebellion_action_choices_public
     from wujiang.strategic.story import scheduled_consequences_public, story_events_public
     from wujiang.strategic.offices import office_system_public
-    from wujiang.strategic.administration import building_projects_public, registered_unit_types_public
+    from wujiang.strategic.administration import (
+        SETTLEMENT_LABELS,
+        building_projects_public,
+        city_building_max_level,
+        registered_unit_types_public,
+        settlement_upgrade_options,
+        settlement_upgrades_public,
+    )
     from wujiang.strategic.neutral_politics import neutral_city_state_profiles_public
-    from wujiang.strategic.diplomacy import diplomacy_cooldown_until, diplomatic_memory_public, neutral_diplomatic_agreements_public, neutral_diplomacy_options_public
+    from wujiang.strategic.diplomacy import diplomacy_cooldown_until, diplomatic_memory_public, faction_diplomacy_public, neutral_diplomatic_agreements_public, neutral_diplomacy_options_public
     from wujiang.strategic.peaceful_integration import peaceful_integration_option
     from wujiang.strategic.occupation import occupation_status_public
     from wujiang.strategic.rebellion import rebellion_funding_option
@@ -393,13 +555,25 @@ def enrich_world_public_state(world: WorldState) -> dict[str, Any]:
             profile["agreements"] = neutral_diplomatic_agreements_public(world, faction.faction_id)
             profile["diplomatic_memory"] = diplomatic_memory_public(world, faction.faction_id)
             faction_payload["neutral_politics"] = profile
+        if faction.is_major:
+            faction_payload["faction_diplomacy"] = {
+                other.faction_id: faction_diplomacy_public(
+                    world,
+                    actor_faction_id=faction.faction_id,
+                    target_faction_id=other.faction_id,
+                )
+                for other in world.factions
+                if other.faction_id != faction.faction_id and other.is_major
+            }
     for city_payload, city in zip(payload["cities"], world.cities):
         faction = factions_by_id[city.owner_faction_id]
         city_payload["troop_conversion"] = city_troop_conversion(city, faction)
+        city_payload["settlement_label"] = SETTLEMENT_LABELS.get(str(city.settlement or ""), str(city.settlement or ""))
         city_payload["building_limits"] = {
-            project["id"]: building_max_level(faction, project["id"])
+            project["id"]: city_building_max_level(city, project["id"])
             for project in building_projects_public()
         }
+        city_payload["settlement_upgrades"] = settlement_upgrade_options(city)
         city_payload["occupation_governance"] = occupation_status_public(world, city.city_id)
         city_payload["rebellion_funding_options"] = {
             major.faction_id: rebellion_funding_option(
@@ -411,7 +585,9 @@ def enrich_world_public_state(world: WorldState) -> dict[str, Any]:
             if major.is_major
         }
     payload["policy_choices"] = sorted(POLICIES)
-    payload["battle_resolution_modes"] = sorted(BATTLE_RESOLUTION_MODES)
+    payload["battle_resolution_modes"] = sorted(mode for mode in BATTLE_RESOLUTION_MODES if mode != "pending_choice")
+    payload["city_monthly_order_limit"] = CITY_MONTHLY_ORDER_LIMIT
+    payload["battle_unit_costs"] = dict(BATTLE_UNIT_TROOP_COSTS)
     payload["exile_action_choices"] = exile_action_choices_public()
     payload["rebellion_action_choices"] = rebellion_action_choices_public()
     payload["strategic_hero_pool"] = strategic_hero_pool_public(world)
@@ -421,6 +597,7 @@ def enrich_world_public_state(world: WorldState) -> dict[str, Any]:
     payload["scheduled_consequences"] = scheduled_consequences_public(world)
     payload["office_system"] = office_system_public(world)
     payload["building_projects"] = building_projects_public()
+    payload["settlement_upgrades"] = settlement_upgrades_public()
     payload["registered_unit_types"] = registered_unit_types_public()
     payload["relic_system"] = relic_system_public(world)
     payload["world_crises"] = world_crises_public(world)
@@ -449,6 +626,29 @@ def set_city_policy(world: WorldState, *, faction_id: str, city_id: str, policy:
     return next_world
 
 
+def _research_months(tech_id: str) -> int:
+    return int(TECH_PRESENTATION.get(tech_id, ("military", 1))[1])
+
+
+def _complete_tactic_tech(world: WorldState, faction: Faction, tech: TacticTech) -> WorldState:
+    if tech.tech_id not in faction.tactic_techs:
+        faction.tactic_techs.append(tech.tech_id)
+    faction.researching = {}
+    world.event_log.append(
+        EventLogEntry(
+            month=world.current_month,
+            category="tactic_tech",
+            message=f"{faction.name}解锁战术科技：{tech.name}。",
+            related_ids=[faction.faction_id, tech.tech_id],
+        )
+    )
+    if tech.office_capacity_effects:
+        from wujiang.strategic.offices import ensure_office_system
+
+        return ensure_office_system(world)
+    return world
+
+
 def unlock_tactic_tech(world: WorldState, *, faction_id: str, tech_id: str) -> WorldState:
     tech = TACTIC_TECHS_BY_ID.get(tech_id)
     if tech is None:
@@ -461,23 +661,103 @@ def unlock_tactic_tech(world: WorldState, *, faction_id: str, tech_id: str) -> W
     missing = [prereq for prereq in tech.prerequisites if prereq not in unlocked]
     if missing:
         raise StrategyError("战术科技前置条件未满足。")
-    if faction.resources.money < tech.money_cost or faction.resources.ether < tech.ether_cost:
-        raise StrategyError("资源不足，无法解锁战术科技。")
+    current = faction.researching or {}
+    current_id = str(current.get("tech_id") or "")
+    if current_id and current_id != tech_id:
+        raise StrategyError("已有科技正在研究，取消后才能改研其他。")
+    if current_id == tech_id:
+        raise StrategyError("这门科技已经在研究。")
+    if faction.resources.money < tech.money_cost:
+        raise StrategyError("资源不足，无法研究战术科技。")
 
     faction.resources.money -= tech.money_cost
-    faction.resources.ether -= tech.ether_cost
-    faction.tactic_techs.append(tech_id)
+    months = max(1, _research_months(tech_id))
+    if months <= 1:
+        next_world = _complete_tactic_tech(next_world, faction, tech)
+        next_world.validate()
+        return next_world
+
+    faction.researching = {
+        "tech_id": tech_id,
+        "months_done": 1,
+        "months_total": months,
+        "monthly_money": tech.money_cost,
+    }
     next_world.event_log.append(
         EventLogEntry(
             month=next_world.current_month,
             category="tactic_tech",
-            message=f"{faction.name}解锁战术科技：{tech.name}。",
+            message=f"{faction.name}开始研究：{tech.name}（1/{months}）。",
             related_ids=[faction_id, tech_id],
         )
     )
-    if tech.office_capacity_effects:
-        from wujiang.strategic.offices import ensure_office_system
+    next_world.validate()
+    return next_world
 
-        next_world = ensure_office_system(next_world)
+
+def cancel_tactic_research(world: WorldState, *, faction_id: str) -> WorldState:
+    next_world = _clone_world(world)
+    faction = _faction(next_world, faction_id)
+    current = faction.researching or {}
+    tech_id = str(current.get("tech_id") or "")
+    if not tech_id:
+        next_world.validate()
+        return next_world
+    tech = TACTIC_TECHS_BY_ID.get(tech_id)
+    faction.researching = {}
+    next_world.event_log.append(
+        EventLogEntry(
+            month=next_world.current_month,
+            category="tactic_tech",
+            message=f"{faction.name}取消研究：{tech.name if tech else tech_id}，进度清零。",
+            related_ids=[faction_id, tech_id],
+        )
+    )
+    next_world.validate()
+    return next_world
+
+
+def advance_tactic_research(world: WorldState) -> WorldState:
+    next_world = _clone_world(world)
+    for faction in next_world.factions:
+        current = faction.researching or {}
+        tech_id = str(current.get("tech_id") or "")
+        if not tech_id:
+            continue
+        tech = TACTIC_TECHS_BY_ID.get(tech_id)
+        if tech is None:
+            faction.researching = {}
+            continue
+        monthly = int(current.get("monthly_money") or tech.money_cost)
+        if faction.resources.money < monthly:
+            next_world.event_log.append(
+                EventLogEntry(
+                    month=next_world.current_month,
+                    category="tactic_tech",
+                    message=f"{faction.name}研究{tech.name}因资金不足暂停。",
+                    related_ids=[faction.faction_id, tech_id],
+                )
+            )
+            continue
+        faction.resources.money -= monthly
+        months_done = int(current.get("months_done") or 0) + 1
+        months_total = max(1, int(current.get("months_total") or _research_months(tech_id)))
+        if months_done >= months_total:
+            next_world = _complete_tactic_tech(next_world, faction, tech)
+            continue
+        faction.researching = {
+            "tech_id": tech_id,
+            "months_done": months_done,
+            "months_total": months_total,
+            "monthly_money": monthly,
+        }
+        next_world.event_log.append(
+            EventLogEntry(
+                month=next_world.current_month,
+                category="tactic_tech",
+                message=f"{faction.name}研究{tech.name}（{months_done}/{months_total}）。",
+                related_ids=[faction.faction_id, tech_id],
+            )
+        )
     next_world.validate()
     return next_world

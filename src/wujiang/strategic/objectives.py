@@ -9,9 +9,11 @@ from wujiang.strategic.quick_campaign import QUICK_CAMPAIGN_SCENARIO_ID, quick_c
 
 
 FIRST_CAMPAIGN_SCENARIO_ID = "city_states_twelve_months_v1"
-FIRST_CAMPAIGN_CITY_COUNT = 8
+FIRST_CAMPAIGN_CITY_COUNT = 20
 FIRST_CAMPAIGN_MAJOR_FACTION_COUNT = 2
-FIRST_CAMPAIGN_NEUTRAL_CITY_STATE_COUNT = 6
+FIRST_CAMPAIGN_NEUTRAL_CITY_STATE_COUNT = 18
+MIN_MAJOR_FACTION_COUNT = 2
+MAX_MAJOR_FACTION_COUNT = 10
 FIRST_CAMPAIGN_MONTH_LIMIT = 12
 CAMPAIGN_CONTENT_VERSION = "p8.1-content-1"
 CAMPAIGN_BALANCE_VERSION = "p8.1-balance-1"
@@ -49,20 +51,34 @@ def campaign_variant_catalog_public() -> list[dict[str, Any]]:
     return [dict(CAMPAIGN_OPENING_VARIANTS[variant_id]) for variant_id in CAMPAIGN_OPENING_VARIANTS]
 
 
-def first_campaign_contract(variant_id: str = DEFAULT_CAMPAIGN_VARIANT_ID) -> dict[str, Any]:
+def campaign_map_scale(major_faction_count: int | None = None) -> tuple[int, int, int]:
+    majors = max(
+        MIN_MAJOR_FACTION_COUNT,
+        min(MAX_MAJOR_FACTION_COUNT, int(major_faction_count or FIRST_CAMPAIGN_MAJOR_FACTION_COUNT)),
+    )
+    city_count = max(FIRST_CAMPAIGN_CITY_COUNT, majors * 2)
+    return majors, city_count, city_count - majors
+
+
+def first_campaign_contract(
+    variant_id: str = DEFAULT_CAMPAIGN_VARIANT_ID,
+    *,
+    major_faction_count: int | None = None,
+) -> dict[str, Any]:
     normalized_variant_id = str(variant_id or DEFAULT_CAMPAIGN_VARIANT_ID).strip().lower()
     variant = CAMPAIGN_OPENING_VARIANTS.get(normalized_variant_id)
     if variant is None:
         raise StrategyError("未知的战役开局变体。")
+    majors, city_count, neutrals = campaign_map_scale(major_faction_count)
     return {
         "id": FIRST_CAMPAIGN_SCENARIO_ID,
         "name": "十二月城邦争衡",
         "content_version": CAMPAIGN_CONTENT_VERSION,
         "balance_version": CAMPAIGN_BALANCE_VERSION,
         "opening_variant": dict(variant),
-        "city_count": FIRST_CAMPAIGN_CITY_COUNT,
-        "major_faction_count": FIRST_CAMPAIGN_MAJOR_FACTION_COUNT,
-        "neutral_city_state_count": FIRST_CAMPAIGN_NEUTRAL_CITY_STATE_COUNT,
+        "city_count": city_count,
+        "major_faction_count": majors,
+        "neutral_city_state_count": neutrals,
         "month_limit": FIRST_CAMPAIGN_MONTH_LIMIT,
         "expected_duration_minutes": [60, 90],
         "available_victory_routes": [
@@ -70,7 +86,6 @@ def first_campaign_contract(variant_id: str = DEFAULT_CAMPAIGN_VARIANT_ID) -> di
             "eliminate_enemy_factions",
             "peaceful_integration",
             "world_mainline_victory",
-            "relic_altar_victory",
             "time_limit_assessment",
         ],
         "locked_systems": [],
@@ -173,12 +188,6 @@ VICTORY_CONDITIONS: tuple[VictoryCondition, ...] = (
         condition_id="world_mainline",
         name="世界主线",
         description="赢得第 11 月北境雪鬼决战；联军反攻分支可共享主线胜利。",
-        implemented=True,
-    ),
-    VictoryCondition(
-        condition_id="relic_altar",
-        name="圣物祭坛",
-        description="在圣物祭坛绑定完整圣物，并连续完成三个月全额维护。",
         implemented=True,
     ),
 )
@@ -361,18 +370,6 @@ def evaluate_strategic_status(world: WorldState) -> dict[str, Any]:
             for faction_id in crisis.mainline_winner_faction_ids
         }
     )
-    relic_victory_winners = sorted(
-        {
-            str(altar.consecration_faction_id)
-            for altar in world.relic_altars
-            if altar.consecration_faction_id
-            and altar.consecration_progress >= altar.consecration_required
-            and altar.state == "active"
-        }
-    )
-    relic_victory_enabled = (
-        str(world.campaign_contract.get("id") or "") == FIRST_CAMPAIGN_SCENARIO_ID
-    )
     condition_statuses: list[dict[str, Any]] = []
     for condition in VICTORY_CONDITIONS:
         achieved = False
@@ -386,23 +383,14 @@ def evaluate_strategic_status(world: WorldState) -> dict[str, Any]:
         elif condition.condition_id == "world_mainline" and mainline_winners:
             achieved = True
             winner_faction_id = mainline_winners[0]
-        elif condition.condition_id == "relic_altar" and relic_victory_winners:
-            achieved = True
-            winner_faction_id = relic_victory_winners[0]
         status = condition.to_status(
             achieved=achieved,
             winner_faction_id=winner_faction_id,
-            winner_faction_ids=(
-                mainline_winners
-                if condition.condition_id == "world_mainline"
-                else relic_victory_winners if condition.condition_id == "relic_altar" else None
-            ),
+            winner_faction_ids=mainline_winners if condition.condition_id == "world_mainline" else None,
         )
-        if condition.condition_id == "relic_altar":
-            status["implemented"] = relic_victory_enabled
         if (
             str(world.campaign_contract.get("id") or "") == QUICK_CAMPAIGN_SCENARIO_ID
-            and condition.condition_id in {"world_mainline", "relic_altar"}
+            and condition.condition_id == "world_mainline"
         ):
             status["implemented"] = False
         condition_statuses.append(status)
@@ -416,6 +404,8 @@ def evaluate_strategic_status(world: WorldState) -> dict[str, Any]:
     month_limit = int(contract.get("month_limit", 0)) if contract else 0
     months_remaining = max(0, month_limit - world.current_month) if month_limit else None
     deadline_reached = bool(month_limit and world.current_month >= month_limit)
+    current_year = (max(1, world.current_month) - 1) // 12 + 1
+    current_month_in_year = ((max(1, world.current_month) - 1) % 12) + 1
     conclusion = dict(world.campaign_conclusion)
     if not conclusion and contract and (achieved_conditions or deadline_reached):
         conclusion = _campaign_conclusion_payload(
@@ -445,8 +435,12 @@ def evaluate_strategic_status(world: WorldState) -> dict[str, Any]:
         "achieved_conditions": achieved_conditions,
         "campaign_contract": contract,
         "month_limit": month_limit or None,
+        "year_limit": int(contract.get("year_limit", 0) or 0) or None,
         "months_remaining": months_remaining,
         "deadline_reached": deadline_reached,
+        "current_year": current_year,
+        "current_month_in_year": current_month_in_year,
+        "calendar_label": f"第{current_year}年{current_month_in_year}月",
         "campaign_state": campaign_state,
         "awaiting_conclusion_choice": campaign_state == "settled",
         "can_advance_month": campaign_state not in {"settled", "archived"},

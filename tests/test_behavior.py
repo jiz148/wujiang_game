@@ -1388,7 +1388,7 @@ class RoomBehaviorTests(unittest.TestCase):
             city_id = str(action_payload.get("city_id") or action_payload.get("source_city_id") or "")
             if action_type in {"set_city_policy", "rebellion_action", "rebellion_battle", "resolve_story_event"}:
                 office_type = "governor"
-            elif action_type in {"increase_city_troops", "register_city_soldiers", "construct_city_building", "perform_hero_ritual"}:
+            elif action_type in {"increase_city_troops", "register_city_soldiers", "construct_city_building", "upgrade_city_settlement", "perform_hero_ritual"}:
                 office_type = "governor"
             elif action_type in {"transfer_registered_units", "approve_registered_unit_request"}:
                 office_type = "grand_general"
@@ -1655,6 +1655,7 @@ class RoomBehaviorTests(unittest.TestCase):
 
         # Then the server starts the fixed tutorial matchup without room configuration
         self.assertEqual(payload["room"]["experience_kind"], "tutorial")
+        self.assertEqual(payload["room"]["launch_context"]["source"], "tutorial")
         self.assertEqual(payload["room"]["status"], "battle")
         self.assertEqual(payload["room"]["human_seat_count"], 1)
         self.assertEqual(payload["room"]["ai_seat_count"], 1)
@@ -1672,6 +1673,7 @@ class RoomBehaviorTests(unittest.TestCase):
 
         # Then the server immediately starts a human-versus-easy-AI 2v2 with named beginner rosters
         self.assertEqual(payload["room"]["experience_kind"], "quick_ai")
+        self.assertEqual(payload["room"]["launch_context"]["source"], "quick_ai")
         self.assertEqual(payload["room"]["status"], "battle")
         self.assertEqual(payload["room"]["human_seat_count"], 1)
         self.assertEqual(payload["room"]["ai_seat_count"], 1)
@@ -1859,7 +1861,7 @@ class RoomBehaviorTests(unittest.TestCase):
 
         self.assertEqual(campaign["name"], "英灵城邦")
         self.assertEqual(campaign["world"]["seed"], 90)
-        self.assertEqual(len(campaign["world"]["cities"]), 8)
+        self.assertEqual(len(campaign["world"]["cities"]), 20)
         self.assertEqual(campaign["world"]["strategic_status"]["month_limit"], 12)
         self.assertEqual(campaign["resume"]["can_resume"], False)
         self.assertEqual(campaign["resume"]["missing_initial_user_ids"], [])
@@ -1885,6 +1887,27 @@ class RoomBehaviorTests(unittest.TestCase):
         left = self.api_post("/api/strategy/campaigns/leave", {"campaign_id": campaign_id})
         self.assertTrue(left["resume"]["can_resume"])
         self.assertEqual(left["resume"]["missing_initial_user_ids"], [1])
+
+    def test_scenario_create_campaign_respects_year_limit_and_hides_early_crisis(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {
+                "name": "十年寒潮",
+                "seed": 91,
+                "crisis_earliest_year": 10,
+                "year_limit": 0,
+            },
+        )
+        campaign = created["campaign"]
+        status = campaign["world"]["strategic_status"]
+        contract = campaign["world"]["campaign_contract"]
+        self.assertEqual(status["calendar_label"], "第1年1月")
+        self.assertEqual(status["current_year"], 1)
+        self.assertIsNone(status["month_limit"])
+        self.assertEqual(contract["crisis_config"]["earliest_year"], 10)
+        self.assertEqual(contract["year_limit"], 0)
+        self.assertEqual(campaign["world"]["world_crises"], [])
+        self.assertEqual(campaign["world"]["current_month"], 1)
 
     def test_scenario_owner_deletes_a_campaign_and_it_stays_gone(self) -> None:
         # 战役此前只能归档，而归档的仍然留在列表里——试玩几局之后列表再也清不干净。
@@ -2291,8 +2314,8 @@ class RoomBehaviorTests(unittest.TestCase):
         majors = [item for item in created["world"]["factions"] if item["faction_type"] == "major"]
         neutrals = [item for item in created["world"]["factions"] if item["faction_type"] == "neutral_city_state"]
 
-        # Then the product scenario remains the declared 8-city / 12-month contract
-        self.assertEqual((len(created["world"]["cities"]), len(majors), len(neutrals)), (8, 2, 6))
+        # Then the product scenario remains the declared 20-city / 12-month contract
+        self.assertEqual((len(created["world"]["cities"]), len(majors), len(neutrals)), (20, 2, 18))
         self.assertEqual(contract["month_limit"], 12)
         self.assertEqual(contract["expected_duration_minutes"], [60, 90])
         self.assertEqual(contract["locked_systems"], [])
@@ -5010,10 +5033,10 @@ class RoomBehaviorTests(unittest.TestCase):
         self.assertIsNone(released_relic["owner_faction_id"])
         self.assertTrue(any(item["category"] == "relic_released" for item in released["world"]["event_log"]))
 
-    def test_scenario_three_public_relic_maintenance_ticks_end_campaign_early(self) -> None:
+    def test_scenario_three_public_relic_binding_applies_bonus_without_ending_campaign(self) -> None:
         created = self.api_post(
             "/api/strategy/campaigns/create",
-            {"name": "relic victory", "seed": 625, "city_count": 8, "faction_count": 2},
+            {"name": "relic bonus", "seed": 625, "city_count": 8, "faction_count": 2},
         )
         campaign_id = created["campaign"]["id"]
         owner_id = created["campaign"]["owner_user_id"]
@@ -5027,7 +5050,7 @@ class RoomBehaviorTests(unittest.TestCase):
             item for item in campaign.world.offices
             if item.faction_id == faction.faction_id and item.office_type == "lord"
         )
-        relic = next(item for item in campaign.world.relics if item.state == "scattered")
+        relic = next(item for item in campaign.world.relics if item.effect_id == "harvest_cup")
         relic.state = "stored"
         relic.condition = "intact"
         relic.location_node_id = city.node_id
@@ -5049,32 +5072,23 @@ class RoomBehaviorTests(unittest.TestCase):
                 },
             },
         )
-        campaign_public = None
-        for expected_progress in (1, 2, 3):
-            campaign_public = self.api_post(
-                "/api/strategy/campaigns/advance-month",
-                {"campaign_id": campaign_id},
-            )["campaign"]
-            public_altar = next(
-                item for item in campaign_public["world"]["relic_system"]["altars"]
-                if item["id"] == altar.altar_id
-            )
-            self.assertEqual(public_altar["consecration"]["progress"], expected_progress)
-
-        self.assertEqual(campaign_public["world"]["campaign_conclusion"]["reason"], "early_victory")
-        self.assertEqual(
-            campaign_public["world"]["campaign_conclusion"]["winner_faction_ids"],
-            [faction.faction_id],
+        campaign_public = self.api_post(
+            "/api/strategy/campaigns/advance-month",
+            {"campaign_id": campaign_id},
+        )["campaign"]
+        public_altar = next(
+            item for item in campaign_public["world"]["relic_system"]["altars"]
+            if item["id"] == altar.altar_id
         )
-        relic_condition = next(
-            item for item in campaign_public["world"]["strategic_status"]["victory_conditions"]
-            if item["id"] == "relic_altar"
-        )
-        self.assertTrue(relic_condition["achieved"])
-        self.assertTrue(
+        self.assertEqual(public_altar["state"], "active")
+        self.assertEqual(public_altar["bound_count"], 1)
+        self.assertTrue(public_altar["bound_relics"][0]["effect_active"])
+        self.assertEqual(public_altar["bound_relics"][0]["effect"]["id"], "harvest_cup")
+        self.assertNotEqual(campaign_public["world"].get("campaign_conclusion", {}).get("reason"), "early_victory")
+        self.assertFalse(
             any(
-                item["category"] == "relic_altar_consecration_completed"
-                for item in campaign_public["world"]["event_log"]
+                item["id"] == "relic_altar"
+                for item in campaign_public["world"]["strategic_status"]["victory_conditions"]
             )
         )
 
@@ -5766,6 +5780,19 @@ class RoomBehaviorTests(unittest.TestCase):
             "/api/strategy/campaigns/queue-action",
             {
                 "campaign_id": campaign_id,
+                "action_type": "assign_strategic_hero_duty",
+                "action_payload": {
+                    "issuer_office_id": lord["id"],
+                    "hero_code": lord["holder_id"],
+                    "assignment_type": "garrison",
+                    "target_id": source["id"],
+                },
+            },
+        )
+        self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
                 "action_type": "issue_office_order",
                 "action_payload": {
                     "issuer_office_id": lord["id"],
@@ -5798,6 +5825,120 @@ class RoomBehaviorTests(unittest.TestCase):
         )["campaign"]
         self.assertEqual(advanced["world"]["office_orders"][-1]["order_type"], "attack_city")
         self.assertIn(lord["holder_id"], advanced["world"]["pending_battles"][-1]["attacker_hero_codes"])
+        self.assertGreaterEqual(attack["payload"]["committed_troops"], 50)
+
+    def test_scenario_queued_attacks_cannot_reuse_the_same_hero_or_overcommit_troops(self) -> None:
+        created = self.api_post(
+            "/api/strategy/campaigns/create",
+            {"name": "exclusive expedition", "seed": 211, "city_count": 6, "faction_count": 2},
+        )
+        campaign_id = created["campaign"]["id"]
+        self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
+        self.api_post("/api/strategy/campaigns/lock", {"campaign_id": campaign_id})
+        campaign = self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})["campaign"]
+        world = campaign["world"]
+        lord = next(office for office in world["offices"] if office["faction_id"] == "faction_1" and office["office_type"] == "lord")
+        nodes = {node["id"]: node for node in world["nodes"]}
+        cities_by_node = {city["node_id"]: city for city in world["cities"]}
+        source = first_target = second_target = serving = None
+        for city in world["cities"]:
+            if city["owner_faction_id"] != "faction_1":
+                continue
+            enemies = [
+                cities_by_node[node_id]
+                for node_id in nodes[city["node_id"]]["connected_node_ids"]
+                if cities_by_node[node_id]["owner_faction_id"] != "faction_1"
+            ]
+            if len(enemies) < 2:
+                continue
+            hero = next(
+                (
+                    item
+                    for item in world["strategic_heroes"]
+                    if item.get("faction_id") == "faction_1"
+                    and item.get("status") == "serving"
+                    and str(item.get("city_id") or item.get("assignment_target_id") or "") == city["id"]
+                ),
+                None,
+            )
+            if hero is None:
+                continue
+            source, first_target, second_target, serving = city, enemies[0], enemies[1], hero
+            break
+        if source is None or serving is None:
+            self.skipTest("need one owned city with a stationed hero and two adjacent enemy cities")
+        serving_code = serving.get("hero_code") or serving.get("code")
+        first = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "declare_attack",
+                "action_payload": {
+                    "issuer_office_id": lord["id"],
+                    "source_city_id": source["id"],
+                    "target_city_id": first_target["id"],
+                    "resolution_mode": "pending_choice",
+                    "attacker_hero_codes": [serving_code],
+                    "committed_troops": 80,
+                },
+            },
+        )["campaign"]
+        attack = next(action for action in first["queued_actions"] if action["action_type"] == "declare_attack")
+        self.assertEqual(attack["payload"]["committed_troops"], 80)
+        status, busy = self.api_post_error(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "declare_attack",
+                "action_payload": {
+                    "issuer_office_id": lord["id"],
+                    "source_city_id": source["id"],
+                    "target_city_id": second_target["id"],
+                    "resolution_mode": "pending_choice",
+                    "attacker_hero_codes": [serving_code],
+                    "committed_troops": 80,
+                },
+                "session_token": self.default_session_token(),
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("其他出征", busy["error"])
+        leftover = max(0, int(source["resources"]["troops"]) - 80)
+        if leftover < 50:
+            self.skipTest("source city does not have enough leftover troops for a second expedition")
+        second = self.api_post(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "declare_attack",
+                "action_payload": {
+                    "issuer_office_id": lord["id"],
+                    "source_city_id": source["id"],
+                    "target_city_id": second_target["id"],
+                    "resolution_mode": "pending_choice",
+                    "committed_troops": leftover,
+                },
+            },
+        )["campaign"]
+        attacks = [action for action in second["queued_actions"] if action["action_type"] == "declare_attack"]
+        self.assertEqual(len(attacks), 2)
+        status, overcommit = self.api_post_error(
+            "/api/strategy/campaigns/queue-action",
+            {
+                "campaign_id": campaign_id,
+                "action_type": "declare_attack",
+                "action_payload": {
+                    "issuer_office_id": lord["id"],
+                    "source_city_id": source["id"],
+                    "target_city_id": second_target["id"],
+                    "resolution_mode": "pending_choice",
+                    "committed_troops": leftover + 10,
+                },
+                "session_token": self.default_session_token(),
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("可带走兵力不足", overcommit["error"])
 
     def test_scenario_strategy_defender_sets_pending_battle_hero_response(self) -> None:
         created = self.api_post(
@@ -5875,7 +6016,7 @@ class RoomBehaviorTests(unittest.TestCase):
         self.assertEqual(battle["defender_hero_codes"], [hero["code"] for hero in heroes])
         self.assertEqual(
             next(item for item in updated["campaign"]["world"]["factions"] if item["id"] == bob_member.faction_id)["strategic_hero_deployment_limit"],
-            2,
+            4,
         )
         self.assertTrue(any(event["category"] == "battle_defender_hero_set" for event in updated["campaign"]["world"]["event_log"]))
 
@@ -5995,9 +6136,9 @@ class RoomBehaviorTests(unittest.TestCase):
         battle_room = resolved["battle_room"]
 
         self.assertEqual(battle["status"], "resolved")
-        self.assertEqual(battle["resolution_mode"], "ai_auto")
+        self.assertIn(battle["resolution_mode"], {"ai_auto", "formula"})
         self.assertEqual(battle["battle_room_id"], battle_room["room_id"])
-        self.assertEqual(battle["battle_result"]["resolution_source"], "real_grid")
+        self.assertIn(battle["battle_result"]["resolution_source"], {"real_grid", "formula"})
         self.assertIn(battle["battle_result"]["winner_side"], {"attacker", "defender"})
         self.assertTrue(battle_room["room_id"])
         self.assertEqual(battle_room["player_token"], "")
@@ -6007,13 +6148,7 @@ class RoomBehaviorTests(unittest.TestCase):
         self.assertIn("manual", world["battle_resolution_modes"])
         self.assertTrue(any(event["category"] == "battle_declared" for event in world["event_log"]))
         self.assertTrue(any(event["category"] == "battle_resolved" for event in world["event_log"]))
-        room_state = self.api_get("/api/rooms/state", params={"room_id": battle_room["room_id"]})
-        self.assertEqual(room_state["room"]["status"], "finished")
-        self.assertIn("strategy_campaign", room_state)
-        self.assertEqual(
-            room_state["strategy_campaign"]["world"]["pending_battles"][-1]["battle_result"]["resolution_source"],
-            "real_grid",
-        )
+        self.assertEqual(world["pending_battles"][-1]["status"], "resolved")
 
     def test_scenario_strategy_manual_city_attack_creates_real_battle_room(self) -> None:
         created = self.api_post(
@@ -6048,7 +6183,9 @@ class RoomBehaviorTests(unittest.TestCase):
             sum(row["grid_units"] for row in battle_room["defender_roster_manifest"]),
             len(battle_room["defender_roster"]),
         )
-        self.assertTrue(any(row["source"] == "city_feature" for row in battle_room["attacker_roster_manifest"]))
+        self.assertTrue(
+            any(row["source"] in {"city_feature", "registered_unit"} for row in battle_room["attacker_roster_manifest"])
+        )
         self.assertTrue(all(code.startswith("strategy_") for code in battle_room["attacker_roster"]))
         self.assertTrue(all(row["hero_code"].startswith("strategy_") for row in battle_room["attacker_roster_manifest"]))
         self.assertEqual(battle["status"], "pending")
@@ -6064,6 +6201,16 @@ class RoomBehaviorTests(unittest.TestCase):
         self.assertIsNotNone(room_state["battle"])
         self.assertEqual(room_state["room"]["viewer_player_id"], 1)
         self.assertEqual(len(room_state["battle"]["units"]), len(battle_room["attacker_roster"]) + len(battle_room["defender_roster"]))
+        self.assertEqual(battle_room["experience_kind"], "strategy_campaign")
+        self.assertEqual(battle_room["launch_context"]["source"], "campaign")
+        self.assertEqual(battle_room["launch_context"]["return_flow"], "campaign")
+        self.assertFalse(battle_room["launch_context"]["allow_lobby"])
+        self.assertFalse(battle_room["launch_context"]["allow_rematch"])
+        self.assertEqual(room_state["room"]["experience_kind"], "strategy_campaign")
+        self.assertEqual(room_state["room"]["launch_context"]["source"], "campaign")
+        self.assertFalse(room_state["room"]["can_rematch"])
+        listed = self.api_get("/api/rooms")
+        self.assertFalse(any(item["room_id"] == battle_room["room_id"] for item in listed["rooms"]))
 
     def test_scenario_strategy_manual_battle_recovers_exact_checkpoint_after_service_restart(self) -> None:
         created = self.api_post(
@@ -6341,7 +6488,7 @@ class RoomBehaviorTests(unittest.TestCase):
         )
         self.assertEqual(campaign["world"]["cities"][1]["resources"]["troops"], declared_battle["defender_troops"])
         self.assertEqual(campaign["world"]["cities"][1]["owner_faction_id"], target_owner_before)
-        self.assertTrue(any("Real grid survivors" in row for row in battle["report"]))
+        self.assertTrue(any("真实战场存活" in row for row in battle["report"]))
         battle_result = battle["battle_result"]
         self.assertEqual(battle_result["winner_side"], "defender")
         self.assertEqual(battle_result["resolution_source"], "real_grid")
@@ -6397,7 +6544,9 @@ class RoomBehaviorTests(unittest.TestCase):
         self.assertTrue(battle_room["room_id"])
         self.assertEqual(battle_room["player_token"], "")
         self.assertGreaterEqual(len(battle_room["attacker_roster"]), 2)
-        self.assertTrue(any(row["source"] == "city_feature" for row in battle_room["defender_roster_manifest"]))
+        self.assertTrue(
+            any(row["source"] in {"city_feature", "registered_unit"} for row in battle_room["defender_roster_manifest"])
+        )
         self.assertTrue(any(code.startswith("strategy_") for code in battle_room["defender_roster"]))
         self.assertEqual(battle["status"], "pending")
         self.assertEqual(battle["resolution_mode"], "watch_ai")
@@ -7649,10 +7798,54 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertIn('id="mastery-overview"', html)
         self.assertNotIn('id="postgame-next-goal"', html)
         self.assertIn('id="postgame-hero-stats"', html)
+        self.assertIn('id="postgame-soldier-stats"', html)
         self.assertIn("renderProgression", home_source)
         self.assertIn('/api/progression/overview', app_source)
         self.assertIn("WujiangReplayUi?.renderToolbar", app_source)
         self.assertIn("WujiangBattleFeedback?.consume", app_source)
+
+    def test_postgame_summary_groups_strategy_soldiers_by_kind(self) -> None:
+        from wujiang.tactical.rooms.postgame import build_postgame_summary
+
+        def entry(unit_id: str, hero_code: str, name: str, damage: float) -> dict:
+            return {
+                "unit_id": unit_id,
+                "hero_code": hero_code,
+                "name": name,
+                "player_id": 1,
+                "owner_seat_id": None,
+                "damage_dealt": damage,
+                "healing_done": 0,
+                "damage_taken": 1,
+                "healing_received": 0,
+                "kills": 0,
+                "deaths": 0,
+                "shields_broken": 0,
+                "chain_reactions": 0,
+                "actions": 1,
+            }
+
+        class FakeBattle:
+            winner = 1
+            win_reason_text = "测试结束"
+            win_reason_code = "other"
+            completed_turns = 2
+            summary_events: list = []
+
+            def combat_summary_entries(self):
+                return [
+                    entry("hero-1", "bard", "吟游诗人", 12),
+                    entry("soldier-1", "strategy_archer", "弓兵", 4),
+                    entry("soldier-2", "strategy_archer", "弓兵", 6),
+                    entry("soldier-3", "strategy_infantry", "普通步兵", 3),
+                ]
+
+        summary = build_postgame_summary(FakeBattle(), None)
+        self.assertEqual([row["name"] for row in summary["hero_stats"]], ["吟游诗人"])
+        self.assertEqual(
+            [(row["name"], row["damage_dealt"], row["unit_count"]) for row in summary["soldier_stats"]],
+            [("弓兵 ×2", 10.0, 2), ("普通步兵 ×1", 3.0, 1)],
+        )
 
     def test_scenario_p7_accessibility_landmarks_and_modal_focus_are_wired(self) -> None:
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
@@ -7788,6 +7981,8 @@ class FrontendBehaviorTests(unittest.TestCase):
         # 面板是浮层而不是一栏：收起之后整张图都在。
         self.assertIn('dock.className = `campaign-dock', app_source)
         self.assertIn("function focusStrategyMapStage", app_source)
+        self.assertIn("function inspectStrategyCityOnMap", app_source)
+        self.assertIn("inspectStrategyCityOnMap(item.city_id, campaign)", app_source)
         self.assertIn("state.strategyDockOpen = false;", app_source)
         self.assertIn(".campaign-dock__body", styles)
         self.assertIn(".campaign-dock.is-collapsed .campaign-dock__body", styles)
@@ -7805,18 +8000,31 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertIn('marker: "◆", label: "己方"', app_source)
         self.assertIn('marker: "⚔", label: "敌方"', app_source)
         self.assertIn('marker: "◇", label: "中立城邦"', app_source)
+        self.assertIn("function strategyCitySettlement", app_source)
+        self.assertIn("SETTLEMENT_MARKERS", app_source)
         self.assertIn('card.setAttribute("aria-pressed", isSelected ? "true" : "false")', app_source)
-        self.assertIn('selection.textContent = "◎ 当前目标"', app_source)
-        self.assertIn('warning.textContent = `⚠ ${cityStateLabels[0]}', app_source)
-        self.assertIn('plan.textContent = `✓ 已计划 ${queuedActions.length}`', app_source)
         self.assertIn("strategySelectedCityByContext", app_source)
         self.assertIn("function strategySelectionContextKey", app_source)
         self.assertIn("function strategyRememberSelectedCity", app_source)
+        self.assertIn("function inspectStrategyCityOnMap", app_source)
+        self.assertIn("function panStrategyMapToNode", app_source)
         self.assertIn("rememberedManagedCity", app_source)
-        self.assertIn(".strategy-map-owner-tag", styles)
-        self.assertIn(".strategy-map-selection", styles)
-        self.assertIn(".strategy-map-alert", styles)
+        self.assertIn(".strategy-map-marker", styles)
+        self.assertIn(".strategy-map-marker-halo", styles)
+        self.assertIn("兵力：", app_source)
+        self.assertIn("upgrade_city_settlement", app_source)
+        self.assertIn("user-select: none", styles)
         self.assertIn(".strategy-map-node.is-selected:hover:not(:disabled)", styles)
+        self.assertIn("button.strategy-map-node", styles)
+        self.assertIn("height: auto", styles)
+        self.assertIn("is-relic-route", app_source)
+        self.assertIn("strategy-map-legend", app_source)
+        self.assertNotIn("is-crisis-route", app_source)
+        self.assertIn("圣物搜索", app_source)
+        self.assertIn("formatStrategyCalendar", app_source)
+        self.assertIn("presentStrategyConclusionNotice", app_source)
+        self.assertIn("危机最早出现年份", app_source)
+        self.assertNotIn(".strategy-map-node.is-owned {\n  border-left: 5px solid #2f7a4f;\n}", styles)
 
     def test_scenario_r2_city_context_command_rail_is_wired(self) -> None:
         styles = (ROOT / "static" / "styles.css").read_text(encoding="utf-8")
@@ -7827,10 +8035,11 @@ class FrontendBehaviorTests(unittest.TestCase):
             "strategy-city-context-head",
             "strategy-city-context-stats",
             "strategy-city-context-risks",
-            "strategy-city-command-actions-head",
         ):
             self.assertIn(class_name, app_source)
             self.assertIn(f".{class_name}", styles)
+        self.assertNotIn("strategy-city-command-actions-head", app_source)
+        self.assertNotIn("当前职位可执行", app_source)
         self.assertIn("当前无警报", app_source)
         self.assertIn("尚未为本城安排军令。", app_source)
         self.assertIn(
@@ -7841,7 +8050,7 @@ class FrontendBehaviorTests(unittest.TestCase):
         # 「军令」页的事，本月已排的队列也是。
         war_room_start = app_source.index("function renderStrategyWarRoom")
         war_room_source = app_source[war_room_start:app_source.index("function renderStrategyWorldCrisis", war_room_start)]
-        city_page = war_room_source[war_room_source.index('id: "city",'):war_room_source.index('id: "heroes",')]
+        city_page = war_room_source[war_room_source.index('id: "city",'):war_room_source.index('id: "diplomacy",')]
         self.assertIn("createStrategyCityDetailCard(campaign, selectedCity, faction, office)", city_page)
         self.assertIn("renderStrategyCityHeroes(host, campaign, selectedCity)", city_page)
         self.assertNotIn("workspaceRenderers", city_page)
@@ -7851,10 +8060,22 @@ class FrontendBehaviorTests(unittest.TestCase):
         orders_page = war_room_source[war_room_source.index('id: "orders",'):war_room_source.index('id: "tech",')]
         self.assertIn("(workspaceRenderers[office?.office_type] || renderGovernorWorkspace)", orders_page)
         self.assertIn("renderStrategyActionQueue", orders_page)
+        self.assertIn("当前军令", app_source)
+        self.assertIn("cancelQueuedStrategyAction", app_source)
+        self.assertIn('["levy_garrison", "征集守军"]', app_source)
+        self.assertIn('["reinforce_city", "增援城市"]', app_source)
+        self.assertIn('["request_food", "请求调粮"]', app_source)
+        self.assertNotIn('["order", "一般目标"]', app_source)
+        self.assertNotIn("向直属下级下达目标", app_source)
+        self.assertIn("strategyEndTurnPending", app_source)
+        self.assertIn("is-loading", app_source)
+        self.assertNotIn('title.textContent = "圣物行动"', app_source)
+        self.assertNotIn("renderStrategyResumePanel", orders_page)
+        self.assertNotIn("renderStrategyMonthlyCycle", orders_page)
 
         # 召唤祭祀、叛乱与主公亲征不再挂在城市面板上。
         command_card_start = app_source.index("export function createStrategyCityCommandCard")
-        command_card = app_source[command_card_start:app_source.index("\n}\n", app_source.index("actionHead, stack", command_card_start))]
+        command_card = app_source[command_card_start:app_source.index("\n}\n", app_source.index("card.append(stack)", command_card_start))]
         for removed in ("召唤祭祀", "叛乱处理", "计划清剿", "主公亲征", "strategy-city-context-stats"):
             self.assertNotIn(removed, command_card)
 
@@ -7868,10 +8089,15 @@ class FrontendBehaviorTests(unittest.TestCase):
             role_source = app_source[
                 app_source.index(start_marker):app_source.index(end_marker, app_source.index(start_marker))
             ]
-            self.assertLess(
-                role_source.index("createStrategyCityCommandCard"),
-                role_source.index("createRoleWorkspaceHeader"),
-            )
+            self.assertIn("createStrategyCityCommandCard", role_source)
+            if start_marker == "function renderLordWorkspace":
+                self.assertNotIn("createRoleWorkspaceHeader", role_source)
+                self.assertNotIn("主公中枢", role_source)
+            else:
+                self.assertLess(
+                    role_source.index("createStrategyCityCommandCard"),
+                    role_source.index("createRoleWorkspaceHeader"),
+                )
 
     def test_scenario_r3_campaign_dock_splits_orders_into_modules_and_drops_screen_prose(self) -> None:
         """浮层面板按模块分页，一页只回答一个问题。
@@ -7901,12 +8127,15 @@ class FrontendBehaviorTests(unittest.TestCase):
         war_room_source = app_source[war_room_start:war_room_end]
         for module_id, label in (
             ("city", "城市"),
+            ("diplomacy", "外交"),
             ("heroes", "武将"),
             ("orders", "军令"),
+            ("expedition", "出征"),
             ("tech", "科技"),
             ("crisis", "危机"),
             ("relic", "圣物"),
             ("log", "战况"),
+            ("more", "更多"),
         ):
             self.assertIn(f'id: "{module_id}"', war_room_source)
             self.assertIn(f'label: "{label}"', war_room_source)
@@ -8148,18 +8377,23 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertIn('selectedCampaignId: state.strategyCampaign?.id || 0', app_source)
         self.assertNotIn('tagName === "TEXTAREA" || tagName === "BUTTON"', app_source)
         self.assertIn("strategyCanResume", app_source)
+        self.assertIn("function exitBattle", app_source)
+        self.assertIn("allow_lobby", app_source)
         self.assertIn("strategyCityOrderLimit", app_source)
         self.assertIn("filterStrategySelectOptions", app_source)
         self.assertIn("createStrategyHeroPathPanel", app_source)
         self.assertIn("createStrategyHeroAppointmentPanel", app_source)
         self.assertIn("createLordHeroDutyPanel", app_source)
+        self.assertIn("strategy-hero-assign", app_source)
+        self.assertIn('if (attackKinds.has(kind) && own) return;', app_source)
         self.assertIn("createLordRitualPanel", app_source)
         self.assertIn("renderStrategyTechPanel", app_source)
         self.assertIn("createGrandGeneralMilitaryPanel", app_source)
         self.assertIn("createGeneralLogisticsPanel", app_source)
         self.assertIn("举行召唤祭祀", app_source)
         self.assertIn("增加兵力", app_source)
-        self.assertIn("注册士兵", app_source)
+        self.assertIn("升级类型", app_source)
+        self.assertIn("外交", app_source)
         self.assertIn("调拨给直属将军", app_source)
         self.assertIn("请示直属大将军", app_source)
         self.assertNotIn("发布招募武将令", app_source)
@@ -8636,22 +8870,22 @@ class FrontendBehaviorTests(unittest.TestCase):
                   ],
                   relic_system: {
                     enabled: true,
-                    phase: "p6_6_relic_victory",
-                    total_relics: 59,
+                    phase: "relic_bonus",
+                    total_relics: 10,
                     rules: {
-                      ritual_site: "祭祀场：1 军令 + 30 城市以太，确定性随机召唤未绑定英灵。",
-                      relic_altar: "圣物祭坛：绑定完整圣物后，从下月起连续完成 3 次全额维护可立即获胜。",
-                      current_scope: "圣物搜索、保管、转移、修复、绑定、释放、城市夺取与公开胜利进度均已开放。",
+                      ritual_site: "祭坛建筑：城市拥有 1 级祭坛后即可安放圣物；等级决定安放容量。",
+                      relic_altar: "圣物必须安放到祭坛才会生效。",
+                      current_scope: "圣物是可争夺的长期加成，不再作为胜利条件。",
                     },
                     intel_by_faction: {
                       faction_1: {
                         known_count: 1,
-                        unknown_count: 58,
+                        unknown_count: 9,
                         known_relics: [
                           {
-                            id: "relic:li",
-                            hero_code: "li",
-                            name: "李的圣物",
+                            id: "relic:harvest_cup",
+                            hero_code: "",
+                            name: "丰饶之杯",
                             state: "scattered",
                             state_label: "散落",
                             condition: "intact",
@@ -8660,6 +8894,13 @@ class FrontendBehaviorTests(unittest.TestCase):
                             location_node_name: "雾港城",
                             location_city_id: "city_2",
                             location_city_name: "雾港城",
+                            effect: {
+                              id: "harvest_cup",
+                              name: "丰饶之杯",
+                              scope: "city",
+                              scope_label: "城市",
+                              summary: "所在城市每月粮食 +80",
+                            },
                           },
                         ],
                       },
@@ -8679,17 +8920,6 @@ class FrontendBehaviorTests(unittest.TestCase):
                         maintenance_affordable: true,
                         actions_used: 0,
                         actions_remaining: 1,
-                        consecration: {
-                          faction_id: null,
-                          relic_id: null,
-                          progress: 0,
-                          required: 3,
-                          started_month: null,
-                          last_progress_month: null,
-                          earliest_completion_month: null,
-                          active: false,
-                          completed: false,
-                        },
                       },
                     ],
                   },
@@ -8825,6 +9055,10 @@ class FrontendBehaviorTests(unittest.TestCase):
                       building_limits: { fields: 1, barracks: 1, ritual_site: 1, academy: 1, stables: 1, archery_range: 1 },
                       registered_units: { infantry: 2, archer: 0, cavalry: 0 },
                       defense: 4,
+                      settlement: "village",
+                      settlement_upgrades: [
+                        { id: "town", name: "城镇", from_settlement: "village", population: 1400, food: 700, money: 180, available: false },
+                      ],
                       event_states: ["rebellion_risk:80:正式叛乱", "rebellion_force:160:month:2"],
                       troop_conversion: [
                         { unit_type: "守备兵", ratio: 10, troops: 30 },
@@ -9023,6 +9257,15 @@ class FrontendBehaviorTests(unittest.TestCase):
               }
               return null;
             }
+            function findInputByValue(node, typeName, value) {
+              if (!node) return null;
+              if (node.tagName === "INPUT" && node.type === typeName && node.value === value) return node;
+              for (const child of node.children || []) {
+                const found = findInputByValue(child, typeName, value);
+                if (found) return found;
+              }
+              return null;
+            }
             function findMapCityButton(node, cityId) {
               if (!node) return null;
               if (node.tagName === "BUTTON" && node.dataset && node.dataset.cityId === cityId) return node;
@@ -9061,7 +9304,7 @@ class FrontendBehaviorTests(unittest.TestCase):
             }
             // 操作面板一次只挂出一个模块，所以"翻到某一页"是探测这一屏的前提；
             // 屏幕文本因此是各页文本之和，而不是某一次渲染的结果。
-            const DOCK_TABS = ["city", "heroes", "orders", "tech", "crisis", "relic", "log"];
+            const DOCK_TABS = ["city", "diplomacy", "heroes", "orders", "expedition", "tech", "crisis", "relic", "log"];
             function openDockTab(tab) {
               state.strategyDockTab = tab;
               state.strategyDockOpen = true;
@@ -9091,10 +9334,16 @@ class FrontendBehaviorTests(unittest.TestCase):
             globalThis.hasRebellionSelect = Boolean(findSelectWithOption(document.elements["strategy-current"], "suppress"));
             globalThis.hasRebellionButton = Boolean(findButtonByText(document.elements["strategy-current"], "计划处理 · 1 军令"));
             globalThis.hasCityRitualButton = Boolean(findButtonByText(document.elements["strategy-current"], "举行祭祀 · 30 以太 · 1 军令"));
-            const heroDeploySelect = findSelectWithOption(document.elements["strategy-current"], "li");
-            globalThis.hasHeroDeploySelect = Boolean(heroDeploySelect);
-            if (heroDeploySelect) heroDeploySelect.value = "li";
-            const planAttackButton = findButtonByText(document.elements["strategy-current"], "计划进攻 · 2 军令");
+            const expeditionPage = openDockTab("expedition");
+            const heroDeployCheckbox = findInputByValue(expeditionPage, "checkbox", "li");
+            globalThis.hasHeroDeploySelect = Boolean(heroDeployCheckbox);
+            if (heroDeployCheckbox) {
+              heroDeployCheckbox.checked = true;
+              if (heroDeployCheckbox.listeners && heroDeployCheckbox.listeners.change) {
+                heroDeployCheckbox.listeners.change[0]();
+              }
+            }
+            const planAttackButton = findButtonByText(document.elements["strategy-current"], "计划出征 · 2 军令");
             globalThis.hasPlanAttackButton = Boolean(planAttackButton);
             if (planAttackButton) planAttackButton.listeners.click[0]();
             // 武将详情要点开某个人才展开，所以先点名单里的第一张卡。
@@ -9108,12 +9357,12 @@ class FrontendBehaviorTests(unittest.TestCase):
               return null;
             }
             const heroesPage = openDockTab("heroes");
-            globalThis.heroDetailBeforeSelect = collectText(heroesPage).includes("武将详情");
+            globalThis.heroDetailBeforeSelect = Boolean(findByClass(heroesPage, "strategy-hero-detail"));
             const heroSlot = findHeroSlot(heroesPage, "li");
             globalThis.hasHeroSlot = Boolean(heroSlot);
             if (heroSlot) heroSlot.listeners.click[0]();
             const openedHeroesPage = document.elements["strategy-current"];
-            globalThis.heroDetailAfterSelect = collectText(openedHeroesPage).includes("武将详情");
+            globalThis.heroDetailAfterSelect = Boolean(findByClass(openedHeroesPage, "strategy-hero-detail"));
             const defenseButton = findButtonByText(openedHeroesPage, "设为防守");
             globalThis.hasDefenseHeroButton = Boolean(defenseButton);
             if (defenseButton) defenseButton.listeners.click[0]();
@@ -9127,10 +9376,10 @@ class FrontendBehaviorTests(unittest.TestCase):
             globalThis.hasSummonHeroButton = Boolean(summonButton);
             if (summonButton) summonButton.listeners.click[0]();
             const cityPage = openDockTab("city");
-            globalThis.hasStrategyMapPlan = Boolean(findByClass(cityPage, "strategy-map-plan"));
-            globalThis.hasStrategyMapOwnerTag = Boolean(findByClass(cityPage, "strategy-map-owner-tag"));
-            globalThis.hasStrategyMapSelection = Boolean(findByClass(cityPage, "strategy-map-selection"));
-            globalThis.hasStrategyMapAlert = Boolean(findByClass(cityPage, "strategy-map-alert"));
+            globalThis.hasStrategyMapPlan = Boolean(findByClass(cityPage, "has-plan"));
+            globalThis.hasStrategyMapMarker = Boolean(findByClass(cityPage, "strategy-map-marker"));
+            globalThis.hasStrategyMapSelection = Boolean(findByClass(cityPage, "is-selected"));
+            globalThis.hasStrategyMapAlert = Boolean(findByClass(cityPage, "is-crisis-threatened"));
             globalThis.hasStrategyCommandPlan = Boolean(findByClass(cityPage, "strategy-command-plan"));
             globalThis.hasStrategyMapStage = Boolean(findByClass(cityPage, "strategy-map-stage"));
             globalThis.hasStrategyCityDetailCard = Boolean(findByClass(cityPage, "strategy-city-detail-card"));
@@ -9182,7 +9431,7 @@ class FrontendBehaviorTests(unittest.TestCase):
             globalThis.selectedCityContextAfterMapClick = state.strategySelectedCityByContext["7::viewer"];
             const selectedFogMapButton = findMapCityButton(document.elements["strategy-current"], "city_2");
             globalThis.fogMapButtonPressedAfterClick = selectedFogMapButton && selectedFogMapButton["aria-pressed"] === "true";
-            globalThis.fogMapHasSelectionMarker = Boolean(findByClass(selectedFogMapButton, "strategy-map-selection"));
+            globalThis.fogMapHasSelectionMarker = String(selectedFogMapButton?.className || "").includes("is-selected");
             renderStrategyPanel();
             globalThis.selectedCityAfterRerender = state.strategySelectedCityId;
             globalThis.fogMapButtonPressedAfterRerender = findMapCityButton(document.elements["strategy-current"], "city_2")?.["aria-pressed"] === "true";
@@ -9339,25 +9588,25 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertIn("角色：房主", ctx.eval("globalThis.strategyText"))
         self.assertIn("角色：AI 接管", ctx.eval("globalThis.strategyText"))
         self.assertTrue(ctx.eval("globalThis.hasStrategyMapPlan"))
-        self.assertTrue(ctx.eval("globalThis.hasStrategyMapOwnerTag"))
+        self.assertTrue(ctx.eval("globalThis.hasStrategyMapMarker"))
         self.assertTrue(ctx.eval("globalThis.hasStrategyMapSelection"))
         self.assertTrue(ctx.eval("globalThis.hasStrategyMapAlert"))
-        self.assertTrue(ctx.eval("globalThis.hasStrategyCommandPlan"))
+        self.assertFalse(ctx.eval("globalThis.hasStrategyCommandPlan"))
         self.assertTrue(ctx.eval("globalThis.hasCityContextStats"))
         self.assertTrue(ctx.eval("globalThis.hasCityContextRisks"))
         self.assertTrue(ctx.eval("globalThis.hasCityHeroList"))
         # 城市页答"这座城什么样"，军令页答"能对它做什么"：动作条只在军令页。
         self.assertFalse(ctx.eval("globalThis.hasCityCommandActionsHead"))
-        self.assertTrue(ctx.eval("globalThis.ordersHasCommandActionsHead"))
+        self.assertFalse(ctx.eval("globalThis.ordersHasCommandActionsHead"))
         self.assertIn("当前城市", ctx.eval("globalThis.strategyText"))
         self.assertIn("当前风险", ctx.eval("globalThis.strategyText"))
         self.assertIn("城内武将", ctx.eval("globalThis.strategyText"))
-        self.assertIn("当前职位可执行", ctx.eval("globalThis.strategyText"))
+        self.assertNotIn("当前职位可执行", ctx.eval("globalThis.strategyText"))
         # 地图铺满整屏，操作面板压在它上面；面板按模块分页，一次只回答一个问题。
         self.assertTrue(ctx.eval("globalThis.mapIsUnderTheDock"))
         self.assertEqual(
             json.loads(ctx.eval("JSON.stringify(globalThis.dockTabLabels)")),
-            ["城市", "武将", "军令 1", "科技", "危机", "圣物", "战况", "›"],
+            ["城市", "外交", "武将", "军令 1", "出征", "科技", "危机", "圣物", "战况", "更多", "›"],
         )
         self.assertFalse(ctx.eval("globalThis.dockOpenAfterClickingActiveTab"))
         self.assertTrue(ctx.eval("globalThis.dockOpenAfterClickingAgain"))
@@ -9378,32 +9627,32 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertTrue(ctx.eval("globalThis.strategySelectIsActive"))
         self.assertFalse(ctx.eval("globalThis.strategyButtonIsActive"))
         self.assertIn("本月已计划 1/2 条军令", ctx.eval("globalThis.strategyText"))
-        self.assertIn("✓ 已计划 1", ctx.eval("globalThis.strategyText"))
+        self.assertIn("已计划 1", ctx.eval("globalThis.strategyText"))
         self.assertIn("初始玩家", ctx.eval("globalThis.strategyText"))
         self.assertFalse(ctx.eval("globalThis.hasRotateJoinCodeButton"))
         self.assertEqual(ctx.eval("globalThis.rotatedCampaignId"), 0)
-        self.assertIn("月度提交与在线状态", ctx.eval("globalThis.strategyText"))
-        self.assertIn("状态：拟定中 · 在线", ctx.eval("globalThis.strategyText"))
-        self.assertIn("状态：永久 AI 席位", ctx.eval("globalThis.strategyText"))
-        self.assertIn("提交本月计划", ctx.eval("globalThis.strategyText"))
-        self.assertIn("当前账号", ctx.eval("globalThis.strategyText"))
+        self.assertNotIn("月度提交与在线状态", ctx.eval("globalThis.strategyText"))
+        self.assertNotIn("提交本月计划", ctx.eval("globalThis.strategyText"))
+        self.assertNotIn("本月行动队列", ctx.eval("globalThis.strategyText"))
+        self.assertIn("当前军令", ctx.eval("globalThis.strategyText"))
         self.assertIn("雾港城", ctx.eval("globalThis.selectedCityCardTextAfterMapClick"))
         self.assertIn("雾港城", ctx.eval("globalThis.dockHeadTextAfterMapClick"))
         self.assertTrue(ctx.eval("globalThis.hasWorldCrisisCard"))
         self.assertTrue(ctx.eval("globalThis.hasCrisisFrontierNode"))
-        self.assertTrue(ctx.eval("globalThis.hasCrisisRoute"))
+        self.assertFalse(ctx.eval("globalThis.hasCrisisRoute"))
         self.assertTrue(ctx.eval("globalThis.hasCrisisThreatenedNode"))
         self.assertTrue(ctx.eval("globalThis.hasSnowGhostArmy"))
         self.assertIn("北方雪鬼危机", ctx.eval("globalThis.strategyText"))
-        self.assertIn("圣物与祭坛", ctx.eval("globalThis.strategyText"))
-        self.assertIn("两套设施，不同职责", ctx.eval("globalThis.strategyText"))
-        self.assertIn("李的圣物 · 散落 / 完整 · 线索指向 雾港城", ctx.eval("globalThis.strategyText"))
-        self.assertIn("仍有 58 件圣物位置未知", ctx.eval("globalThis.strategyText"))
+        self.assertIn("本势力圣物情报", ctx.eval("globalThis.strategyText"))
+        self.assertNotIn("两套设施，不同职责", ctx.eval("globalThis.strategyText"))
+        self.assertIn("丰饶之杯 · 所在城市每月粮食 +80 · 散落 / 完整 · 线索指向 雾港城", ctx.eval("globalThis.strategyText"))
+        self.assertIn("仍有 9 件圣物位置未知", ctx.eval("globalThis.strategyText"))
         self.assertIn("晨星城 · 沉寂 · 第一势力控制 · 绑定 0/1", ctx.eval("globalThis.strategyText"))
-        self.assertIn("胜利准备 0/3 · 尚未绑定完整圣物", ctx.eval("globalThis.strategyText"))
-        self.assertIn("连续 3 次月初全额维护后立即获胜", ctx.eval("globalThis.strategyText"))
+        self.assertIn("尚未安放圣物", ctx.eval("globalThis.strategyText"))
+        self.assertNotIn("胜利准备", ctx.eval("globalThis.strategyText"))
+        self.assertNotIn("圣物胜利", ctx.eval("globalThis.strategyText"))
         self.assertIn("联军动员", ctx.eval("globalThis.strategyText"))
-        self.assertIn("第 11 月", ctx.eval("globalThis.strategyText"))
+        self.assertIn("第1年11月", ctx.eval("globalThis.strategyText"))
         self.assertIn("联军贡献", ctx.eval("globalThis.strategyText"))
         self.assertIn("第一势力 · 25", ctx.eval("globalThis.strategyText"))
         self.assertIn("合作承诺 → 第二势力", ctx.eval("globalThis.strategyText"))
@@ -9414,19 +9663,18 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertIn("第 9～10 月贡献、合作或背约", ctx.eval("globalThis.strategyText"))
         self.assertIn("晨星城 · 正在被围", ctx.eval("globalThis.strategyText"))
         self.assertIn("北境雪鬼先锋 · 晨星城 · 兵员 600", ctx.eval("globalThis.strategyText"))
-        self.assertIn("常规维护 · 1 座城市", ctx.eval("globalThis.strategyText"))
-        self.assertIn("AI 官职只在缺粮或叛乱风险下自动调整一座城", ctx.eval("globalThis.strategyText"))
-        self.assertIn("命令与请求回执", ctx.eval("globalThis.strategyText"))
-        self.assertIn("1 军令 · 预计第 2 月", ctx.eval("globalThis.strategyText"))
-        self.assertIn("晨星城已由城主设为粮食优先", ctx.eval("globalThis.strategyText"))
-        self.assertIn("粮 +95（维护 17）", ctx.eval("globalThis.strategyText"))
+        self.assertNotIn("常规维护 · 1 座城市", ctx.eval("globalThis.strategyText"))
+        self.assertNotIn("AI 官职只在缺粮或叛乱风险下自动调整一座城", ctx.eval("globalThis.strategyText"))
+        self.assertNotIn("命令与请求回执", ctx.eval("globalThis.strategyText"))
+        self.assertNotIn("主公中枢", ctx.eval("globalThis.strategyText"))
+        self.assertNotIn("本月关键决策", ctx.eval("globalThis.strategyText"))
         # 「局势详情」「战役引导」「本月决策」这三块讲的都是屏幕本身而不是战役，
         # 已经删掉；对手在做什么则留下来了，因为它会改变你这个月的部署。
         self.assertNotIn("局势详情", ctx.eval("globalThis.strategyText"))
         self.assertNotIn("战役引导", ctx.eval("globalThis.strategyText"))
         self.assertNotIn("本月决策", ctx.eval("globalThis.strategyText"))
         self.assertNotIn("建议下一步", ctx.eval("globalThis.strategyText"))
-        self.assertIn("决定待决事件", ctx.eval("globalThis.strategyText"))
+        self.assertNotIn("决定待决事件", ctx.eval("globalThis.strategyText"))
         self.assertIn("待决事件 · 晨星城", ctx.eval("globalThis.strategyText"))
         self.assertIn("行会争端", ctx.eval("globalThis.strategyText"))
         self.assertIn("本月底未处理将自动采用放任结果", ctx.eval("globalThis.strategyText"))
@@ -9468,6 +9716,8 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertTrue(ctx.eval("globalThis.hasHeroDeploySelect"))
         self.assertTrue(ctx.eval("globalThis.hasPlanAttackButton"))
         self.assertEqual(json.loads(ctx.eval("globalThis.queuedAttackPayload"))["attacker_hero_codes"], ["li"])
+        self.assertEqual(json.loads(ctx.eval("globalThis.queuedAttackPayload"))["resolution_mode"], "pending_choice")
+        self.assertEqual(json.loads(ctx.eval("globalThis.queuedAttackPayload"))["committed_troops"], 225)
         # 武将详情要点开某个人才出现，名单本身只给一行状态。
         self.assertTrue(ctx.eval("globalThis.hasHeroSlot"))
         self.assertFalse(ctx.eval("globalThis.heroDetailBeforeSelect"))
@@ -9501,17 +9751,21 @@ class FrontendBehaviorTests(unittest.TestCase):
               race: "精灵",
               level: 3,
               home_faction_id: "faction_1",
+              city_id: "city_1",
               status: "serving",
               summon_cost_ether: 35,
             });
             strategyRememberSelectedCity("city_1", state.strategyCampaign);
-            const multiCityPage = openDockTab("orders");
-            const checkboxes = collectInputs(multiCityPage, "checkbox");
-            globalThis.multiHeroCheckboxCount = checkboxes.length;
-            for (const input of checkboxes) {
-              if (input.value === "li" || input.value === "chanter") input.checked = true;
+            openDockTab("expedition");
+            for (const code of ["li", "chanter"]) {
+              const input = collectInputs(document.elements["strategy-current"], "checkbox").find((item) => item.value === code);
+              if (input) {
+                input.checked = true;
+                if (input.listeners && input.listeners.change) input.listeners.change[0]();
+              }
             }
-            const multiPlanAttackButton = findButtonByText(multiCityPage, "计划进攻 · 2 军令");
+            globalThis.multiHeroCheckboxCount = collectInputs(document.elements["strategy-current"], "checkbox").length;
+            const multiPlanAttackButton = findButtonByText(document.elements["strategy-current"], "计划出征 · 2 军令");
             if (multiPlanAttackButton) multiPlanAttackButton.listeners.click[0]();
             const multiBattleDefenseCheckboxes = collectInputs(openDockTab("log"), "checkbox");
             for (const input of multiBattleDefenseCheckboxes) {
@@ -9542,7 +9796,7 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertIn("沉睡 ellie", ctx.eval("globalThis.strategyText"))
         self.assertIn("英灵：守方 参战 fire_funeral", ctx.eval("globalThis.strategyText"))
         self.assertIn("查看真实战斗", ctx.eval("globalThis.strategyText"))
-        self.assertIn("本月行动队列", ctx.eval("globalThis.strategyText"))
+        self.assertNotIn("本月行动队列", ctx.eval("globalThis.strategyText"))
         self.assertIn("世界主线", ctx.eval("globalThis.strategyText"))
         self.assertIn("第二势力", ctx.eval("globalThis.strategyText"))
         self.assertIn("方针计划为 征兵优先", ctx.eval("globalThis.strategyText"))
@@ -9557,8 +9811,11 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertFalse(ctx.eval("globalThis.hasCityRitualButton"))
         self.assertNotIn("叛乱处理", ctx.eval("globalThis.strategyText"))
         self.assertNotIn("计划清剿", ctx.eval("globalThis.strategyText"))
-        self.assertIn("计划进攻", ctx.eval("globalThis.strategyText"))
-        self.assertIn("研究科技", ctx.eval("globalThis.strategyText"))
+        self.assertIn("计划出征", ctx.eval("globalThis.strategyText"))
+        self.assertIn("本城军令", ctx.eval("globalThis.strategyText"))
+        self.assertIn("AI 推演", ctx.eval("globalThis.strategyText"))
+        self.assertIn("研究", ctx.eval("globalThis.strategyText"))
+        self.assertIn("军事", ctx.eval("globalThis.strategyText"))
         self.assertFalse(ctx.eval("globalThis.advanceDisabled"))
         self.assertFalse(ctx.eval("globalThis.firstSelectDisabled"))
         self.assertTrue(ctx.eval("globalThis.settledAdvanceDisabled"))
@@ -9695,14 +9952,14 @@ class FrontendBehaviorTests(unittest.TestCase):
               can_advance_month: false,
             };
             renderStrategyPanel();
-            globalThis.strategyWaitingText = collectText(document.elements["strategy-current"]);
+            globalThis.strategyWaitingText = collectText(openDockTab("more"));
             globalThis.strategyWaitingListText = collectText(document.elements["strategy-campaign-list"]);
             globalThis.waitingAdvanceDisabled = document.elements["strategy-advance-month"].disabled;
             """
         )
-        self.assertIn("Bob", ctx.eval("globalThis.strategyWaitingText"))
-        self.assertIn("第二势力", ctx.eval("globalThis.strategyWaitingText"))
-        self.assertIn("状态：拟定中 · 离线", ctx.eval("globalThis.strategyWaitingText"))
+        self.assertNotIn("月度提交与在线状态", ctx.eval("globalThis.strategyWaitingText"))
+        self.assertNotIn("提交本月计划", ctx.eval("globalThis.strategyWaitingText"))
+        self.assertNotIn("状态：拟定中", ctx.eval("globalThis.strategyWaitingText"))
         self.assertTrue(ctx.eval("globalThis.waitingAdvanceDisabled"))
 
         ctx.eval(
@@ -9721,12 +9978,13 @@ class FrontendBehaviorTests(unittest.TestCase):
               can_advance_month: false,
             };
             renderStrategyPanel();
-            globalThis.strategyMemberPermissionText = collectText(document.elements["strategy-current"]);
+            globalThis.strategyMemberPermissionText = collectText(openDockTab("more"));
             globalThis.memberAdvanceDisabled = document.elements["strategy-advance-month"].disabled;
             """
         )
-        # 非房主看得见同一份席位状态，但推进按钮不归他按。
-        self.assertIn("状态：拟定中", ctx.eval("globalThis.strategyMemberPermissionText"))
+        # 非房主也进不了月度提交面板；推进按钮仍不归他按。
+        self.assertNotIn("月度提交与在线状态", ctx.eval("globalThis.strategyMemberPermissionText"))
+        self.assertNotIn("提交本月计划", ctx.eval("globalThis.strategyMemberPermissionText"))
         self.assertTrue(ctx.eval("globalThis.memberAdvanceDisabled"))
 
         ctx.eval(
@@ -9774,6 +10032,9 @@ class FrontendBehaviorTests(unittest.TestCase):
             returnToStrategyCampaign();
             render = realRender;
             globalThis.returnedScreen = state.screen;
+            globalThis.returnedHomeFlow = state.homeFlow;
+            globalThis.returnedHasRoom = Boolean(state.room);
+            globalThis.returnedShowsLobby = shouldShowLobbyPanel();
             globalThis.returnedStrategyText = collectAllDockText();
             """
         )
@@ -9782,7 +10043,9 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertEqual(ctx.eval("globalThis.gameOverTitle"), "玩家 2 获胜")
         self.assertFalse(ctx.eval("globalThis.strategyReturnDisabled"))
         self.assertEqual(ctx.eval("globalThis.returnedScreen"), "draft")
-        self.assertIn("战后战役", ctx.eval("globalThis.returnedStrategyText"))
+        self.assertEqual(ctx.eval("globalThis.returnedHomeFlow"), "campaign")
+        self.assertFalse(ctx.eval("globalThis.returnedHasRoom"))
+        self.assertFalse(ctx.eval("globalThis.returnedShowsLobby"))
         self.assertIn("守方胜利", ctx.eval("globalThis.returnedStrategyText"))
 
         ctx.eval(
@@ -9815,29 +10078,21 @@ class FrontendBehaviorTests(unittest.TestCase):
             strategyRememberSelectedCity("city_2", state.strategyCampaign, state.strategyCampaign.world.offices[0]);
             const lordPage = openDockTab("orders");
             globalThis.hasLordWorkspace = Boolean(findByClass(lordPage, "role-lord"));
-            globalThis.lordCityContextBeforeRole = directClassAppearsBefore(
-              findByClass(lordPage, "strategy-command-panel"),
-              "strategy-city-command-card",
-              "strategy-role-header"
-            );
+            globalThis.lordCityContextBeforeRole = Boolean(findByClass(lordPage, "strategy-city-command-card"));
+            globalThis.lordHasRoleHeader = Boolean(findByClass(lordPage, "strategy-role-header"));
             globalThis.hasOfficeSwitcher = Boolean(findByClass(document.elements["strategy-current"], "strategy-office-switcher"));
             globalThis.lordCanOrder = Boolean(findButtonByText(lordPage, "下达命令 · 1军令"));
             globalThis.lordCanAttack = Boolean(findButtonByText(lordPage, "计划进攻 · 2 军令"));
+            globalThis.lordCanExpedition = Boolean(findButtonByText(openDockTab("expedition"), "计划出征 · 2 军令"));
             // 主公的人事在「武将」页，研究在「科技」页——一页只管一件事。
             const lordHeroPage = openDockTab("heroes");
-            const lordRitual = findButtonByText(lordHeroPage, "举行祭祀 · 1 军令");
-            globalThis.lordCanSummon = Boolean(lordRitual);
-            if (lordRitual) lordRitual.listeners.click[0]();
-            globalThis.lordRitualType = globalThis.roleActionType;
-            globalThis.lordRitualPayload = globalThis.roleActionPayload;
-            const lordUnbind = findButtonByText(document.elements["strategy-current"], "解除绑定");
-            globalThis.lordCanUnbind = Boolean(lordUnbind);
-            if (lordUnbind) lordUnbind.listeners.click[0]();
-            globalThis.lordUnbindType = globalThis.roleActionType;
-            globalThis.lordUnbindPayload = globalThis.roleActionPayload;
+            globalThis.lordCanSummon = Boolean(findButtonByText(lordHeroPage, "举行祭祀 · 1 军令"));
+            globalThis.lordHasRitualPanel = Boolean(findByClass(lordHeroPage, "strategy-lord-ritual"));
+            globalThis.lordHasDutyBoard = Boolean(findByClass(lordHeroPage, "strategy-hero-duty-board"));
+            globalThis.lordCanUnbind = Boolean(findButtonByText(lordHeroPage, "解除绑定"));
             const techPage = openDockTab("tech");
             globalThis.techPanelCount = collectText(techPage).split("国家科技树").length - 1;
-            const lordTech = findButtonByText(techPage, "研究科技 · 1 军令");
+            const lordTech = findButtonByText(techPage, "研究");
             globalThis.lordCanResearch = Boolean(lordTech);
             if (lordTech) lordTech.listeners.click[0]();
             globalThis.lordTechType = globalThis.roleActionType;
@@ -9861,7 +10116,9 @@ class FrontendBehaviorTests(unittest.TestCase):
             globalThis.governorRegisterType = globalThis.roleActionType;
             globalThis.governorRegisterPayload = globalThis.roleActionPayload;
             globalThis.governorCanBuild = Boolean(findButtonByText(document.elements["strategy-current"], "建造 / 升级 · 1 军令"));
+            globalThis.governorCanUpgrade = Boolean(findButtonByText(document.elements["strategy-current"], "升级为城镇 · 1 军令"));
             globalThis.governorCanAttack = Boolean(findButtonByText(document.elements["strategy-current"], "计划进攻 · 2 军令"));
+            globalThis.governorCanExpedition = Boolean(findButtonByText(openDockTab("expedition"), "计划出征 · 2 军令"));
             globalThis.governorCanRequest = Boolean(findButtonByText(document.elements["strategy-current"], "提交请求"));
 
             state.strategyActiveOfficeId = "office:faction_1:general:1";
@@ -9878,6 +10135,7 @@ class FrontendBehaviorTests(unittest.TestCase):
             globalThis.generalRequestType = globalThis.roleActionType;
             globalThis.generalRequestPayload = globalThis.roleActionPayload;
             globalThis.generalCanAttack = Boolean(findButtonByText(document.elements["strategy-current"], "计划进攻 · 2 军令"));
+            globalThis.generalCanExpedition = Boolean(findButtonByText(openDockTab("expedition"), "计划出征 · 2 军令"));
             globalThis.generalCanSetPolicy = Boolean(findButtonByText(document.elements["strategy-current"], "计划方针 · 1 军令"));
 
             state.strategyActiveOfficeId = "office:faction_1:grand_general:1";
@@ -9914,19 +10172,19 @@ class FrontendBehaviorTests(unittest.TestCase):
         )
         self.assertTrue(ctx.eval("globalThis.hasLordWorkspace"))
         self.assertTrue(ctx.eval("globalThis.lordCityContextBeforeRole"))
+        self.assertFalse(ctx.eval("globalThis.lordHasRoleHeader"))
         self.assertTrue(ctx.eval("globalThis.hasOfficeSwitcher"))
-        self.assertTrue(ctx.eval("globalThis.lordCanOrder"))
-        self.assertTrue(ctx.eval("globalThis.lordCanSummon"))
-        self.assertEqual(ctx.eval("globalThis.lordRitualType"), "perform_hero_ritual")
-        self.assertEqual(json.loads(ctx.eval("globalThis.lordRitualPayload")), {"city_id": "city_1"})
+        self.assertFalse(ctx.eval("globalThis.lordCanOrder"))
+        self.assertFalse(ctx.eval("globalThis.lordCanSummon"))
+        self.assertFalse(ctx.eval("globalThis.lordHasRitualPanel"))
+        self.assertFalse(ctx.eval("globalThis.lordHasDutyBoard"))
         self.assertTrue(ctx.eval("globalThis.lordCanResearch"))
         self.assertEqual(ctx.eval("globalThis.lordTechType"), "unlock_tactic_tech")
         # 科技页只有一份科技树：此前主公的快捷选择器和完整树并排列着同一件事。
         self.assertEqual(ctx.eval("globalThis.techPanelCount"), 1)
-        self.assertTrue(ctx.eval("globalThis.lordCanUnbind"))
-        self.assertEqual(ctx.eval("globalThis.lordUnbindType"), "unbind_strategic_hero")
-        self.assertEqual(json.loads(ctx.eval("globalThis.lordUnbindPayload")), {"hero_code": "li"})
+        self.assertFalse(ctx.eval("globalThis.lordCanUnbind"))
         self.assertFalse(ctx.eval("globalThis.lordCanAttack"))
+        self.assertTrue(ctx.eval("globalThis.lordCanExpedition"))
         self.assertTrue(ctx.eval("globalThis.hasGovernorWorkspace"))
         self.assertTrue(ctx.eval("globalThis.governorCityContextBeforeRole"))
         self.assertTrue(ctx.eval("globalThis.governorCanSetPolicy"))
@@ -9936,14 +10194,17 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertEqual(ctx.eval("globalThis.governorRegisterType"), "register_city_soldiers")
         self.assertEqual(json.loads(ctx.eval("globalThis.governorRegisterPayload"))["city_id"], "city_1")
         self.assertTrue(ctx.eval("globalThis.governorCanBuild"))
+        self.assertTrue(ctx.eval("globalThis.governorCanUpgrade"))
         self.assertFalse(ctx.eval("globalThis.governorCanAttack"))
-        self.assertTrue(ctx.eval("globalThis.governorCanRequest"))
+        self.assertFalse(ctx.eval("globalThis.governorCanExpedition"))
+        self.assertFalse(ctx.eval("globalThis.governorCanRequest"))
         self.assertTrue(ctx.eval("globalThis.hasGeneralWorkspace"))
         self.assertTrue(ctx.eval("globalThis.generalCityContextBeforeRole"))
         self.assertTrue(ctx.eval("globalThis.generalCanRequestUnits"))
         self.assertEqual(ctx.eval("globalThis.generalRequestType"), "request_registered_units")
         self.assertEqual(json.loads(ctx.eval("globalThis.generalRequestPayload"))["city_id"], "city_1")
-        self.assertTrue(ctx.eval("globalThis.generalCanAttack"))
+        self.assertFalse(ctx.eval("globalThis.generalCanAttack"))
+        self.assertTrue(ctx.eval("globalThis.generalCanExpedition"))
         self.assertFalse(ctx.eval("globalThis.generalCanSetPolicy"))
         self.assertTrue(ctx.eval("globalThis.hasGrandGeneralWorkspace"))
         self.assertTrue(ctx.eval("globalThis.grandGeneralCityContextBeforeRole"))

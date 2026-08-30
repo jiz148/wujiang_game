@@ -6,7 +6,8 @@ from typing import Any, Iterable
 from wujiang.strategic.ai import _choose_city_policy, _city_policy_urgency
 from wujiang.strategic.command import FACTION_MONTHLY_COMMAND_POINTS, monthly_briefings_public, strategy_action_command_cost
 from wujiang.strategic.heroes import hero_ritual_capacity, perform_hero_ritual
-from wujiang.strategic.models import EventLogEntry, OfficeOrder, WorldState
+from wujiang.strategic.administration import levy_city_garrison
+from wujiang.strategic.models import EventLogEntry, OfficeOrder, StrategyError, WorldState
 from wujiang.strategic.offices import OFFICE_TYPE_LABELS, ensure_office_system
 from wujiang.strategic.story import choose_ai_story_choice, pending_story_event_for_faction, resolve_story_event
 from wujiang.strategic.quick_campaign import (
@@ -79,6 +80,22 @@ def _execute_ai_order(world: WorldState, order: OfficeOrder) -> tuple[WorldState
             next_world = set_city_policy(world, faction_id=faction_id, city_id=city.city_id, policy=policy)
             return next_world, "completed", f"{city.name}已按主公命令设为{policy}。"
         return world, "rejected", "目标城市或方针已经不再合法。"
+    if order.order_type == "levy_garrison":
+        city = next((item for item in world.cities if item.city_id == order.target_entity_id), None)
+        if city is not None and city.owner_faction_id == faction_id and city.city_id in receiver.managed_entity_ids:
+            try:
+                next_world = levy_city_garrison(
+                    world,
+                    faction_id=faction_id,
+                    city_id=city.city_id,
+                    issuer_office_id=receiver.office_id,
+                )
+                return next_world, "completed", f"{city.name}已按主公命令征集守军。"
+            except StrategyError as exc:
+                return world, "rejected", str(exc)
+        return world, "rejected", "目标城市不在接收职位的管辖范围内。"
+    if order.order_type == "reinforce_city":
+        return world, "accepted", "增援目标已纳入战区案牍；具体调兵仍等待玩家将军确认。"
     if objective.startswith("[引导:set_policy]"):
         city = next((item for item in world.cities if item.city_id == order.target_entity_id), None)
         if city is not None and city.owner_faction_id == faction_id and city.city_id in receiver.managed_entity_ids:
@@ -116,7 +133,7 @@ def _execute_ai_order(world: WorldState, order: OfficeOrder) -> tuple[WorldState
             return next_world, "completed", f"{OFFICE_TYPE_LABELS[receiver.office_type]}已在{city.name}完成召唤祭祀。"
         return world, "accepted", "请求已接受，但当前职位权限、祭祀场、以太或职位容量尚不满足执行条件。"
     if order.order_type in {"attack_city", "defend_city"}:
-        return world, "accepted", "攻防目标已纳入战区案牍；宣战与格子战仍等待玩家将军确认。"
+        return world, "accepted", "攻防目标已写入案牍。真正宣战请在军令页进攻区选择出发城与处理方式，或由将军确认开战。"
     return world, "accepted", "命令已送达并纳入接收职位案牍；未匹配自动执行模板，不会擅自改变世界状态。"
 
 

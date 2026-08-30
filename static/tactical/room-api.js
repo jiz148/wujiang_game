@@ -12,6 +12,7 @@ import { roomStateLabel, syncAiPreview } from '../tactical/battle-ui.js';
 import { clearActionSelection, clearStoredIdentity, loadStoredIdentity, resetRoomSession, saveStoredIdentity, syncSelectedUnitAfterStateChange } from '../tactical/session.js';
 import { actionNeedsTarget, controllerTypeLabel, currentPreview, currentRoomSeat, randomRoomRosterSize, roomSummaries, unitIsSelectableTarget } from '../tactical/targeting.js';
 import { maxVisualEventId, positionKey, syncBattleVfxState, tutorialState, visualEvents } from '../tactical/vfx.js';
+import { adoptBattleLaunchFromRoom, currentBattleLaunch, rememberBattleLaunch } from '../bridge/battle-launch.js';
 import { loadRecordedMatchEnds, syncStrategyCampaignFromRoomPayload } from '../bridge/campaign-battle.js';
 
 function normalizePlayerNameForSeatMatch(name) {
@@ -79,7 +80,8 @@ function roomStateClass(room) {
 }
 
 export function shouldShowLobbyPanel() {
-  return hasRoom() && (viewerPlayerId() !== null || state.room?.is_full || hasBattle());
+  if (!hasRoom() || !currentBattleLaunch().allowLobby) return false;
+  return viewerPlayerId() !== null || state.room?.is_full || hasBattle();
 }
 
 export function applyRoomPayload(payload, { preserveScreen = false } = {}) {
@@ -110,6 +112,25 @@ export function applyRoomPayload(payload, { preserveScreen = false } = {}) {
     Number(state.room?.turn_timer?.last_timeout?.occurred_at || 0),
   );
   syncStrategyCampaignFromRoomPayload(payload);
+  if (payload.strategy_campaign || payload.battle_recovery || state.room?.experience_kind === "strategy_campaign") {
+    const launch = rememberBattleLaunch({
+      ...(state.room?.launch_context || {}),
+      source: "campaign",
+      campaign_id: payload.strategy_campaign?.id,
+    });
+    if (state.room) state.room.launch_context = {
+      source: launch.source,
+      return_flow: launch.returnFlow,
+      allow_lobby: launch.allowLobby,
+      allow_rematch: launch.allowRematch,
+      allow_roster_edit: launch.allowRosterEdit,
+      campaign_id: launch.campaignId,
+      battle_id: launch.battleId,
+    };
+    state.homeFlow = "campaign";
+  } else {
+    adoptBattleLaunchFromRoom(state.room);
+  }
   state.liveBattle = payload.battle || null;
   if (!state.room || state.room.room_id !== previousRoomId) {
     state.aiPreview = null;
@@ -1137,6 +1158,7 @@ export function exitTutorial() {
 }
 
 export function restartFromGameOver() {
+  if (!currentBattleLaunch().allowRematch) return;
   const tutorial = tutorialState();
   if (!tutorial) {
     if (state.room?.experience_kind === "quick_ai") {

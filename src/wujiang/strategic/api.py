@@ -7,6 +7,7 @@ import hashlib
 from wujiang.bridge.battle_bridge import create_strategy_battle_room
 from wujiang.bridge.battle_bridge import declare_strategy_attack_for_world
 from wujiang.bridge.battle_bridge import declare_strategy_engagement_for_world
+from wujiang.bridge.battle_bridge import resolve_strategy_battle_player_choice
 from wujiang.bridge.battle_bridge import persist_created_strategy_battle_rooms
 from wujiang.bridge.battle_bridge import persist_strategy_battle_room
 from wujiang.bridge.battle_bridge import start_world_crisis_showdown_for_world
@@ -24,6 +25,7 @@ from wujiang.strategic import campaign_variant_catalog_public
 from wujiang.strategic import choose_player_hero_path
 from wujiang.strategic import continue_campaign_as_sandbox
 from wujiang.strategic import first_campaign_contract
+from wujiang.strategic.world_crisis import apply_campaign_play_settings
 from wujiang.strategic import normalize_strategic_hero_deployment
 from wujiang.strategic import quick_campaign_contract
 from wujiang.strategic import quick_campaign_opening_status
@@ -88,12 +90,22 @@ def post_strategy_campaigns_create(ctx: RequestContext) -> None:
     auth_user = ctx.auth_user
     try:
         assert auth_user is not None
+        campaign_contract = first_campaign_contract(
+            str(payload.get("variant_id") or "classic_frontier"),
+            major_faction_count=int(payload.get("major_faction_count") or 2),
+        )
+        if "crisis_earliest_year" in payload or "year_limit" in payload:
+            campaign_contract = apply_campaign_play_settings(
+                campaign_contract,
+                crisis_earliest_year=int(payload.get("crisis_earliest_year", 10) or 10),
+                year_limit=int(payload.get("year_limit", 0) or 0),
+            )
         campaign = campaign_runtime.STRATEGY_STORE.create_campaign(
             owner=auth_user,
             name=str(payload.get("name") or "新战役"),
             seed=int(payload.get("seed", 1)),
             neutral_city_states=True,
-            campaign_contract=first_campaign_contract(str(payload.get("variant_id") or "classic_frontier")),
+            campaign_contract=campaign_contract,
         )
         resume_status = campaign_runtime.STRATEGY_STORE.mark_online(campaign.campaign_id, auth_user)
         campaign = campaign_runtime.STRATEGY_STORE.get_campaign_for_user(campaign.campaign_id, auth_user.user_id)
@@ -860,6 +872,43 @@ def post_strategy_campaigns_queue_action(ctx: RequestContext) -> None:
     return
 
 
+@post("/api/strategy/campaigns/cancel-action")
+def post_strategy_campaigns_cancel_action(ctx: RequestContext) -> None:
+    handler = ctx.handler
+    payload = ctx.payload
+    auth_user = ctx.auth_user
+    try:
+        assert auth_user is not None
+        campaign_id = int(payload.get("campaign_id"))
+        action_id = int(payload.get("action_id") or payload.get("id") or 0)
+        campaign = campaign_runtime.STRATEGY_STORE.get_campaign_for_user(campaign_id, auth_user.user_id)
+        require_campaign_orders_open(campaign.world)
+        resume_status = campaign_runtime.STRATEGY_STORE.require_can_resume(campaign_id, auth_user.user_id)
+        campaign = campaign_runtime.STRATEGY_STORE.cancel_queued_action(
+            campaign_id=campaign_id,
+            user=auth_user,
+            action_id=action_id,
+        )
+    except (TypeError, ValueError) as exc:
+        json_response(handler, HTTPStatus.BAD_REQUEST, {"error": "战役 ID 和军令 ID 必须是整数。"})
+        return
+    except StrategyError as exc:
+        strategy_error_response(handler, exc)
+        return
+    json_response(
+        handler,
+        HTTPStatus.OK,
+        {
+            "campaign": campaign.to_public_dict(resume_status=resume_status),
+            "command_points": faction_command_points(
+                campaign_member_faction_id(campaign, auth_user.user_id),
+                campaign.queued_actions,
+            ),
+        },
+    )
+    return
+
+
 @post("/api/strategy/campaigns/set-city-policy")
 def post_strategy_campaigns_set_city_policy(ctx: RequestContext) -> None:
     handler = ctx.handler
@@ -1151,6 +1200,49 @@ def post_strategy_campaigns_resolve_strategic_battle(ctx: RequestContext) -> Non
     return
 
 
+@post("/api/strategy/campaigns/resolve-battle-choice")
+def post_strategy_campaigns_resolve_battle_choice(ctx: RequestContext) -> None:
+    handler = ctx.handler
+    payload = ctx.payload
+    auth_user = ctx.auth_user
+    try:
+        assert auth_user is not None
+        campaign_id = int(payload.get("campaign_id"))
+        battle_id = str(payload.get("battle_id") or "").strip()
+        choice = str(payload.get("choice") or "").strip()
+        composition = payload.get("composition") if isinstance(payload.get("composition"), dict) else {}
+        resume_status = campaign_runtime.STRATEGY_STORE.require_can_resume(campaign_id, auth_user.user_id)
+        campaign = campaign_runtime.STRATEGY_STORE.get_campaign_for_user(campaign_id, auth_user.user_id)
+        faction_id = campaign_member_faction_id(campaign, auth_user.user_id)
+        next_world, battle_room = resolve_strategy_battle_player_choice(
+            campaign,
+            campaign.world,
+            auth_user,
+            faction_id=faction_id,
+            battle_id=battle_id,
+            choice=choice,
+            composition=composition,
+        )
+        campaign = campaign_runtime.STRATEGY_STORE.update_world(campaign_id, auth_user.user_id, next_world)
+        if battle_room is not None:
+            persist_created_strategy_battle_rooms(campaign, [battle_room])
+    except (TypeError, ValueError):
+        json_response(handler, HTTPStatus.BAD_REQUEST, {"error": "战役 ID 必须是整数。"})
+        return
+    except StrategyError as exc:
+        strategy_error_response(handler, exc)
+        return
+    json_response(
+        handler,
+        HTTPStatus.OK,
+        {
+            "campaign": campaign.to_public_dict(resume_status=resume_status),
+            **({"battle_room": battle_room} if battle_room is not None else {}),
+        },
+    )
+    return
+
+
 @post("/api/strategy/campaigns/declare-attack")
 def post_strategy_campaigns_declare_attack(ctx: RequestContext) -> None:
     handler = ctx.handler
@@ -1177,6 +1269,8 @@ def post_strategy_campaigns_declare_attack(ctx: RequestContext) -> None:
             faction_id,
             strategy_hero_codes_from_payload(payload),
         )
+        committed_raw = payload.get("committed_troops", payload.get("attacker_troops"))
+        committed_troops = int(committed_raw) if committed_raw not in {None, ""} else None
         next_world, battle_room = declare_strategy_attack_for_world(
             campaign,
             campaign.world,
@@ -1187,6 +1281,7 @@ def post_strategy_campaigns_declare_attack(ctx: RequestContext) -> None:
             resolution_mode=resolution_mode,
             attacker_hero_codes=attacker_hero_codes,
             attacker_office_id=attack_office.office_id,
+            committed_troops=committed_troops,
         )
         campaign = campaign_runtime.STRATEGY_STORE.update_world(campaign_id, auth_user.user_id, next_world)
         if battle_room is not None:

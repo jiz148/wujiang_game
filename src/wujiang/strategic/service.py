@@ -13,6 +13,7 @@ from wujiang.platform.auth import AuthUser
 from wujiang.strategic import EventLogEntry
 from wujiang.strategic import StrategyError
 from wujiang.strategic import apply_exile_action
+from wujiang.strategic import apply_faction_diplomacy_action
 from wujiang.strategic import apply_neutral_diplomacy_action
 from wujiang.strategic import apply_occupation_policy
 from wujiang.strategic import apply_office_order
@@ -25,7 +26,13 @@ from wujiang.strategic import approve_registered_unit_request
 from wujiang.strategic import assign_strategic_hero_duty
 from wujiang.strategic import bind_relic
 from wujiang.strategic import construct_city_building
+from wujiang.strategic import upgrade_city_settlement
 from wujiang.strategic import declare_city_attack
+from wujiang.strategic.battles import (
+    city_attack_commitment,
+    normalize_committed_attack_troops,
+    pending_battle_hero_codes,
+)
 from wujiang.strategic import disband_army
 from wujiang.strategic import form_or_reinforce_army
 from wujiang.strategic import halt_army_march
@@ -51,9 +58,10 @@ from wujiang.strategic import set_city_policy
 from wujiang.strategic import transfer_registered_units
 from wujiang.strategic import transfer_relic
 from wujiang.strategic import unbind_strategic_hero
-from wujiang.strategic import unlock_tactic_tech
+from wujiang.strategic import cancel_tactic_research, unlock_tactic_tech
 from wujiang.strategic import validate_bind_relic
 from wujiang.strategic import validate_exile_action
+from wujiang.strategic import validate_faction_diplomacy_action
 from wujiang.strategic import validate_neutral_diplomacy_action
 from wujiang.strategic import validate_occupation_policy
 from wujiang.strategic import validate_peaceful_integration
@@ -115,6 +123,7 @@ def strategy_action_city_id(action_type: str, payload: dict[str, Any]) -> str:
         "transfer_registered_units",
         "request_registered_units",
         "construct_city_building",
+        "upgrade_city_settlement",
         "form_army",
     }:
         return str(payload.get("city_id") or "").strip()
@@ -190,6 +199,66 @@ def require_strategy_action_office(
         payload=payload,
         requested_office_id=str(payload.get("issuer_office_id") or payload.get("office_id") or ""),
     )
+
+
+def queued_attack_hero_codes(
+    campaign,
+    *,
+    exclude_action_type: str = "",
+    exclude_action_key: str = "",
+) -> set[str]:
+    codes: set[str] = set()
+    for action in campaign.queued_actions:
+        if action.action_type != "declare_attack":
+            continue
+        if (
+            exclude_action_type
+            and action.action_type == exclude_action_type
+            and action.action_key == exclude_action_key
+        ):
+            continue
+        codes.update(strategy_hero_codes_from_payload(action.payload))
+        commander = str(action.payload.get("commander_hero_code") or "").strip()
+        if commander:
+            codes.add(commander)
+    return codes
+
+
+def queued_attack_troops_from_city(
+    campaign,
+    city_id: str,
+    *,
+    exclude_action_type: str = "",
+    exclude_action_key: str = "",
+) -> int:
+    reserved = 0
+    source_id = str(city_id or "")
+    for action in campaign.queued_actions:
+        if action.action_type != "declare_attack":
+            continue
+        if (
+            exclude_action_type
+            and action.action_type == exclude_action_type
+            and action.action_key == exclude_action_key
+        ):
+            continue
+        if str(action.payload.get("source_city_id") or "") != source_id:
+            continue
+        raw = action.payload.get("committed_troops")
+        if raw in {None, ""}:
+            raw = action.payload.get("attacker_troops")
+        if raw in {None, ""}:
+            city = next((item for item in campaign.world.cities if item.city_id == source_id), None)
+            reserved += city_attack_commitment(city.resources.troops if city is not None else 0)
+        else:
+            reserved += max(0, int(raw))
+    return reserved
+
+
+def parse_optional_int(value: object) -> int | None:
+    if value in {None, ""}:
+        return None
+    return int(value)
 
 
 def strategy_hero_codes_from_payload(payload: dict[str, Any]) -> list[str]:
@@ -276,6 +345,20 @@ def normalize_strategy_action_payload(campaign, user_id: int, action_type: str, 
             action_id=diplomacy_action_id,
         )
         return finalize(neutral_faction_id, normalized_payload)
+    if normalized_type == "faction_diplomacy":
+        target_faction_id = str(payload.get("target_faction_id") or "").strip()
+        diplomacy_action_id = str(payload.get("diplomacy_action_id") or payload.get("action_id") or "").strip()
+        normalized_payload = {
+            "target_faction_id": target_faction_id,
+            "diplomacy_action_id": diplomacy_action_id,
+        }
+        validate_faction_diplomacy_action(
+            campaign.world,
+            actor_faction_id=faction_id,
+            target_faction_id=target_faction_id,
+            action_id=diplomacy_action_id,
+        )
+        return finalize(f"{target_faction_id}:{diplomacy_action_id}", normalized_payload)
     if normalized_type == "world_crisis_choice":
         choice_id = str(payload.get("choice_id") or payload.get("action_id") or "").strip()
         target_faction_id = str(payload.get("target_faction_id") or "").strip()
@@ -324,8 +407,19 @@ def normalize_strategy_action_payload(campaign, user_id: int, action_type: str, 
     if normalized_type == "unlock_tactic_tech":
         tech_id = str(payload.get("tech_id") or "").strip()
         normalized_payload = {"tech_id": tech_id}
+        for queued in campaign.queued_actions:
+            if (
+                queued.faction_id == faction_id
+                and queued.action_type == "unlock_tactic_tech"
+                and queued.action_key != tech_id
+            ):
+                raise StrategyError("已有科技正在研究，取消后才能改研其他。")
         unlock_tactic_tech(campaign.world, faction_id=faction_id, tech_id=tech_id)
         return finalize(tech_id, normalized_payload)
+    if normalized_type == "cancel_tactic_research":
+        normalized_payload = {}
+        cancel_tactic_research(campaign.world, faction_id=faction_id)
+        return finalize("research", normalized_payload)
     if normalized_type == "exile_action":
         exile_action_id = str(payload.get("exile_action_id") or payload.get("action_id") or "").strip()
         target_city_id = str(payload.get("target_city_id") or "").strip()
@@ -465,16 +559,24 @@ def normalize_strategy_action_payload(campaign, user_id: int, action_type: str, 
             issuer_office_id=normalized_payload["issuer_office_id"],
         )
         return normalized_type, action_key, normalized_payload
-    if normalized_type in {"increase_city_troops", "register_city_soldiers", "construct_city_building"}:
+    if normalized_type in {
+        "increase_city_troops",
+        "register_city_soldiers",
+        "construct_city_building",
+        "upgrade_city_settlement",
+    }:
         city_id = str(payload.get("city_id") or "").strip()
         building_id = str(payload.get("building_id") or "").strip()
+        settlement = str(payload.get("settlement") or "").strip()
         unit_count = max(1, min(3, int(payload.get("unit_count") or 1)))
         normalized_payload = {"city_id": city_id}
         if normalized_type == "construct_city_building":
             normalized_payload["building_id"] = building_id
         if normalized_type == "register_city_soldiers":
             normalized_payload["unit_count"] = unit_count
-        action_target = "increase" if normalized_type == "increase_city_troops" else building_id or str(unit_count)
+        if normalized_type == "upgrade_city_settlement":
+            normalized_payload["settlement"] = settlement
+        action_target = "increase" if normalized_type == "increase_city_troops" else building_id or settlement or str(unit_count)
         _, action_key, normalized_payload = finalize(f"{city_id}:{action_target}", normalized_payload)
         kwargs = {
             "faction_id": faction_id,
@@ -485,6 +587,8 @@ def normalize_strategy_action_payload(campaign, user_id: int, action_type: str, 
             increase_city_troops(campaign.world, **kwargs)
         elif normalized_type == "register_city_soldiers":
             register_city_soldiers(campaign.world, unit_count=unit_count, **kwargs)
+        elif normalized_type == "upgrade_city_settlement":
+            upgrade_city_settlement(campaign.world, settlement=settlement, **kwargs)
         else:
             construct_city_building(campaign.world, building_id=building_id, **kwargs)
         return normalized_type, action_key, normalized_payload
@@ -709,26 +813,52 @@ def normalize_strategy_action_payload(campaign, user_id: int, action_type: str, 
             faction_id,
             strategy_hero_codes_from_payload(payload),
         )
+        action_key = f"{source_city_id}->{target_city_id}"
+        busy_heroes = pending_battle_hero_codes(campaign.world) | queued_attack_hero_codes(
+            campaign,
+            exclude_action_type="declare_attack",
+            exclude_action_key=action_key,
+        )
+        overlapping = [code for code in attacker_hero_codes if code in busy_heroes]
+        if overlapping:
+            raise StrategyError("这些武将已参加其他出征，不能同时出现在两场进攻里。")
+        source_city = next((item for item in campaign.world.cities if item.city_id == source_city_id), None)
+        city_troops = int(source_city.resources.troops) if source_city is not None else 0
+        available_troops = city_troops - queued_attack_troops_from_city(
+            campaign,
+            source_city_id,
+            exclude_action_type="declare_attack",
+            exclude_action_key=action_key,
+        )
+        committed_troops = normalize_committed_attack_troops(
+            parse_optional_int(payload.get("committed_troops", payload.get("attacker_troops"))),
+            available_troops,
+        )
         normalized_payload = {
             "source_city_id": source_city_id,
             "target_city_id": target_city_id,
             "resolution_mode": resolution_mode,
             "attacker_hero_codes": attacker_hero_codes,
+            "committed_troops": committed_troops,
         }
-        result = finalize(f"{source_city_id}->{target_city_id}", normalized_payload)
+        result = finalize(action_key, normalized_payload)
         issuer = next(
             office for office in campaign.world.offices if office.office_id == normalized_payload["issuer_office_id"]
         )
         if issuer.office_type == "lord":
             commander_code = str(issuer.holder_id or "")
-            if not commander_code:
-                raise StrategyError("主公职位没有武将担任，不能亲征。")
-            normalized_payload["commander_hero_code"] = commander_code
-            normalized_payload["attacker_hero_codes"] = normalize_strategic_hero_deployment(
-                campaign.world,
-                faction_id,
-                [commander_code, *normalized_payload["attacker_hero_codes"]],
+            lord_hero = next(
+                (item for item in campaign.world.strategic_heroes if item.hero_code == commander_code),
+                None,
             )
+            lord_city = str((lord_hero.city_id if lord_hero is not None else "") or (lord_hero.assignment_target_id if lord_hero is not None else "") or "")
+            if commander_code and lord_city == source_city_id and commander_code not in busy_heroes:
+                normalized_payload["commander_hero_code"] = commander_code
+                normalized_payload["attacker_hero_codes"] = normalize_strategic_hero_deployment(
+                    campaign.world,
+                    faction_id,
+                    [commander_code, *normalized_payload["attacker_hero_codes"]],
+                )
         declare_city_attack(
             campaign.world,
             faction_id=faction_id,
@@ -738,6 +868,7 @@ def normalize_strategy_action_payload(campaign, user_id: int, action_type: str, 
             auto_resolve=resolution_mode == "quick",
             attacker_hero_codes=normalized_payload["attacker_hero_codes"],
             attacker_office_id=issuer.office_id,
+            committed_troops=committed_troops,
         )
         return result
     if normalized_type in {"issue_office_order", "send_office_request"}:
@@ -752,7 +883,15 @@ def normalize_strategy_action_payload(campaign, user_id: int, action_type: str, 
             if normalized_type == "send_office_request"
             else str(payload.get("office_order_type") or "order").strip()
         )
-        if office_order_type not in {"order", "request", "attack_city", "defend_city", "set_policy"}:
+        if office_order_type not in {
+            "order",
+            "request",
+            "attack_city",
+            "defend_city",
+            "set_policy",
+            "levy_garrison",
+            "reinforce_city",
+        }:
             raise StrategyError("职位命令类型无效。")
         city_policy = str(payload.get("city_policy") or "").strip()
         normalized_payload = {
@@ -824,6 +963,13 @@ def apply_strategy_action_queue(campaign):
                     neutral_faction_id=str(payload.get("neutral_faction_id") or ""),
                     action_id=str(payload.get("diplomacy_action_id") or ""),
                 )
+            elif action.action_type == "faction_diplomacy":
+                next_world = apply_faction_diplomacy_action(
+                    next_world,
+                    actor_faction_id=faction_id,
+                    target_faction_id=str(payload.get("target_faction_id") or ""),
+                    action_id=str(payload.get("diplomacy_action_id") or ""),
+                )
             elif action.action_type == "world_crisis_choice":
                 next_world = resolve_world_crisis_choice(
                     next_world,
@@ -864,6 +1010,8 @@ def apply_strategy_action_queue(campaign):
                     faction_id=faction_id,
                     tech_id=str(payload.get("tech_id") or ""),
                 )
+            elif action.action_type == "cancel_tactic_research":
+                next_world = cancel_tactic_research(next_world, faction_id=faction_id)
             elif action.action_type == "exile_action":
                 next_world = apply_exile_action(
                     next_world,
@@ -1086,6 +1234,14 @@ def apply_strategy_action_queue(campaign):
                     building_id=str(payload.get("building_id") or ""),
                     issuer_office_id=office.office_id,
                 )
+            elif action.action_type == "upgrade_city_settlement":
+                next_world = upgrade_city_settlement(
+                    next_world,
+                    faction_id=faction_id,
+                    city_id=str(payload.get("city_id") or ""),
+                    settlement=str(payload.get("settlement") or ""),
+                    issuer_office_id=office.office_id,
+                )
             elif action.action_type == "declare_attack":
                 resolution_mode = str(payload.get("resolution_mode") or "quick")
                 action_user = AuthUser(
@@ -1103,6 +1259,9 @@ def apply_strategy_action_queue(campaign):
                     resolution_mode=resolution_mode,
                     attacker_hero_codes=strategy_hero_codes_from_payload(payload),
                     attacker_office_id=office.office_id,
+                    committed_troops=parse_optional_int(
+                        payload.get("committed_troops", payload.get("attacker_troops"))
+                    ),
                 )
                 if battle_room is not None:
                     battle_room["queued_action_id"] = action.action_id

@@ -2,7 +2,20 @@ from __future__ import annotations
 
 import copy
 
-from wujiang.strategic.battles import MIN_ATTACK_TROOPS, city_attack_commitment, declare_city_attack, declare_strategic_battle
+from wujiang.strategic.administration import (
+    BUILDING_PROJECTS,
+    GARRISON_LEVY,
+    city_building_max_level,
+    construct_city_building,
+    increase_city_troops,
+)
+from wujiang.strategic.battles import (
+    MIN_ATTACK_TROOPS,
+    city_attack_commitment,
+    declare_city_attack,
+    declare_strategic_battle,
+    hero_is_stationed_in_city,
+)
 from wujiang.strategic.ai_goals import (
     ensure_ai_strategic_goal,
     preferred_attack_for_goal,
@@ -14,12 +27,13 @@ from wujiang.strategic.exile import faction_is_exiled
 from wujiang.strategic.heroes import (
     active_strategic_hero_codes_for_faction,
     appoint_strategic_hero_to_office,
+    assign_strategic_hero_duty,
     hero_ritual_capacity,
     perform_hero_ritual,
     set_strategic_defender_hero,
     strategic_heroes_for_faction_public,
 )
-from wujiang.strategic.models import City, EventLogEntry, Faction, WorldState
+from wujiang.strategic.models import City, EventLogEntry, Faction, StrategyError, WorldState
 from wujiang.strategic.neutral_city_states import incitement_attack_pair
 from wujiang.strategic.offices import ai_office_for_action, ensure_office_system
 from wujiang.strategic.political_ai import ai_peace_treasury_reserve, apply_major_political_ai_actions
@@ -38,6 +52,7 @@ from wujiang.strategic.story import choose_ai_story_choice, pending_story_event_
 from wujiang.strategic.tactics import TACTIC_TECH_TREE, set_city_policy, unlock_tactic_tech
 from wujiang.strategic.world_crisis import (
     SNOW_GHOST_CRISIS_ID,
+    _in_mobilization_window,
     resolve_world_crisis_choice,
     set_world_crisis_showdown_resolution,
     world_crisis_pair_key,
@@ -201,7 +216,7 @@ def _best_attack_against_cities(
     cities_by_id = {city.city_id: city for city in world.cities}
     candidates: list[tuple[int, int, str, str]] = []
     altar_progress = {
-        str(row["city_id"]): int(row.get("consecration", {}).get("progress", 0))
+        str(row["city_id"]): int(row.get("bound_count", 0))
         for row in relic_system_public(world).get("altars", [])
     }
     for source in _cities_for_faction(world, faction.faction_id):
@@ -238,7 +253,7 @@ def _relic_counter_attack(world: WorldState, faction: Faction) -> tuple[str, str
         str(row["city_id"])
         for row in relic_system_public(world).get("altars", [])
         if row.get("owner_faction_id") != faction.faction_id
-        and int(row.get("consecration", {}).get("progress", 0)) >= 1
+        and int(row.get("bound_count", 0)) >= 1
     }
     if not target_city_ids:
         return None
@@ -253,11 +268,15 @@ def _owned_relic_altar_city_id(world: WorldState, faction_id: str) -> str | None
     ]
     if not candidates:
         return None
+    capital_id = next(
+        (faction.capital_city_id for faction in world.factions if faction.faction_id == faction_id),
+        "",
+    )
     chosen = max(
         candidates,
         key=lambda row: (
-            int(row.get("consecration", {}).get("progress", 0)),
-            -int(row.get("bound_count", 0)),
+            int(row.get("capacity", 1)) - int(row.get("bound_count", 0)),
+            1 if str(row.get("city_id") or "") == str(capital_id or "") else 0,
             str(row.get("city_id") or ""),
         ),
     )
@@ -614,7 +633,7 @@ def _apply_world_crisis_ai_choice(
     if (
         crisis is None
         or crisis.stage != "mobilization"
-        or world.current_month not in {9, 10}
+        or not _in_mobilization_window(world, crisis)
         or any(
             int(item.get("month", 0)) == world.current_month
             and item.get("faction_id") == faction_id
@@ -674,7 +693,7 @@ def _apply_world_crisis_ai_choice(
             choice_id = "cooperate"
             target_faction_id = incoming[0].faction_id
             rationale = f"{rationale} 对方已公开承诺，响应可立即成立合作并获得双向奖励。"
-        elif priority == "survival" and world.current_month == 9 and other_majors and faction.resources.food >= 80 and faction.resources.money >= 40:
+        elif priority == "survival" and world.current_month == crisis.stage_started_month and other_majors and faction.resources.food >= 80 and faction.resources.money >= 40:
             choice_id = "cooperate"
             target_faction_id = other_majors[0].faction_id
             rationale = f"{rationale} 主动寻求合作比单独承担前线压力更安全。"
@@ -794,6 +813,157 @@ def apply_strategy_ai_showdown_action(
         resolution_mode="quick",
         auto_resolve=True,
     )
+
+
+def _frontline_cities(world: WorldState, faction_id: str) -> list[City]:
+    adjacent = _nodes_by_city(world)
+    cities_by_id = {city.city_id: city for city in world.cities}
+    owned = _cities_for_faction(world, faction_id)
+    frontline: list[City] = []
+    for city in owned:
+        if any(
+            cities_by_id[neighbor].owner_faction_id != faction_id
+            for neighbor in adjacent.get(city.city_id, set())
+            if neighbor in cities_by_id
+        ):
+            frontline.append(city)
+    return sorted(frontline or owned, key=lambda city: (city.resources.troops, city.city_id))
+
+
+def _station_ai_heroes(
+    world: WorldState,
+    *,
+    faction_id: str,
+    attack: tuple[str, str] | None,
+) -> tuple[WorldState, list[str], list[str]]:
+    lord = ai_office_for_action(
+        world,
+        faction_id=faction_id,
+        action_type="assign_strategic_hero_duty",
+        payload={},
+    )
+    if lord is None:
+        return world, [], []
+    serving = [
+        hero
+        for hero in world.strategic_heroes
+        if hero.faction_id == faction_id and hero.status == "serving"
+    ]
+    if not serving:
+        return world, [], []
+    garrison_cities = _frontline_cities(world, faction_id)
+    next_world = world
+    actions: list[str] = []
+    office_actions: list[str] = []
+    for index, hero in enumerate(sorted(serving, key=lambda item: item.hero_code)):
+        if attack is not None and index == 0:
+            city_id = attack[0]
+            assignment = "campaign"
+        else:
+            city_id = garrison_cities[index % len(garrison_cities)].city_id
+            assignment = "garrison"
+        if hero.city_id == city_id and hero.assignment_type in {assignment, "garrison", "campaign"}:
+            continue
+        try:
+            next_world = assign_strategic_hero_duty(
+                next_world,
+                faction_id=faction_id,
+                issuer_office_id=lord.office_id,
+                hero_code=hero.hero_code,
+                assignment_type=assignment,
+                target_id=city_id,
+            )
+        except StrategyError:
+            continue
+        action = f"duty:{hero.hero_code}:{assignment}:{city_id}"
+        actions.append(action)
+        office_actions.append(f"{lord.office_id}:{action}")
+        hero = next(item for item in next_world.strategic_heroes if item.hero_code == hero.hero_code)
+    return next_world, actions, office_actions
+
+
+def _apply_ai_city_development(
+    world: WorldState,
+    *,
+    faction_id: str,
+    command_remaining: int,
+    attack_reserve: int,
+) -> tuple[WorldState, int, list[str], list[str]]:
+    if command_remaining < 1 or command_remaining - 1 < attack_reserve:
+        return world, command_remaining, [], []
+    cities = _frontline_cities(world, faction_id)
+    if not cities:
+        return world, command_remaining, [], []
+    next_world = world
+    actions: list[str] = []
+    office_actions: list[str] = []
+
+    levy_city = next(
+        (
+            city
+            for city in cities
+            if city.resources.troops < max(MIN_ATTACK_TROOPS * 4, city.resources.population // 20)
+            and city.resources.population >= GARRISON_LEVY["population"]
+            and city.resources.food >= GARRISON_LEVY["food"]
+            and city.resources.money >= GARRISON_LEVY["money"]
+        ),
+        None,
+    )
+    if levy_city is not None:
+        office = ai_office_for_action(
+            next_world,
+            faction_id=faction_id,
+            action_type="increase_city_troops",
+            payload={"city_id": levy_city.city_id},
+        )
+        if office is not None:
+            try:
+                next_world = increase_city_troops(
+                    next_world,
+                    faction_id=faction_id,
+                    city_id=levy_city.city_id,
+                    issuer_office_id=office.office_id,
+                )
+                action = f"levy:{levy_city.city_id}"
+                actions.append(action)
+                office_actions.append(f"{office.office_id}:{action}")
+                return next_world, command_remaining - 1, actions, office_actions
+            except StrategyError:
+                pass
+
+    for city in cities:
+        for building_id in ("barracks", "ritual_site"):
+            current_level = int(city.building_levels.get(building_id, 0))
+            maximum_level = city_building_max_level(city, building_id)
+            if current_level >= maximum_level or maximum_level <= 0:
+                continue
+            project = BUILDING_PROJECTS[building_id]
+            next_level = current_level + 1
+            if city.resources.money < int(project["money"]) * next_level or city.resources.food < int(project["food"]) * next_level:
+                continue
+            office = ai_office_for_action(
+                next_world,
+                faction_id=faction_id,
+                action_type="construct_city_building",
+                payload={"city_id": city.city_id},
+            )
+            if office is None:
+                continue
+            try:
+                next_world = construct_city_building(
+                    next_world,
+                    faction_id=faction_id,
+                    city_id=city.city_id,
+                    building_id=building_id,
+                    issuer_office_id=office.office_id,
+                )
+                action = f"build:{city.city_id}:{building_id}"
+                actions.append(action)
+                office_actions.append(f"{office.office_id}:{action}")
+                return next_world, command_remaining - 1, actions, office_actions
+            except StrategyError:
+                continue
+    return next_world, command_remaining, actions, office_actions
 
 
 def apply_strategy_ai_monthly_actions(
@@ -1082,6 +1252,7 @@ def apply_strategy_ai_monthly_actions(
             tech_id is not None
             and tech is not None
             and tech_office is not None
+            and not (faction.researching or {}).get("tech_id")
             and command_remaining - 1 >= attack_reserve
             and faction.resources.money - tech.money_cost >= peace_treasury_reserve
         ):
@@ -1171,12 +1342,32 @@ def apply_strategy_ai_monthly_actions(
             office_actions.append(f"{defense_office.office_id}:{action}")
             faction = next(faction for faction in next_world.factions if faction.faction_id == faction_id)
 
+        planned_attack = None
         if enable_attacks and command_remaining >= 2:
-            attack = _relic_counter_attack(next_world, faction)
-            if attack is None:
-                attack = preferred_attack_for_goal(next_world, faction_id, strategic_goal)
-            if attack is None and (strategic_goal or {}).get("goal_type") != "capture_city":
-                attack = _best_attack(next_world, faction)
+            planned_attack = _relic_counter_attack(next_world, faction)
+            if planned_attack is None:
+                planned_attack = preferred_attack_for_goal(next_world, faction_id, strategic_goal)
+            if planned_attack is None and (strategic_goal or {}).get("goal_type") != "capture_city":
+                planned_attack = _best_attack(next_world, faction)
+        next_world, duty_actions, duty_office_actions = _station_ai_heroes(
+            next_world,
+            faction_id=faction_id,
+            attack=planned_attack,
+        )
+        actions.extend(duty_actions)
+        office_actions.extend(duty_office_actions)
+        next_world, command_remaining, develop_actions, develop_office_actions = _apply_ai_city_development(
+            next_world,
+            faction_id=faction_id,
+            command_remaining=command_remaining,
+            attack_reserve=2 if planned_attack is not None else 0,
+        )
+        actions.extend(develop_actions)
+        office_actions.extend(develop_office_actions)
+        faction = next(faction for faction in next_world.factions if faction.faction_id == faction_id)
+
+        if enable_attacks and command_remaining >= 2 and planned_attack is not None:
+            attack = planned_attack
             if attack is not None:
                 source_city_id, target_city_id = attack
                 attack_office = ai_office_for_action(
@@ -1186,6 +1377,11 @@ def apply_strategy_ai_monthly_actions(
                     payload={"source_city_id": source_city_id, "target_city_id": target_city_id},
                 )
                 if attack_office is not None:
+                    stationed_codes = [
+                        code
+                        for code in active_strategic_hero_codes_for_faction(next_world, faction_id)
+                        if hero_is_stationed_in_city(next_world, code, source_city_id)
+                    ]
                     next_world = declare_city_attack(
                         next_world,
                         faction_id=faction_id,
@@ -1193,7 +1389,7 @@ def apply_strategy_ai_monthly_actions(
                         target_city_id=target_city_id,
                         resolution_mode="quick",
                         auto_resolve=True,
-                        attacker_hero_codes=active_strategic_hero_codes_for_faction(next_world, faction_id),
+                        attacker_hero_codes=stationed_codes,
                         attacker_office_id=attack_office.office_id,
                     )
                     action = f"attack:{source_city_id}->{target_city_id}"

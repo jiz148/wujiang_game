@@ -1396,6 +1396,7 @@ class Battle:
         self._summary_defeated_unit_ids: set[str] = set()
         self.win_reason_code = ""
         self.win_reason_text = ""
+        self.blocked_cells: set[tuple[int, int]] = set()
 
     def log(self, message: str) -> None:
         if self._log_suppression_depth > 0:
@@ -2144,6 +2145,8 @@ class Battle:
     ) -> bool:
         for cell in self.unit_cells_at(unit, position):
             if not self.in_bounds(cell):
+                return False
+            if (cell.x, cell.y) in self.blocked_cells:
                 return False
             if not ignore_units and self.is_occupied(
                 cell,
@@ -4784,7 +4787,14 @@ class Battle:
         current_turn_unit = self.current_turn_unit()
         next_turn_unit = self.peek_next_turn_unit()
         return {
-            "board": {"width": self.width, "height": self.height},
+            "board": {
+                "width": self.width,
+                "height": self.height,
+                "terrain": [
+                    {"x": x, "y": y, "kind": "wall"}
+                    for x, y in sorted(self.blocked_cells)
+                ],
+            },
             "active_player": self.active_player,
             "active_turn_unit_id": current_turn_unit.unit_id if current_turn_unit is not None else self.current_turn_slot_unit_id(),
             "active_turn_unit_name": current_turn_unit.name if current_turn_unit is not None else None,

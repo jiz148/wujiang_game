@@ -326,7 +326,7 @@ def main() -> int:
             "[...document.querySelectorAll('.campaign-dock__tab')]"
             ".map((node) => (node.textContent || '').trim().replace(/\\s+\\d+$/, ''))"
         )
-        for label in ("城市", "武将", "军令", "科技"):
+        for label in ("城市", "外交", "武将", "军令", "科技", "更多"):
             if label not in (tab_labels or []):
                 problems.append(f"面板里没有「{label}」页")
         if open_dock_tab("城市"):
@@ -337,6 +337,12 @@ def main() -> int:
                 problems.append("城市页没有城市详情")
         else:
             problems.append("翻不到城市页")
+        if open_dock_tab("外交"):
+            page.wait_for("true", timeout=2)
+            if not page.evaluate("!!document.querySelector('.campaign-dock__page .strategy-diplomacy')"):
+                problems.append("外交页没有势力列表")
+        else:
+            problems.append("翻不到外交页")
         if open_dock_tab("武将"):
             page.wait_for("true", timeout=2)
             if page.evaluate("!!document.querySelector('.campaign-dock__page .strategy-hero-detail')"):
@@ -347,6 +353,13 @@ def main() -> int:
                 problems.append("点了武将却没有展开详情")
         else:
             problems.append("翻不到武将页")
+        if open_dock_tab("更多"):
+            page.wait_for("true", timeout=2)
+            more_text = page.evaluate("document.querySelector('.campaign-dock__page')?.textContent || ''")
+            if "返回战役大厅" not in more_text:
+                problems.append("更多页没有返回战役大厅")
+        else:
+            problems.append("翻不到更多页")
         if problems:
             print("DOCK FAILED: " + "；".join(problems))
             return 1

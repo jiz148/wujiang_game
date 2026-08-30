@@ -1059,7 +1059,7 @@ class StrategyStore:
             raise StrategyError(f"一个战略战役最多支持 {MAX_HUMAN_PLAYERS} 名真人。")
         if len(players_by_id) > faction_count * MAX_HUMANS_PER_FACTION:
             if contract:
-                raise StrategyError("首个产品战役固定为 2 个主要势力，每个势力最多 2 名真人。")
+                raise StrategyError(f"每个主要势力最多 {MAX_HUMANS_PER_FACTION} 名真人。")
             faction_count = (len(players_by_id) + MAX_HUMANS_PER_FACTION - 1) // MAX_HUMANS_PER_FACTION
         world = generate_random_world(
             seed=seed,
@@ -2082,6 +2082,29 @@ class StrategyStore:
                         "本月已进入 AI 临时托管；请先重新提交以取回控制。",
                         status=HTTPStatus.CONFLICT,
                     )
+                if normalized_type == "cancel_tactic_research":
+                    connection.execute(
+                        """
+                        UPDATE strategy_actions
+                        SET status = 'cancelled'
+                        WHERE campaign_id = ? AND user_id = ? AND month = ?
+                          AND action_type = 'unlock_tactic_tech' AND status = 'pending'
+                        """,
+                        (int(campaign_id), int(user.user_id), int(campaign.world.current_month)),
+                    )
+                    from wujiang.strategic.tactics import cancel_tactic_research
+
+                    next_world = cancel_tactic_research(campaign.world, faction_id=member.faction_id)
+                    after_json = json.dumps(next_world.to_dict(), ensure_ascii=False, sort_keys=True)
+                    connection.execute(
+                        """
+                        UPDATE strategy_campaigns
+                        SET world_json = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (after_json, now, int(campaign_id)),
+                    )
+                    return self._campaign_from_connection(connection, int(campaign_id))
                 connection.execute(
                     """
                     INSERT INTO strategy_actions
@@ -2124,6 +2147,68 @@ class StrategyStore:
                     target_id=int(action_row["id"]), after_hash=sha256_text(
                         json.dumps(payload, ensure_ascii=False, sort_keys=True)
                     ), details={"month": campaign.world.current_month, "action_type": normalized_type},
+                )
+                return self._campaign_from_connection(connection, int(campaign_id))
+
+    def cancel_queued_action(
+        self,
+        *,
+        campaign_id: int,
+        user: AuthUser,
+        action_id: int,
+    ) -> CampaignRecord:
+        now = time.time()
+        with self._lock:
+            self._ensure_schema()
+            with self._connection() as connection:
+                self._require_member(connection, int(campaign_id), int(user.user_id))
+                campaign = self._campaign_from_connection(connection, int(campaign_id))
+                submission = connection.execute(
+                    """
+                    SELECT status
+                    FROM strategy_month_submissions
+                    WHERE campaign_id = ? AND user_id = ? AND month = ?
+                    """,
+                    (int(campaign_id), int(user.user_id), int(campaign.world.current_month)),
+                ).fetchone()
+                submission_status = str(submission["status"]) if submission is not None else "drafting"
+                if submission_status == "ready":
+                    raise StrategyError(
+                        "你已提交本月计划；请先撤回提交再修改军令。",
+                        status=HTTPStatus.CONFLICT,
+                    )
+                if submission_status == "proxy_ai":
+                    raise StrategyError(
+                        "本月已进入 AI 临时托管；请先重新提交以取回控制。",
+                        status=HTTPStatus.CONFLICT,
+                    )
+                row = connection.execute(
+                    """
+                    SELECT id, user_id, action_type
+                    FROM strategy_actions
+                    WHERE id = ? AND campaign_id = ? AND month = ? AND status = 'pending'
+                    """,
+                    (int(action_id), int(campaign_id), int(campaign.world.current_month)),
+                ).fetchone()
+                if row is None:
+                    raise StrategyError("这条军令不存在或已经执行。", status=HTTPStatus.NOT_FOUND)
+                if int(row["user_id"]) != int(user.user_id):
+                    raise StrategyError("只能删除自己提交的军令。", status=HTTPStatus.FORBIDDEN)
+                connection.execute(
+                    """
+                    UPDATE strategy_actions
+                    SET status = 'cancelled', submitted_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, int(action_id)),
+                )
+                self._audit_operation(
+                    connection, campaign_id=int(campaign_id), actor_user_id=int(user.user_id),
+                    operation="action.cancelled", target_type="strategy_action",
+                    target_id=int(action_id), details={
+                        "month": campaign.world.current_month,
+                        "action_type": str(row["action_type"]),
+                    },
                 )
                 return self._campaign_from_connection(connection, int(campaign_id))
 

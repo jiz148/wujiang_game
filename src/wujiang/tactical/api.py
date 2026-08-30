@@ -16,6 +16,7 @@ from wujiang.platform.http.runtime import json_response
 from wujiang.platform.http.runtime import request_base_url
 from wujiang.platform.match_history import MatchHistoryError
 from wujiang.strategic import StrategyError
+from wujiang.tactical.rooms.launch import make_launch_context
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.heroes.registry import create_battle
 from wujiang.tactical.heroes.registry import list_heroes
@@ -281,6 +282,7 @@ def post_rooms_tutorial_start(ctx: RequestContext) -> None:
             account_user_id=auth_user.user_id,
         )
         room.experience_kind = "tutorial"
+        room.launch_context = make_launch_context("tutorial")
         room.select_hero(player_token, "fire_funeral", 1, seat_id=1)
         room.set_seat_controller(player_token, 2, "ai")
         room.select_hero(player_token, "ellie", 1, seat_id=2)
@@ -315,6 +317,7 @@ ai_difficulty=str(config["ai_difficulty"]),
             host_account_user_id=auth_user.user_id,
         )
         room.experience_kind = "quick_ai"
+        room.launch_context = make_launch_context("quick_ai")
         room.resolve_ai_until_human_input()
         room.touch()
     except RoomError as exc:
