@@ -436,3 +436,243 @@ def advance_diplomacy_month(world: WorldState) -> WorldState:
         ))
     next_world.validate()
     return next_world
+
+
+@dataclass(frozen=True, slots=True)
+class FactionDiplomacyAction:
+    action_id: str
+    name: str
+    description: str
+    money_cost: int = 0
+    food_cost: int = 0
+    money_gain: int = 0
+    food_gain: int = 0
+    counterpart_money: int = 0
+    counterpart_food: int = 0
+    relation_delta: int = 0
+    relation_min: int | None = None
+
+
+FACTION_DIPLOMACY_ACTIONS: tuple[FactionDiplomacyAction, ...] = (
+    FactionDiplomacyAction(
+        "gift_money",
+        "赠金",
+        "赠予金钱以改善关系。",
+        money_cost=80,
+        relation_delta=8,
+    ),
+    FactionDiplomacyAction(
+        "gift_food",
+        "赠粮",
+        "赠予粮食以改善关系。",
+        food_cost=100,
+        relation_delta=8,
+    ),
+    FactionDiplomacyAction(
+        "buy_food",
+        "购粮",
+        "支付金钱换取对方粮食。",
+        money_cost=50,
+        food_gain=70,
+        counterpart_food=70,
+        relation_delta=3,
+        relation_min=-25,
+    ),
+    FactionDiplomacyAction(
+        "sell_food",
+        "售粮",
+        "出售粮食换取对方金钱。",
+        food_cost=70,
+        money_gain=50,
+        counterpart_money=50,
+        relation_delta=3,
+        relation_min=-25,
+    ),
+)
+FACTION_DIPLOMACY_ACTIONS_BY_ID = {item.action_id: item for item in FACTION_DIPLOMACY_ACTIONS}
+
+
+def faction_relation_score(world: WorldState, actor_faction_id: str, target_faction_id: str) -> int:
+    actor = faction_by_id(world, actor_faction_id)
+    target = faction_by_id(world, target_faction_id)
+    if target_faction_id in actor.relations:
+        return int(actor.relations[target_faction_id])
+    if actor_faction_id in target.relations:
+        return int(target.relations[actor_faction_id])
+    return 0
+
+
+def faction_relation_label(score: int) -> str:
+    if score >= 40:
+        return "友善"
+    if score >= 15:
+        return "亲近"
+    if score >= 0:
+        return "中立"
+    if score >= -20:
+        return "冷淡"
+    return "敌对"
+
+
+def _adjust_faction_relation(actor: Faction, target: Faction, delta: int) -> None:
+    if not delta:
+        return
+    actor.relations[target.faction_id] = max(-100, min(100, actor.relations.get(target.faction_id, 0) + delta))
+    target.relations[actor.faction_id] = max(-100, min(100, target.relations.get(actor.faction_id, 0) + delta))
+
+
+def faction_diplomacy_option(
+    world: WorldState,
+    *,
+    actor_faction_id: str,
+    target_faction_id: str,
+    action_id: str,
+) -> dict[str, Any]:
+    action = FACTION_DIPLOMACY_ACTIONS_BY_ID.get(str(action_id or "").strip())
+    if action is None:
+        raise StrategyError("未知的外交行动。")
+    actor = faction_by_id(world, actor_faction_id)
+    target = faction_by_id(world, target_faction_id)
+    relation = faction_relation_score(world, actor_faction_id, target_faction_id)
+    blocked_reason = ""
+    if actor.faction_id == target.faction_id:
+        blocked_reason = "不能与本势力交易。"
+    elif not actor.is_major:
+        blocked_reason = "只有主要势力可以发起战略外交。"
+    elif not target.is_major:
+        blocked_reason = "只能与主要势力进行钱粮交易。"
+    elif actor.resources.money < action.money_cost:
+        blocked_reason = f"金钱不足：需要 {action.money_cost}。"
+    elif actor.resources.food < action.food_cost:
+        blocked_reason = f"粮食不足：需要 {action.food_cost}。"
+    elif target.resources.money < action.counterpart_money:
+        blocked_reason = "对方金钱不足以完成这笔交易。"
+    elif target.resources.food < action.counterpart_food:
+        blocked_reason = "对方粮食不足以完成这笔交易。"
+    elif action.relation_min is not None and relation < action.relation_min:
+        blocked_reason = "双方关系过差，对方拒绝交易。"
+    else:
+        cooldown_until = diplomacy_cooldown_until(world, actor.faction_id, target.faction_id, action.action_id)
+        if world.current_month < cooldown_until:
+            blocked_reason = f"冷却至第 {cooldown_until} 月。"
+    transfer_bits = []
+    if action.money_cost:
+        transfer_bits.append(f"钱 -{action.money_cost}")
+    if action.food_cost:
+        transfer_bits.append(f"粮 -{action.food_cost}")
+    if action.money_gain:
+        transfer_bits.append(f"钱 +{action.money_gain}")
+    if action.food_gain:
+        transfer_bits.append(f"粮 +{action.food_gain}")
+    if action.relation_delta:
+        transfer_bits.append(f"关系 {action.relation_delta:+d}")
+    return {
+        "id": action.action_id,
+        "name": action.name,
+        "description": action.description,
+        "resource_cost": {
+            "money": action.money_cost,
+            "food": action.food_cost,
+        },
+        "resource_gain": {
+            "money": action.money_gain,
+            "food": action.food_gain,
+        },
+        "relation_delta": action.relation_delta,
+        "can_propose": not blocked_reason,
+        "blocked_reason": blocked_reason,
+        "direct_effect": " · ".join(transfer_bits) if transfer_bits else action.description,
+    }
+
+
+def faction_diplomacy_options_public(
+    world: WorldState,
+    *,
+    actor_faction_id: str,
+    target_faction_id: str,
+) -> list[dict[str, Any]]:
+    return [
+        faction_diplomacy_option(
+            world,
+            actor_faction_id=actor_faction_id,
+            target_faction_id=target_faction_id,
+            action_id=action.action_id,
+        )
+        for action in FACTION_DIPLOMACY_ACTIONS
+    ]
+
+
+def faction_diplomacy_public(
+    world: WorldState,
+    *,
+    actor_faction_id: str,
+    target_faction_id: str,
+) -> dict[str, Any]:
+    score = faction_relation_score(world, actor_faction_id, target_faction_id)
+    return {
+        "kind": "major",
+        "relation": score,
+        "relation_label": faction_relation_label(score),
+        "options": faction_diplomacy_options_public(
+            world,
+            actor_faction_id=actor_faction_id,
+            target_faction_id=target_faction_id,
+        ),
+    }
+
+
+def validate_faction_diplomacy_action(
+    world: WorldState,
+    *,
+    actor_faction_id: str,
+    target_faction_id: str,
+    action_id: str,
+) -> None:
+    option = faction_diplomacy_option(
+        world,
+        actor_faction_id=actor_faction_id,
+        target_faction_id=target_faction_id,
+        action_id=action_id,
+    )
+    if not option["can_propose"]:
+        raise StrategyError(str(option["blocked_reason"]))
+
+
+def apply_faction_diplomacy_action(
+    world: WorldState,
+    *,
+    actor_faction_id: str,
+    target_faction_id: str,
+    action_id: str,
+) -> WorldState:
+    validate_faction_diplomacy_action(
+        world,
+        actor_faction_id=actor_faction_id,
+        target_faction_id=target_faction_id,
+        action_id=action_id,
+    )
+    action = FACTION_DIPLOMACY_ACTIONS_BY_ID[str(action_id)]
+    next_world = _clone_world(world)
+    actor = faction_by_id(next_world, actor_faction_id)
+    target = faction_by_id(next_world, target_faction_id)
+    actor.resources.money -= action.money_cost
+    actor.resources.food -= action.food_cost
+    actor.resources.money += action.money_gain
+    actor.resources.food += action.food_gain
+    target.resources.money += action.money_cost
+    target.resources.food += action.food_cost
+    target.resources.money -= action.counterpart_money
+    target.resources.food -= action.counterpart_food
+    _adjust_faction_relation(actor, target, action.relation_delta)
+    set_diplomacy_cooldown(next_world, actor.faction_id, target.faction_id, action.action_id)
+    next_world.event_log.append(
+        EventLogEntry(
+            month=next_world.current_month,
+            category="faction_diplomacy",
+            message=f"{actor.name}对{target.name}执行{action.name}。",
+            related_ids=[actor.faction_id, target.faction_id, action.action_id],
+        )
+    )
+    next_world.validate()
+    return next_world
+

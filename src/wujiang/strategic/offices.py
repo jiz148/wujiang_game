@@ -46,6 +46,7 @@ OFFICE_PERMISSIONS = {
         "declare_attack",
         "handle_rebellion",
         "manage_occupation",
+        "manage_buildings",
     ),
     "grand_general": (
         "manage_theater",
@@ -93,6 +94,7 @@ OFFICE_DUTY_TYPES = {
 ACTION_PERMISSION = {
     "advance_month": "advance_month",
     "unlock_tactic_tech": "national_technology",
+    "cancel_tactic_research": "national_technology",
     "perform_hero_ritual": "perform_ritual",
     "search_relic": "relic_decision",
     "transfer_relic": "relic_decision",
@@ -108,6 +110,7 @@ ACTION_PERMISSION = {
     "request_registered_units": "request_registered_units",
     "approve_registered_unit_request": "approve_unit_request",
     "construct_city_building": "manage_buildings",
+    "upgrade_city_settlement": "manage_buildings",
     "set_city_policy": "set_city_policy",
     "rebellion_action": "handle_rebellion",
     "rebellion_battle": "handle_rebellion",
@@ -120,6 +123,7 @@ ACTION_PERMISSION = {
     "load_army_supply": "command_army",
     "incite_neutral_city_state": "diplomacy",
     "neutral_diplomacy": "diplomacy",
+    "faction_diplomacy": "diplomacy",
     "peaceful_integration": "diplomacy",
     "choose_occupation_policy": "manage_occupation",
     "fund_rebellion": "diplomacy",
@@ -438,6 +442,7 @@ def office_action_entity_id(action_type: str, payload: dict[str, Any]) -> str:
         "transfer_registered_units",
         "request_registered_units",
         "construct_city_building",
+        "upgrade_city_settlement",
         "choose_occupation_policy",
         "form_army",
     }:
@@ -485,7 +490,18 @@ def resolve_action_office(
         and (
             not entity_id
             or (
-                action_type in {"declare_attack", "perform_hero_ritual", "transfer_registered_units", "request_registered_units", "choose_occupation_policy", "rebellion_action", "rebellion_battle", "form_army"}
+                action_type in {
+                    "declare_attack",
+                    "perform_hero_ritual",
+                    "transfer_registered_units",
+                    "request_registered_units",
+                    "choose_occupation_policy",
+                    "rebellion_action",
+                    "rebellion_battle",
+                    "form_army",
+                    "construct_city_building",
+                    "upgrade_city_settlement",
+                }
                 and office.office_type in {"lord", "grand_general", "general"}
             )
             or not office.managed_entity_ids
@@ -530,6 +546,8 @@ def ai_office_for_action(
                     "rebellion_action",
                     "rebellion_battle",
                     "form_army",
+                    "construct_city_building",
+                    "upgrade_city_settlement",
                 }
                 and office.office_type in {"lord", "grand_general", "general"}
             )
@@ -583,6 +601,21 @@ def apply_office_order(
             raise StrategyError("城市方针命令必须指定该城主管辖的己方城市。")
         if policy not in POLICIES:
             raise StrategyError("城市方针命令指定了未知方针。")
+    if normalized_type == "levy_garrison":
+        if receiver.office_type != "governor":
+            raise StrategyError("征集守军命令只能下达给城主。")
+        target_city = next((city for city in next_world.cities if city.city_id == str(target_entity_id)), None)
+        if target_city is None or target_city.owner_faction_id != issuer.faction_id or target_city.city_id not in receiver.managed_entity_ids:
+            raise StrategyError("征集守军命令必须指定该城主管辖的己方城市。")
+    if normalized_type == "reinforce_city":
+        if (issuer.office_type, receiver.office_type) not in {
+            ("lord", "grand_general"),
+            ("grand_general", "general"),
+        }:
+            raise StrategyError("增援命令只能由主公下达给大将军，或由大将军分派给直属将军。")
+        target_city = next((city for city in next_world.cities if city.city_id == str(target_entity_id)), None)
+        if target_city is None:
+            raise StrategyError("增援命令必须指定有效目标城市。")
     objective_text = str(objective or "").strip()
     if not objective_text:
         raise StrategyError("职位命令必须填写目标。")

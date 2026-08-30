@@ -11,6 +11,7 @@ from wujiang.strategic.tactics import city_troop_conversion
 
 TROOPS_PER_GRID_UNIT = 100
 MAX_GRID_UNITS_PER_SIDE = 12
+MAX_COMPOSED_UNITS = 50
 MIN_FEATURED_UNITS_ROSTER_SIZE = 2
 
 STRATEGY_UNIT_HERO_CODES: dict[str, str] = {
@@ -254,17 +255,24 @@ def strategy_battle_rosters(world: WorldState, battle: PendingBattle) -> Strateg
     attacker_faction = factions_by_id[battle.attacker_faction_id]
     defender_faction = factions_by_id[battle.defender_faction_id]
     available_codes = _available_hero_codes()
-    attacker_units = roster_for_registered_units(
-        battle.attacker_registered_units,
-        available_hero_codes=available_codes,
-    )
+    if getattr(battle, "attacker_composition", None):
+        attacker_units = roster_for_registered_units(
+            dict(battle.attacker_composition),
+            available_hero_codes=available_codes,
+            limit=MAX_COMPOSED_UNITS,
+        )
+    else:
+        attacker_units = roster_for_registered_units(
+            battle.attacker_registered_units,
+            available_hero_codes=available_codes,
+        )
     defender_units = roster_for_registered_units(
         battle.defender_registered_units,
         available_hero_codes=available_codes,
     )
     attacker_roster = (
         attacker_units
-        if battle.source_kind in {"encounter", "siege", "world_crisis"}
+        if battle.source_kind in {"encounter", "siege", "world_crisis"} or getattr(battle, "attacker_composition", None)
         else _merge_rosters(
             attacker_units,
             roster_for_city_troops(

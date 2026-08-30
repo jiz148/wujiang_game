@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>武将</title>
     <link rel="stylesheet" href="/theme.css?v=r23" />
-    <link rel="stylesheet" href="/styles.css?v=r26" />
+    <link rel="stylesheet" href="/styles.css?v=r33" />
   </head>
   <!-- 哪一屏该显示，要等 /api/auth/me 回来才知道。在那之前先什么都不显示，
        否则标记里默认可见的那一屏会先闪出来，再被换掉。 -->
@@ -104,9 +104,9 @@
                    它们的 disabled 并转发 click，所以它们必须留在 DOM 里，但没有
                    哪一屏需要把它们摆出来。 -->
               <div class="strategy-actions">
-                <button id="strategy-exit-campaign" class="ghost hidden" type="button">战役列表</button>
+                <button id="strategy-exit-campaign" class="ghost hidden" type="button">返回战役大厅</button>
                 <button id="strategy-refresh" class="ghost" type="button">刷新</button>
-                <button id="strategy-advance-month" class="primary" type="button">推进一月</button>
+                <button id="strategy-advance-month" class="primary" type="button">回合结束</button>
               </div>
               <div id="strategy-message" class="strategy-message"></div>
               <!-- 战役列表 + 一个新建入口。创建本身是个独立流程（见
@@ -319,6 +319,15 @@
                               <tbody id="postgame-hero-stats"></tbody>
                             </table>
                           </div>
+                          <div id="postgame-soldier-section" class="postgame-soldier-section hidden">
+                            <div class="postgame-section-head"><strong>士兵统计</strong></div>
+                            <div class="postgame-table-wrap">
+                              <table class="postgame-table">
+                                <thead><tr><th>兵种</th><th>伤害</th><th>治疗</th><th>承伤</th><th>击破</th><th>破盾</th><th>连锁</th></tr></thead>
+                                <tbody id="postgame-soldier-stats"></tbody>
+                              </table>
+                            </div>
+                          </div>
                           <hr class="game-over-rule" />
                           <div class="postgame-section-head"><strong>关键回合</strong></div>
                           <div id="postgame-key-turns" class="postgame-key-turns"></div>
@@ -518,6 +527,6 @@
     <script src="/platform/home-ui.js?v=r13" defer></script>
     <script src="/tactical/replay-ui.js?v=r13" defer></script>
     <script src="/tactical/battle-feedback.js?v=r15" defer></script>
-    <script type="module" src="/app.js?v=r27"></script>
+    <script type="module" src="/app.js?v=r33"></script>
   </body>
 </html>

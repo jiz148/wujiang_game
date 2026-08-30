@@ -4,10 +4,10 @@ import { $ } from '../core/dom.js';
 import { fetchJson, recordProductEvent, recordStrategyConclusionIfNeeded, recordStrategyEventOnce, syncLocation } from '../core/net.js';
 import { refreshState, render } from '../core/render.js';
 import { FALLBACK_STRATEGY_VARIANTS, state } from '../core/state.js';
-import { setScreen } from '../core/ui.js';
 import { effectiveProfileName, userLoggedIn } from '../platform/auth.js';
-import { createStrategyField, strategyCanResume, strategyFactionCommandPoints, strategyMemberLabel, strategyOfficeLabel } from '../strategic/ui-base.js';
-import { isStrategyControlActive, renderStrategyPanel } from '../strategic/workbench.js';
+import { createStrategyField, formatStrategyCalendar, showStrategyTurnToast, strategyCanResume, strategyCityById, strategyFactionCommandPoints, strategyMemberLabel, strategyOfficeLabel, strategyRememberSelectedCity } from '../strategic/ui-base.js';
+import { isStrategyControlActive, presentStrategyNoticesAfterAdvance, renderStrategyPanel } from '../strategic/workbench.js';
+import { currentBattleLaunch, exitBattle, rememberBattleLaunch } from '../bridge/battle-launch.js';
 import { loadStoredIdentity, saveStoredIdentity } from '../bridge/campaign-battle.js';
 
 export function clearStrategyState(message = "") {
@@ -124,6 +124,16 @@ export function focusStrategyMapStage() {
   renderStrategyPanel();
 }
 
+/** 选中城市、打开城市页，并把地图视角落到那座城上。不收起侧栏。 */
+export function inspectStrategyCityOnMap(cityId, campaign = state.strategyCampaign) {
+  const city = strategyCityById(campaign, cityId);
+  strategyRememberSelectedCity(city?.id || cityId, campaign);
+  state.strategyDockOpen = true;
+  state.strategyDockTab = "city";
+  state.strategyMapFocusCityId = city?.id || String(cityId || "");
+  renderStrategyPanel();
+}
+
 export function exitStrategyCampaignView() {
   state.strategyCampaign = null;
   state.strategySelectedCityId = "";
@@ -140,6 +150,9 @@ export function openStrategyCampaignCreator() {
   state.strategyName = "英灵城邦";
   state.strategySeed = String(Math.max(1, Math.floor(Date.now() / 1000) % 999983));
   state.strategyVariantId = state.strategyVariantId || "classic_frontier";
+  state.strategyCrisisEarliestYear = 10;
+  state.strategyYearLimit = 0;
+  state.strategyMajorFactionCount = 2;
   state.strategyMessage = "";
   renderStrategyPanel();
 }
@@ -151,7 +164,7 @@ export function closeStrategyCampaignCreator() {
 }
 
 export function setStrategyCreateStep(step) {
-  state.strategyCreateStep = Math.max(0, Math.min(2, Number(step) || 0));
+  state.strategyCreateStep = Math.max(0, Math.min(3, Number(step) || 0));
   renderStrategyPanel();
 }
 
@@ -162,6 +175,9 @@ export async function createStrategyCampaign() {
     name,
     seed,
     variant_id: state.strategyVariantId,
+    crisis_earliest_year: Math.max(1, Math.min(100, Number(state.strategyCrisisEarliestYear) || 10)),
+    year_limit: Math.max(0, Math.min(100, Number(state.strategyYearLimit) || 0)),
+    major_faction_count: Math.max(2, Math.min(10, Number(state.strategyMajorFactionCount) || 2)),
   });
   if (!payload) {
     renderStrategyPanel();
@@ -460,15 +476,24 @@ export async function advanceStrategyMonth() {
     renderStrategyPanel();
     return;
   }
+  if (state.strategyBusy || state.strategyEndTurnPending) return;
+  state.strategyEndTurnPending = true;
+  renderStrategyPanel();
   const queuedBattles = (state.strategyCampaign.queued_actions || []).filter((action) => action.action_type === "city_attack");
-  const payload = await strategyPost("/api/strategy/campaigns/advance-month", {
-    campaign_id: state.strategyCampaign.id,
-    issuer_office_id: state.strategyActiveOfficeId,
-  });
+  let payload = null;
+  try {
+    payload = await strategyPost("/api/strategy/campaigns/advance-month", {
+      campaign_id: state.strategyCampaign.id,
+      issuer_office_id: state.strategyActiveOfficeId,
+    });
+  } finally {
+    state.strategyEndTurnPending = false;
+  }
   if (!payload) {
     renderStrategyPanel();
     return;
   }
+  const previousCampaign = state.strategyCampaign;
   state.strategyCampaign = payload.campaign;
   const status = payload.campaign?.world?.strategic_status || {};
   const reachedMonth = Number(payload.campaign?.world?.current_month || 0);
@@ -484,15 +509,17 @@ export async function advanceStrategyMonth() {
     });
   }
   recordStrategyConclusionIfNeeded(payload.campaign);
+  showStrategyTurnToast(payload.campaign.world.current_month);
   state.strategyMessage = status.awaiting_conclusion_choice
-    ? `第 ${payload.campaign.world.current_month} 月结算完成，战役已进入${status.conclusion?.result_label || "评议"}。`
-    : `已推进到第 ${payload.campaign.world.current_month} 月。`;
+    ? `${formatStrategyCalendar(payload.campaign.world.current_month)}结算完成，战役已进入${status.conclusion?.result_label || "评议"}。`
+    : `已推进到${formatStrategyCalendar(payload.campaign.world.current_month)}。`;
   state.strategyBattleRoom = (payload.battle_rooms || []).slice(-1)[0] || state.strategyBattleRoom;
   if (state.strategyBattleRoom?.player_token) {
     saveStoredIdentity(state.strategyBattleRoom.room_id, state.strategyBattleRoom.player_token, effectiveProfileName());
   }
   await refreshStrategyCampaigns({ renderAfter: false });
   render();
+  presentStrategyNoticesAfterAdvance(previousCampaign, payload.campaign);
 }
 
 export async function continueStrategySandbox() {
@@ -709,6 +736,23 @@ export function createStrategicBattleResolver(campaign, sourceKind, sourceEntity
   return controls;
 }
 
+export async function cancelQueuedStrategyAction(actionId) {
+  if (!state.strategyCampaign) return;
+  const payload = await strategyPost("/api/strategy/campaigns/cancel-action", {
+    campaign_id: state.strategyCampaign.id,
+    action_id: actionId,
+  });
+  if (!payload) {
+    renderStrategyPanel();
+    return;
+  }
+  state.strategyCampaign = payload.campaign;
+  const points = payload.command_points || strategyFactionCommandPoints(payload.campaign);
+  state.strategyMessage = `已删除这条军令；剩余军令 ${points.remaining}/${points.maximum}。`;
+  await refreshStrategyCampaigns({ renderAfter: false });
+  render();
+}
+
 export async function queueStrategyAction(actionType, actionPayload) {
   if (!state.strategyCampaign) return;
   const payload = await strategyPost("/api/strategy/campaigns/queue-action", {
@@ -740,6 +784,31 @@ export async function queueStrategyAction(actionType, actionPayload) {
   render();
 }
 
+export async function resolveStrategyBattleChoice(battleId, choice, composition = {}) {
+  if (!state.strategyCampaign) return;
+  const payload = await strategyPost("/api/strategy/campaigns/resolve-battle-choice", {
+    campaign_id: state.strategyCampaign.id,
+    battle_id: battleId,
+    choice,
+    composition,
+    issuer_office_id: state.strategyActiveOfficeId,
+  });
+  if (!payload) {
+    renderStrategyPanel();
+    return;
+  }
+  state.strategyCampaign = payload.campaign;
+  state.strategyBattleNoticeId = "";
+  const names = { manual: "已进入手动战斗", ai_auto: "已由 AI 推演结算", formula: "已快速结算", siege: "已转入围城", retreat: "已撤退" };
+  state.strategyMessage = names[choice] || "已处理这场战斗。";
+  await refreshStrategyCampaigns({ renderAfter: false });
+  if (choice === "manual" && payload.battle_room) {
+    await openStrategyBattleRoom(payload.battle_room);
+    return;
+  }
+  render();
+}
+
 export async function openStrategyBattleRoom(roomInfo = {}) {
   const roomId = String(roomInfo.room_id || roomInfo.battle_room_id || "").trim().toUpperCase();
   if (!roomId) {
@@ -755,6 +824,12 @@ export async function openStrategyBattleRoom(roomInfo = {}) {
   state.roomForm.joinRoomCode = roomId;
   const joinInput = $("join-room-code");
   if (joinInput) joinInput.value = roomId;
+  state.homeFlow = "campaign";
+  rememberBattleLaunch(roomInfo.launch_context || {
+    source: "campaign",
+    campaign_id: state.strategyCampaign?.id,
+    battle_id: roomInfo.battle_id || roomInfo.battle_room_id || "",
+  });
   syncLocation("battle", roomId);
   await refreshState({ preserveScreen: false });
 }
@@ -786,12 +861,20 @@ export async function restartStrategyBattleFromSnapshot(roomId) {
 }
 
 export function returnToStrategyCampaign() {
-  if (!state.strategyCampaign) return;
-  state.strategyMessage = state.strategyMessage || "已返回战役。";
-  setScreen("draft", { renderAfter: false });
-  render();
-  const panel = $("strategy-panel");
-  if (panel && typeof panel.scrollIntoView === "function") {
-    panel.scrollIntoView({ block: "start" });
+  if (!state.strategyCampaign && currentBattleLaunch().source !== "campaign") return;
+  rememberBattleLaunch({
+    ...(state.room?.launch_context || {}),
+    source: "campaign",
+    campaign_id: state.strategyCampaign?.id,
+  });
+  if (state.room) {
+    state.room.launch_context = {
+      source: "campaign",
+      return_flow: "campaign",
+      allow_lobby: false,
+      allow_rematch: false,
+      allow_roster_edit: false,
+    };
   }
+  exitBattle();
 }

@@ -5,6 +5,7 @@ import { state, ui } from '../core/state.js';
 import { setScreen, syncScreen } from '../core/ui.js';
 import { closeProfileModal, confirmProfile, effectiveProfileName, normalizeProfileName, openProfileModal, renderProfilePanel } from '../platform/auth.js';
 import { refreshRecentMatches } from '../platform/home.js';
+import { exitBattle } from '../bridge/battle-launch.js';
 import { advanceStrategyMonth, exitStrategyCampaignView, joinStrategyCampaignByCode, openStrategyCampaignCreator, refreshStrategyCampaigns, returnToStrategyCampaign } from '../strategic/api.js';
 import { connectionStatusLabel, readyStateLabel } from '../strategic/ui-base.js';
 import { renderRecoveryButton, renderStrategyPanel } from '../strategic/workbench.js';
@@ -264,13 +265,13 @@ export function bindEvents() {
     scheduleBoardOverlayRender();
   });
   $("room-battle").addEventListener("click", () => setScreen("battle"));
-  $("return-room-lobby")?.addEventListener("click", () => setScreen("draft"));
+  $("return-room-lobby")?.addEventListener("click", () => exitBattle());
   $("toggle-battle-console")?.addEventListener("click", () => {
     state.battleConsoleCollapsed = !state.battleConsoleCollapsed;
     renderBattleConsole();
   });
   $("game-over-strategy").addEventListener("click", returnToStrategyCampaign);
-  $("game-over-back").addEventListener("click", () => setScreen("draft"));
+  $("game-over-back").addEventListener("click", () => exitBattle());
   $("game-over-rematch").addEventListener("click", restartFromGameOver);
   $("game-over-details-toggle")?.addEventListener("click", () => {
     state.gameOverShowDetails = !state.gameOverShowDetails;

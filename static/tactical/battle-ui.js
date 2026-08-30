@@ -6,6 +6,7 @@ import { render } from '../core/render.js';
 import { applyScreen } from '../core/router.js';
 import { state, ui } from '../core/state.js';
 import { effectiveProfileName } from '../platform/auth.js';
+import { currentBattleLaunch, isCampaignBattleLaunch } from '../bridge/battle-launch.js';
 import { isRandomRoomMode, loadReplayStep, onActionClick, roomModeMeta, shouldShowLobbyPanel } from '../tactical/room-api.js';
 import { clearActionSelection } from '../tactical/session.js';
 import { actionLabel, actionLimitLabel, actionManaLabel, actionNeedsTarget, actionTierLabel, actionTimingLabel, actionTitle, bodyDirectionSelection, canCompleteTargetSelection, choicePatternSelection, currentPreview, fieldEffectMarker, fieldEffectsByCell, hasCancelableTargetSelection, movePathSelection, multiUnitSelection, normalizedPatternCells, patternSelection, patternSelectionCanComplete, randomRoomFallbackSummary, randomRoomRosterSize, reviveUnitCellSelection, stagedAttackVariantCode, stagedBodyCells, stagedBodyDirection, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, statCellRequired, statCellSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
@@ -322,7 +323,10 @@ export function renderBoard() {
       const ghostUnits = unitsHere.filter((unit) => unit.banished);
 
       const key = `${x},${y}`;
+      const terrain = Array.isArray(state.battle?.board?.terrain) ? state.battle.board.terrain : [];
+      const isWall = terrain.some((item) => Number(item.x) === x && Number(item.y) === y && item.kind === "wall");
       const cellEffects = fieldCellMap.get(key) || [];
+      if (isWall) cell.classList.add("is-terrain-wall");
       if (preview.cellKeys.has(key)) cell.classList.add("is-preview");
       if (preview.secondaryCellKeys.has(key)) cell.classList.add("is-secondary");
       if (preview.destinationCellKeys?.has(key)) cell.classList.add("is-footprint-destination");
@@ -764,7 +768,11 @@ export function renderSidebarPanels() {
     toggle.title = open ? "收起操作面板" : "展开操作面板";
   }
   const lobbyBtn = $("return-room-lobby");
-  if (lobbyBtn) lobbyBtn.classList.toggle("hidden", !hasRoom());
+  if (lobbyBtn) {
+    const campaignBattle = isCampaignBattleLaunch();
+    lobbyBtn.textContent = campaignBattle ? "返回战役" : "房间大厅";
+    lobbyBtn.classList.toggle("hidden", !hasRoom());
+  }
 }
 
 function resourceRatio(current, max) {
@@ -981,26 +989,39 @@ export function renderPostgameSummary() {
     mvpPanel.textContent = "本局没有足够数据生成 MVP。";
   }
 
-  const heroBody = $("postgame-hero-stats");
-  heroBody.innerHTML = "";
-  (summary.hero_stats || []).forEach((hero) => {
-    const row = document.createElement("tr");
-    const values = [
-      `${hero.name}${hero.owner_name ? ` · ${hero.owner_name}` : ""}`,
-      formatPostgameValue(hero.damage_dealt),
-      formatPostgameValue(hero.healing_done),
-      formatPostgameValue(hero.damage_taken),
-      String(hero.kills || 0),
-      String(hero.shields_broken || 0),
-      String(hero.chain_reactions || 0),
-    ];
-    values.forEach((value) => {
-      const cell = document.createElement("td");
-      cell.textContent = value;
-      row.append(cell);
+  const fillPostgameRows = (body, rows, emptyLabel) => {
+    if (!body) return;
+    body.innerHTML = "";
+    (rows || []).forEach((item) => {
+      const row = document.createElement("tr");
+      [
+        `${item.name}${item.owner_name ? ` · ${item.owner_name}` : ""}`,
+        formatPostgameValue(item.damage_dealt),
+        formatPostgameValue(item.healing_done),
+        formatPostgameValue(item.damage_taken),
+        String(item.kills || 0),
+        String(item.shields_broken || 0),
+        String(item.chain_reactions || 0),
+      ].forEach((value) => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      });
+      body.append(row);
     });
-    heroBody.append(row);
-  });
+    if (!(rows || []).length && emptyLabel) {
+      const row = document.createElement("tr");
+      const cell = document.createElement("td");
+      cell.colSpan = 7;
+      cell.textContent = emptyLabel;
+      row.append(cell);
+      body.append(row);
+    }
+  };
+  fillPostgameRows($("postgame-hero-stats"), summary.hero_stats || [], "本局没有单独的武将统计。");
+  const soldierRows = summary.soldier_stats || [];
+  fillPostgameRows($("postgame-soldier-stats"), soldierRows, "");
+  $("postgame-soldier-section")?.classList.toggle("hidden", !soldierRows.length);
 
   const keyTurns = $("postgame-key-turns");
   keyTurns.innerHTML = "";
@@ -1029,6 +1050,8 @@ export function renderGameOverOverlay() {
   const title = $("game-over-title");
   const rematch = $("game-over-rematch");
   const strategy = $("game-over-strategy");
+  const back = $("game-over-back");
+  const launch = currentBattleLaunch();
   if (!state.battle || !isGameOver() || state.screen !== "battle" || isReplayMode()) {
     overlay.classList.add("hidden");
     state.gameOverShowDetails = false;
@@ -1046,12 +1069,19 @@ export function renderGameOverOverlay() {
   }
   const tutorial = tutorialState();
   if (strategy) {
-    const hasStrategyCampaign = Boolean(state.strategyCampaign);
-    strategy.classList.toggle("hidden", !hasStrategyCampaign);
-    strategy.disabled = !hasStrategyCampaign;
+    const showStrategy = launch.source === "campaign" || Boolean(state.strategyCampaign);
+    strategy.classList.toggle("hidden", !showStrategy);
+    strategy.disabled = !showStrategy;
+    strategy.classList.toggle("primary", showStrategy);
+    strategy.classList.toggle("ghost", !showStrategy);
+  }
+  if (back) {
+    back.classList.toggle("hidden", launch.source === "campaign");
+    back.textContent = launch.allowLobby ? "返回房间大厅" : "离开战场";
   }
   if (rematch) {
-    rematch.disabled = !Boolean(state.room?.can_rematch && state.room?.viewer_player_id !== null);
+    rematch.classList.toggle("hidden", !launch.allowRematch);
+    rematch.disabled = !launch.allowRematch || !Boolean(state.room?.can_rematch && state.room?.viewer_player_id !== null);
     if (tutorial) {
       rematch.disabled = state.battle.winner !== 1 && !tutorial.can_retry_checkpoint;
       rematch.textContent = state.battle.winner === 1 ? "再次开始教学" : "从检查点重试";

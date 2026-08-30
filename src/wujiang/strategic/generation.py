@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import random
 from typing import Any
 
@@ -19,6 +20,19 @@ CITY_NAME_PARTS = (
     "黑石",
     "风铃",
     "云砦",
+    "霜原",
+    "铁门",
+    "月津",
+    "苍藤",
+    "琥珀",
+    "芦洲",
+    "雁门",
+    "桑榆",
+    "石梁",
+    "桐溪",
+    "鹤汀",
+    "紫塞",
+    "兰渚",
 )
 
 CITY_TROOP_FEATURES = (
@@ -33,12 +47,103 @@ CITY_TROOP_FEATURES = (
 NEUTRAL_GOVERNOR_NAMES = (
     "顾临川", "陆怀安", "沈砚", "苏明远", "裴照", "温行舟",
     "谢云岚", "林朔", "闻人策", "白景澄", "萧长宁", "叶知秋",
+    "韩望舒", "乔晚晴", "孟衡", "容止", "岑暮雪", "尹长川",
 )
 
 
 def _city_name(index: int) -> str:
     base = CITY_NAME_PARTS[(index - 1) % len(CITY_NAME_PARTS)]
+    if index > len(CITY_NAME_PARTS):
+        return f"{base}{1 + (index - 1) // len(CITY_NAME_PARTS)}城"
     return f"{base}城"
+
+
+def _map_grid_size(city_count: int) -> tuple[int, int]:
+    cols = max(2, math.ceil(math.sqrt(city_count)))
+    rows = max(2, math.ceil(city_count / cols))
+    return cols, rows
+
+
+def _snake_cell(index: int, cols: int) -> tuple[int, int]:
+    step = index - 1
+    row = step // cols
+    col = step % cols
+    if row % 2:
+        col = cols - 1 - col
+    return col, row
+
+
+def _place_city_coordinates(city_count: int, rng: random.Random) -> dict[int, tuple[float, float]]:
+    cols, rows = _map_grid_size(city_count)
+    placed: dict[int, tuple[float, float]] = {}
+    for index in range(1, city_count + 1):
+        col, row = _snake_cell(index, cols)
+        jitter_x = rng.uniform(-0.44, 0.44)
+        jitter_y = rng.uniform(-0.44, 0.44)
+        if rng.random() < 0.4:
+            jitter_x += rng.uniform(-0.22, 0.22)
+            jitter_y += rng.uniform(-0.22, 0.22)
+        x = 8 + ((col + 0.5 + jitter_x) / cols) * 84
+        y = 8 + ((row + 0.5 + jitter_y) / rows) * 84
+        placed[index] = (max(3.0, min(97.0, x)), max(3.0, min(97.0, y)))
+    for _ in range(8):
+        indexes = list(placed)
+        for left_pos, left_index in enumerate(indexes):
+            ax, ay = placed[left_index]
+            for right_index in indexes[left_pos + 1:]:
+                bx, by = placed[right_index]
+                dx = ax - bx
+                dy = ay - by
+                distance = math.hypot(dx, dy)
+                if distance < 0.01 or distance >= 11.0:
+                    continue
+                push = (11.0 - distance) / 2
+                nx = dx / distance
+                ny = dy / distance
+                ax = max(3.0, min(97.0, ax + nx * push))
+                ay = max(3.0, min(97.0, ay + ny * push))
+                placed[right_index] = (
+                    max(3.0, min(97.0, bx - nx * push)),
+                    max(3.0, min(97.0, by - ny * push)),
+                )
+            placed[left_index] = (ax, ay)
+    return placed
+
+
+def _nearby_connection_pairs(
+    city_count: int,
+    coordinates: dict[int, tuple[float, float]],
+) -> list[tuple[int, int]]:
+    pairs: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for index in range(1, city_count + 1):
+        ax, ay = coordinates[index]
+        nearest = sorted(
+            (other for other in range(1, city_count + 1) if other != index),
+            key=lambda other: math.hypot(ax - coordinates[other][0], ay - coordinates[other][1]),
+        )
+        for other in nearest[:2]:
+            key = (min(index, other), max(index, other))
+            if key in seen:
+                continue
+            seen.add(key)
+            pairs.append(key)
+    return pairs
+
+
+def _pick_city_settlement(rng: random.Random, *, level: int, defense: int, is_capital: bool) -> str:  # noqa: ARG001
+    if is_capital:
+        return "fortress" if defense >= 7 else "city"
+    if defense >= 8:
+        return "fortress"
+    roll = rng.random()
+    if roll < 0.34:
+        return "village"
+    if roll < 0.68:
+        return "town"
+    if roll < 0.90:
+        return "city"
+    return "fortress"
 
 
 def _support_for_owner(faction_ids: list[str], owner_faction_id: str) -> dict[str, int]:
@@ -69,8 +174,6 @@ def generate_random_world(
         raise StrategyError("随机战略地图至少需要 1 个势力。")
     if faction_count > city_count:
         raise StrategyError("势力数量不能超过城市数量。")
-    if neutral_city_states and city_count - faction_count <= faction_count:
-        raise StrategyError("中立城邦数量必须多于玩家与主要 AI 的起始城市总数。")
 
     rng = random.Random(int(seed))
     major_faction_ids = [f"faction_{index}" for index in range(1, faction_count + 1)]
@@ -82,29 +185,36 @@ def generate_random_world(
     nodes: list[MapNode] = []
     cities: list[City] = []
     connections: dict[str, set[str]] = {}
+    coordinates = _place_city_coordinates(city_count, rng)
 
     for index in range(1, city_count + 1):
         node_id = f"node_{index}"
         connections[node_id] = set()
+        x, y = coordinates[index]
         nodes.append(
             MapNode(
                 node_id=node_id,
                 name=_city_name(index),
                 node_type="city",
-                x=rng.randint(0, 100),
-                y=rng.randint(0, 100),
+                x=int(round(x)),
+                y=int(round(y)),
                 traits=[],
             )
         )
 
-    # A path guarantees connectivity; extra local links make the graph less linear.
+    # A winding backbone keeps the map connected; nearby cities add irregular roads.
     for index in range(1, city_count):
         left = f"node_{index}"
         right = f"node_{index + 1}"
         connections[left].add(right)
         connections[right].add(left)
+    for left_index, right_index in _nearby_connection_pairs(city_count, coordinates):
+        left = f"node_{left_index}"
+        right = f"node_{right_index}"
+        connections[left].add(right)
+        connections[right].add(left)
     for index in range(1, city_count + 1):
-        if rng.random() < 0.45:
+        if rng.random() < 0.18:
             target = rng.randint(1, city_count)
             if target != index:
                 left = f"node_{index}"
@@ -156,6 +266,7 @@ def generate_random_world(
         level = 1 + (1 if index <= faction_count else rng.randint(0, 2))
         population = rng.randint(800, 1800) * level
         troops = rng.randint(180, 420) * level
+        defense = rng.randint(2, 6) + level
         troop_feature = CITY_TROOP_FEATURES[(index - 1) % len(CITY_TROOP_FEATURES)]
         cities.append(
             City(
@@ -171,7 +282,7 @@ def generate_random_world(
                     ether=rng.randint(20, 80) * level,
                     troops=troops,
                 ),
-                defense=rng.randint(2, 6) + level,
+                defense=defense,
                 governor_id=(f"officer:neutral_city_state_{index}:governor" if neutral_city_states and index > faction_count else None),
                 buildings=["政厅", "fields", "barracks", "ritual_site"],
                 building_levels={"fields": 1, "barracks": 1, "ritual_site": 1},
@@ -179,6 +290,12 @@ def generate_random_world(
                 local_factions=["local_autonomy"],
                 traits=(["主城候选"] if index <= faction_count else (["中立城邦"] if neutral_city_states else [])),
                 troop_features=[troop_feature],
+                settlement=_pick_city_settlement(
+                    rng,
+                    level=level,
+                    defense=defense,
+                    is_capital=index <= faction_count,
+                ),
             )
         )
 

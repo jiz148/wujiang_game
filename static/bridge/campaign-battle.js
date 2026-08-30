@@ -5,6 +5,7 @@
 // backend's wujiang.bridge package: if you are adding a call that crosses
 // between the two domains, it belongs here and nowhere else.
 
+export { adoptBattleLaunchFromRoom, currentBattleLaunch, exitBattle, isCampaignBattleLaunch, normalizeBattleLaunch, rememberBattleLaunch } from './battle-launch.js';
 export { syncStrategyCampaignFromRoomPayload } from '../strategic/api.js';
 export { loadRecordedMatchEnds } from '../strategic/workbench.js';
 export { applyRoomPayload, canReclaimSeatByName, storedIdentityForCurrentRoom } from '../tactical/room-api.js';

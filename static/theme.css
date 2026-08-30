@@ -808,6 +808,25 @@ select {
   gap: var(--s-2);
 }
 
+.campaign-notice-overlay {
+  z-index: 92;
+}
+
+.campaign-notice {
+  width: min(100%, 680px);
+  max-height: min(86vh, 820px);
+  overflow: auto;
+}
+
+.campaign-notice__body {
+  display: grid;
+  gap: var(--s-3);
+}
+
+.campaign-notice-overlay.is-conclusion .campaign-notice {
+  width: min(100%, 740px);
+}
+
 /* ============================================================================
  * 空态
  * ========================================================================== */

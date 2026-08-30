@@ -21,8 +21,8 @@ SLEEPING_TAG_PREFIX = "strategic_hero_sleeping:"
 SLEEPING_TAG_SEPARATOR = ":until:"
 DEFENDER_TAG_PREFIX = "strategic_hero_defender:"
 STRATEGIC_HERO_BATTLE_SLEEP_MONTHS = 2
-STRATEGIC_HERO_BATTLE_LIMIT = 1
-STRATEGIC_HERO_BATTLE_LIMIT_MAX = 3
+STRATEGIC_HERO_BATTLE_LIMIT = 3
+STRATEGIC_HERO_BATTLE_LIMIT_MAX = 6
 STRATEGIC_HERO_LIMIT_TECH_BONUSES = {"hero_command": 1}
 HERO_RITUAL_ETHER_COST = 30
 
@@ -977,21 +977,29 @@ def assign_strategic_hero_duty(
     if normalized not in {"reserve", "administration", "training", "garrison", "campaign"}:
         raise StrategyError("武将任务类型无效。")
     normalized_target = str(target_id or "").strip() or None
-    if normalized in {"garrison", "training"}:
-        city = next((item for item in next_world.cities if item.city_id == normalized_target), None)
-        if city is None or city.owner_faction_id != faction_id:
-            raise StrategyError("驻守或训练任务必须指定一座己方城市。")
+    stationed = None
+    if normalized_target:
+        stationed = next((item for item in next_world.cities if item.city_id == normalized_target), None)
+        if stationed is None or stationed.owner_faction_id != faction_id:
+            raise StrategyError("只能把武将派往本势力城市。")
+    elif normalized in {"garrison", "training"}:
+        raise StrategyError("驻守或训练任务必须指定一座己方城市。")
     from wujiang.strategic.hero_personal import require_hero_command_acceptance
 
     require_hero_command_acceptance(next_world, hero, f"assignment:{normalized}")
     hero.assignment_type = normalized
     hero.assignment_target_id = normalized_target
+    if stationed is not None:
+        hero.city_id = stationed.city_id
     faction = _faction(next_world, faction_id)
     next_world.event_log.append(
         EventLogEntry(
             month=next_world.current_month,
             category="strategic_hero_assignment",
-            message=f"{faction.name}主公安排{_hero_name(hero.hero_code)}执行任务：{normalized}。",
+            message=(
+                f"{faction.name}主公安排{_hero_name(hero.hero_code)}执行任务：{normalized}"
+                + (f"，派驻{stationed.name}。" if stationed is not None else "。")
+            ),
             related_ids=[faction_id, issuer.office_id, hero.hero_code, *( [normalized_target] if normalized_target else [] )],
         )
     )

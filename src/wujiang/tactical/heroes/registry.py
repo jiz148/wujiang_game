@@ -299,6 +299,54 @@ def classic_board_side(player1_units: Sequence[object], player2_units: Sequence[
     return max(base_side, required_width, required_height)
 
 
+def _column_overflows(units: Sequence[object], height: int) -> bool:
+    return sum(entry_footprint_bounds(unit)["height"] for unit in units) > max(1, int(height))
+
+
+def packed_spawn_positions(
+    units: Sequence[object],
+    board_side: int,
+    *,
+    occupied_min_x: int,
+    occupied_max_x: int,
+    board_height: int | None = None,
+    prefer_high_x: bool = False,
+) -> dict[int, Position]:
+    if not units:
+        return {}
+    height = board_side if board_height is None else int(board_height)
+
+    def placement_key(unit: object) -> tuple[int, int, int]:
+        bounds = entry_footprint_bounds(unit)
+        return bounds["width"] * bounds["height"], bounds["height"], bounds["width"]
+
+    def valid_anchors(unit: object, occupied_cells: set[tuple[int, int]]) -> list[Position]:
+        bounds = entry_footprint_bounds(unit)
+        min_anchor_x = occupied_min_x - bounds["min_dx"]
+        max_anchor_x = occupied_max_x - bounds["max_dx"]
+        min_anchor_y = 0 - bounds["min_dy"]
+        max_anchor_y = height - 1 - bounds["max_dy"]
+        candidates: list[Position] = []
+        for x in range(min_anchor_x, max_anchor_x + 1):
+            for y in range(min_anchor_y, max_anchor_y + 1):
+                anchor = Position(x, y)
+                if spawn_cells_for_anchor(unit, anchor) & occupied_cells:
+                    continue
+                candidates.append(anchor)
+        return candidates
+
+    occupied_cells: set[tuple[int, int]] = set()
+    positions: dict[int, Position] = {}
+    for unit in sorted(units, key=placement_key, reverse=True):
+        candidates = valid_anchors(unit, occupied_cells)
+        if not candidates:
+            raise ValueError("当前战场放不下这些武将，请把战场调大后再开局。")
+        anchor = min(candidates, key=lambda item: ((-item.x, item.y) if prefer_high_x else (item.x, item.y)))
+        positions[id(unit)] = anchor
+        occupied_cells.update(spawn_cells_for_anchor(unit, anchor))
+    return positions
+
+
 def classic_spawn_positions(
     units: Sequence[object],
     board_side: int,
@@ -434,6 +482,23 @@ def create_room_battle(
             sorted_player2,
             width,
             board_height=height,
+        )
+    elif _column_overflows(sorted_player1, height) or _column_overflows(sorted_player2, height):
+        band = max(4, min(8, width // 4))
+        player1_positions = packed_spawn_positions(
+            sorted_player1,
+            width,
+            occupied_min_x=0,
+            occupied_max_x=band - 1,
+            board_height=height,
+        )
+        player2_positions = packed_spawn_positions(
+            sorted_player2,
+            width,
+            occupied_min_x=width - band,
+            occupied_max_x=width - 1,
+            board_height=height,
+            prefer_high_x=True,
         )
     else:
         player1_positions = classic_spawn_positions(sorted_player1, width, player_id=1, board_height=height)

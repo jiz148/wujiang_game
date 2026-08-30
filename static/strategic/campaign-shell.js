@@ -10,7 +10,7 @@
 import { createButton } from '../core/components.js';
 import { $ } from '../core/dom.js';
 import { state } from '../core/state.js';
-import { STRATEGY_DUTY_LABELS, strategyFactionCommandPoints, strategyOfficeLabel } from './ui-base.js';
+import { STRATEGY_DUTY_LABELS, formatStrategyCalendar, strategyFactionCommandPoints, strategyOfficeLabel } from './ui-base.js';
 
 const STATUS_LABELS = {
   serving: "仕官",
@@ -119,6 +119,16 @@ function heroCard(campaign, hero, { onSelect, selected } = {}) {
   loyalty.title = `忠诚 ${hero.loyalty ?? 50}（${hero.loyalty_band?.label || "稳定"}）`;
   card.append(loyalty);
 
+  if (hero.personal_mission) {
+    const statusLabels = { active: "进行中", completed: "已完成", failed: "已逾期" };
+    const mission = document.createElement("span");
+    mission.className = "hero-slot__mission";
+    const progress = `${hero.personal_mission.progress ?? 0}/${hero.personal_mission.required ?? 0}`;
+    const due = hero.personal_mission.due_month ? ` · 截止第 ${hero.personal_mission.due_month} 月` : "";
+    mission.textContent = `${hero.personal_mission.name} · ${statusLabels[hero.personal_mission.status] || hero.personal_mission.status} · ${progress}${due}`;
+    card.append(mission);
+  }
+
   return card;
 }
 
@@ -130,7 +140,7 @@ function heroCard(campaign, hero, { onSelect, selected } = {}) {
  *
  * 名单只给一行状态；档案要点开某个人才展开，一屏之内不会同时铺开十几份履历。
  */
-export function renderCampaignHeroList(host, campaign, faction, { onSelect, selectedCode = "" } = {}) {
+export function renderCampaignHeroList(host, campaign, faction, { onSelect, selectedCode = "", renderDetail } = {}) {
   const heroes = campaignFactionHeroes(campaign, faction);
   const list = document.createElement("div");
   list.className = "campaign-hero-list";
@@ -140,93 +150,184 @@ export function renderCampaignHeroList(host, campaign, faction, { onSelect, sele
     empty.textContent = "本势力还没有武将。";
     list.append(empty);
   } else {
-    heroes.forEach((hero) => list.append(heroCard(campaign, hero, {
-      onSelect,
-      selected: Boolean(selectedCode) && hero.code === selectedCode,
-    })));
+    heroes.forEach((hero) => {
+      const selected = Boolean(selectedCode) && hero.code === selectedCode;
+      list.append(heroCard(campaign, hero, { onSelect, selected }));
+      if (selected && typeof renderDetail === "function") {
+        const detail = document.createElement("div");
+        detail.className = "hero-slot__detail strategy-hero-detail";
+        renderDetail(detail, hero);
+        list.append(detail);
+      }
+    });
   }
   host.append(list);
 }
 
+const HUD_ICONS = {
+  month: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M2 6.5h12M5 1.8v2.6M11 1.8v2.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>',
+  command: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 13.2 8 2.6l5 10.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M5.2 9.6h5.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>',
+  food: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13.4V7.2M4.6 13.2c0-3.4 1.5-5.2 3.4-6M11.4 13.2c0-3.4-1.5-5.2-3.4-6M8 7.2c1.6-1.7 1.6-3.8 0-5.2C6.4 3.4 6.4 5.5 8 7.2Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  money: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 5.1v5.8M6.3 6.4c.5-.7 1.3-1 1.7-1 .9 0 1.6.5 1.6 1.3 0 1.8-3.3 1.1-3.3 2.7 0 .8.8 1.4 1.7 1.4.6 0 1.2-.3 1.6-.8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>',
+  ether: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.4 12.6 8 8 13.6 3.4 8Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 5.2 10.4 8 8 10.8 5.6 8Z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>',
+  troops: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.6 13.2 5v3.2c0 3.2-2.1 5-5.2 5.8C4.9 13.2 2.8 11.4 2.8 8.2V5Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 6.1v3.4M6.4 7.8h3.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>',
+};
+
 /**
- * 顶部一条状态栏：我在哪局、我是谁、我有什么、这个月还剩多少军令、怎么结束这
- * 个月、怎么出去。这些此前分散在共享页头、按钮条、资源条和底部推进条四层里，
- * 加起来近 200px 都还没进入游戏。
- *
- * 推进与刷新沿用页头那两个按钮的禁用判断（房主、能否推进、开局待决都写在
- * renderStrategyPanel 里），这里只转发点击，判断仍旧只有一处。
+ * 资源条浮在战略地图左上角：只报月份、军令和四项资源，不再占掉一整行顶栏。
  */
-function createCampaignHud(campaign, faction, office) {
+function createCampaignHud(campaign, faction) {
   const hud = document.createElement("header");
   hud.className = "campaign-hud";
 
-  const identity = document.createElement("div");
-  identity.className = "campaign-hud__identity";
-  const name = document.createElement("strong");
-  name.className = "campaign-hud__name";
-  name.textContent = campaign.name || "战役";
-  const role = document.createElement("span");
-  role.className = "campaign-hud__role";
-  role.textContent = `${faction?.name || "未绑定势力"} · ${office ? strategyOfficeLabel(office, campaign) : "在野"}`;
-  identity.append(name, role);
-  hud.append(identity);
-
-  const monthLimit = campaign?.world?.strategic_status?.month_limit;
   const points = strategyFactionCommandPoints(campaign, faction);
   const facts = document.createElement("div");
   facts.className = "campaign-hud__facts";
   [
-    ["月份", monthLimit ? `${campaign.world.current_month} / ${monthLimit}` : `第 ${campaign.world.current_month} 月`],
-    ["军令", `${points.remaining} / ${points.maximum}`],
-    ["粮", faction ? String(faction.resources.food) : "—"],
-    ["钱", faction ? String(faction.resources.money) : "—"],
-    ["以太", faction ? String(faction.resources.ether) : "—"],
-    ["兵", faction ? String(faction.resources.troops) : "—"],
-  ].forEach(([label, value]) => {
+    ["month", "年月", formatStrategyCalendar(campaign.world.current_month)],
+    ["command", "军令", `${points.remaining} / ${points.maximum}`],
+    ["money", "钱", faction ? String(faction.resources.money) : "—"],
+    ["food", "粮", faction ? String(faction.resources.food) : "—"],
+    ["troops", "兵", faction ? String(faction.resources.troops) : "—"],
+    ["ether", "以太", faction ? String(faction.resources.ether) : "—"],
+  ].forEach(([icon, label, value]) => {
     const fact = document.createElement("div");
     fact.className = "campaign-hud__fact";
+    const mark = document.createElement("span");
+    mark.className = `campaign-hud__icon campaign-hud__icon--${icon}`;
+    mark.innerHTML = HUD_ICONS[icon];
+    mark.setAttribute("aria-hidden", "true");
     const caption = document.createElement("span");
     caption.className = "campaign-hud__label";
     caption.textContent = label;
     const strong = document.createElement("strong");
     strong.className = "campaign-hud__value";
     strong.textContent = value;
-    fact.append(caption, strong);
+    fact.append(mark, caption, strong);
     facts.append(fact);
   });
   hud.append(facts);
 
-  const actions = document.createElement("div");
-  actions.className = "campaign-hud__actions";
-  const source = {
+  const source = campaignChromeButtons();
+  const endTurn = document.createElement("button");
+  endTurn.type = "button";
+  const endingTurn = Boolean(state.strategyEndTurnPending || state.strategyBusy);
+  endTurn.className = endingTurn ? "campaign-end-turn is-loading" : "campaign-end-turn";
+  endTurn.disabled = Boolean(source.advance?.disabled) || endingTurn;
+  endTurn.setAttribute("aria-label", endingTurn ? "正在结算回合" : "回合结束");
+  const line1 = document.createElement("span");
+  line1.textContent = endingTurn ? "结算" : "回合";
+  const line2 = document.createElement("span");
+  line2.textContent = endingTurn ? "中" : "结束";
+  endTurn.append(line1, line2);
+  endTurn.addEventListener("click", () => {
+    if (endTurn.disabled || state.strategyEndTurnPending || state.strategyBusy) return;
+    source.advance?.click();
+  });
+  hud.append(endTurn);
+  return hud;
+}
+
+function createCampaignTurnToast() {
+  const toastState = state.strategyTurnToast;
+  if (!toastState) return null;
+  const toast = document.createElement("div");
+  toast.className = "campaign-turn-toast";
+  const title = document.createElement("strong");
+  title.textContent = `第${toastState.year}年 · ${toastState.monthName}`;
+  const detail = document.createElement("span");
+  detail.textContent = `第 ${toastState.turn} 回合`;
+  toast.append(title, detail);
+  return toast;
+}
+
+function campaignChromeButtons() {
+  return {
     refresh: $("strategy-refresh"),
     advance: $("strategy-advance-month"),
     exit: $("strategy-exit-campaign"),
   };
-  actions.append(
-    createButton({
-      label: "刷新",
+}
+
+const REFRESH_ICON = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.2 8A5.2 5.2 0 1 1 8 2.8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M8 1.4 9.8 3.4 7.6 4.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+function findNamedClass(root, className) {
+  if (!root) return null;
+  if (String(root.className || "").split(/\s+/).includes(className)) return root;
+  for (const child of root.children || []) {
+    const found = findNamedClass(child, className);
+    if (found) return found;
+  }
+  return null;
+}
+
+function attachCampaignRefreshTool(stage) {
+  const tools = findNamedClass(stage, "strategy-map-tools");
+  if (!tools) return;
+  const source = campaignChromeButtons();
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "strategy-map-tool strategy-map-tool--refresh";
+  button.title = "刷新";
+  button.setAttribute("aria-label", "刷新");
+  button.disabled = Boolean(source.refresh?.disabled);
+  button.innerHTML = REFRESH_ICON;
+  button.addEventListener("click", () => source.refresh?.click());
+  tools.append(button);
+}
+
+function moreToggleLabel(kind, prefs) {
+  if (kind === "sound") return `声音：${prefs.sound ? "开" : "关"}`;
+  if (kind === "colorblind") return `色弱高对比：${prefs.colorblind ? "开" : "关"}`;
+  if (kind === "combatFeed") return `行动记录：${prefs.combatFeed === false ? "关" : "开"}`;
+  const motion = prefs.motion || "system";
+  const motionLabel = motion === "system" ? "跟随系统" : (motion === "reduce" ? "减少" : "完整");
+  return `动态：${motionLabel}`;
+}
+
+/**
+ * 战役「更多」与战场同一套系统设置，再加返回大厅。
+ */
+export function renderCampaignMorePanel(host) {
+  const prefs = globalThis.WujiangBattleFeedback?.preferences?.() || {};
+  const toolbar = document.createElement("div");
+  toolbar.className = "campaign-more-toolbar";
+  [
+    ["sound", "sound"],
+    ["colorblind", "colorblind"],
+    ["combatFeed", "combatFeed"],
+    ["motion", "motion"],
+  ].forEach(([kind]) => {
+    toolbar.append(createButton({
+      label: moreToggleLabel(kind, prefs),
       variant: "subtle",
-      size: "sm",
-      disabled: Boolean(source.refresh?.disabled),
-      onClick: () => source.refresh?.click(),
-    }),
-    createButton({
-      label: "推进一月",
-      variant: "primary",
-      size: "sm",
-      disabled: Boolean(source.advance?.disabled),
-      onClick: () => source.advance?.click(),
-    }),
-    createButton({
-      label: "战役列表",
-      variant: "subtle",
-      size: "sm",
-      onClick: () => source.exit?.click(),
-    }),
-  );
-  hud.append(actions);
-  return hud;
+      block: true,
+      onClick: () => {
+        globalThis.WujiangBattleFeedback?.toggle(kind);
+        const next = globalThis.WujiangBattleFeedback?.preferences?.() || prefs;
+        const button = toolbar.querySelector(`[data-more-toggle="${kind}"]`);
+        if (button) button.textContent = moreToggleLabel(kind, next);
+      },
+      dataset: { moreToggle: kind },
+    }));
+  });
+  toolbar.append(createButton({
+    label: "键盘帮助",
+    variant: "subtle",
+    block: true,
+    onClick: () => $("open-keyboard-help")?.click(),
+  }));
+  host.append(toolbar);
+
+  const divider = document.createElement("hr");
+  divider.className = "campaign-more-divider";
+  host.append(divider, createButton({
+    label: "返回战役大厅",
+    variant: "subtle",
+    block: true,
+    className: "campaign-more-exit",
+    onClick: () => campaignChromeButtons().exit?.click(),
+  }));
 }
 
 /**
@@ -245,6 +346,9 @@ function createCampaignDock(modules) {
   const dock = document.createElement("aside");
   dock.className = `campaign-dock${state.strategyDockOpen ? " is-open" : " is-collapsed"}`;
   dock.setAttribute("aria-label", "战役操作面板");
+
+  const rail = document.createElement("div");
+  rail.className = "campaign-dock__rail";
 
   const tabs = document.createElement("nav");
   tabs.className = "campaign-dock__tabs";
@@ -317,7 +421,8 @@ function createCampaignDock(modules) {
     body.append(page);
   }
 
-  dock.append(tabs, body);
+  rail.append(tabs);
+  dock.append(rail, body);
   return dock;
 }
 
@@ -344,11 +449,14 @@ function applyDockState(dock, tabs) {
 export function renderCampaignScreen(host, { campaign, faction, office, renderMap, modules, onDockChange }) {
   const screen = document.createElement("section");
   screen.className = "campaign-screen";
-  screen.append(createCampaignHud(campaign, faction, office));
 
   const stage = document.createElement("div");
   stage.className = "campaign-stage";
   renderMap(stage);
+  attachCampaignRefreshTool(stage);
+  stage.append(createCampaignHud(campaign, faction));
+  const toast = createCampaignTurnToast();
+  if (toast) stage.append(toast);
   const dock = createCampaignDock(modules);
   stage.append(dock);
   if (typeof onDockChange === "function") {

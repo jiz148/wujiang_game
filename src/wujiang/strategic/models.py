@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -36,6 +37,70 @@ def _plain_dict(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
     return {str(key): value for key, value in raw.items()}
+
+
+FACTION_THEME_COLORS = (
+    "#3d7ea6",
+    "#c45c4a",
+    "#4a9a6e",
+    "#8b6bb0",
+    "#c48a3a",
+    "#5a9aa8",
+    "#a85a7a",
+    "#6b7c4a",
+    "#4a6fa5",
+    "#9a5a3a",
+)
+NEUTRAL_FACTION_COLOR = "#a89868"
+CRISIS_FACTION_COLOR = "#7eb8d4"
+CITY_SETTLEMENTS = ("village", "town", "city", "fortress")
+
+
+def normalize_faction_color(value: Any, fallback: str = "") -> str:
+    text = str(value or "").strip()
+    if re.fullmatch(r"#[0-9A-Fa-f]{6}", text):
+        return text.lower()
+    if re.fullmatch(r"#[0-9A-Fa-f]{3}", text):
+        return "#" + "".join(character * 2 for character in text[1:]).lower()
+    return fallback
+
+
+def infer_city_settlement(*, level: int, defense: int, traits: list[str] | None = None) -> str:
+    names = {str(item) for item in (traits or [])}
+    if "要塞" in names:
+        return "fortress"
+    if defense >= 8:
+        return "fortress"
+    if level >= 3 or "主城候选" in names:
+        return "city"
+    if level >= 2:
+        return "town"
+    return "village"
+
+
+def ensure_faction_theme_colors(factions: list[Faction]) -> None:
+    used: set[str] = set()
+    major_index = 0
+    for faction in factions:
+        current = normalize_faction_color(faction.color)
+        if current:
+            faction.color = current
+            used.add(current)
+    for faction in factions:
+        if normalize_faction_color(faction.color):
+            continue
+        if faction.is_world_crisis:
+            faction.color = CRISIS_FACTION_COLOR
+        elif faction.is_neutral_city_state:
+            faction.color = NEUTRAL_FACTION_COLOR
+        else:
+            color = FACTION_THEME_COLORS[major_index % len(FACTION_THEME_COLORS)]
+            while color in used and major_index < len(FACTION_THEME_COLORS) * 2:
+                major_index += 1
+                color = FACTION_THEME_COLORS[major_index % len(FACTION_THEME_COLORS)]
+            faction.color = color
+            used.add(color)
+            major_index += 1
 
 
 @dataclass(slots=True)
@@ -87,12 +152,15 @@ class Faction:
     diplomatic_reputation: int = 50
     memory_tags: list[str] = field(default_factory=list)
     tactic_techs: list[str] = field(default_factory=list)
+    researching: dict[str, Any] = field(default_factory=dict)
     faction_type: str = "major"
     governor_name: str | None = None
     incited_against_faction_id: str | None = None
     incited_by_faction_id: str | None = None
+    color: str = ""
 
     def __post_init__(self) -> None:
+        self.color = normalize_faction_color(self.color)
         self.diplomatic_reputation = max(0, min(100, int(self.diplomatic_reputation)))
         self.relations = {
             str(faction_id): max(-100, min(100, int(score)))
@@ -131,10 +199,12 @@ class Faction:
             "diplomatic_reputation": self.diplomatic_reputation,
             "memory_tags": list(self.memory_tags),
             "tactic_techs": list(self.tactic_techs),
+            "researching": dict(self.researching or {}),
             "faction_type": self.faction_type,
             "governor_name": self.governor_name,
             "incited_against_faction_id": self.incited_against_faction_id,
             "incited_by_faction_id": self.incited_by_faction_id,
+            "color": self.color,
         }
 
     @classmethod
@@ -152,6 +222,7 @@ class Faction:
             diplomatic_reputation=int(raw.get("diplomatic_reputation", 50)),
             memory_tags=_string_list(raw.get("memory_tags")),
             tactic_techs=_string_list(raw.get("tactic_techs")),
+            researching=_plain_dict(raw.get("researching")),
             faction_type=str(raw.get("faction_type") or "major"),
             governor_name=(str(raw.get("governor_name")) if raw.get("governor_name") else None),
             incited_against_faction_id=(
@@ -160,6 +231,7 @@ class Faction:
             incited_by_faction_id=(
                 str(raw.get("incited_by_faction_id")) if raw.get("incited_by_faction_id") else None
             ),
+            color=str(raw.get("color") or ""),
         )
 
 
@@ -266,10 +338,17 @@ class City:
     event_states: list[str] = field(default_factory=list)
     troop_features: list[str] = field(default_factory=list)
     occupation: dict[str, Any] = field(default_factory=dict)
+    settlement: str = ""
 
     def __post_init__(self) -> None:
         self.level = int(self.level)
         self.defense = int(self.defense)
+        if self.settlement not in CITY_SETTLEMENTS:
+            self.settlement = infer_city_settlement(
+                level=self.level,
+                defense=self.defense,
+                traits=self.traits,
+            )
         if self.level <= 0:
             raise StrategyError("城市等级必须为正数。")
         if self.defense < 0:
@@ -314,6 +393,7 @@ class City:
             "event_states": list(self.event_states),
             "troop_features": list(self.troop_features),
             "occupation": dict(self.occupation),
+            "settlement": self.settlement,
         }
 
     @classmethod
@@ -338,6 +418,7 @@ class City:
             traits=_string_list(raw.get("traits")),
             event_states=_string_list(raw.get("event_states")),
             troop_features=_string_list(raw.get("troop_features")),
+            settlement=str(raw.get("settlement") or raw.get("kind") or ""),
             occupation=_plain_dict(raw.get("occupation")),
         )
 
@@ -399,6 +480,7 @@ class PendingBattle:
     attacker_army_ids: list[str] = field(default_factory=list)
     defender_army_ids: list[str] = field(default_factory=list)
     army_snapshots: dict[str, dict[str, Any]] = field(default_factory=dict)
+    attacker_composition: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.month = int(self.month)
@@ -424,6 +506,11 @@ class PendingBattle:
             str(army_id): dict(snapshot)
             for army_id, snapshot in self.army_snapshots.items()
             if str(army_id) and isinstance(snapshot, dict)
+        }
+        self.attacker_composition = {
+            str(unit_type): max(0, int(count))
+            for unit_type, count in self.attacker_composition.items()
+            if str(unit_type) and int(count) > 0
         }
         if self.attacker_troops < 0 or self.defender_troops < 0:
             raise StrategyError("战斗兵力不能为负数。")
@@ -457,6 +544,7 @@ class PendingBattle:
             "attacker_army_ids": list(self.attacker_army_ids),
             "defender_army_ids": list(self.defender_army_ids),
             "army_snapshots": {army_id: dict(snapshot) for army_id, snapshot in self.army_snapshots.items()},
+            "attacker_composition": dict(self.attacker_composition),
         }
 
     @classmethod
@@ -495,6 +583,7 @@ class PendingBattle:
                 for army_id, snapshot in (raw.get("army_snapshots") or {}).items()
                 if isinstance(snapshot, dict)
             },
+            attacker_composition=_int_dict(raw.get("attacker_composition")),
         )
 
 
@@ -730,20 +819,25 @@ class StrategicHeroState:
 @dataclass(slots=True)
 class RelicState:
     relic_id: str
-    hero_code: str
-    name: str
+    hero_code: str = ""
+    name: str = ""
     state: str = "scattered"
     condition: str = "intact"
     location_node_id: str | None = None
     location_city_id: str | None = None
     owner_faction_id: str | None = None
     altar_id: str | None = None
+    effect_id: str = ""
+    effect_active: bool = False
     maintenance_ether_cost: int = 10
     discovered_by_faction_ids: list[str] = field(default_factory=list)
     last_changed_month: int = 1
     history: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        self.hero_code = str(self.hero_code or "")
+        self.effect_id = str(self.effect_id or "")
+        self.effect_active = bool(self.effect_active)
         self.maintenance_ether_cost = max(0, int(self.maintenance_ether_cost))
         self.last_changed_month = max(1, int(self.last_changed_month))
         self.discovered_by_faction_ids = sorted(set(self.discovered_by_faction_ids))
@@ -760,6 +854,8 @@ class RelicState:
             "location_city_id": self.location_city_id,
             "owner_faction_id": self.owner_faction_id,
             "altar_id": self.altar_id,
+            "effect_id": self.effect_id,
+            "effect_active": self.effect_active,
             "maintenance_ether_cost": self.maintenance_ether_cost,
             "discovered_by_faction_ids": list(self.discovered_by_faction_ids),
             "last_changed_month": self.last_changed_month,
@@ -784,6 +880,8 @@ class RelicState:
                 str(raw.get("owner_faction_id")) if raw.get("owner_faction_id") is not None else None
             ),
             altar_id=str(raw.get("altar_id")) if raw.get("altar_id") is not None else None,
+            effect_id=str(raw.get("effect_id") or ""),
+            effect_active=bool(raw.get("effect_active", False)),
             maintenance_ether_cost=int(raw.get("maintenance_ether_cost", 10)),
             discovered_by_faction_ids=_string_list(raw.get("discovered_by_faction_ids")),
             last_changed_month=int(raw.get("last_changed_month", 1)),
@@ -1615,6 +1713,7 @@ class WorldState:
         self.validate()
 
     def validate(self) -> None:
+        ensure_faction_theme_colors(self.factions)
         node_ids = {node.node_id for node in self.nodes}
         city_ids = {city.city_id for city in self.cities}
         faction_ids = {faction.faction_id for faction in self.factions}
@@ -1626,7 +1725,7 @@ class WorldState:
         order_ids = {order.order_id for order in self.office_orders}
         hero_codes = {hero.hero_code for hero in self.strategic_heroes}
         relic_ids = {relic.relic_id for relic in self.relics}
-        relic_hero_codes = {relic.hero_code for relic in self.relics}
+        relic_hero_codes = [relic.hero_code for relic in self.relics if relic.hero_code]
         altar_ids = {altar.altar_id for altar in self.relic_altars}
         recruitment_ids = {item.recruitment_id for item in self.hero_recruitments}
         agreement_ids = {item.agreement_id for item in self.diplomatic_agreements}
@@ -1654,8 +1753,10 @@ class WorldState:
             raise StrategyError("职位命令 ID 不能重复。")
         if len(hero_codes) != len(self.strategic_heroes):
             raise StrategyError("战略武将不能重复。")
-        if len(relic_ids) != len(self.relics) or len(relic_hero_codes) != len(self.relics):
-            raise StrategyError("圣物 ID 与对应英灵必须唯一。")
+        if len(relic_ids) != len(self.relics):
+            raise StrategyError("圣物 ID 不能重复。")
+        if len(relic_hero_codes) != len(set(relic_hero_codes)):
+            raise StrategyError("同一英灵不能对应多件圣物。")
         if len(altar_ids) != len(self.relic_altars):
             raise StrategyError("圣物祭坛 ID 不能重复。")
         player_controller_ids = [
@@ -1966,7 +2067,7 @@ class WorldState:
             ):
                 raise StrategyError(f"圣物祭坛 {altar.altar_id} 的胜利准备控制权不一致。")
         for relic in self.relics:
-            if relic.hero_code not in hero_codes:
+            if relic.hero_code and relic.hero_code not in hero_codes:
                 raise StrategyError(f"圣物 {relic.relic_id} 对应的英灵不存在。")
             if relic.state not in {"scattered", "stored", "bound_to_altar", "released"}:
                 raise StrategyError(f"圣物 {relic.relic_id} 状态无效。")
@@ -2103,8 +2204,8 @@ class WorldState:
                 raise StrategyError(f"世界危机 {crisis.crisis_id} 下一阶段月份无效。")
         if self.campaign_contract:
             month_limit = int(self.campaign_contract.get("month_limit", 0))
-            if month_limit <= 0:
-                raise StrategyError("限时战役必须设置正数月份上限。")
+            if month_limit < 0:
+                raise StrategyError("战役月份上限不能为负数。")
         if self.campaign_conclusion:
             conclusion_state = str(self.campaign_conclusion.get("state") or "")
             if conclusion_state not in {"settled", "sandbox", "archived"}:

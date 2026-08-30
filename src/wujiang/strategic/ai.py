@@ -38,6 +38,7 @@ from wujiang.strategic.story import choose_ai_story_choice, pending_story_event_
 from wujiang.strategic.tactics import TACTIC_TECH_TREE, set_city_policy, unlock_tactic_tech
 from wujiang.strategic.world_crisis import (
     SNOW_GHOST_CRISIS_ID,
+    _in_mobilization_window,
     resolve_world_crisis_choice,
     set_world_crisis_showdown_resolution,
     world_crisis_pair_key,
@@ -201,7 +202,7 @@ def _best_attack_against_cities(
     cities_by_id = {city.city_id: city for city in world.cities}
     candidates: list[tuple[int, int, str, str]] = []
     altar_progress = {
-        str(row["city_id"]): int(row.get("consecration", {}).get("progress", 0))
+        str(row["city_id"]): int(row.get("bound_count", 0))
         for row in relic_system_public(world).get("altars", [])
     }
     for source in _cities_for_faction(world, faction.faction_id):
@@ -238,7 +239,7 @@ def _relic_counter_attack(world: WorldState, faction: Faction) -> tuple[str, str
         str(row["city_id"])
         for row in relic_system_public(world).get("altars", [])
         if row.get("owner_faction_id") != faction.faction_id
-        and int(row.get("consecration", {}).get("progress", 0)) >= 1
+        and int(row.get("bound_count", 0)) >= 1
     }
     if not target_city_ids:
         return None
@@ -253,11 +254,15 @@ def _owned_relic_altar_city_id(world: WorldState, faction_id: str) -> str | None
     ]
     if not candidates:
         return None
+    capital_id = next(
+        (faction.capital_city_id for faction in world.factions if faction.faction_id == faction_id),
+        "",
+    )
     chosen = max(
         candidates,
         key=lambda row: (
-            int(row.get("consecration", {}).get("progress", 0)),
-            -int(row.get("bound_count", 0)),
+            int(row.get("capacity", 1)) - int(row.get("bound_count", 0)),
+            1 if str(row.get("city_id") or "") == str(capital_id or "") else 0,
             str(row.get("city_id") or ""),
         ),
     )
@@ -614,7 +619,7 @@ def _apply_world_crisis_ai_choice(
     if (
         crisis is None
         or crisis.stage != "mobilization"
-        or world.current_month not in {9, 10}
+        or not _in_mobilization_window(world, crisis)
         or any(
             int(item.get("month", 0)) == world.current_month
             and item.get("faction_id") == faction_id
@@ -674,7 +679,7 @@ def _apply_world_crisis_ai_choice(
             choice_id = "cooperate"
             target_faction_id = incoming[0].faction_id
             rationale = f"{rationale} 对方已公开承诺，响应可立即成立合作并获得双向奖励。"
-        elif priority == "survival" and world.current_month == 9 and other_majors and faction.resources.food >= 80 and faction.resources.money >= 40:
+        elif priority == "survival" and world.current_month == crisis.stage_started_month and other_majors and faction.resources.food >= 80 and faction.resources.money >= 40:
             choice_id = "cooperate"
             target_faction_id = other_majors[0].faction_id
             rationale = f"{rationale} 主动寻求合作比单独承担前线压力更安全。"
@@ -1082,6 +1087,7 @@ def apply_strategy_ai_monthly_actions(
             tech_id is not None
             and tech is not None
             and tech_office is not None
+            and not (faction.researching or {}).get("tech_id")
             and command_remaining - 1 >= attack_reserve
             and faction.resources.money - tech.money_cost >= peace_treasury_reserve
         ):

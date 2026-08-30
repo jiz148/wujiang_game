@@ -20,6 +20,7 @@ from wujiang.tactical.rooms.ai import (
 )
 from wujiang.tactical.rooms.replay import ReplayRecorder
 from wujiang.tactical.rooms.postgame import build_postgame_summary
+from wujiang.tactical.rooms.launch import is_campaign_launch, make_launch_context, public_launch_context
 from wujiang.tactical.rooms.tutorial import TUTORIAL_ID, next_tutorial_step_id, tutorial_step
 
 
@@ -606,6 +607,7 @@ class GameRoom:
         self.room_id = normalize_room_id(room_id)
         self.mode = normalize_room_mode(mode)
         self.experience_kind = "custom"
+        self.launch_context = make_launch_context("skirmish")
         self.tutorial_state: Optional[dict[str, Any]] = None
         self.tutorial_checkpoint: Optional[Battle] = None
         self.random_roster_size = DEFAULT_RANDOM_ROSTER_SIZE
@@ -650,6 +652,8 @@ class GameRoom:
             self.board_width = DEFAULT_BOARD_WIDTH
         if not hasattr(self, "board_height"):
             self.board_height = DEFAULT_BOARD_HEIGHT
+        if not hasattr(self, "launch_context"):
+            self.launch_context = make_launch_context("skirmish")
         self._lock = threading.RLock()
 
     def checkpoint_bytes(self) -> bytes:
@@ -1912,7 +1916,8 @@ class GameRoom:
                 "configuration_ready": self._configuration_blocker() is None,
                 "start_blocker": self._start_blocker(),
                 "human_ready_count": self.human_ready_count(),
-                "can_rematch": self.status == "finished",
+                "can_rematch": self.status == "finished" and public_launch_context(self).get("allow_rematch", True),
+                "launch_context": public_launch_context(self),
                 "postgame": build_postgame_summary(
                     self.battle,
                     self.replay,
@@ -2296,6 +2301,7 @@ class GameRoom:
                 "mode_name": mode_meta["name"],
                 "mode_description": mode_meta["description"],
                 "experience_kind": self.experience_kind,
+                "launch_context": public_launch_context(self),
                 "tutorial": self.tutorial_public_state(),
                 "available_modes": room_mode_list_payload(),
                 "version": self.version,
@@ -2325,7 +2331,11 @@ class GameRoom:
                 "configuration_ready": self._configuration_blocker() is None,
                 "start_blocker": self._start_blocker(),
                 "human_ready_count": self.human_ready_count(),
-                "can_rematch": self.status == "finished" and viewer_player_id == self.host_player_id,
+                "can_rematch": (
+                    self.status == "finished"
+                    and viewer_player_id == self.host_player_id
+                    and public_launch_context(self).get("allow_rematch", True)
+                ),
                 "seats": [seat.to_public_dict(heroes_by_code, self.host_player_id) for seat in self.seats.values()],
                 "turn_timer": self._turn_timer_public_state(),
                 "postgame": build_postgame_summary(
@@ -2414,6 +2424,10 @@ class RoomRegistry:
         ai_difficulty: str = DEFAULT_AI_DIFFICULTY,
         host_account_user_id: Optional[int] = None,
         room_id: Optional[str] = None,
+        board_width: Optional[int] = None,
+        board_height: Optional[int] = None,
+        experience_kind: str = "custom",
+        launch_context: Optional[dict[str, Any]] = None,
     ) -> tuple[GameRoom, int, str]:
         with self._lock:
             normalized_room_id = normalize_room_id(room_id) if room_id else self._generate_room_id()
@@ -2422,6 +2436,16 @@ class RoomRegistry:
             if normalized_room_id in self._rooms:
                 raise RoomError("预设战斗房间编号已被占用。")
             room = GameRoom(normalized_room_id, mode="classic", seat_count=2)
+            room.experience_kind = str(experience_kind or "custom")
+            if launch_context:
+                room.launch_context = make_launch_context(
+                    str(launch_context.get("source") or experience_kind or "skirmish"),
+                    **{key: value for key, value in launch_context.items() if key != "source"},
+                )
+            if board_width:
+                room.board_width = int(board_width)
+            if board_height:
+                room.board_height = int(board_height)
             player_id, token = room.create_host(host_name, account_user_id=host_account_user_id)
             room.set_seat_controller(token, 2, "ai")
             room.default_ai_difficulty = normalize_ai_difficulty(ai_difficulty)
@@ -2486,7 +2510,11 @@ class RoomRegistry:
         with self._lock:
             rooms = list(self._rooms.values())
         rooms.sort(key=lambda room: room.updated_at, reverse=True)
-        return [room.serialize_summary(base_url=base_url) for room in rooms]
+        return [
+            room.serialize_summary(base_url=base_url)
+            for room in rooms
+            if not is_campaign_launch(room)
+        ]
 
 
 ROOMS = RoomRegistry()
