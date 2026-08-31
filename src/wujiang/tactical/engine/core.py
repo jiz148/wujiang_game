@@ -196,6 +196,9 @@ class BattleComponent(ABC):
     def on_enter_battle(self, battle: "Battle") -> None:
         return None
 
+    def on_destroyed_hero_count_changed(self, battle: "Battle", count: int) -> None:
+        return None
+
     def on_removed(self, battle: "Battle") -> None:
         return None
 
@@ -499,6 +502,9 @@ class Skill(BattleComponent, ABC):
         payload: Optional[dict[str, Any]] = None,
     ) -> float:
         cost = float(self.mana_cost)
+        if self.is_reaction and battle.pending_chain is not None:
+            multiplier = float(battle.pending_chain.queued_action.payload.get("reaction_mana_multiplier", 1.0) or 1.0)
+            cost *= max(0.0, multiplier)
         for component in list(actor.iter_components()):
             if component is self:
                 continue
@@ -686,6 +692,15 @@ class Skill(BattleComponent, ABC):
         payload: dict[str, Any],
     ) -> bool:
         return False
+
+    def queued_payload_metadata(
+        self,
+        battle: "Battle",
+        actor: "Unit",
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Trusted metadata copied onto this skill's queued action."""
+        return {}
 
     def to_public_dict(self, battle: "Battle") -> dict[str, Any]:
         self.sync_turn_scope(battle)
@@ -1733,6 +1748,7 @@ class Battle:
         self.log(f"{unit.name} 进入战场。")
         for component in list(unit.iter_components()):
             component.on_enter_battle(self)
+            component.on_destroyed_hero_count_changed(self, self.destroyed_hero_count())
 
     def remove_unit(self, unit: Unit) -> None:
         for component in list(unit.iter_components()):
@@ -3749,6 +3765,7 @@ class Battle:
             ok, reason = skill.can_use(self, actor, payload)
             if not ok:
                 raise ActionError(reason)
+            queued_payload.update(skill.queued_payload_metadata(self, actor, payload))
             if actor.position is not None:
                 queued_payload["declared_source_x"] = actor.position.x
                 queued_payload["declared_source_y"] = actor.position.y
@@ -4467,8 +4484,22 @@ class Battle:
             if unit.unit_id not in {destroyed.unit_id for destroyed in self.destroyed_units}:
                 self.destroyed_units.append(unit)
             self.remove_unit(unit)
+        self.notify_destroyed_hero_count_changed()
         self.clear_all_stealth_if_all_heroes_stealthed()
         self.check_win_condition()
+
+    def destroyed_hero_count(self) -> int:
+        return sum(
+            1
+            for unit in self.destroyed_units
+            if not unit.is_summon and not unit.is_clone
+        )
+
+    def notify_destroyed_hero_count_changed(self) -> None:
+        count = self.destroyed_hero_count()
+        for unit in self.all_units():
+            for component in list(unit.iter_components()):
+                component.on_destroyed_hero_count_changed(self, count)
 
     def banish_unit(self, unit: Unit, turns: int) -> None:
         unit.banished = True
@@ -4512,6 +4543,26 @@ class Battle:
             self.log(f"玩家 {self.winner} 获胜。")
 
     def perform_action(self, payload: dict[str, Any]) -> None:
+        self._perform_action(payload)
+        self.finish_destroyed_active_turn_if_idle()
+
+    def finish_destroyed_active_turn_if_idle(self) -> None:
+        if (
+            self.winner is not None
+            or self.pending_chain is not None
+            or self.pending_followup_actions
+            or self.pending_respawn_unit_ids
+        ):
+            return
+        active_unit_id = self.current_turn_slot_unit_id()
+        if active_unit_id is None:
+            return
+        active_unit = self.units.get(active_unit_id)
+        if active_unit is not None and active_unit.alive:
+            return
+        self.resolve_turn_end(auto_started=True)
+
+    def _perform_action(self, payload: dict[str, Any]) -> None:
         if self.winner is not None:
             raise ActionError("对局已结束，请返回选将页面开始新的对局。")
         action_type = payload.get("type")
@@ -4601,6 +4652,10 @@ class Battle:
                         self.pending_chain.pending_reactor_ids.pop(0)
                         self.advance_reaction_window()
                         return
+                    if chosen.action_code == "evasion" and self.pending_chain.queued_action.action_type == "attack":
+                        evaded = self.pending_chain.queued_action.payload.setdefault("evaded_unit_ids", [])
+                        if reactor.unit_id not in evaded:
+                            evaded.append(reactor.unit_id)
                 queued = QueuedAction(
                     action_type="reaction_skill" if chosen.action_type == "skill" else "reaction_action",
                     actor_id=current_unit_id,

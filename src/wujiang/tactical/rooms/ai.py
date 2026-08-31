@@ -56,6 +56,9 @@ SELF_BUFF_SKILL_CODES = {
     "pandemonium",
     "sky_sanctuary",
     "wetland_grassland",
+    "messenger_reincarnation",
+    "messenger_creation",
+    "beetle_full_force",
 }
 MOVE_SKILL_CODES = {"fly_leap", "fate_kick", "crazy_sand", "plasma_thruster", "mounted_leap", "jirobo_follow_step"}
 MOVE_SKILL_CODES |= {"zero_dash", "fuma_pursuit", "true_blade_air_slash"}
@@ -100,6 +103,11 @@ DAMAGING_SKILL_CODES = {
     "hell_slash",
     "vitality_blast",
     "sun_slash",
+    "thor_heavy_hammer",
+    "thor_rage_impact",
+    "thor_destroy_lightning",
+    "beetle_spear",
+    "electronic_laser",
 }
 CONTROL_SKILL_CODES = {
     "curse",
@@ -132,6 +140,8 @@ CONTROL_SKILL_CODES = {
     "noise_wave",
     "purify_mana",
     "fantasy_move",
+    "thor_destroy_lightning",
+    "eagle_eye",
 }
 REACTION_SHIELD_CODES = {
     "magic_wall",
@@ -1478,6 +1488,9 @@ def score_reaction_payload(
         if expected >= attacker.current_hp - 1e-9:
             score += 80.0
         return score
+    if code == "beetle_armor_deploy":
+        missing_hp = max(0.0, reactor.max_health - reactor.current_hp)
+        return threat + min(0.25, missing_hp) * 100.0 + 34.0
     if code == "evasion":
         destination = payload_destination(payload)
         if destination is None:
@@ -1585,6 +1598,16 @@ def skill_control_bonus(
         return len(enemies) * 24.0
     if code == "morning_holy_light":
         return len(enemies) * 30.0 + sum(40.0 for unit in enemies if unit.attribute == "暗")
+    if code == "eagle_eye":
+        return sum(
+            42.0
+            + (0 if unit.cannot_attack else 24.0)
+            + sum(1 for skill in unit.skills if skill.timing == "active") * 12.0
+            for unit in enemies
+            if not unit.has_status("鹰眼")
+        )
+    if code == "thor_destroy_lightning":
+        return sum(54.0 for unit in enemies if unit.attribute != "雷" and not unit.has_status("毁灭电击"))
     if code in {"drain_mana", "large_drain_mana"}:
         return sum(min(unit.current_mana, 1.0) * 45.0 for unit in enemies)
     if code == "mana_pull":
@@ -2146,6 +2169,17 @@ def migratory_bird_mark_score(
 
 def self_buff_score(battle: Battle, actor: Unit, code: str, profile: DifficultyProfile) -> float:
     enemies = [unit for unit in battle.enemy_units(actor.player_id) if unit.alive and unit.position is not None and not unit.banished]
+    if code == "messenger_reincarnation":
+        missing_mana = max(0.0, actor.max_mana() - actor.current_mana)
+        if actor.current_mana > 1e-9 or actor.mana_points < 2 or missing_mana <= 0:
+            return -10.0
+        return 180.0 + missing_mana * 34.0
+    if code == "messenger_creation":
+        return 48.0
+    if code == "beetle_full_force":
+        if actor.has_status("全力攻击"):
+            return -8.0
+        return 1000.0 + len(enemies) * 18.0 if enemies else -8.0
     if code == "mountain_awakening":
         counters = sum(1 for status in actor.statuses if status.name == "山神计数点")
         return 1000.0 if counters >= 8 else -8.0
@@ -2667,7 +2701,7 @@ def hostile_skill_effect_target_has_impact(
         return payload.get("x") is not None and payload.get("y") is not None
     if code == "vain_giant_shadow":
         return not target.cannot_attack and not target.has_status("虚荣巨影")
-    if code in {"electric_wind", "snow_avalanche", "sacred_duel", "heaven_lock", "gale"}:
+    if code in {"electric_wind", "snow_avalanche", "sacred_duel", "heaven_lock", "gale", "eagle_eye", "thor_destroy_lightning"}:
         return True
     if code in {"drain_mana", "large_drain_mana"} and target.current_mana <= 0 and target.total_shields() <= 0:
         return False

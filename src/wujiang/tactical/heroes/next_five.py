@@ -413,6 +413,20 @@ class RemoteAreaDamageSkill(Skill):
         return True
 
 
+def complete_burn_status_factory() -> StatusEffect:
+    return BurningManaStatus(triggers=5)
+
+
+def blizzard_status_factory() -> StatusEffect:
+    return FlagStatus(
+        "暴风雪",
+        "cannot_normal_move",
+        description="不能进行普通移动。",
+        duration=3,
+        tick_scope="owner_turn_end",
+    )
+
+
 class CompleteBurnSkill(RemoteAreaDamageSkill):
     def __init__(self) -> None:
         super().__init__(
@@ -421,7 +435,7 @@ class CompleteBurnSkill(RemoteAreaDamageSkill):
             "普通技能：每回合最多 1 次，远程选择完整 4*4 区域；按当前攻造成伤害，附加每个己方回合开始时魔 -1（附加效果破魔，5轮，不叠加）。",
             width=4,
             height=4,
-            status_factory=lambda: BurningManaStatus(triggers=5),
+            status_factory=complete_burn_status_factory,
         )
 
 
@@ -433,13 +447,7 @@ class BlizzardSkill(RemoteAreaDamageSkill):
             "普通技能：每回合最多 1 次，远程选择完整 3*3 区域；按当前攻造成伤害，附加 3轮不能普通移动（附加效果破魔，不叠加）。",
             width=3,
             height=3,
-            status_factory=lambda: FlagStatus(
-                "暴风雪",
-                "cannot_normal_move",
-                description="不能进行普通移动。",
-                duration=3,
-                tick_scope="owner_turn_end",
-            ),
+            status_factory=blizzard_status_factory,
         )
 
 
@@ -3631,6 +3639,7 @@ class SacrificeRitualSkill(ManaPointCostSkill):
         target.clear_end_of_turn_shields()
         battle.add_unit(target, destination)
         battle.destroyed_units = [unit for unit in battle.destroyed_units if unit.unit_id != target.unit_id]
+        battle.notify_destroyed_hero_count_changed()
         battle.log(f"{actor.name} 通过献祭仪式召回了 {target.name}。")
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:

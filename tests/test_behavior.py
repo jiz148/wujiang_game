@@ -145,6 +145,23 @@ def end_turns(battle, count: int) -> None:
 
 
 class AIDecisionBehaviorTests(unittest.TestCase):
+    def test_ai_refills_unnamed_messenger_when_mana_is_empty(self) -> None:
+        # Given an empty-Mana Messenger has enough magic points and no immediate target
+        battle = create_battle("excel_r138", "bard")
+        messenger = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        while battle.current_turn_unit() is not messenger:
+            battle.perform_action({"type": "end_turn"})
+        messenger.position = Position(0, 0)
+        bard.position = Position(7, 7)
+        messenger.current_mana = 0
+        messenger.mana_points = 2
+
+        # Then AI values the refill above movement or ending the turn
+        action = choose_turn_action(battle, messenger, "standard")
+        self.assertEqual(action["type"], "skill")
+        self.assertEqual(action["skill_code"], "messenger_reincarnation")
+
     def test_ai_skips_damage_only_actions_that_cannot_affect_ellie_after_using_skill(self) -> None:
         # Given FireFuneral has already used an active skill this turn
         battle = create_battle("fire_funeral", "ellie")
@@ -1287,6 +1304,57 @@ class AIDecisionBehaviorTests(unittest.TestCase):
         # Then movement toward a 大火葬 line is a valid high-value plan
         self.assertEqual(payload.get("type"), "move")
         self.assertTrue(payload.get("x") == bard.position.x or payload.get("y") == bard.position.y)
+
+    def test_h1_1_ai_opens_beetle_full_force_before_other_actions(self) -> None:
+        battle = create_battle("excel_r172", "bard")
+        beetle = primary_hero(battle, 1)
+        target = primary_hero(battle, 2)
+        beetle.position = Position(1, 1)
+        target.position = Position(4, 1)
+
+        payload = choose_turn_action(battle, beetle, "standard")
+
+        self.assertEqual(payload.get("type"), "skill")
+        self.assertEqual(payload.get("skill_code"), "beetle_full_force")
+
+    def test_h1_1_ai_generates_and_values_new_line_and_area_skills(self) -> None:
+        profile = difficulty_profile("standard")
+        cases = [
+            ("excel_r143", "thor_heavy_hammer", Position(2, 1)),
+            ("excel_r172", "beetle_spear", Position(3, 1)),
+            ("excel_r224", "electronic_laser", Position(4, 1)),
+            ("excel_r264", "eagle_eye", Position(3, 1)),
+        ]
+        for hero_code, skill_code, target_position in cases:
+            with self.subTest(hero_code=hero_code, skill_code=skill_code):
+                battle = create_battle(hero_code, "fire_funeral")
+                actor = primary_hero(battle, 1)
+                target = primary_hero(battle, 2)
+                actor.position = Position(1, 1)
+                target.position = target_position
+                action = next(action for action in battle.action_snapshot_for(actor)["actions"] if action["code"] == skill_code)
+
+                candidates = build_skill_candidates(battle, actor, action, profile, instant_only=False)
+
+                self.assertTrue(candidates)
+                self.assertGreater(max(candidate.score for candidate in candidates), profile.action_threshold)
+
+    def test_h1_1_ai_uses_beetle_armor_deployment_reaction(self) -> None:
+        battle = create_battle("bard", "excel_r172")
+        attacker = primary_hero(battle, 1)
+        beetle = primary_hero(battle, 2)
+        attacker.position = Position(1, 1)
+        beetle.position = Position(2, 1)
+        beetle.current_hp = 0.5
+        battle.perform_action({"type": "attack", "unit_id": attacker.unit_id, "target_unit_id": beetle.unit_id})
+        while battle.pending_chain is not None and battle.pending_chain.current_unit_id() != beetle.unit_id:
+            battle.perform_action({"type": "chain_skip"})
+        options = battle.reaction_snapshot_for(beetle)["actions"]
+
+        payload = choose_chain_reaction(battle, beetle, options, "standard")
+
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload.get("action_code"), "beetle_armor_deploy")
 
     def test_soul_wraith_growth_is_visible_in_public_state(self) -> None:
         # Given Bard blocks Soul Wraith's arc attack with a passive skill
@@ -6924,6 +6992,132 @@ class RoomBehaviorTests(unittest.TestCase):
 
 
 class CombatBehaviorTests(unittest.TestCase):
+    def test_scenario_unnamed_messenger_can_build_points_and_refill_from_the_player_action_list(self) -> None:
+        # Given the Messenger is the current acting hero with empty mana
+        battle = create_battle("excel_r138", "bard")
+        messenger = primary_hero(battle, 1)
+        while battle.current_turn_unit() is not messenger:
+            battle.perform_action({"type": "end_turn"})
+        messenger.current_mana = 0
+        messenger.mana_points = 2
+
+        # Then both resource skills are exposed as ordinary self-targeted actions
+        actions = {action["code"]: action for action in battle.action_snapshot_for(messenger)["actions"]}
+        self.assertIn("messenger_creation", actions)
+        self.assertIn("messenger_reincarnation", actions)
+        self.assertEqual(actions["messenger_reincarnation"]["target_mode"], "self")
+
+        # When the player uses Reincarnation through the normal action flow
+        battle.perform_action(
+            {"type": "skill", "unit_id": messenger.unit_id, "skill_code": "messenger_reincarnation"}
+        )
+        resolve_pending_chain(battle)
+
+        # Then mana is full, points were paid, and Creation remains available this turn
+        self.assertEqual(messenger.current_mana, messenger.max_mana())
+        self.assertEqual(messenger.mana_points, 0)
+        actions = {action["code"]: action for action in battle.action_snapshot_for(messenger)["actions"]}
+        self.assertIn("messenger_creation", actions)
+
+    def test_scenario_red_lotus_attack_preview_and_resolution_ignore_shield_and_dodge(self) -> None:
+        # Given Red Lotus is ready to attack a shielded, dodging enemy
+        battle = create_battle("excel_r327", "bard")
+        red_lotus = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        while battle.current_turn_unit() is not red_lotus:
+            battle.perform_action({"type": "end_turn"})
+        red_lotus.position = Position(3, 3)
+        bard.position = Position(4, 3)
+        bard.shields = 1
+        bard.dodge_charges = 1
+
+        # Then the player-facing queued action announces both defensive exceptions
+        queued = battle.build_queued_action(
+            {"type": "attack", "unit_id": red_lotus.unit_id, "target_unit_id": bard.unit_id}
+        )
+        self.assertTrue(queued.payload["ignore_shield"])
+        self.assertTrue(queued.payload["cannot_evade"])
+
+        # When the player submits the ordinary attack
+        battle.perform_action(
+            {"type": "attack", "unit_id": red_lotus.unit_id, "target_unit_id": bard.unit_id}
+        )
+        resolve_pending_chain(battle)
+
+        # Then the shield breaks, damage lands, and the dodge charge is preserved
+        self.assertEqual(bard.shields, 0)
+        self.assertEqual(bard.dodge_charges, 1)
+        self.assertLess(bard.current_hp, 1)
+
+    def test_scenario_h1_1_blind_swordsman_player_sees_area_attack_and_mana_movement(self) -> None:
+        battle = create_battle("excel_r120", "fire_funeral")
+        blind = primary_hero(battle, 1)
+        enemy = primary_hero(battle, 2)
+        blind.position = Position(2, 2)
+        enemy.position = Position(3, 2)
+        blind.current_mana = 2
+
+        snapshot = battle.action_snapshot_for(blind)
+        move = next(action for action in snapshot["actions"] if action["kind"] == "move")
+        attack = next(action for action in snapshot["actions"] if action["kind"] == "attack")
+        self.assertEqual(move["preview"]["selection"]["max_steps"], 2)
+        self.assertEqual(attack["preview"]["selection"]["mode"], "pattern_cells")
+        self.assertIn(enemy.unit_id, attack["preview"]["target_unit_ids"])
+
+        battle.perform_action({"type": "move", "unit_id": blind.unit_id, "x": 2, "y": 3})
+        self.assertEqual(blind.current_mana, 1)
+
+    def test_scenario_h1_1_thor_and_beetle_player_previews_show_complete_core_kits(self) -> None:
+        thor_battle = create_battle("excel_r143", "fire_funeral")
+        thor = primary_hero(thor_battle, 1)
+        thor.position = Position(1, 1)
+        primary_hero(thor_battle, 2).position = Position(3, 1)
+        thor_actions = {action["code"]: action for action in thor_battle.action_snapshot_for(thor)["actions"]}
+        self.assertEqual(
+            {"thor_heavy_hammer", "thor_rage_impact", "thor_destroy_lightning"} - set(thor_actions),
+            set(),
+        )
+        self.assertTrue(all(thor_actions[code]["preview"]["selection"]["mode"] == "pattern_cells" for code in {"thor_heavy_hammer", "thor_rage_impact", "thor_destroy_lightning"}))
+
+        beetle_battle = create_battle("excel_r172", "fire_funeral")
+        beetle = primary_hero(beetle_battle, 1)
+        beetle.position = Position(1, 1)
+        primary_hero(beetle_battle, 2).position = Position(3, 1)
+        beetle_actions = {action["code"]: action for action in beetle_battle.action_snapshot_for(beetle)["actions"]}
+        self.assertIn("beetle_spear", beetle_actions)
+        self.assertIn("beetle_full_force", beetle_actions)
+        self.assertEqual(beetle_actions["beetle_full_force"]["target_mode"], "self")
+
+    def test_scenario_h1_1_electronic_dragons_expose_skills_aliases_and_dynamic_aura(self) -> None:
+        battle = create_battle(["excel_r224", "excel_r225"], "fire_funeral")
+        laser = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r224")
+        barrier = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r225")
+        laser.position = Position(1, 1)
+        barrier.position = Position(2, 1)
+        actions = {action["code"]: action for action in battle.action_snapshot_for(laser)["actions"]}
+
+        self.assertIn("electronic_laser", actions)
+        self.assertEqual(actions["electronic_laser"]["preview"]["selection"]["mode"], "pattern_cells")
+        public = {unit["id"]: unit for unit in battle.to_public_dict()["units"]}
+        self.assertTrue(any(trait["name"] == "名字视为电子龙" for trait in public[laser.unit_id]["traits"]))
+        self.assertTrue(any(trait["name"] == "电子屏障光环" for trait in public[barrier.unit_id]["traits"]))
+        self.assertTrue(any(effect["name"] == "电子屏障光环" for effect in battle.to_public_dict()["field_effects"]))
+
+    def test_scenario_h1_1_winged_leopard_eagle_eye_preview_and_status_are_public(self) -> None:
+        battle = create_battle("excel_r264", "fire_funeral")
+        leopard = primary_hero(battle, 1)
+        enemy = primary_hero(battle, 2)
+        leopard.position = Position(1, 1)
+        enemy.position = Position(3, 1)
+        action = next(action for action in battle.action_snapshot_for(leopard)["actions"] if action["code"] == "eagle_eye")
+        pattern = next(pattern for pattern in action["preview"]["selection"]["patterns"] if enemy.position.to_dict() in pattern)
+
+        battle.perform_action({"type": "skill", "unit_id": leopard.unit_id, "skill_code": "eagle_eye", "cells": pattern})
+        resolve_pending_chain(battle)
+
+        public_enemy = next(unit for unit in battle.to_public_dict()["units"] if unit["id"] == enemy.unit_id)
+        self.assertTrue(any(status["name"] == "鹰眼" and status["duration"] == 3 for status in public_enemy["statuses"]))
+
     def test_scenario_classic_multihero_turn_order_stays_fixed_and_skips_destroyed_slots(self) -> None:
         # Given a classic multi-hero battle with both rosters sorted once at battle start
         battle = create_battle(
