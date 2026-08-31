@@ -16,7 +16,7 @@ from wujiang.tactical.heroes.first_five import GreatFireFuneralField, MedusaSumm
 from wujiang.tactical.heroes.common import SlowStatus  # noqa: E402
 from wujiang.tactical.heroes.next_five import BloodDanceLockStatus, ErasureCounterStatus, RockAbsorbFootprintStatus, SandstormWeatherEffect, StandardCloneSummon  # noqa: E402
 from wujiang.tactical.heroes.excel_roster import EXCEL_HERO_REGISTRY, MountainGodCounterStatus  # noqa: E402
-from wujiang.tactical.heroes.registry import HERO_REGISTRY, RANDOM_HERO_BATTLE_MODE, create_battle, create_classic_battle, create_hero, list_heroes  # noqa: E402
+from wujiang.tactical.heroes.registry import HERO_REGISTRY, RANDOM_HERO_BATTLE_MODE, RoomBattleEntry, create_battle, create_classic_battle, create_hero, create_room_battle, list_heroes  # noqa: E402
 from wujiang.tactical.rooms.ai import attack_payloads_for_action, build_attack_candidates, difficulty_profile, reaction_payloads_for_option, skill_payloads_for_action  # noqa: E402
 
 
@@ -38,6 +38,34 @@ def resolve_pending_chain(battle) -> None:
 
 
 class BattleSmokeTests(unittest.TestCase):
+    def test_room_spawn_reserves_aaron_starting_mount_footprint(self) -> None:
+        player1_entries = [
+            RoomBattleEntry("strategy_garrison", 1, 1),
+            *[RoomBattleEntry("strategy_infantry", 1, 1) for _ in range(5)],
+        ]
+        player2_entries = [
+            RoomBattleEntry("excel_r032", 2, 2),
+            RoomBattleEntry("strategy_archer", 2, 2),
+            *[RoomBattleEntry("strategy_infantry", 2, 2) for _ in range(6)],
+        ]
+
+        battle = create_room_battle(
+            player1_entries,
+            player2_entries,
+            board_width=10,
+            board_height=10,
+        )
+
+        aaron = next(unit for unit in battle.player_units(2) if unit.hero_code == "excel_r032")
+        unicorn = summon_by_code(battle, 2, "great_unicorn")
+        occupied_by_other_allies = {
+            (cell.x, cell.y)
+            for unit in battle.player_units(2)
+            if unit.unit_id not in {aaron.unit_id, unicorn.unit_id}
+            for cell in battle.unit_cells(unit)
+        }
+        self.assertTrue({(cell.x, cell.y) for cell in battle.unit_cells(unicorn)}.isdisjoint(occupied_by_other_allies))
+
     def test_excel_roster_registers_every_generated_hero(self) -> None:
         self.assertEqual(len(EXCEL_HERO_REGISTRY), 370)
         strategy_codes = {code for code in HERO_REGISTRY if code.startswith("strategy_")}
@@ -45,7 +73,7 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertIn("strategy_snow_ghost", strategy_codes)
         self.assertEqual(len(HERO_REGISTRY), 396)
         public_heroes = list_heroes()
-        self.assertEqual(len(public_heroes), 59)
+        self.assertEqual(len(public_heroes), 67)
         public_codes = {str(hero["code"]) for hero in public_heroes}
         self.assertIn("excel_r030", public_codes)
         self.assertIn("excel_r031", public_codes)
@@ -54,6 +82,10 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertIn("excel_r034", public_codes)
         self.assertIn("excel_r035", public_codes)
         self.assertIn("excel_r037", public_codes)
+        self.assertIn("excel_r138", public_codes)
+        self.assertIn("excel_r327", public_codes)
+        for code in {"excel_r120", "excel_r143", "excel_r172", "excel_r224", "excel_r225", "excel_r264"}:
+            self.assertIn(code, public_codes)
         self.assertNotIn("excel_r038", public_codes)
         self.assertTrue(strategy_codes.isdisjoint(public_codes))
 
@@ -82,6 +114,285 @@ class BattleSmokeTests(unittest.TestCase):
         panther = create_hero("excel_r022", 1)
         self.assertIn("mimic_skill", panther.skill_map())
         self.assertIn("D。魔力点", [trait.name for trait in panther.traits])
+
+    def test_unnamed_messenger_completes_magic_point_cycle_and_pierces_with_skill_damage(self) -> None:
+        battle = create_battle("excel_r138", "bard")
+        messenger = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+
+        self.assertEqual(messenger.mana_points, 5)
+        self.assertEqual(
+            set(messenger.skill_map()),
+            {
+                "fly_leap",
+                "protection",
+                "dragon_breath",
+                "shensu",
+                "pierce",
+                "harden",
+                "messenger_reincarnation",
+                "messenger_creation",
+            },
+        )
+
+        creation = messenger.get_skill("messenger_creation")
+        creation.execute(battle, messenger, {})
+        self.assertEqual(messenger.mana_points, 6)
+
+        reincarnation = messenger.get_skill("messenger_reincarnation")
+        messenger.current_mana = 0
+        messenger.mana_points = 1
+        self.assertFalse(reincarnation.can_use(battle, messenger, {})[0])
+        messenger.mana_points = 2
+        self.assertTrue(reincarnation.can_use(battle, messenger, {})[0])
+        reincarnation.execute(battle, messenger, {})
+        self.assertEqual(messenger.current_mana, messenger.max_mana())
+        self.assertEqual(messenger.mana_points, 0)
+
+        messenger.notify_action_declared(battle, "skill", {"skill_code": "pierce"})
+        self.assertEqual(messenger.mana_points, 1)
+        messenger.notify_action_declared(battle, "skill", {"skill_code": "shensu"})
+        self.assertEqual(messenger.mana_points, 1)
+
+        bard.shields = 1
+        bard.current_hp = 1
+        ctx = battle.resolve_damage(
+            DamageContext(
+                source=messenger,
+                target=bard,
+                attack_power=messenger.stat("attack"),
+                is_skill=True,
+                action_name="龙息",
+                raw_damage=0.25,
+            )
+        )
+        self.assertFalse(ctx.cancelled)
+        self.assertTrue(ctx.ignore_shield)
+        self.assertEqual(bard.shields, 0)
+        self.assertAlmostEqual(bard.current_hp, 0.75)
+
+    def test_red_lotus_dynamically_grows_and_enforces_all_damage_defenses(self) -> None:
+        battle = create_battle(["excel_r327", "bard"], ["bard", "bard"])
+        red_lotus = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r327")
+        ally = next(unit for unit in battle.hero_units(1) if unit.hero_code == "bard")
+        enemies = [unit for unit in battle.hero_units(2) if unit.hero_code == "bard"]
+
+        self.assertIn("普攻破魔", [trait.name for trait in red_lotus.traits])
+        self.assertEqual(red_lotus.stat("attack"), 3)
+        self.assertEqual(red_lotus.stat("defense"), 3)
+
+        immune = battle.resolve_damage(
+            DamageContext(
+                source=enemies[0],
+                target=red_lotus,
+                attack_power=9,
+                is_skill=True,
+                action_name="测试技能",
+                raw_damage=0.25,
+            )
+        )
+        self.assertTrue(immune.cancelled)
+        self.assertTrue(immune.preserve_followup_effects)
+        self.assertAlmostEqual(red_lotus.current_hp, 1)
+
+        first = battle.resolve_damage(
+            DamageContext(source=enemies[0], target=red_lotus, attack_power=3, is_skill=False, action_name="第一击", raw_damage=0.25)
+        )
+        second = battle.resolve_damage(
+            DamageContext(source=enemies[0], target=red_lotus, attack_power=3, is_skill=False, action_name="第二击", raw_damage=0.25)
+        )
+        self.assertFalse(first.cancelled)
+        self.assertTrue(second.cancelled)
+        self.assertAlmostEqual(red_lotus.current_hp, 0.75)
+
+        battle.turn_number += 1
+        third = battle.resolve_damage(
+            DamageContext(source=enemies[0], target=red_lotus, attack_power=3, is_skill=False, action_name="下一回合", raw_damage=0.25)
+        )
+        self.assertFalse(third.cancelled)
+        self.assertAlmostEqual(red_lotus.current_hp, 0.5)
+
+        enemies[0].shields = 1
+        enemies[0].dodge_charges = 1
+        enemies[0].current_hp = 1
+        attack = battle.resolve_attack_damage(red_lotus, enemies[0], action_name="普攻")
+        self.assertIsNotNone(attack)
+        self.assertFalse(attack.cancelled)
+        self.assertTrue(attack.ignore_shield)
+        self.assertTrue(attack.cannot_evade)
+        self.assertEqual(enemies[0].shields, 0)
+        self.assertEqual(enemies[0].dodge_charges, 1)
+        self.assertLess(enemies[0].current_hp, 1)
+
+        battle.resolve_damage(
+            DamageContext(source=ally, target=enemies[1], attack_power=9, is_skill=False, action_name="击破", raw_damage=1)
+        )
+        self.assertEqual(red_lotus.stat("attack"), 4)
+        self.assertEqual(red_lotus.stat("defense"), 4)
+
+    def test_blind_swordsman_spends_mana_per_move_and_resets_evaded_attack(self) -> None:
+        battle = create_battle("excel_r120", "dark_human")
+        blind = primary_hero(battle, 1)
+        dark = primary_hero(battle, 2)
+        blind.position = Position(1, 1)
+        dark.position = Position(2, 1)
+        blind.current_mana = 3
+
+        battle.perform_action({"type": "move", "unit_id": blind.unit_id, "x": 1, "y": 3})
+        self.assertEqual(blind.current_mana, 1)
+        self.assertEqual(blind.remaining_normal_move_distance(battle), 1)
+        battle.perform_action({"type": "move", "unit_id": blind.unit_id, "x": 2, "y": 3})
+        self.assertEqual(blind.current_mana, 0)
+
+        blind.position = Position(1, 1)
+        dark.position = Position(2, 1)
+        battle.perform_action({"type": "attack", "unit_id": blind.unit_id})
+        self.assertIsNotNone(battle.pending_chain)
+        while battle.pending_chain is not None and battle.pending_chain.current_unit_id() != dark.unit_id:
+            battle.perform_action({"type": "chain_skip"})
+        battle.perform_action({"type": "chain_react", "unit_id": dark.unit_id, "action_code": "evasion", "x": 3, "y": 1})
+        resolve_pending_chain(battle)
+
+        self.assertEqual(blind.attacks_used, 0)
+        self.assertEqual(dark.current_hp, 1)
+
+    def test_thor_line_skills_apply_reaction_cost_movement_and_control(self) -> None:
+        battle = create_battle("excel_r143", "bard")
+        thor = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        thor.position = Position(1, 1)
+        bard.position = Position(2, 1)
+
+        battle.perform_action(
+            {"type": "skill", "unit_id": thor.unit_id, "skill_code": "thor_heavy_hammer", "cells": [{"x": 2, "y": 1}]}
+        )
+        self.assertIsNotNone(battle.pending_chain)
+        while battle.pending_chain is not None and battle.pending_chain.current_unit_id() != bard.unit_id:
+            battle.perform_action({"type": "chain_skip"})
+        mana_before = bard.current_mana
+        battle.perform_action({"type": "chain_react", "unit_id": bard.unit_id, "action_code": "protection"})
+        resolve_pending_chain(battle)
+        self.assertEqual(bard.current_mana, mana_before - 2)
+
+        bard.position = Position(5, 1)
+        bard.max_health = 5
+        bard.current_hp = 5
+        thor.get_skill("thor_rage_impact").execute(
+            battle,
+            thor,
+            {"cells": [{"x": x, "y": 1} for x in range(2, 6)]},
+        )
+        self.assertEqual(thor.position, Position(6, 1))
+
+        thor.position = Position(1, 2)
+        bard.position = Position(3, 2)
+        bard.shields = 0
+        bard.max_health = 5
+        bard.current_hp = 5
+        thor.get_skill("thor_destroy_lightning").execute(
+            battle,
+            thor,
+            {"cells": [{"x": x, "y": 2} for x in range(2, 7)]},
+        )
+        self.assertTrue(bard.has_status("毁灭电击"))
+        self.assertTrue(bard.cannot_move)
+        self.assertTrue(bard.cannot_attack)
+
+    def test_beetle_knight_toggle_and_armor_deployment_reaction(self) -> None:
+        battle = create_battle("excel_r172", "bard")
+        beetle = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        beetle.position = Position(1, 1)
+        bard.position = Position(2, 1)
+
+        battle.perform_action({"type": "skill", "unit_id": beetle.unit_id, "skill_code": "beetle_full_force"})
+        self.assertEqual(beetle.stat("attack"), 5)
+        self.assertEqual(beetle.stat("speed"), 5)
+        self.assertEqual(beetle.stat("defense"), 2)
+
+        battle = create_battle("bard", "excel_r172")
+        bard = primary_hero(battle, 1)
+        beetle = primary_hero(battle, 2)
+        bard.position = Position(1, 1)
+        beetle.position = Position(2, 1)
+        beetle.current_hp = 0.5
+        base_defense = beetle.stat("defense")
+        battle.perform_action({"type": "attack", "unit_id": bard.unit_id, "target_unit_id": beetle.unit_id})
+        while battle.pending_chain is not None and battle.pending_chain.current_unit_id() != beetle.unit_id:
+            battle.perform_action({"type": "chain_skip"})
+        battle.perform_action({"type": "chain_react", "unit_id": beetle.unit_id, "action_code": "beetle_armor_deploy"})
+        resolve_pending_chain(battle)
+
+        self.assertGreater(beetle.current_hp, 0.5)
+        self.assertLess(beetle.current_hp, 0.75)
+        self.assertEqual(beetle.stat("defense"), base_defense + 3)
+        self.assertTrue(beetle.cannot_move)
+        self.assertTrue(beetle.cannot_use_skills)
+
+    def test_electronic_dragons_apply_alias_damage_bonus_and_nonstacking_aura(self) -> None:
+        battle = create_battle(["excel_r224", "excel_r225"], ["bard", "bard"])
+        laser = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r224")
+        barrier = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r225")
+        enemy = battle.hero_units(2)[0]
+        laser.position = Position(1, 1)
+        barrier.position = Position(2, 1)
+        enemy.position = Position(4, 1)
+        enemy.base_stats.defense = 3
+        enemy.max_health = 5
+        enemy.current_hp = 5
+
+        self.assertIn("电子龙", laser.rule_name_aliases)
+        self.assertIn("电子龙", barrier.rule_name_aliases)
+        bonus = battle.resolve_damage(
+            DamageContext(source=laser, target=enemy, attack_power=0, raw_damage=0.25, is_skill=True, action_name="测试伤害")
+        )
+        self.assertEqual(bonus.raw_damage, 1.25)
+
+        barrier.max_health = 5
+        barrier.current_hp = 5
+        reduced = battle.resolve_damage(
+            DamageContext(source=enemy, target=barrier, attack_power=0, raw_damage=3, is_skill=True, action_name="测试伤害")
+        )
+        self.assertEqual(reduced.raw_damage, 0)
+        self.assertEqual(barrier.current_hp, 5)
+
+        second_barrier = create_hero("excel_r225", 1)
+        battle.add_unit(second_barrier, Position(2, 2))
+        laser.current_hp = 5
+        laser.max_health = 5
+        aura = battle.resolve_damage(
+            DamageContext(source=enemy, target=laser, attack_power=0, raw_damage=3, is_skill=False, action_name="测试普攻", tags={"attack"})
+        )
+        self.assertEqual(aura.raw_damage, 1)
+
+    def test_winged_leopard_eagle_eye_is_free_first_and_leap_resets_move(self) -> None:
+        battle = create_battle("excel_r264", "fire_funeral")
+        leopard = primary_hero(battle, 1)
+        enemy = primary_hero(battle, 2)
+        leopard.position = Position(1, 1)
+        enemy.position = Position(3, 1)
+        eagle_eye = leopard.get_skill("eagle_eye")
+        pattern = next(
+            cells for cells in eagle_eye.patterns(battle, leopard)
+            if enemy.position in cells and leopard.position not in cells
+        )
+        mana_before = leopard.current_mana
+
+        battle.perform_action(
+            {"type": "skill", "unit_id": leopard.unit_id, "skill_code": "eagle_eye", "cells": [cell.to_dict() for cell in pattern]}
+        )
+        resolve_pending_chain(battle)
+        self.assertEqual(leopard.current_mana, mana_before)
+        self.assertTrue(enemy.has_status("鹰眼"))
+        self.assertFalse(battle.attack_target_allowed(enemy, leopard)[0])
+
+        leopard.position = Position(1, 1)
+        enemy.position = Position(8, 8)
+        leopard.normal_move_actions_used = 1
+        leopard.move_used = True
+        battle.perform_action({"type": "skill", "unit_id": leopard.unit_id, "skill_code": "fly_leap", "x": 5, "y": 1})
+        self.assertEqual(leopard.position, Position(5, 1))
+        self.assertEqual(leopard.normal_move_actions_used, 0)
 
     def test_oberon_judgment_stone_must_be_summoned_in_surrounding_empty_cell(self) -> None:
         battle = create_battle("excel_r020", "bard")
@@ -2721,6 +3032,27 @@ class BattleSmokeTests(unittest.TestCase):
         battle.perform_action({"type": "move", "unit_id": dark.unit_id, "x": 5, "y": 4})
 
         self.assertLess(dark.current_hp, hp_before)
+
+    def test_destroyed_active_unit_automatically_advances_after_action_resolution(self) -> None:
+        battle = create_battle(["bard"], ["dark_human", "element_hunter"])
+        bard = battle.player_units(1)[0]
+        dark, survivor = battle.player_units(2)
+        battle.configure_turn_order([bard.unit_id, dark.unit_id, survivor.unit_id])
+        battle.start_current_turn()
+        dark.max_health = 4.0
+        dark.current_hp = 4.0
+
+        battle.perform_action({"type": "skill", "unit_id": bard.unit_id, "skill_code": "great_holy_light"})
+        battle.perform_action({"type": "end_turn"})
+        self.assertEqual(battle.current_turn_unit(), dark)
+        turn_number_before = battle.turn_number
+
+        battle.perform_action({"type": "move", "unit_id": dark.unit_id, "x": 5, "y": 4})
+
+        self.assertNotIn(dark.unit_id, battle.units)
+        self.assertIsNone(battle.winner)
+        self.assertEqual(battle.current_turn_unit(), survivor)
+        self.assertEqual(battle.turn_number, turn_number_before + 1)
 
     def test_great_holy_light_only_damages_when_enemy_ends_move_in_range(self) -> None:
         battle = create_battle("bard", "dark_human")

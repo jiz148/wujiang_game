@@ -1135,9 +1135,18 @@ class MultiTargetChainShieldSkill(Skill):
         payload: Optional[dict[str, Any]] = None,
     ) -> float:
         if payload is None or (not payload.get("target_unit_id") and not payload.get("target_unit_ids")):
-            return self.mana_cost
-        target_count = len(payload_target_units(battle, payload))
-        return round(target_count * self.mana_cost, 2)
+            target_count = 1
+        else:
+            target_count = len(payload_target_units(battle, payload))
+        cost = float(target_count * self.mana_cost)
+        if self.is_reaction and battle.pending_chain is not None:
+            multiplier = float(battle.pending_chain.queued_action.payload.get("reaction_mana_multiplier", 1.0) or 1.0)
+            cost *= max(0.0, multiplier)
+        for component in list(actor.iter_components()):
+            if component is self:
+                continue
+            cost = component.modify_skill_mana_cost(battle, actor, self, payload, cost)
+        return round(max(0.0, cost), 2)
 
     def mana_cost_text(self) -> Optional[str]:
         return f"费 {int(self.mana_cost) if float(self.mana_cost).is_integer() else self.mana_cost} 魔/目标"
@@ -1971,6 +1980,10 @@ class PassiveEvasionSkill(Skill):
             max_distance=1,
             tags={"evasion"},
         )
+        if queued_action.action_type == "attack":
+            evaded = queued_action.payload.setdefault("evaded_unit_ids", [])
+            if actor.unit_id not in evaded:
+                evaded.append(actor.unit_id)
         battle.log(f"{actor.name} 使用回避离开了原定目标格。")
 
     def reaction_preview(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> dict[str, Any]:

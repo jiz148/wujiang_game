@@ -5087,7 +5087,7 @@ class StrategyHeroTests(unittest.TestCase):
         self.assertEqual(public_hero["status"], "sleeping")
         self.assertEqual(public_hero["sleeping_until_month"], resolved.current_month + STRATEGIC_HERO_BATTLE_SLEEP_MONTHS)
         self.assertEqual(public_hero["loyalty"], 0)
-        self.assertEqual(public_hero["lord_relationship"], -3)
+        self.assertEqual(public_hero["lord_relationship"], 0 if hero["code"] == lord.holder_id else -3)
         self.assertEqual(public_hero["lord_hero_code"], lord.holder_id)
         self.assertNotIn(hero["code"], active_strategic_hero_codes_for_faction(resolved, "faction_1"))
         self.assertEqual(battle.battle_result["strategic_heroes_by_side"]["attacker"]["sleeping"], [hero["code"]])
