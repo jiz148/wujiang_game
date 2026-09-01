@@ -96,17 +96,21 @@ def _apply_policy(city: City, events: list[EventLogEntry], month: int) -> None:
         ether_income += 4 * level
 
     from wujiang.strategic.occupation import occupation_income_multiplier
+    from wujiang.strategic.administration import city_economy_growth
 
     occupation_multiplier = occupation_income_multiplier(city)
-    food_income = int(food_income * occupation_multiplier)
-    money_income = int(money_income * occupation_multiplier)
+    growth = city_economy_growth(city)
+    food_income = int(food_income * occupation_multiplier * growth)
+    money_income = int(money_income * occupation_multiplier * growth)
     ether_income = int(ether_income * occupation_multiplier)
     troop_growth = int(troop_growth * occupation_multiplier)
+    population_growth = int((12 + city.resources.population // 200) * level * growth * occupation_multiplier)
 
     city.resources.food += food_income
     city.resources.money += money_income
     city.resources.ether += ether_income
     city.resources.troops += troop_growth
+    city.resources.population += population_growth
     city.defense += defense_growth
     events.append(
         EventLogEntry(
@@ -114,7 +118,7 @@ def _apply_policy(city: City, events: list[EventLogEntry], month: int) -> None:
             category="city_income",
             message=(
                 f"{city.name}执行{city.policy}：粮食 +{food_income}，金钱 +{money_income}，"
-                f"以太 +{ether_income}，兵力 +{troop_growth}。"
+                f"以太 +{ether_income}，兵力 +{troop_growth}，人口 +{population_growth}。"
             ),
             related_ids=[city.city_id],
         )

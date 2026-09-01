@@ -218,6 +218,7 @@ def difficulty_profile(name: str) -> DifficultyProfile:
 
 
 def choose_turn_action(battle: Battle, actor: Unit, difficulty: str) -> dict[str, Any]:
+    clear_follow_anchor_cache(battle)
     profile = difficulty_profile(difficulty)
     candidates, move_candidates = turn_action_candidates(battle, actor, profile)
     best_non_move = best_candidate(candidates)
@@ -232,6 +233,7 @@ def choose_turn_action(battle: Battle, actor: Unit, difficulty: str) -> dict[str
 
 
 def choose_turn_bundle_action(battle: Battle, units: Iterable[Unit], difficulty: str) -> tuple[dict[str, Any], Optional[Unit]]:
+    clear_follow_anchor_cache(battle)
     profile = difficulty_profile(difficulty)
     non_move_candidates: list[tuple[Unit, AICandidate]] = []
     move_candidates: list[tuple[Unit, AICandidate]] = []
@@ -283,6 +285,7 @@ def turn_action_candidates(
 
 
 def choose_instant_action(battle: Battle, units: Iterable[Unit], difficulty: str) -> Optional[dict[str, Any]]:
+    clear_follow_anchor_cache(battle)
     profile = difficulty_profile(difficulty)
     candidates: list[AICandidate] = []
     for unit in units:
@@ -1251,6 +1254,210 @@ def shield_targets_for_reaction(
     return [unit.unit_id for unit in threatened[:max(1, max_targets)]]
 
 
+def living_hostile_combatants(battle: Battle, player_id: int) -> list[Unit]:
+    return [
+        unit
+        for unit in battle.enemy_units(player_id)
+        if unit.alive
+        and unit.position is not None
+        and not unit.banished
+        and not bool(getattr(unit, "is_siege_structure", False))
+    ]
+
+
+def hero_ai_style_for(battle: Battle, actor: Unit) -> str:
+    styles = getattr(battle, "hero_ai_styles", None) or {}
+    raw = styles.get(int(actor.player_id)) or styles.get(str(actor.player_id)) or "rush"
+    return "follow" if str(raw) == "follow" else "rush"
+
+
+FOLLOW_COMFORT_RADIUS = 5
+FOLLOW_FRONT_PACK_SLACK = 4
+FOLLOW_LEAD_BY_ORDER = {
+    "hold": 1,
+    "advance": 3,
+    "seek": 3,
+    "retreat": 2,
+}
+FOLLOW_ANCHOR_EXCLUDED_KINDS = frozenset({"cannon", "arrow_tower"})
+
+
+def _chebyshev_cells(origin: Position, destination: Position) -> int:
+    return max(abs(int(destination.x) - int(origin.x)), abs(int(destination.y) - int(origin.y)))
+
+
+def _axis_heading(origin: Position, target: Position) -> tuple[int, int]:
+    dx = int(target.x) - int(origin.x)
+    dy = int(target.y) - int(origin.y)
+    sx = 0 if dx == 0 else (1 if dx > 0 else -1)
+    sy = 0 if dy == 0 else (1 if dy > 0 else -1)
+    return (sx, sy)
+
+
+def _clamp_follow_cell(battle: Battle, x: int, y: int) -> Position:
+    max_x = max(0, int(getattr(battle, "width", 1)) - 1)
+    max_y = max(0, int(getattr(battle, "height", 1)) - 1)
+    return Position(min(max(0, x), max_x), min(max(0, y), max_y))
+
+
+def _follow_heading_for_army(
+    battle: Battle,
+    player_id: int,
+    centroid: Position,
+    command: dict[str, str],
+) -> tuple[int, int]:
+    from wujiang.tactical.engine.army import march_direction
+
+    if str(command.get("order") or "") == "seek":
+        enemies = living_hostile_combatants(battle, player_id)
+        if enemies:
+            nearest = min(enemies, key=lambda enemy: _chebyshev_cells(centroid, enemy.position))
+            return _axis_heading(centroid, nearest.position)
+    return march_direction(command)
+
+
+def _is_follow_anchor_unit(unit: Unit) -> bool:
+    if not unit.alive or unit.banished or unit.position is None:
+        return False
+    if bool(getattr(unit, "is_summon", False) or getattr(unit, "is_clone", False)):
+        return False
+    from wujiang.tactical.engine.army import army_kind_for_unit, is_army_soldier
+
+    if not is_army_soldier(unit):
+        return False
+    if bool(getattr(unit, "is_siege_structure", False)):
+        return False
+    kind = str(army_kind_for_unit(unit) or "")
+    return kind not in FOLLOW_ANCHOR_EXCLUDED_KINDS
+
+
+def _follow_front_pack(units: list[Unit], heading: tuple[int, int]) -> list[Unit]:
+    if not units:
+        return []
+    if heading == (0, 0):
+        return units
+    alongs = [
+        int(unit.position.x) * heading[0] + int(unit.position.y) * heading[1]
+        for unit in units
+    ]
+    front_along = max(alongs)
+    pack = [
+        unit
+        for unit, along in zip(units, alongs)
+        if along >= front_along - FOLLOW_FRONT_PACK_SLACK
+    ]
+    return pack or units
+
+
+def clear_follow_anchor_cache(battle: Battle) -> None:
+    battle._army_anchor_cache = {}
+
+
+def follow_anchor_state(battle: Battle, player_id: int) -> tuple[Optional[Position], tuple[int, int]]:
+    cache = getattr(battle, "_army_anchor_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        battle._army_anchor_cache = cache
+    key = int(player_id)
+    if key in cache:
+        return cache[key]
+    from wujiang.tactical.engine.army import command_for_kind, default_army_orders
+
+    soldiers = [unit for unit in battle.player_units(player_id) if _is_follow_anchor_unit(unit)]
+    if not soldiers:
+        cache[key] = (None, (0, 0))
+        return cache[key]
+    probe = Position(
+        int(round(sum(unit.position.x for unit in soldiers) / len(soldiers))),
+        int(round(sum(unit.position.y for unit in soldiers) / len(soldiers))),
+    )
+    orders = getattr(battle, "army_orders", None) or default_army_orders()
+    command = command_for_kind(orders, player_id, "infantry")
+    heading = _follow_heading_for_army(battle, player_id, probe, command)
+    pack = _follow_front_pack(soldiers, heading)
+    centroid = Position(
+        int(round(sum(unit.position.x for unit in pack) / len(pack))),
+        int(round(sum(unit.position.y for unit in pack) / len(pack))),
+    )
+    lead = FOLLOW_LEAD_BY_ORDER.get(str(command.get("order") or ""), 3)
+    if heading == (0, 0):
+        lead = 0
+    anchor = _clamp_follow_cell(battle, centroid.x + heading[0] * lead, centroid.y + heading[1] * lead)
+    cache[key] = (anchor, heading)
+    return cache[key]
+
+
+def army_anchor_cell(battle: Battle, player_id: int) -> Optional[Position]:
+    return follow_anchor_state(battle, player_id)[0]
+
+
+def follow_catch_up_skill_penalty(battle: Battle, actor: Unit) -> float:
+    if hero_ai_style_for(battle, actor) != "follow" or actor.position is None:
+        return 0.0
+    if bool(getattr(actor, "is_summon", False) or getattr(actor, "is_clone", False)):
+        return 0.0
+    anchor, heading = follow_anchor_state(battle, actor.player_id)
+    if anchor is None or heading == (0, 0):
+        return 0.0
+    current_along = int(actor.position.x) * heading[0] + int(actor.position.y) * heading[1]
+    front_along = int(anchor.x) * heading[0] + int(anchor.y) * heading[1]
+    behind = front_along - current_along
+    if behind < 3:
+        return 0.0
+    return -30.0
+
+
+def follow_leash_adjustment(army_dist: int, nearest_enemy: float, offensive_gain: float) -> float:
+    over = army_dist - FOLLOW_COMFORT_RADIUS
+    if over <= 0:
+        return (FOLLOW_COMFORT_RADIUS - army_dist) * 1.5
+    penalty = over * 10.0 + over * over * 3.0
+    if nearest_enemy <= 2 and army_dist <= FOLLOW_COMFORT_RADIUS + 2:
+        penalty *= 0.2
+    elif offensive_gain > 0:
+        penalty *= 0.35
+    return -penalty
+
+
+def follow_formation_adjustment(
+    destination: Position,
+    current: Optional[Position],
+    anchor: Position,
+    heading: tuple[int, int],
+    nearest_enemy: float,
+    offensive_gain: float,
+    *,
+    is_summon: bool = False,
+) -> float:
+    dest_dist = _chebyshev_cells(anchor, destination)
+    current_dist = _chebyshev_cells(anchor, current) if current is not None else dest_dist
+    if heading == (0, 0):
+        score = follow_leash_adjustment(dest_dist, nearest_enemy, offensive_gain)
+        if dest_dist < current_dist:
+            score += float(current_dist - dest_dist) * 3.0
+        return score
+    dest_along = int(destination.x) * heading[0] + int(destination.y) * heading[1]
+    front_along = int(anchor.x) * heading[0] + int(anchor.y) * heading[1]
+    ahead = dest_along - front_along
+    score = 0.0
+    if current is not None:
+        current_along = int(current.x) * heading[0] + int(current.y) * heading[1]
+        if current_along < front_along and dest_along > current_along and dest_along <= front_along + 1:
+            score += float(min(dest_along, front_along) - current_along) * 8.0
+    slack = 2 if is_summon else 1
+    if ahead > slack:
+        over = ahead - slack
+        penalty = over * 10.0 + over * over * 3.0
+        if nearest_enemy <= 2 and dest_dist <= FOLLOW_COMFORT_RADIUS + 2:
+            penalty *= 0.2
+        elif offensive_gain > 0:
+            penalty *= 0.35
+        score -= penalty
+    elif dest_dist <= FOLLOW_COMFORT_RADIUS:
+        score += float(FOLLOW_COMFORT_RADIUS - dest_dist) * 1.5
+    return score
+
+
 def score_move_destination(
     battle: Battle,
     actor: Unit,
@@ -1258,7 +1465,7 @@ def score_move_destination(
     role: str,
     profile: DifficultyProfile,
 ) -> float:
-    enemies = [unit for unit in battle.enemy_units(actor.player_id) if unit.alive and unit.position is not None and not unit.banished]
+    enemies = living_hostile_combatants(battle, actor.player_id)
     allies = [unit for unit in battle.player_units(actor.player_id) if unit.unit_id != actor.unit_id and unit.alive and unit.position is not None and not unit.banished]
     if not enemies:
         return -10.0
@@ -1268,11 +1475,28 @@ def score_move_destination(
     offensive_gain = offensive_reach_score_at(battle, actor, destination)
     score += offensive_gain * 18.0
     score += great_fire_funeral_alignment_score_at(battle, actor, destination)
-    if role == "support":
+    follow_behind = False
+    if hero_ai_style_for(battle, actor) == "follow":
+        anchor, heading = follow_anchor_state(battle, actor.player_id)
+        if anchor is not None and heading != (0, 0) and actor.position is not None:
+            current_along = int(actor.position.x) * heading[0] + int(actor.position.y) * heading[1]
+            front_along = int(anchor.x) * heading[0] + int(anchor.y) * heading[1]
+            follow_behind = front_along - current_along >= 3
+        if anchor is not None:
+            score += follow_formation_adjustment(
+                destination,
+                actor.position,
+                anchor,
+                heading,
+                nearest_enemy,
+                offensive_gain,
+                is_summon=bool(getattr(actor, "is_summon", False) or getattr(actor, "is_clone", False)),
+            )
+    if role == "support" and not follow_behind:
         nearest_ally = min((distance_to_position(battle, ally, destination) for ally in allies), default=2)
         score += max(0.0, 3.0 - nearest_ally) * 6.0
         score += max(0.0, nearest_enemy - 1.0) * profile.support_bonus
-    else:
+    elif role != "support":
         score += max(0.0, 4.0 - nearest_enemy) * (4.0 + profile.aggressive_bonus / 6.0)
     return score
 
@@ -1391,6 +1615,7 @@ def score_skill_payload(
             score += summon_position_score(battle, actor, destination)
         if code in {"earth_walker", "split"}:
             score += 10.0
+        score += follow_catch_up_skill_penalty(battle, actor)
         return score
     if code == "nian_dragon_dance":
         missing_hp = max(0.0, actor.max_health - actor.current_hp)
@@ -1421,7 +1646,7 @@ def score_skill_payload(
         score = ally_buff_score(battle, actor, code, target, profile)
         return score
     if code in SELF_BUFF_SKILL_CODES:
-        return self_buff_score(battle, actor, code, profile)
+        return self_buff_score(battle, actor, code, profile) + follow_catch_up_skill_penalty(battle, actor)
     if code == "great_funeral":
         return great_fire_funeral_score(battle, actor, skill, payload, profile)
     if code in {"stance", "great_holy_light", "plant_growth", "smoke_spray"}:
@@ -2345,11 +2570,7 @@ def judgment_stone_score(
     destination = payload_destination(payload)
     if destination is None:
         return -20.0
-    enemies = [
-        enemy
-        for enemy in battle.enemy_units(actor.player_id)
-        if enemy.alive and enemy.position is not None and not enemy.banished
-    ]
+    enemies = living_hostile_combatants(battle, actor.player_id)
     if not enemies:
         return -20.0
     nearest_enemy = min(distance_to_position(battle, enemy, destination) for enemy in enemies)
@@ -2375,7 +2596,7 @@ def world_seed_score(
     destination = payload_destination(payload)
     if destination is None:
         return -20.0
-    enemies = [unit for unit in battle.enemy_units(actor.player_id) if unit.alive and unit.position is not None and not unit.banished]
+    enemies = living_hostile_combatants(battle, actor.player_id)
     nearest_enemy = min((distance_to_position(battle, enemy, destination) for enemy in enemies), default=8)
     center_bonus = max(0.0, 6.0 - abs(destination.x - battle.width / 2.0) - abs(destination.y - battle.height / 2.0))
     return 70.0 + center_bonus * 3.0 + max(0.0, 6.0 - nearest_enemy) * 4.0
@@ -2485,7 +2706,7 @@ def generic_skill_score(
 
 
 def summon_position_score(battle: Battle, actor: Unit, destination: Position) -> float:
-    enemies = [unit for unit in battle.enemy_units(actor.player_id) if unit.alive and unit.position is not None and not unit.banished]
+    enemies = living_hostile_combatants(battle, actor.player_id)
     if not enemies:
         return 0.0
     nearest = min(distance_to_position(battle, unit, destination) for unit in enemies)
@@ -2499,7 +2720,7 @@ def score_respawn_destination(
     role: str,
     profile: DifficultyProfile,
 ) -> float:
-    enemies = [enemy for enemy in battle.enemy_units(unit.player_id) if enemy.alive and enemy.position is not None and not enemy.banished]
+    enemies = living_hostile_combatants(battle, unit.player_id)
     allies = [ally for ally in battle.player_units(unit.player_id) if ally.unit_id != unit.unit_id and ally.alive and ally.position is not None and not ally.banished]
     nearest_enemy = min((distance_to_position(battle, enemy, destination) for enemy in enemies), default=8)
     nearest_ally = min((distance_to_position(battle, ally, destination) for ally in allies), default=8)
@@ -3179,7 +3400,11 @@ def offensive_reach_score_at(battle: Battle, actor: Unit, destination: Position)
     actor.position = destination
     try:
         preview = battle.basic_attack_preview_for_payload(actor, {})
-        target_ids = {str(unit_id) for unit_id in preview.get("target_unit_ids", [])}
+        target_ids = {
+            str(unit_id)
+            for unit_id in preview.get("target_unit_ids", [])
+            if not bool(getattr(battle.units.get(str(unit_id)), "is_siege_structure", False))
+        }
         return len(target_ids)
     except Exception:
         return 0
@@ -3206,6 +3431,8 @@ def has_mana_point_skill(unit: Unit) -> bool:
 
 
 def hostile_unit_value(unit: Unit) -> float:
+    if bool(getattr(unit, "is_siege_structure", False)):
+        return 0.0
     return (
         unit.level * 8.0
         + unit.stat("attack") * 5.0

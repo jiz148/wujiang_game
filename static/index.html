@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>武将</title>
-    <link rel="stylesheet" href="/theme.css?v=r23" />
-    <link rel="stylesheet" href="/styles.css?v=r33" />
+    <link rel="stylesheet" href="/theme.css?v=r24" />
+    <link rel="stylesheet" href="/styles.css?v=r61" />
   </head>
   <!-- 哪一屏该显示，要等 /api/auth/me 回来才知道。在那之前先什么都不显示，
        否则标记里默认可见的那一屏会先闪出来，再被换掉。 -->
@@ -225,6 +225,9 @@
                     <option value="1" selected>1x</option>
                     <option value="2">2x</option>
                     <option value="4">4x</option>
+                    <option value="6">6x</option>
+                    <option value="8">8x</option>
+                    <option value="16">16x</option>
                   </select>
                 </label>
                 <label class="replay-omniscient-toggle">
@@ -260,6 +263,7 @@
                 <span id="battle-chain-text"></span>
               </div>
               <div class="battle-hud__actions">
+                <div id="battle-turn-banner" class="battle-turn-banner hidden" role="status" aria-live="polite"></div>
                 <div id="battle-turn-timer" class="battle-turn-timer hidden" role="timer" aria-live="polite"></div>
                 <button id="skip-chain" class="ghost hidden">放弃连锁</button>
                 <button id="end-turn" class="primary">结束回合</button>
@@ -334,6 +338,7 @@
                         </div>
                       </section>
                       <div class="game-over-actions">
+                        <button id="game-over-review" class="ghost" type="button">查看战场</button>
                         <button id="game-over-strategy" class="ghost hidden">返回战役</button>
                         <button id="game-over-rematch" class="primary">重新开始选将</button>
                         <button id="game-over-back" class="ghost">返回房间大厅</button>
@@ -347,6 +352,7 @@
                 <nav class="battle-dock__tabs" role="tablist">
                   <button type="button" class="battle-dock__tab is-active" data-battle-tab="info" role="tab" aria-selected="true">信息</button>
                   <button type="button" class="battle-dock__tab" data-battle-tab="queue" role="tab" aria-selected="false">行动</button>
+                  <button type="button" class="battle-dock__tab hidden" data-battle-tab="army" role="tab" aria-selected="false">军队</button>
                   <button type="button" class="battle-dock__tab" data-battle-tab="log" role="tab" aria-selected="false">记录</button>
                   <button type="button" class="battle-dock__tab" data-battle-tab="more" role="tab" aria-selected="false">更多</button>
                   <button id="toggle-right-rail" type="button" class="battle-dock__toggle" aria-expanded="false" title="展开操作面板">‹</button>
@@ -361,6 +367,9 @@
                     <div id="action-panel" class="action-panel"></div>
                     <div id="action-forecast" class="action-forecast"></div>
                     <div id="chain-panel" class="chain-panel"></div>
+                  </div>
+                  <div class="battle-dock__page hidden" data-battle-page="army">
+                    <div id="army-order-panel" class="army-order-panel" aria-label="军队指令"></div>
                   </div>
                   <div class="battle-dock__page hidden" data-battle-page="log">
                     <div id="logs" class="logs"></div>
@@ -377,6 +386,26 @@
                       <button id="toggle-reduced-motion" class="ghost" type="button" aria-pressed="false">动态：跟随系统</button>
                       <button id="open-keyboard-help" class="ghost" type="button" aria-haspopup="dialog">键盘帮助</button>
                     </div>
+                    <section id="ai-takeover-panel" class="ai-takeover-panel hidden">
+                      <h3 class="ai-takeover-panel__title">AI 接管</h3>
+                      <p class="ai-takeover-panel__meta">把本方剩余操作交给 AI。武将倾向只管武将走位；士兵倾向只管军队指令。随时可以收回。</p>
+                      <label class="ai-takeover-panel__field">
+                        <span>武将倾向</span>
+                        <select id="ai-hero-style">
+                          <option value="follow">跟队</option>
+                          <option value="rush">突击</option>
+                        </select>
+                      </label>
+                      <label class="ai-takeover-panel__field">
+                        <span>士兵倾向</span>
+                        <select id="ai-army-style">
+                          <option value="seek">寻敌</option>
+                          <option value="advance">进军</option>
+                          <option value="hold">固守</option>
+                        </select>
+                      </label>
+                      <button id="ai-takeover-toggle" class="ghost ai-takeover-panel__toggle" type="button" aria-pressed="false">让 AI 接管</button>
+                    </section>
                     <hr class="battle-more-divider" />
                     <button id="return-room-lobby" class="ghost battle-more-lobby" type="button">房间大厅</button>
                   </div>
@@ -464,6 +493,49 @@
       </div>
     </div>
 
+    <!-- 自动配置。点开后选数量或点数，再按自动分配才落地。 -->
+    <div id="auto-configure-dialog" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="auto-configure-title">
+      <div class="modal-card modal-card--narrow">
+        <div class="modal-card__head">
+          <h2 id="auto-configure-title" class="modal-card__title">自动配置</h2>
+        </div>
+        <div class="modal-card__body">
+          <div class="field">
+            <span class="field__label" id="auto-configure-method-label">分配方式</span>
+            <div class="choice-toggle" role="radiogroup" aria-labelledby="auto-configure-method-label">
+              <label class="choice-toggle__option">
+                <input id="auto-configure-method-count" type="radio" name="auto-configure-method" value="count" />
+                <span>按数量</span>
+              </label>
+              <label class="choice-toggle__option">
+                <input id="auto-configure-method-points" type="radio" name="auto-configure-method" value="points" />
+                <span>按点数</span>
+              </label>
+            </div>
+          </div>
+          <label id="auto-configure-count-control" class="field" for="auto-configure-count-input">
+            <span class="field__label">武将数量</span>
+            <input id="auto-configure-count-input" class="input" type="number" min="1" max="12" step="1" value="3" />
+            <span class="field__hint">每个席位随机分配这么多名武将。默认 3，范围 1–12。</span>
+          </label>
+          <label id="auto-configure-points-control" class="field hidden" for="auto-configure-points-input">
+            <span class="field__label">点数</span>
+            <input id="auto-configure-points-input" class="input" type="number" min="10" max="50" step="1" value="15" />
+            <span class="field__hint">所选武将的等级之和不超过这个点数。默认 15，范围 10–50。</span>
+          </label>
+          <label class="field field--switch" for="auto-configure-allow-duplicates">
+            <span class="field__label">允许重复武将</span>
+            <input id="auto-configure-allow-duplicates" type="checkbox" />
+          </label>
+          <p class="field__hint">空席位会改成 AI。随机选人模式下只填席位，不改阵容。</p>
+        </div>
+        <div class="modal-card__actions">
+          <button id="auto-configure-cancel" class="ghost" type="button">取消</button>
+          <button id="auto-configure-confirm" class="primary" type="button">自动分配</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 选将。每一行是一张标签：名字、等级、攻守速范魔。技能和特性点进去才看。 -->
     <div id="hero-picker" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="hero-picker-title">
       <div class="modal-card modal-card--wide">
@@ -525,8 +597,8 @@
     </div>
 
     <script src="/platform/home-ui.js?v=r13" defer></script>
-    <script src="/tactical/replay-ui.js?v=r13" defer></script>
+    <script src="/tactical/replay-ui.js?v=r14" defer></script>
     <script src="/tactical/battle-feedback.js?v=r15" defer></script>
-    <script type="module" src="/app.js?v=r33"></script>
+    <script type="module" src="/app.js?v=r61"></script>
   </body>
 </html>

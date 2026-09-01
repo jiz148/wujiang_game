@@ -755,6 +755,10 @@ export async function cancelQueuedStrategyAction(actionId) {
 
 export async function queueStrategyAction(actionType, actionPayload) {
   if (!state.strategyCampaign) return;
+  if (actionType === "declare_attack") {
+    state.strategyExpeditionError = "";
+    state.strategyExpeditionHeroCodes = Array.from(actionPayload?.attacker_hero_codes || []);
+  }
   const payload = await strategyPost("/api/strategy/campaigns/queue-action", {
     campaign_id: state.strategyCampaign.id,
     action_type: actionType,
@@ -764,8 +768,14 @@ export async function queueStrategyAction(actionType, actionPayload) {
     },
   });
   if (!payload) {
-    renderStrategyPanel();
+    if (actionType === "declare_attack") {
+      state.strategyExpeditionError = state.strategyMessage || "出征计划未能提交。";
+    }
+    render();
     return;
+  }
+  if (actionType === "declare_attack") {
+    state.strategyExpeditionError = "";
   }
   state.strategyCampaign = payload.campaign;
   const submission = payload.submission || {};

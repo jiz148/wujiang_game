@@ -23,6 +23,10 @@ class TacticTech:
     unit_unlocks: tuple[str, ...] = field(default_factory=tuple)
     building_level_effects: dict[str, int] = field(default_factory=dict)
     prerequisites: tuple[str, ...] = field(default_factory=tuple)
+    required_building: str = ""
+    required_building_level: int = 0
+    required_settlement: str = ""
+    siege_effects: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -39,6 +43,10 @@ class TacticTech:
             "unit_unlocks": list(self.unit_unlocks),
             "building_level_effects": dict(self.building_level_effects),
             "prerequisites": list(self.prerequisites),
+            "required_building": self.required_building,
+            "required_building_level": int(self.required_building_level or 0),
+            "required_settlement": self.required_settlement,
+            "siege_effects": dict(self.siege_effects),
         }
 
 
@@ -300,6 +308,138 @@ TACTIC_TECH_TREE: tuple[TacticTech, ...] = (
         branch="office",
         hero_deployment_limit_bonus=0,
     ),
+    TacticTech(
+        tech_id="cannon_foundry",
+        name="火炮铸造",
+        description="解锁城市工程项目「铸造火炮」。需要至少一座城市拥有 2 级学院。",
+        money_cost=180,
+        ether_cost=20,
+        branch="siege",
+        prerequisites=("civic_architecture_2",),
+        required_building="academy",
+        required_building_level=2,
+        siege_effects={"can_forge_cannon": 1},
+    ),
+    TacticTech(
+        tech_id="cannon_attack_1",
+        name="火炮威力 I",
+        description="全部火炮攻击力 +1。",
+        money_cost=140,
+        ether_cost=15,
+        branch="siege",
+        prerequisites=("cannon_foundry",),
+        siege_effects={"cannon_attack": 1},
+    ),
+    TacticTech(
+        tech_id="cannon_attack_2",
+        name="火炮威力 II",
+        description="全部火炮攻击力再 +1。",
+        money_cost=220,
+        ether_cost=25,
+        branch="siege",
+        prerequisites=("cannon_attack_1",),
+        siege_effects={"cannon_attack": 1},
+    ),
+    TacticTech(
+        tech_id="cannon_range_1",
+        name="火炮射程 I",
+        description="全部火炮攻击距离 +1。",
+        money_cost=140,
+        ether_cost=15,
+        branch="siege",
+        prerequisites=("cannon_foundry",),
+        siege_effects={"cannon_range": 1},
+    ),
+    TacticTech(
+        tech_id="cannon_range_2",
+        name="火炮射程 II",
+        description="全部火炮攻击距离再 +1。",
+        money_cost=220,
+        ether_cost=25,
+        branch="siege",
+        prerequisites=("cannon_range_1",),
+        siege_effects={"cannon_range": 1},
+    ),
+    TacticTech(
+        tech_id="cannon_splash_1",
+        name="火炮范围 I",
+        description="解锁重型炮弹，火炮可配置溅射 1。溅射不分敌我。",
+        money_cost=160,
+        ether_cost=20,
+        branch="siege",
+        prerequisites=("cannon_foundry",),
+        siege_effects={"cannon_splash": 1},
+    ),
+    TacticTech(
+        tech_id="cannon_splash_2",
+        name="火炮范围 II",
+        description="解锁超重型炮弹，火炮可配置溅射 2。溅射极易误伤己方。",
+        money_cost=240,
+        ether_cost=30,
+        branch="siege",
+        prerequisites=("cannon_splash_1",),
+        siege_effects={"cannon_splash": 1},
+    ),
+    TacticTech(
+        tech_id="tower_attack_1",
+        name="箭塔火力 I",
+        description="全部箭塔攻击力 +1。",
+        money_cost=120,
+        ether_cost=10,
+        branch="siege",
+        prerequisites=("fortified_garrison",),
+        siege_effects={"tower_attack": 1},
+    ),
+    TacticTech(
+        tech_id="tower_attack_2",
+        name="箭塔火力 II",
+        description="全部箭塔攻击力再 +1。",
+        money_cost=200,
+        ether_cost=20,
+        branch="siege",
+        prerequisites=("tower_attack_1",),
+        siege_effects={"tower_attack": 1},
+    ),
+    TacticTech(
+        tech_id="tower_range_1",
+        name="箭塔射程 I",
+        description="全部箭塔攻击距离 +1。",
+        money_cost=120,
+        ether_cost=10,
+        branch="siege",
+        prerequisites=("fortified_garrison",),
+        siege_effects={"tower_range": 1},
+    ),
+    TacticTech(
+        tech_id="tower_range_2",
+        name="箭塔射程 II",
+        description="全部箭塔攻击距离再 +1。",
+        money_cost=200,
+        ether_cost=20,
+        branch="siege",
+        prerequisites=("tower_range_1",),
+        siege_effects={"tower_range": 1},
+    ),
+    TacticTech(
+        tech_id="tower_defense_1",
+        name="箭塔防御 I",
+        description="全部箭塔防御力 +1。",
+        money_cost=120,
+        ether_cost=10,
+        branch="siege",
+        prerequisites=("fortified_garrison",),
+        siege_effects={"tower_defense": 1},
+    ),
+    TacticTech(
+        tech_id="tower_defense_2",
+        name="箭塔防御 II",
+        description="全部箭塔防御力再 +1。",
+        money_cost=200,
+        ether_cost=20,
+        branch="siege",
+        prerequisites=("tower_defense_1",),
+        siege_effects={"tower_defense": 1},
+    ),
 )
 
 TACTIC_TECHS_BY_ID = {tech.tech_id: tech for tech in TACTIC_TECH_TREE}
@@ -313,6 +453,7 @@ TECH_CATEGORY_LABELS = {
     "diplomacy": "外交",
     "ritual": "祭祀",
     "heroes": "武将",
+    "siege": "攻城",
 }
 
 # 父类只负责分组展示；研究费用、回合和前置都挂在子科技上。
@@ -346,6 +487,19 @@ TECH_PRESENTATION: dict[str, tuple[str, int]] = {
     "spirit_rite": ("ritual", 2),
     "hero_command": ("heroes", 1),
     "talent_call": ("heroes", 2),
+    "cannon_foundry": ("siege", 2),
+    "cannon_attack_1": ("siege", 2),
+    "cannon_attack_2": ("siege", 3),
+    "cannon_range_1": ("siege", 2),
+    "cannon_range_2": ("siege", 3),
+    "cannon_splash_1": ("siege", 2),
+    "cannon_splash_2": ("siege", 3),
+    "tower_attack_1": ("siege", 2),
+    "tower_attack_2": ("siege", 3),
+    "tower_range_1": ("siege", 2),
+    "tower_range_2": ("siege", 3),
+    "tower_defense_1": ("siege", 2),
+    "tower_defense_2": ("siege", 3),
 }
 
 BASE_UNIT_UNLOCKS = {"infantry"}
@@ -387,7 +541,49 @@ def _city(world: WorldState, city_id: str) -> City:
     raise StrategyError("城市不存在。")
 
 
-def tactic_tech_tree_public(faction: Faction) -> list[dict[str, Any]]:
+def _settlement_rank(settlement: str) -> int:
+    from wujiang.strategic.administration import SETTLEMENT_BUILDING_RANK
+
+    return int(SETTLEMENT_BUILDING_RANK.get(str(settlement or ""), 0) or 0)
+
+
+def faction_meets_tech_requirements(world: WorldState | None, faction: Faction, tech: TacticTech) -> bool:
+    if world is None:
+        return not tech.required_building and not tech.required_settlement
+    cities = [city for city in world.cities if city.owner_faction_id == faction.faction_id]
+    if tech.required_building:
+        needed = max(1, int(tech.required_building_level or 1))
+        if not any(int(city.building_levels.get(tech.required_building, 0) or 0) >= needed for city in cities):
+            return False
+    if tech.required_settlement:
+        needed_rank = _settlement_rank(tech.required_settlement)
+        if not any(_settlement_rank(city.settlement) >= needed_rank for city in cities):
+            return False
+    return True
+
+
+def siege_tech_bonuses(faction: Faction) -> dict[str, int]:
+    bonuses = {
+        "cannon_attack": 0,
+        "cannon_range": 0,
+        "cannon_splash": 0,
+        "tower_attack": 0,
+        "tower_range": 0,
+        "tower_defense": 0,
+        "can_forge_cannon": 0,
+    }
+    for tech_id in faction.tactic_techs:
+        tech = TACTIC_TECHS_BY_ID.get(tech_id)
+        if tech is None:
+            continue
+        for key, value in tech.siege_effects.items():
+            bonuses[key] = min(2, int(bonuses.get(key, 0)) + int(value or 0))
+    return bonuses
+
+
+def tactic_tech_tree_public(faction: Faction, world: WorldState | None = None) -> list[dict[str, Any]]:
+    from wujiang.strategic.administration import BUILDING_PROJECTS, SETTLEMENT_LABELS
+
     unlocked = set(faction.tactic_techs)
     payload: list[dict[str, Any]] = []
     for tech in TACTIC_TECH_TREE:
@@ -396,6 +592,11 @@ def tactic_tech_tree_public(faction: Faction) -> list[dict[str, Any]]:
         item["category"] = category
         item["category_label"] = TECH_CATEGORY_LABELS.get(category, "军事")
         item["research_months"] = research_months
+        item["required_building_label"] = (
+            (BUILDING_PROJECTS.get(tech.required_building) or {}).get("name") or tech.required_building
+        )
+        item["required_settlement_label"] = SETTLEMENT_LABELS.get(tech.required_settlement, tech.required_settlement)
+        item["requirement_met"] = faction_meets_tech_requirements(world, faction, tech)
         researching = faction.researching or {}
         researching_id = str(researching.get("tech_id") or "")
         months_done = int(researching.get("months_done") or 0)
@@ -403,6 +604,7 @@ def tactic_tech_tree_public(faction: Faction) -> list[dict[str, Any]]:
         item["available"] = (
             tech.tech_id not in unlocked
             and all(prereq in unlocked for prereq in tech.prerequisites)
+            and item["requirement_met"]
         )
         item["researching"] = researching_id == tech.tech_id
         item["research_progress"] = months_done if researching_id == tech.tech_id else 0
@@ -495,7 +697,11 @@ def enrich_world_public_state(world: WorldState) -> dict[str, Any]:
     from wujiang.strategic.administration import (
         SETTLEMENT_LABELS,
         building_projects_public,
+        cannon_stock_cap,
         city_building_max_level,
+        city_economy_class,
+        city_work_options,
+        city_works_public,
         registered_unit_types_public,
         settlement_upgrade_options,
         settlement_upgrades_public,
@@ -529,7 +735,8 @@ def enrich_world_public_state(world: WorldState) -> dict[str, Any]:
                 "remaining": 0,
             }
             continue
-        faction_payload["tactic_tech_tree"] = tactic_tech_tree_public(faction)
+        faction_payload["tactic_tech_tree"] = tactic_tech_tree_public(faction, world)
+        faction_payload["siege_tech"] = siege_tech_bonuses(faction)
         faction_payload["strategic_heroes"] = strategic_heroes_for_faction_public(world, faction.faction_id)
         faction_payload["strategic_hero_deployment_limit"] = strategic_hero_deployment_limit(world, faction.faction_id)
         faction_payload["hero_ritual_capacity"] = hero_ritual_capacity(world, faction.faction_id)
@@ -574,6 +781,11 @@ def enrich_world_public_state(world: WorldState) -> dict[str, Any]:
             for project in building_projects_public()
         }
         city_payload["settlement_upgrades"] = settlement_upgrade_options(city)
+        city_payload["cannon_stock"] = int(getattr(city, "cannon_stock", 0) or 0)
+        city_payload["cannon_stock_cap"] = cannon_stock_cap(city)
+        city_payload["economy_class"] = city_economy_class(city)
+        city_payload["economy_class_label"] = SETTLEMENT_LABELS.get(city_economy_class(city), city_economy_class(city))
+        city_payload["city_works"] = city_work_options(world, city, faction)
         city_payload["occupation_governance"] = occupation_status_public(world, city.city_id)
         city_payload["rebellion_funding_options"] = {
             major.faction_id: rebellion_funding_option(
@@ -597,6 +809,7 @@ def enrich_world_public_state(world: WorldState) -> dict[str, Any]:
     payload["scheduled_consequences"] = scheduled_consequences_public(world)
     payload["office_system"] = office_system_public(world)
     payload["building_projects"] = building_projects_public()
+    payload["city_works"] = city_works_public()
     payload["settlement_upgrades"] = settlement_upgrades_public()
     payload["registered_unit_types"] = registered_unit_types_public()
     payload["relic_system"] = relic_system_public(world)
@@ -661,6 +874,13 @@ def unlock_tactic_tech(world: WorldState, *, faction_id: str, tech_id: str) -> W
     missing = [prereq for prereq in tech.prerequisites if prereq not in unlocked]
     if missing:
         raise StrategyError("战术科技前置条件未满足。")
+    if not faction_meets_tech_requirements(next_world, faction, tech):
+        if tech.required_building:
+            from wujiang.strategic.administration import BUILDING_PROJECTS
+
+            building_name = (BUILDING_PROJECTS.get(tech.required_building) or {}).get("name") or tech.required_building
+            raise StrategyError(f"研究该科技需要至少一座城市拥有 {tech.required_building_level} 级{building_name}。")
+        raise StrategyError("战术科技的城市或建筑条件未满足。")
     current = faction.researching or {}
     current_id = str(current.get("tech_id") or "")
     if current_id and current_id != tech_id:

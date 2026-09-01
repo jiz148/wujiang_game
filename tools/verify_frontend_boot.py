@@ -427,6 +427,9 @@ def main() -> int:
             problems.append("房间设置弹窗里没有战场大小")
         elif args.screenshot_room_setup:
             page.screenshot(resolve(args.screenshot_room_setup))
+        page.evaluate("document.getElementById('room-setup-dialog').click()")
+        if page.evaluate("document.getElementById('room-setup-dialog').classList.contains('hidden')"):
+            problems.append("点房间设置遮罩不应关闭弹窗")
         page.evaluate("document.getElementById('room-setup-cancel').click()")
 
         # 选将：每一行是名字、等级标签和攻守速范魔，加进来是一枚标签，点标签才看详情。
@@ -501,6 +504,12 @@ def main() -> int:
         ):
             return fail(page, "BATTLE FAILED: 建房后进不了房间大厅")
         page.evaluate("document.getElementById('auto-configure-room').click()")
+        if not page.wait_for(
+            "!document.getElementById('auto-configure-dialog').classList.contains('hidden')",
+            timeout=10,
+        ):
+            return fail(page, "BATTLE FAILED: 打不开自动配置弹窗")
+        page.evaluate("document.getElementById('auto-configure-confirm').click()")
         if not page.wait_for(
             "!document.getElementById('start-room').disabled",
             timeout=25,

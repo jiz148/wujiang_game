@@ -5,7 +5,7 @@ import { fetchJson, syncLocation } from '../core/net.js';
 import { render } from '../core/render.js';
 import { state } from '../core/state.js';
 import { userLoggedIn } from '../platform/auth.js';
-import { closeStrategyMonthDeadline, focusStrategySelectedCityCommand, grantStrategyOfficeTakeover, openStrategyBattleRoom, queueStrategyAction, requestStrategyOfficeChange, respondStrategyOfficeChange, restartStrategyBattleFromSnapshot, revokeStrategyJoinCode, revokeStrategyOfficeTakeover, rotateStrategyJoinCode, setStrategyMonthReady } from '../strategic/api.js';
+import { closeStrategyMonthDeadline, focusStrategySelectedCityCommand, grantStrategyOfficeTakeover, inspectStrategyCityOnMap, openStrategyBattleRoom, queueStrategyAction, requestStrategyOfficeChange, respondStrategyOfficeChange, restartStrategyBattleFromSnapshot, revokeStrategyJoinCode, revokeStrategyOfficeTakeover, rotateStrategyJoinCode, setStrategyMonthReady } from '../strategic/api.js';
 import { appendTextLine, createStrategyHeroDeploymentPicker, renderStrategyPanel, strategyCityRebellionForce, strategyCityStateLabels, strategyDeployableHeroes, strategyHeroDeploymentLimit, strategyNumber, strategyQueuedActionLabel } from '../strategic/workbench.js';
 import { actionTitle, applyRoomPayload, syncSelectedUnitAfterStateChange } from '../bridge/campaign-battle.js';
 
@@ -894,6 +894,7 @@ function strategyCityMapClass(city, campaign, faction, selectedCityId) {
   else if (city.owner_faction_id) classes.push("is-enemy");
   else classes.push("is-neutral");
   if (city.id === selectedCityId) classes.push("is-selected");
+  if (faction?.capital_city_id && city.id === faction.capital_city_id) classes.push("is-capital");
   if (strategyCityRebellionForce(city) > 0) classes.push("has-rebellion");
   if (strategyAttackTargetsForCity(campaign, city, faction?.id).length) classes.push("has-attack");
   if (strategyQueuedActionsForCity(campaign, city.id).length) classes.push("has-plan");
@@ -944,6 +945,7 @@ const BUILDING_ICONS = {
   academy: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.8 6.4 8 3.6l5.2 2.8L8 9.2z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M4.4 7.4v4.2L8 13.2l3.6-1.6V7.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>',
   market: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 7.2 4.2 4.6h7.6L13 7.2H3zM4.2 7.2v5.4h7.6V7.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>',
   industrial: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 13.2V8.4l3.2-2v2.4l3-1.8v6.2H3.2zM12.4 13.2V6.2h.8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>',
+  city_defense: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.6 13.2 5v3.2c0 3.2-2.1 5-5.2 5.8C4.9 13.2 2.8 11.4 2.8 8.2V5Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M5.2 8.8V6.4h1.2V5.4h1.2v1h1.2V5.4h1.2v1H11V8.8H5.2z" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/></svg>',
   walls: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.6 13V6.4h2.2V4.8h2v1.6h2.4V4.8h2v1.6h2.2V13H2.6z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>',
   castle: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 13V6.2h2V4h2v2.2h2V4h2v2.2h2V13H3z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M7 13V9h2v4" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>',
 };
@@ -984,9 +986,53 @@ export function showStrategyHoverTip(anchor, lines = []) {
   strategyHoverTipNode.hidden = false;
 }
 
-function bindStrategyHoverTip(node, lines) {
+export function bindStrategyHoverTip(node, lines) {
   node.addEventListener("mouseenter", () => showStrategyHoverTip(node, lines));
   node.addEventListener("mouseleave", hideStrategyHoverTip);
+  node.addEventListener("focus", () => showStrategyHoverTip(node, lines));
+  node.addEventListener("blur", hideStrategyHoverTip);
+}
+
+const STRATEGY_SKILL_ASSIGNMENT_LABELS = {
+  campaign: "出征",
+  garrison: "驻守",
+  training: "训练",
+  administration: "辅政",
+};
+
+export function appendStrategySkillTags(parent, hero, options = {}) {
+  const skills = Array.isArray(hero?.strategic_skills) && hero.strategic_skills.length
+    ? hero.strategic_skills
+    : (
+      hero?.specialty
+        ? [{
+            name: hero.specialty.name,
+            effect: hero.specialty.effect,
+            assignment_type: hero.specialty.assignment_type,
+          }]
+        : []
+    );
+  if (!skills.length) return null;
+  const row = document.createElement("div");
+  row.className = options.compact ? "strategy-skill-tags is-compact" : "strategy-skill-tags";
+  if (!options.compact) {
+    const caption = document.createElement("span");
+    caption.className = "strategy-skill-tags__label";
+    caption.textContent = "战略技能";
+    row.append(caption);
+  }
+  skills.forEach((skill) => {
+    const assignment = String(skill.assignment_type || "");
+    const duty = STRATEGY_SKILL_ASSIGNMENT_LABELS[assignment] || "";
+    const tag = document.createElement("span");
+    tag.className = `strategy-skill-tag${assignment ? ` is-${assignment}` : ""}`;
+    tag.textContent = skill.name || skill.id || "技能";
+    tag.tabIndex = 0;
+    bindStrategyHoverTip(tag, [skill.name, duty && `职责：${duty}`, skill.effect].filter(Boolean));
+    row.append(tag);
+  });
+  parent.append(row);
+  return row;
 }
 
 const SETTLEMENT_MARKERS = {
@@ -1047,8 +1093,27 @@ export function showStrategyTurnToast(month) {
 
 // 世界的像素尺寸。节点坐标是 0~100 的百分比，落在这块画布上就成了具体位置；
 // 画布比视口大，所以地图需要被拖着看——这正是要的效果。
-const STRATEGY_MAP_WORLD = { width: 2100, height: 1400 };
-const STRATEGY_MAP_ZOOM = { min: 0.45, max: 2.2 };
+const STRATEGY_MAP_WORLD = { width: 3200, height: 2200 };
+const STRATEGY_MAP_ZOOM = { min: 0.28, max: 2.4 };
+const STRATEGY_CAPITAL_ICON = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 13.4h10V8.1L10.4 10 8 5.8 5.6 10 3 8.1v5.3z" fill="currentColor"/><path d="M2.2 13.4h11.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="8" cy="3.4" r="1.15" fill="currentColor"/></svg>';
+
+function strategyOwnedCities(campaign, faction) {
+  return (campaign?.world?.cities || []).filter((city) => city.owner_faction_id === faction?.id);
+}
+
+function strategyFocusHomeCity(campaign, faction) {
+  const owned = strategyOwnedCities(campaign, faction);
+  if (!owned.length) return;
+  const capitalId = String(faction?.capital_city_id || "");
+  const capital = owned.find((city) => city.id === capitalId);
+  if (capital) {
+    inspectStrategyCityOnMap(capital.id, campaign);
+    return;
+  }
+  const index = Math.abs(Number(state.strategyOwnedCityFocusIndex || 0)) % owned.length;
+  state.strategyOwnedCityFocusIndex = index + 1;
+  inspectStrategyCityOnMap(owned[index].id, campaign);
+}
 
 function clampMapScale(scale) {
   return Math.max(STRATEGY_MAP_ZOOM.min, Math.min(STRATEGY_MAP_ZOOM.max, scale));
@@ -1160,12 +1225,23 @@ function panStrategyMapToNode(viewport, positions, nodeId) {
   if (canvas) canvas.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale})`;
 }
 
+function strategyMapRouteBend(sourcePos, targetPos) {
+  const dx = targetPos.x - sourcePos.x;
+  const dy = targetPos.y - sourcePos.y;
+  const length = Math.hypot(dx, dy) || 1;
+  const hash = Math.abs(Math.round(sourcePos.x * 17 + targetPos.y * 31 + sourcePos.y * 9 + targetPos.x * 13));
+  const bend = ((hash % 9) - 4) * Math.min(4.4, length * 0.16);
+  return {
+    x: (sourcePos.x + targetPos.x) / 2 - (dy / length) * bend,
+    y: (sourcePos.y + targetPos.y) / 2 + (dx / length) * bend,
+  };
+}
+
 function appendStrategyMapRouteLine(layer, sourcePos, targetPos, className, titleText = "") {
-  const line = createStrategySvgElement("line");
-  line.setAttribute("x1", String(sourcePos.x));
-  line.setAttribute("y1", String(sourcePos.y));
-  line.setAttribute("x2", String(targetPos.x));
-  line.setAttribute("y2", String(targetPos.y));
+  const control = strategyMapRouteBend(sourcePos, targetPos);
+  const d = `M ${sourcePos.x} ${sourcePos.y} Q ${control.x} ${control.y} ${targetPos.x} ${targetPos.y}`;
+  const line = createStrategySvgElement("path");
+  line.setAttribute("d", d);
   line.setAttribute("class", className);
   if (titleText) {
     const title = createStrategySvgElement("title");
@@ -1173,6 +1249,41 @@ function appendStrategyMapRouteLine(layer, sourcePos, targetPos, className, titl
     line.append(title);
   }
   layer.append(line);
+}
+
+function appendStrategyMapLand(canvas, positions, campaign) {
+  const land = createStrategySvgElement("svg");
+  land.setAttribute("class", "strategy-map-land-layer");
+  land.setAttribute("viewBox", "0 0 100 100");
+  land.setAttribute("preserveAspectRatio", "none");
+  const seed = Number(campaign?.id || campaign?.world?.seed || 1);
+  const mix = (value, span) => ((seed * 17 + value * 53) % 1000) / 1000 * span - span / 2;
+  const patches = [
+    [20 + mix(1, 8), 26 + mix(2, 6), 30, 21, "is-wood"],
+    [74 + mix(3, 7), 24 + mix(4, 6), 26, 18, "is-plain"],
+    [48 + mix(5, 8), 74 + mix(6, 6), 34, 20, "is-water"],
+    [82 + mix(7, 6), 72 + mix(8, 6), 20, 16, "is-hill"],
+    [28 + mix(9, 6), 78 + mix(10, 5), 18, 14, "is-hill"],
+  ];
+  patches.forEach(([cx, cy, rx, ry, kind]) => {
+    const blob = createStrategySvgElement("ellipse");
+    blob.setAttribute("cx", String(cx));
+    blob.setAttribute("cy", String(cy));
+    blob.setAttribute("rx", String(rx));
+    blob.setAttribute("ry", String(ry));
+    blob.setAttribute("class", `strategy-map-land-blob ${kind}`);
+    land.append(blob);
+  });
+  Array.from(positions.values()).forEach((position, index) => {
+    const grove = createStrategySvgElement("ellipse");
+    grove.setAttribute("cx", String(position.x + mix(index + 11, 3)));
+    grove.setAttribute("cy", String(position.y + mix(index + 23, 3)));
+    grove.setAttribute("rx", String(5.4 + (index % 3)));
+    grove.setAttribute("ry", String(3.8 + (index % 2)));
+    grove.setAttribute("class", `strategy-map-land-grove ${index % 3 === 0 ? "is-plain" : "is-wood"}`);
+    land.append(grove);
+  });
+  canvas.prepend(land);
 }
 
 export function renderStrategyMap(current, campaign, faction) {
@@ -1229,6 +1340,7 @@ export function renderStrategyMap(current, campaign, faction) {
   routeLayer.setAttribute("viewBox", "0 0 100 100");
   routeLayer.setAttribute("preserveAspectRatio", "none");
   canvas.append(routeLayer);
+  appendStrategyMapLand(canvas, positions, campaign);
 
   const routeKeys = new Set();
   nodes.forEach((node) => {
@@ -1348,6 +1460,13 @@ export function renderStrategyMap(current, campaign, faction) {
     art.className = "strategy-map-marker-art";
     art.innerHTML = SETTLEMENT_MARKERS[settlement];
     marker.append(halo, art);
+    if (faction?.capital_city_id && city.id === faction.capital_city_id && city.owner_faction_id === faction.id) {
+      const crown = document.createElement("span");
+      crown.className = "strategy-map-capital-mark";
+      crown.setAttribute("aria-hidden", "true");
+      crown.innerHTML = STRATEGY_CAPITAL_ICON;
+      marker.append(crown);
+    }
     const caption = document.createElement("span");
     caption.className = "strategy-map-caption";
     const strong = document.createElement("strong");
@@ -1434,25 +1553,22 @@ export function renderStrategyMap(current, campaign, faction) {
     button.addEventListener("click", onClick);
     tools.append(button);
   });
+  const ownedCities = strategyOwnedCities(campaign, faction);
+  const capitalCity = ownedCities.find((city) => city.id === faction?.capital_city_id);
+  const homeButton = document.createElement("button");
+  homeButton.type = "button";
+  homeButton.className = "strategy-map-tool strategy-map-tool--capital";
+  const homeLabel = capitalCity ? `主城 ${capitalCity.name}` : (ownedCities.length ? "下一座己方城市" : "没有己方城市");
+  homeButton.title = homeLabel;
+  homeButton.setAttribute("aria-label", homeLabel);
+  homeButton.innerHTML = STRATEGY_CAPITAL_ICON;
+  homeButton.disabled = !ownedCities.length;
+  const homeColor = strategyFactionColor(campaign, faction?.id);
+  if (typeof homeButton.style?.setProperty === "function") homeButton.style.setProperty("--faction-color", homeColor);
+  else homeButton.style["--faction-color"] = homeColor;
+  homeButton.addEventListener("click", () => strategyFocusHomeCity(campaign, faction));
+  tools.append(homeButton);
   map.append(tools);
-
-  const hint = document.createElement("span");
-  hint.className = "strategy-map-hint";
-  hint.textContent = "拖拽移动地图 · 滚轮缩放 · 点击城市下令";
-  map.append(hint);
-
-  const legend = document.createElement("div");
-  legend.className = "strategy-map-legend";
-  const legendItems = [["is-road", "道路"]];
-  if (relicRouteKeys.size) legendItems.push(["is-relic", "圣物搜索"]);
-  if (activeArmyRouteKeys.size) legendItems.push(["is-army", "行军"]);
-  legendItems.forEach(([className, label]) => {
-    const item = document.createElement("span");
-    item.className = className;
-    item.textContent = label;
-    legend.append(item);
-  });
-  map.append(legend);
   current.append(map);
 }
 
@@ -1538,11 +1654,16 @@ function strategyCityContextRiskLabels(campaign, city) {
 function createStrategyCityContextHead(campaign, city, office, ownership, kicker) {
   const contextHead = document.createElement("header");
   contextHead.className = "strategy-city-context-head";
-  const contextTitle = document.createElement("div");
+  const contextTitle = document.createElement("button");
+  contextTitle.type = "button";
+  contextTitle.className = "strategy-city-context-focus";
+  contextTitle.title = "在地图上定位这座城";
+  contextTitle.setAttribute("aria-label", `在地图上定位${city.name}`);
   appendTextLine(contextTitle, "strategy-quick-opening-kicker", kicker);
   const title = document.createElement("strong");
   title.textContent = `${city.name} · ${city.policy}`;
   contextTitle.append(title);
+  contextTitle.addEventListener("click", () => inspectStrategyCityOnMap(city.id, campaign));
   const contextBadges = document.createElement("div");
   contextBadges.className = "strategy-city-context-badges";
   const settlement = strategyCitySettlement(city);
@@ -1555,7 +1676,11 @@ function createStrategyCityContextHead(campaign, city, office, ownership, kicker
   const typeLabel = document.createElement("em");
   typeLabel.textContent = SETTLEMENT_LABELS[settlement] || "村庄";
   typeBadge.append(typeIcon, typeLabel);
-  bindStrategyHoverTip(typeBadge, [`类型：${SETTLEMENT_LABELS[settlement] || settlement}`, "村庄 / 城镇 / 城市可建 1 / 2 / 3 级建筑；要塞另可建城墙与城堡。"]);
+  bindStrategyHoverTip(typeBadge, [
+    `类型：${SETTLEMENT_LABELS[settlement] || settlement}`,
+    `经济档：${city.economy_class_label || SETTLEMENT_LABELS[city.economy_class] || city.economy_class || "村庄"}`,
+    "村庄 / 城镇 / 城市可建 1 / 2 / 3 级建筑；要塞另可建城墙与城堡。升为城市后钱粮人口增速最快，改为要塞后增速保持原经济档。",
+  ]);
   const ownerBadge = document.createElement("span");
   ownerBadge.className = `strategy-city-context-owner ${ownership.className}`;
   ownerBadge.textContent = `${ownership.marker} ${ownership.label}`;
@@ -1693,6 +1818,7 @@ export function createStrategyCityDetailCard(campaign, city, faction, office = s
     ["troops", "兵力", city.resources?.troops || 0],
     ["defense", "城防", city.defense || 0],
     ["ether", "以太", city.resources?.ether || 0],
+    ["defense", "火炮", `${city.cannon_stock || 0}/${city.cannon_stock_cap || 0}`],
   ].forEach(([icon, label, value]) => stats.append(createStrategyCityStatChip(icon, label, value)));
   card.append(stats);
   appendTextLine(card, "strategy-city-context-faction", strategyFactionName(campaign, city.owner_faction_id));
@@ -1702,6 +1828,36 @@ export function createStrategyCityDetailCard(campaign, city, faction, office = s
     appendTextLine(card, "strategy-city-order-budget", `本城军令 ${Math.max(0, limit - used)}/${limit} 可用 · 已排 ${used} 条`);
   }
   card.append(createStrategyCityBuildings(campaign, city, faction, office));
+  const ownCityForWorks = city.owner_faction_id === faction?.id;
+  if (ownCityForWorks && (!office || ["governor", "lord"].includes(office.office_type)) && (city.city_works || []).length) {
+    const workRow = document.createElement("div");
+    workRow.className = "strategy-city-works";
+    (city.city_works || []).forEach((work) => {
+      if (work.kind === "convert" && work.reason === "当前城市类型不符") return;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "ghost";
+      button.textContent = work.name;
+      button.disabled = (
+        state.strategyBusy
+        || !strategyCanResume(campaign)
+        || strategyCityOrderLimitReached(campaign, city.id)
+        || !work.available
+        || !strategyCanAffordCommand(campaign, faction, "start_city_work", {}, city.id)
+      );
+      bindStrategyHoverTip(button, [
+        work.effect || work.name,
+        work.money || work.food ? `钱 ${work.money || 0} / 粮 ${work.food || 0}` : "",
+        work.reason || (work.id === "forge_cannon" ? `库存 ${work.cannon_stock || 0}/${work.cannon_stock_cap || 0}` : ""),
+      ].filter(Boolean));
+      button.addEventListener("click", () => queueStrategyAction("start_city_work", {
+        city_id: city.id,
+        work_id: work.id,
+      }));
+      workRow.append(button);
+    });
+    if (workRow.children.length) card.append(workRow);
+  }
   const cityAltar = (campaign?.world?.relic_system?.altars || []).find((item) => item.city_id === city.id);
   const boundRelics = Array.isArray(cityAltar?.bound_relics) ? cityAltar.bound_relics : [];
   if (boundRelics.length) {

@@ -6,11 +6,27 @@ from wujiang.strategic.battle_adapter import MAX_COMPOSED_UNITS, MAX_GRID_UNITS_
 from wujiang.strategic.heroes import (
     normalize_strategic_hero_deployment,
     record_strategic_hero_battle_losses,
+    station_heroes_in_city,
     strategic_defender_hero_codes_for_faction,
     strategic_hero_deployment_limit,
 )
 from wujiang.strategic.models import City, EventLogEntry, PendingBattle, StrategicArmy, StrategicSiege, StrategyError, WorldState
 from wujiang.strategic.simulation import clamp, owner_support
+
+
+def _attacker_heroes_to_station(
+    hero_result: dict[str, dict[str, list[str]]] | None,
+    fallback_codes: list[str] | tuple[str, ...] | None,
+) -> list[str]:
+    attacker = (hero_result or {}).get("attacker") or {}
+    codes: list[str] = []
+    for code in list(attacker.get("surviving") or []) + list(attacker.get("sleeping") or []):
+        text = str(code or "")
+        if text and text not in codes:
+            codes.append(text)
+    if codes:
+        return codes
+    return [str(code) for code in (fallback_codes or []) if code]
 
 
 BATTLE_RESOLUTION_MODES = {"manual", "ai_auto", "watch_ai", "quick", "formula", "pending_choice"}
@@ -427,6 +443,25 @@ def _hero_combat_power(codes: list[str] | tuple[str, ...] | set[str] | None) -> 
     return FORMULA_HERO_POWER * len([code for code in (codes or []) if str(code or "").strip()])
 
 
+def _hero_skill_combat_power(
+    world: WorldState,
+    codes: list[str] | tuple[str, ...] | set[str] | None,
+    *,
+    assignment_type: str,
+) -> int:
+    from wujiang.strategic.hero_personal import hero_skill_battle_bonus
+
+    bonus = 0
+    wanted = {str(code) for code in (codes or []) if str(code or "").strip()}
+    if not wanted:
+        return 0
+    for hero in world.strategic_heroes:
+        if hero.hero_code not in wanted:
+            continue
+        bonus += hero_skill_battle_bonus(hero, assignment_type=assignment_type)
+    return bonus
+
+
 def simulate_formula_city_attack(world: WorldState, battle: PendingBattle) -> dict[str, object]:
     target = _city(world, battle.target_city_id)
     support = owner_support(target)
@@ -434,6 +469,7 @@ def simulate_formula_city_attack(world: WorldState, battle: PendingBattle) -> di
         _composition_combat_power(getattr(battle, "attacker_composition", None), battle.attacker_troops)
         + _registered_unit_power(battle.attacker_registered_units)
         + _hero_combat_power(battle.attacker_hero_codes)
+        + _hero_skill_combat_power(world, battle.attacker_hero_codes, assignment_type="campaign")
     )
     defender_codes = battle.defender_hero_codes
     if defender_codes is None:
@@ -444,6 +480,7 @@ def simulate_formula_city_attack(world: WorldState, battle: PendingBattle) -> di
         + target.defense * 80
         + support * 3
         + _hero_combat_power(defender_codes)
+        + _hero_skill_combat_power(world, defender_codes, assignment_type="garrison")
     )
     attacker_wins = attacker_power >= defender_power
     ratio = attacker_power / max(1, defender_power)
@@ -1131,6 +1168,12 @@ def _apply_strategic_army_outcome(
         )
         battle = next(item for item in next_world.pending_battles if item.battle_id == battle.battle_id)
         battle.battle_result["city_control_change"] = control_change
+    if city_captured:
+        station_heroes_in_city(
+            next_world,
+            hero_codes=_attacker_heroes_to_station(hero_result, battle.attacker_hero_codes),
+            city_id=battle.target_city_id,
+        )
     battle.status = "resolved"
     next_world.event_log.append(EventLogEntry(
         month=next_world.current_month,
@@ -1446,6 +1489,12 @@ def _apply_battle_outcome(
     battle = next(item for item in next_world.pending_battles if item.battle_id == battle.battle_id)
     source = _city(next_world, battle.source_city_id)
     target = _city(next_world, battle.target_city_id)
+    if attacker_wins:
+        station_heroes_in_city(
+            next_world,
+            hero_codes=_attacker_heroes_to_station(strategic_heroes_by_side, battle.attacker_hero_codes),
+            city_id=target.city_id,
+        )
     if battle.battle_result is not None:
         battle.battle_result["strategic_heroes_by_side"] = strategic_heroes_by_side
         battle.battle_result["registered_units_by_side"] = {
@@ -1597,6 +1646,7 @@ def resolve_pending_battle(world: WorldState, *, battle_id: str) -> WorldState:
         _composition_combat_power(getattr(battle, "attacker_composition", None), battle.attacker_troops)
         + _registered_unit_power(battle.attacker_registered_units)
         + _hero_combat_power(battle.attacker_hero_codes)
+        + _hero_skill_combat_power(next_world, battle.attacker_hero_codes, assignment_type="campaign")
     )
     defender_codes = battle.defender_hero_codes
     if defender_codes is None:
@@ -1607,6 +1657,7 @@ def resolve_pending_battle(world: WorldState, *, battle_id: str) -> WorldState:
         + target.defense * 80
         + support * 3
         + _hero_combat_power(defender_codes)
+        + _hero_skill_combat_power(next_world, defender_codes, assignment_type="garrison")
     )
     return _apply_battle_outcome(next_world, battle, attacker_wins=attacker_score >= defender_score)
 

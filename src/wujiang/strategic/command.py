@@ -52,6 +52,7 @@ def strategy_action_command_cost(action_type: str, payload: dict[str, Any] | Non
         "load_army_supply",
         "construct_city_building",
         "upgrade_city_settlement",
+        "start_city_work",
     }:
         return 1
     return 1

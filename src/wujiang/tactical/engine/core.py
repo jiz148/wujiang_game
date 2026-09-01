@@ -9,6 +9,23 @@ from itertools import count
 import random
 from typing import Any, Callable, Iterable, Literal, Optional
 
+from wujiang.tactical.engine.army import (
+    army_public_state,
+    command_hero_units,
+    default_army_orders,
+    is_army_soldier,
+    living_army_units,
+    parse_army_slot,
+    resolve_army_phase,
+    with_army_turn_slots,
+)
+
+
+DEFAULT_HERO_TURN_LIMIT = 200
+SKIRMISH_HERO_TURN_LIMIT = 50
+SIEGE_HERO_TURN_LIMIT = 200
+ENCOUNTER_HERO_TURN_LIMIT = 50
+
 
 _id_counter = count(1)
 
@@ -752,6 +769,7 @@ class TargetContext:
     ignore_shield: bool = False
     half_ignore_shield: bool = False
     ignore_magic_immunity: bool = False
+    ignore_physical_immunity: bool = False
     from_field_effect: bool = False
     cannot_evade: bool = False
     shield_consumed: bool = False
@@ -770,6 +788,8 @@ class DamageContext:
     ignore_shield: bool = False
     half_ignore_shield: bool = False
     ignore_magic_immunity: bool = False
+    ignore_physical_immunity: bool = False
+    siege_shell: bool = False
     from_field_effect: bool = False
     cannot_evade: bool = False
     area_cell_hits: int = 1
@@ -973,6 +993,7 @@ class Unit(ABC):
         self.current_mana = base_stats.mana
         self.mana_points = 0.0
         self.position: Optional[Position] = None
+        self.last_position: Optional[Position] = None
         self.footprint_width = max(1, int(getattr(self, "footprint_width", 1)))
         self.footprint_height = max(1, int(getattr(self, "footprint_height", 1)))
         configured_stat_minimums = dict(getattr(self, "stat_minimums", {}))
@@ -1001,6 +1022,7 @@ class Unit(ABC):
         self.temporary_shields = 0
         self.dodge_charges = 0
         self.magic_immunity = False
+        self.physical_immunity = False
         self.cannot_be_targeted = False
         self.cannot_move = False
         self.cannot_normal_move = False
@@ -1303,6 +1325,8 @@ class Unit(ABC):
             "banish_turns_remaining": self.banish_turns_remaining,
             "banish_return_position": self.banish_return_position.to_dict() if self.banish_return_position else None,
             "is_summon": self.is_summon,
+            "hero_code": str(getattr(self, "hero_code", "") or ""),
+            "is_army_soldier": is_army_soldier(self),
             "is_clone": self.is_clone,
             "is_mount": self.is_mount,
             "mount_owner_id": self.mount_owner_id,
@@ -1310,6 +1334,11 @@ class Unit(ABC):
             "ridden_by_unit_id": self.ridden_by_unit_id,
             "turn_ready": self.turn_ready,
             "position": self.position.to_dict() if self.position else None,
+            "last_position": (
+                self.last_position.to_dict()
+                if getattr(self, "last_position", None)
+                else None
+            ),
             "footprint": {
                 "width": self.footprint_width,
                 "height": self.footprint_height,
@@ -1348,12 +1377,24 @@ class Unit(ABC):
             "total_shields": self.total_shields(),
             "dodge_charges": self.dodge_charges,
             "magic_immunity": self.magic_immunity,
+            "physical_immunity": bool(getattr(self, "physical_immunity", False)),
             "cannot_be_targeted": self.cannot_be_targeted,
             "cannot_move": self.cannot_move,
             "cannot_normal_move": self.cannot_normal_move,
             "cannot_heal": self.cannot_heal,
             "cannot_attack": self.cannot_attack,
             "cannot_use_skills": self.cannot_use_skills,
+            "is_siege_structure": bool(getattr(self, "is_siege_structure", False)),
+            "siege_reload_cycle": bool(getattr(self, "siege_reload_cycle", False)),
+            "siege_loaded": bool(getattr(self, "siege_loaded", False)),
+            "siege_reload_state": str(
+                getattr(self, "siege_reload_state", "")
+                or ("ready" if bool(getattr(self, "siege_loaded", False)) else "empty")
+            ),
+            "siege_profile_id": str(getattr(self, "siege_profile_id", "") or ""),
+            "siege_family": str(getattr(self, "siege_family", "") or ""),
+            "siege_tier": int(getattr(self, "siege_tier", 0) or 0),
+            "splash_radius": int(getattr(self, "splash_radius", 0) or 0),
             "ignore_units_while_moving": self.ignore_units_while_moving,
             "allow_enemy_destination_overlap": self.allow_enemy_destination_overlap,
             "raw_skill_text": self.raw_skill_text,
@@ -1399,6 +1440,7 @@ class Battle:
         self.legacy_player_turn_mode = False
         self.initial_hero_count = 0
         self.turn_timeout_limit = 0
+        self.turn_timeout_winner = 2
         self.completed_turns = 0
         self._log_suppression_depth = 0
         self._draining_followup_actions = False
@@ -1412,6 +1454,24 @@ class Battle:
         self.win_reason_code = ""
         self.win_reason_text = ""
         self.blocked_cells: set[tuple[int, int]] = set()
+        self.army_orders: dict[int, dict[str, str]] = default_army_orders()
+        self.army_ai_players: set[int] = set()
+        self.army_strike_wave: str = ""
+        self.fast_ai_simulation = False
+        self.on_replay_checkpoint = None
+        self._replay_match_end_emitted = False
+
+    def _emit_replay_checkpoint(self, reason: str) -> None:
+        if not bool(getattr(self, "fast_ai_simulation", False)):
+            return
+        if reason == "match_end" and bool(getattr(self, "_replay_match_end_emitted", False)):
+            return
+        hook = getattr(self, "on_replay_checkpoint", None)
+        if not callable(hook):
+            return
+        if reason == "match_end":
+            self._replay_match_end_emitted = True
+        hook(reason)
 
     def log(self, message: str) -> None:
         if self._log_suppression_depth > 0:
@@ -1459,6 +1519,12 @@ class Battle:
         defense_reason: str = "",
         metadata: Optional[dict[str, Any]] = None,
     ) -> None:
+        if bool(getattr(self, "fast_ai_simulation", False)):
+            return
+        payload = dict(metadata or {})
+        wave = str(getattr(self, "army_strike_wave", "") or "")
+        if wave and "army_strike_wave" not in payload:
+            payload["army_strike_wave"] = wave
         event = VisualEvent(
             event_id=self._next_visual_event_id,
             kind=kind,
@@ -1471,7 +1537,7 @@ class Battle:
             target_cells=list(target_cells or []),
             source_cell=source_cell,
             defense_reason=defense_reason,
-            metadata=dict(metadata or {}),
+            metadata=payload,
         )
         self._next_visual_event_id += 1
         self.visual_events.append(event)
@@ -1806,8 +1872,12 @@ class Battle:
                     unit.remove_status(status, self)
 
     def start_battle(self) -> None:
-        self.initial_hero_count = len([unit for unit in self.all_units() if not unit.is_summon])
-        self.turn_timeout_limit = self.initial_hero_count * 20 if self.initial_hero_count > 0 else 0
+        command_count = len([unit for unit in self.all_units() if not unit.is_summon and not is_army_soldier(unit)])
+        self.initial_hero_count = command_count
+        configured_limit = int(getattr(self, "turn_timeout_limit", 0) or 0)
+        self.turn_timeout_limit = configured_limit if configured_limit > 0 else DEFAULT_HERO_TURN_LIMIT
+        if int(getattr(self, "turn_timeout_winner", 0) or 0) not in {1, 2}:
+            self.turn_timeout_winner = 2
         self.completed_turns = 0
         self.ensure_turn_order()
         self.start_current_turn()
@@ -1815,22 +1885,80 @@ class Battle:
     def end_turn(self) -> None:
         if self.pending_chain is not None:
             raise ActionError("当前正在等待连锁结算，不能结束回合。")
+        if self.is_army_turn():
+            player_id = self.army_turn_player_id()
+            if player_id is not None:
+                resolve_army_phase(self, player_id)
         self.resolve_turn_end()
+
+    def is_army_turn(self) -> bool:
+        return parse_army_slot(self.current_turn_slot_unit_id()) is not None
+
+    def army_turn_player_id(self) -> Optional[int]:
+        return parse_army_slot(self.current_turn_slot_unit_id())
+
+    def has_command_hero_slots(self) -> bool:
+        return any(parse_army_slot(unit_id) is None for unit_id in self.turn_order_unit_ids)
+
+    def set_army_order(
+        self,
+        player_id: int,
+        order: str,
+        direction: str | None = None,
+        kind: str | None = None,
+        stride: str | None = None,
+        ammo: str | None = None,
+    ) -> dict[str, str]:
+        from wujiang.tactical.engine.army import (
+            apply_army_order,
+            command_for_kind,
+            normalize_army_command,
+            normalize_army_kind,
+            present_army_kinds,
+        )
+
+        team_id = 1 if int(player_id) != 2 else 2
+        target_kind = None if kind in {None, ""} else normalize_army_kind(kind)
+        previous = command_for_kind(self.army_orders, team_id, target_kind or "infantry")
+        allowed_ammo = None
+        ammo_options = (getattr(self, "siege_ammo_by_player", None) or {}).get(team_id)
+        if ammo_options:
+            allowed_ammo = [str(item.get("id") or item) for item in ammo_options]
+        command = normalize_army_command(
+            order,
+            direction,
+            player_id=team_id,
+            previous=previous,
+            stride=stride,
+            ammo=ammo,
+            allowed_ammo=allowed_ammo,
+        )
+        apply_army_order(
+            self.army_orders,
+            team_id,
+            command,
+            kind=target_kind,
+            kinds=present_army_kinds(self, team_id) or None,
+        )
+        return dict(command)
 
     def ensure_turn_order(self) -> None:
         if self.turn_order_unit_ids:
+            self.turn_order_unit_ids = with_army_turn_slots(self, self.turn_order_unit_ids)
             if self.turn_slot_index >= len(self.turn_order_unit_ids):
                 self.turn_slot_index = 0
-            self.active_turn_unit_id = self.turn_order_unit_ids[self.turn_slot_index]
+            self.active_turn_unit_id = self.turn_order_unit_ids[self.turn_slot_index] if self.turn_order_unit_ids else None
             return
-        hero_ids = [unit.unit_id for unit in self.hero_units(1)] + [unit.unit_id for unit in self.hero_units(2)]
-        if not hero_ids:
+        hero_ids = [unit.unit_id for unit in command_hero_units(self, 1)] + [
+            unit.unit_id for unit in command_hero_units(self, 2)
+        ]
+        if not hero_ids and not any(is_army_soldier(unit) for unit in self.all_units()):
             self.active_turn_unit_id = None
             return
         self.configure_turn_order(hero_ids)
 
     def configure_turn_order(self, hero_unit_ids: Iterable[str], *, starting_index: int = 0) -> None:
-        self.turn_order_unit_ids = [str(unit_id) for unit_id in hero_unit_ids]
+        self.turn_order_unit_ids = with_army_turn_slots(self, hero_unit_ids)
         if not self.turn_order_unit_ids:
             self.turn_slot_index = 0
             self.active_turn_unit_id = None
@@ -1847,7 +1975,7 @@ class Battle:
 
     def current_turn_unit(self) -> Optional[Unit]:
         unit_id = self.current_turn_slot_unit_id()
-        if unit_id is None:
+        if unit_id is None or parse_army_slot(unit_id) is not None:
             return None
         return self.units.get(unit_id)
 
@@ -1880,6 +2008,7 @@ class Battle:
                 for unit in self.all_units()
                 if unit.alive
                 and unit.player_id == hero_unit.player_id
+                and not is_army_soldier(unit)
                 and (include_banished or not unit.banished)
             ]
             units.sort(key=lambda unit: (0 if unit.unit_id == hero_id else 1, unit.unit_id))
@@ -1889,6 +2018,7 @@ class Battle:
             for unit in self.all_units()
             if unit.alive
             and self.controlling_hero_id(unit) == hero_id
+            and not is_army_soldier(unit)
             and (include_banished or not unit.banished)
         ]
         units.sort(key=lambda unit: (0 if unit.unit_id == hero_id else 1, unit.unit_id))
@@ -1899,6 +2029,10 @@ class Battle:
 
     def unit_belongs_to_current_turn(self, unit: Unit | None) -> bool:
         if unit is None:
+            return False
+        if self.is_army_turn() and is_army_soldier(unit):
+            return unit.player_id == self.army_turn_player_id()
+        if is_army_soldier(unit):
             return False
         if self.legacy_player_turn_mode:
             hero = self.current_turn_unit()
@@ -1926,8 +2060,22 @@ class Battle:
         attempts = 0
         while attempts < len(self.turn_order_unit_ids):
             hero_id = self.current_turn_slot_unit_id()
+            army_player_id = parse_army_slot(hero_id)
+            if army_player_id is not None:
+                self.active_turn_unit_id = hero_id
+                self.active_player = army_player_id
+                if self.completed_turns > 0 and self.has_command_hero_slots():
+                    if living_army_units(self, army_player_id):
+                        resolve_army_phase(self, army_player_id)
+                    if self.winner is not None:
+                        return
+                    self.resolve_turn_end(auto_started=True)
+                    return
+                self.log(f"第 {self.round_number} 轮，玩家 {army_player_id} 的军队回合开始。")
+                self.check_win_condition()
+                return
             hero = self.units.get(hero_id) if hero_id else None
-            if hero is None or not hero.alive or hero.is_summon:
+            if hero is None or not hero.alive or hero.is_summon or is_army_soldier(hero):
                 self.advance_turn_slot_index()
                 attempts += 1
                 continue
@@ -1960,8 +2108,11 @@ class Battle:
         total = len(self.turn_order_unit_ids)
         for offset in range(1, total + 1):
             index = (self.turn_slot_index + offset) % total
-            hero = self.units.get(self.turn_order_unit_ids[index])
-            if hero is None or not hero.alive or hero.is_summon:
+            slot_id = self.turn_order_unit_ids[index]
+            if parse_army_slot(slot_id) is not None:
+                continue
+            hero = self.units.get(slot_id)
+            if hero is None or not hero.alive or hero.is_summon or is_army_soldier(hero):
                 continue
             return hero
         return None
@@ -1972,6 +2123,8 @@ class Battle:
         bundle_units = self.current_turn_bundle_units(include_banished=True)
         if hero is not None and not auto_started:
             self.log(f"{hero.name} 结束了自己的回合。")
+        elif self.is_army_turn() and not auto_started:
+            self.log(f"玩家 {self.army_turn_player_id()} 的军队结束了回合。")
         for unit in bundle_units:
             unit.finish_turn(self)
         for unit in self.all_units():
@@ -1985,28 +2138,31 @@ class Battle:
         self.enforce_sandstorm_stealth_rules()
         self.cleanup_dead_units()
         if self.winner is not None:
+            self._emit_replay_checkpoint("match_end")
             return
         self.completed_turns += 1
+        self._emit_replay_checkpoint("turn_end")
         if self.turn_timeout_limit > 0 and self.completed_turns >= self.turn_timeout_limit:
-            candidates = [player_id for player_id in (1, 2) if self.hero_units(player_id)]
-            if not candidates:
-                candidates = [1, 2]
-            self.winner = int(random.choice(candidates))
-            self.win_reason_code = "turn_limit_random"
-            self.win_reason_text = f"达到 {self.turn_timeout_limit} 个武将回合上限后随机判定胜方。"
+            winner = int(getattr(self, "turn_timeout_winner", 2) or 2)
+            if winner not in {1, 2}:
+                winner = 2
+            self.winner = winner
+            self.win_reason_code = "turn_limit"
+            self.win_reason_text = f"达到 {self.turn_timeout_limit} 个武将回合上限后判定玩家 {self.winner} 获胜。"
             self._append_summary_event(
                 "match_end",
                 actor_unit_id=None,
                 actor_name="系统",
                 actor_player_id=self.winner,
                 target_name="",
-                action_name="回合上限随机判定",
+                action_name="回合上限判定",
                 amount=0,
             )
             self.log(
                 f"对局已达到 {self.turn_timeout_limit} 个武将回合上限，"
-                f"随机判定玩家 {self.winner} 获胜。"
+                f"判定玩家 {self.winner} 获胜。"
             )
+            self._emit_replay_checkpoint("match_end")
             return
         self.advance_turn_slot_index()
         self.start_current_turn()
@@ -2340,7 +2496,11 @@ class Battle:
         return [
             unit
             for unit in self.all_units()
-            if unit.alive and not unit.is_summon and not unit.banished and unit.position is not None
+            if unit.alive
+            and not unit.is_summon
+            and not is_army_soldier(unit)
+            and not unit.banished
+            and unit.position is not None
         ]
 
     def clear_all_stealth_if_all_heroes_stealthed(self) -> None:
@@ -2830,6 +2990,7 @@ class Battle:
         ignore_shield: bool = False,
         half_ignore_shield: bool = False,
         ignore_magic_immunity: bool = False,
+        ignore_physical_immunity: bool = False,
         from_field_effect: bool = False,
         cannot_evade: bool = False,
         ignore_targeting_restrictions: bool = False,
@@ -2846,6 +3007,7 @@ class Battle:
             ignore_shield=ignore_shield,
             half_ignore_shield=half_ignore_shield,
             ignore_magic_immunity=ignore_magic_immunity,
+            ignore_physical_immunity=ignore_physical_immunity,
             from_field_effect=from_field_effect,
             cannot_evade=cannot_evade,
             tags=tags or set(),
@@ -2881,6 +3043,22 @@ class Battle:
                 defense_reason="magic_immunity",
             )
             ctx.reason = f"{target.name} 处于魔免状态。"
+            return ctx
+        if (
+            is_hostile
+            and not is_skill
+            and not ctx.from_field_effect
+            and bool(getattr(target, "physical_immunity", False))
+            and not ctx.ignore_physical_immunity
+        ):
+            ctx.cancelled = True
+            self.emit_defense_visual_event(
+                source=actor,
+                target=target,
+                action_name=action_name,
+                defense_reason="physical_immunity",
+            )
+            ctx.reason = f"{target.name} 处于物免状态。"
             return ctx
         if not resolve_defenses:
             return ctx
@@ -2957,6 +3135,23 @@ class Battle:
                     defense_reason="magic_immunity",
                 )
                 ctx.reason = f"{ctx.target.name} 处于魔免状态。"
+                self.log_public_event(ctx.reason, source=ctx.source, target=ctx.target)
+                notify_cancelled()
+                return ctx
+            if (
+                not ctx.is_skill
+                and not ctx.from_field_effect
+                and bool(getattr(ctx.target, "physical_immunity", False))
+                and not ctx.ignore_physical_immunity
+            ):
+                ctx.cancelled = True
+                self.emit_defense_visual_event(
+                    source=ctx.source,
+                    target=ctx.target,
+                    action_name=ctx.action_name,
+                    defense_reason="physical_immunity",
+                )
+                ctx.reason = f"{ctx.target.name} 处于物免状态。"
                 self.log_public_event(ctx.reason, source=ctx.source, target=ctx.target)
                 notify_cancelled()
                 return ctx
@@ -3185,11 +3380,21 @@ class Battle:
         attack_payload["attack_cells"] = [cell.to_dict() for cell in area_cells]
         actor.attacks_used += attack_cost
         actor.actions_taken_this_turn.append("attack")
-        targets = [
-            unit
-            for unit in self.effect_units_at_cells(area_cells)
-            if unit.player_id != actor.player_id
-        ]
+        friendly_fire = bool(attack_payload.get("friendly_fire"))
+        impact = None
+        raw_impact = attack_payload.get("impact_cell")
+        if isinstance(raw_impact, dict) and raw_impact.get("x") is not None and raw_impact.get("y") is not None:
+            impact = Position(int(raw_impact["x"]), int(raw_impact["y"]))
+        from wujiang.tactical.engine.siege import is_siege_structure, structure_hit_by_impact
+
+        targets = []
+        for unit in self.effect_units_at_cells(area_cells):
+            if not friendly_fire and unit.player_id == actor.player_id:
+                continue
+            if attack_payload.get("structures_need_direct_hit") and is_siege_structure(unit):
+                if not structure_hit_by_impact(self, unit, impact):
+                    continue
+            targets.append(unit)
         if not targets:
             actor.consume_attack_attempt_buffs(self)
             attack_name = str(attack_payload.get("attack_name") or "普攻")
@@ -3263,6 +3468,11 @@ class Battle:
                 return False, reason
         if self.distance_between_units(actor, target) > actor.targeting_range():
             return False, "目标超出普攻范围。"
+        from wujiang.tactical.engine.siege import siege_min_attack_range
+
+        min_range = siege_min_attack_range(actor)
+        if min_range and self.distance_between_units(actor, target) < min_range:
+            return False, f"{actor.name} 无法对范 {min_range - 1} 开火。"
         if payload is not None and payload.get("x") is not None and payload.get("y") is not None:
             clicked = Position(int(payload["x"]), int(payload["y"]))
             if clicked not in self.unit_cells(target):
@@ -3305,6 +3515,8 @@ class Battle:
                 action_name=action_name,
                 is_skill=False,
                 is_hostile=True,
+                ignore_magic_immunity=bool(resolved_payload.get("ignore_magic_immunity")),
+                ignore_physical_immunity=bool(resolved_payload.get("ignore_physical_immunity")),
                 resolve_defenses=False,
                 tags=attack_tags,
             )
@@ -3315,6 +3527,8 @@ class Battle:
             attack_power = actor.stat("attack") + float(resolved_payload.get("attack_bonus", 0.0) or 0.0)
             if resolved_payload.get("attack_power_override") is not None:
                 attack_power = float(resolved_payload["attack_power_override"])
+            if resolved_payload.get("siege_shell"):
+                attack_tags.add("siege_shell")
             damage_ctx = DamageContext(
                 source=actor,
                 target=target,
@@ -3323,7 +3537,9 @@ class Battle:
                 action_name=action_name,
                 ignore_shield=bool(target_ctx.ignore_shield or resolved_payload.get("ignore_shield")),
                 half_ignore_shield=bool(target_ctx.half_ignore_shield or resolved_payload.get("half_ignore_shield")),
-                ignore_magic_immunity=target_ctx.ignore_magic_immunity,
+                ignore_magic_immunity=bool(target_ctx.ignore_magic_immunity or resolved_payload.get("ignore_magic_immunity")),
+                ignore_physical_immunity=bool(target_ctx.ignore_physical_immunity or resolved_payload.get("ignore_physical_immunity")),
+                siege_shell=bool(resolved_payload.get("siege_shell")),
                 cannot_evade=target_ctx.cannot_evade,
                 tags=set(target_ctx.tags),
                 area_cell_hits=max(1, self.unit_hit_count_for_cells(target, self.payload_positions(resolved_payload, "attack_cells"))),
@@ -4482,6 +4698,7 @@ class Battle:
         dead_units = [unit for unit in self.all_units() if not unit.alive]
         for unit in dead_units:
             if unit.position is not None:
+                unit.last_position = unit.position
                 self.log(f"{unit.name} 被击破。")
                 unit.position = None
             if unit.unit_id not in {destroyed.unit_id for destroyed in self.destroyed_units}:
@@ -4495,7 +4712,7 @@ class Battle:
         return sum(
             1
             for unit in self.destroyed_units
-            if not unit.is_summon and not unit.is_clone
+            if not unit.is_summon and not unit.is_clone and not is_army_soldier(unit)
         )
 
     def notify_destroyed_hero_count_changed(self) -> None:
@@ -4528,7 +4745,11 @@ class Battle:
     def check_win_condition(self) -> None:
         if self.winner is not None:
             return
-        alive_players = {player_id for player_id in (1, 2) if self.hero_units(player_id)}
+        alive_players = {
+            player_id
+            for player_id in (1, 2)
+            if any(not bool(getattr(unit, "is_siege_structure", False)) for unit in self.hero_units(player_id))
+        }
         if len(alive_players) == 1 and self.units:
             self.winner = alive_players.pop()
             losing_player = 2 if self.winner == 1 else 1
@@ -4544,6 +4765,7 @@ class Battle:
                 amount=0,
             )
             self.log(f"玩家 {self.winner} 获胜。")
+            self._emit_replay_checkpoint("match_end")
 
     def perform_action(self, payload: dict[str, Any]) -> None:
         self._perform_action(payload)
@@ -4558,7 +4780,7 @@ class Battle:
         ):
             return
         active_unit_id = self.current_turn_slot_unit_id()
-        if active_unit_id is None:
+        if active_unit_id is None or parse_army_slot(active_unit_id) is not None:
             return
         active_unit = self.units.get(active_unit_id)
         if active_unit is not None and active_unit.alive:
@@ -4699,9 +4921,16 @@ class Battle:
             self.end_turn()
             return
         if action_type in {"move", "attack", "skill"}:
+            actor_id = payload.get("unit_id")
+            if actor_id:
+                actor = self.get_unit(str(actor_id))
+                if is_army_soldier(actor):
+                    raise ActionError("士兵由军队指令统一行动，不能单独操控。")
             self.start_action_or_chain(payload)
             return
         unit = self.get_unit(payload["unit_id"])
+        if is_army_soldier(unit):
+            raise ActionError("士兵由军队指令统一行动，不能单独操控。")
         if action_type == "pass_unit":
             self.pass_turn(unit)
             return
@@ -4841,6 +5070,7 @@ class Battle:
         respawn_prompt = self.current_respawn_prompt()
         current_turn_unit = self.current_turn_unit()
         next_turn_unit = self.peek_next_turn_unit()
+        army_turn = self.is_army_turn()
         return {
             "board": {
                 "width": self.width,
@@ -4852,7 +5082,11 @@ class Battle:
             },
             "active_player": self.active_player,
             "active_turn_unit_id": current_turn_unit.unit_id if current_turn_unit is not None else self.current_turn_slot_unit_id(),
-            "active_turn_unit_name": current_turn_unit.name if current_turn_unit is not None else None,
+            "active_turn_unit_name": (
+                current_turn_unit.name
+                if current_turn_unit is not None
+                else ("军队" if army_turn else None)
+            ),
             "next_turn_unit_id": next_turn_unit.unit_id if next_turn_unit is not None else None,
             "next_turn_unit_name": next_turn_unit.name if next_turn_unit is not None else None,
             "next_turn_player_id": next_turn_unit.player_id if next_turn_unit is not None else None,
@@ -4864,6 +5098,8 @@ class Battle:
             "turn_number": self.turn_number,
             "round_number": self.round_number,
             "completed_turns": self.completed_turns,
+            "turn_timeout_limit": int(getattr(self, "turn_timeout_limit", 0) or 0),
+            "turn_timeout_winner": int(getattr(self, "turn_timeout_winner", 2) or 2),
             "turn_order_unit_ids": list(self.turn_order_unit_ids),
             "winner": self.winner,
             "win_reason_code": self.win_reason_code if self.winner is not None else "",
@@ -4877,4 +5113,6 @@ class Battle:
             "pending_respawn": respawn_prompt.to_public_dict() if respawn_prompt else None,
             "logs": self.logs,
             "visual_events": [event.to_public_dict() for event in self.visual_events],
+            "is_army_turn": army_turn,
+            "army": army_public_state(self),
         }

@@ -433,6 +433,72 @@ def post_rooms_select_hero(ctx: RequestContext) -> None:
     return
 
 
+@post("/api/rooms/set-army-composition")
+def post_rooms_set_army_composition(ctx: RequestContext) -> None:
+    handler = ctx.handler
+    payload = ctx.payload
+    room_id = payload.get("room_id", "")
+    player_token = payload.get("player_token")
+    seat_id = payload.get("seat_id")
+    composition = payload.get("army_counts") or payload.get("composition") or {}
+    try:
+        room = ROOMS.get_room(str(room_id))
+        room.set_army_composition(str(player_token or ""), composition, seat_id=seat_id)
+    except RoomError as exc:
+        room = None
+        try:
+            room = ROOMS.get_room(str(room_id))
+        except RoomError:
+            pass
+        error_payload: dict[str, Any] = {"error": str(exc)}
+        if room is not None:
+            error_payload["state"] = room.serialize_state(str(player_token or ""), base_url=request_base_url(handler))
+        json_response(handler, HTTPStatus.BAD_REQUEST, error_payload)
+        return
+    json_response(
+        handler,
+        HTTPStatus.OK,
+        room_state_with_strategy_sync(room, str(player_token or ""), base_url=request_base_url(handler)),
+    )
+    return
+
+
+@post("/api/rooms/set-army-order")
+def post_rooms_set_army_order(ctx: RequestContext) -> None:
+    handler = ctx.handler
+    payload = ctx.payload
+    room_id = payload.get("room_id", "")
+    player_token = payload.get("player_token")
+    try:
+        room = ROOMS.get_room(str(room_id))
+        room.set_army_order(
+            str(player_token or ""),
+            payload.get("order"),
+            payload.get("direction"),
+            team_id=payload.get("team_id"),
+            kind=payload.get("kind"),
+            stride=payload.get("stride"),
+            ammo=payload.get("ammo"),
+        )
+    except RoomError as exc:
+        room = None
+        try:
+            room = ROOMS.get_room(str(room_id))
+        except RoomError:
+            pass
+        error_payload: dict[str, Any] = {"error": str(exc)}
+        if room is not None:
+            error_payload["state"] = room.serialize_state(str(player_token or ""), base_url=request_base_url(handler))
+        json_response(handler, HTTPStatus.BAD_REQUEST, error_payload)
+        return
+    json_response(
+        handler,
+        HTTPStatus.OK,
+        room_state_with_strategy_sync(room, str(player_token or ""), base_url=request_base_url(handler)),
+    )
+    return
+
+
 @post("/api/rooms/apply-recommended-roster")
 def post_rooms_apply_recommended_roster(ctx: RequestContext) -> None:
     handler = ctx.handler
@@ -804,7 +870,13 @@ def post_rooms_auto_configure(ctx: RequestContext) -> None:
     player_token = payload.get("player_token")
     try:
         room = ROOMS.get_room(str(room_id))
-        room.auto_configure(str(player_token or ""))
+        room.auto_configure(
+            str(player_token or ""),
+            method=payload.get("method", "count"),
+            count=payload.get("count", 3),
+            points=payload.get("points", 15),
+            allow_duplicates=bool(payload.get("allow_duplicates")),
+        )
     except RoomError as exc:
         room = None
         try:
@@ -982,6 +1054,78 @@ def post_rooms_surrender(ctx: RequestContext) -> None:
         assert auth_user is not None
         require_strategy_room_mutation_allowed(room, auth_user)
         room.surrender(str(player_token or ""))
+    except RoomError as exc:
+        room = None
+        try:
+            room = ROOMS.get_room(str(room_id))
+        except RoomError:
+            pass
+        error_payload = {"error": str(exc)}
+        if room is not None:
+            error_payload["state"] = room.serialize_state(str(player_token or ""), base_url=request_base_url(handler))
+        json_response(handler, HTTPStatus.BAD_REQUEST, error_payload)
+        return
+    json_response(
+        handler,
+        HTTPStatus.OK,
+        room_state_with_strategy_sync(room, str(player_token or ""), base_url=request_base_url(handler)),
+    )
+    return
+
+
+@post("/api/rooms/ai-takeover")
+def post_rooms_ai_takeover(ctx: RequestContext) -> None:
+    handler = ctx.handler
+    payload = ctx.payload
+    auth_user = ctx.auth_user
+    room_id = payload.get("room_id", "")
+    player_token = payload.get("player_token")
+    try:
+        room = ROOMS.get_room(str(room_id))
+        assert auth_user is not None
+        require_strategy_room_mutation_allowed(room, auth_user)
+        if "hero_ai_style" in payload or "army_ai_style" in payload:
+            room.set_ai_styles(
+                str(player_token or ""),
+                hero_ai_style=payload.get("hero_ai_style") if "hero_ai_style" in payload else None,
+                army_ai_style=payload.get("army_ai_style") if "army_ai_style" in payload else None,
+            )
+        room.set_ai_takeover(str(player_token or ""), payload.get("enabled"))
+    except RoomError as exc:
+        room = None
+        try:
+            room = ROOMS.get_room(str(room_id))
+        except RoomError:
+            pass
+        error_payload = {"error": str(exc)}
+        if room is not None:
+            error_payload["state"] = room.serialize_state(str(player_token or ""), base_url=request_base_url(handler))
+        json_response(handler, HTTPStatus.BAD_REQUEST, error_payload)
+        return
+    json_response(
+        handler,
+        HTTPStatus.OK,
+        room_state_with_strategy_sync(room, str(player_token or ""), base_url=request_base_url(handler)),
+    )
+    return
+
+
+@post("/api/rooms/ai-style")
+def post_rooms_ai_style(ctx: RequestContext) -> None:
+    handler = ctx.handler
+    payload = ctx.payload
+    auth_user = ctx.auth_user
+    room_id = payload.get("room_id", "")
+    player_token = payload.get("player_token")
+    try:
+        room = ROOMS.get_room(str(room_id))
+        assert auth_user is not None
+        require_strategy_room_mutation_allowed(room, auth_user)
+        room.set_ai_styles(
+            str(player_token or ""),
+            hero_ai_style=payload.get("hero_ai_style"),
+            army_ai_style=payload.get("army_ai_style"),
+        )
     except RoomError as exc:
         room = None
         try:

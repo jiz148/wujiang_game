@@ -111,6 +111,7 @@ ACTION_PERMISSION = {
     "approve_registered_unit_request": "approve_unit_request",
     "construct_city_building": "manage_buildings",
     "upgrade_city_settlement": "manage_buildings",
+    "start_city_work": "manage_buildings",
     "set_city_policy": "set_city_policy",
     "rebellion_action": "handle_rebellion",
     "rebellion_battle": "handle_rebellion",
@@ -443,6 +444,7 @@ def office_action_entity_id(action_type: str, payload: dict[str, Any]) -> str:
         "request_registered_units",
         "construct_city_building",
         "upgrade_city_settlement",
+        "start_city_work",
         "choose_occupation_policy",
         "form_army",
     }:
@@ -501,6 +503,7 @@ def resolve_action_office(
                     "form_army",
                     "construct_city_building",
                     "upgrade_city_settlement",
+                    "start_city_work",
                 }
                 and office.office_type in {"lord", "grand_general", "general"}
             )
@@ -548,6 +551,7 @@ def ai_office_for_action(
                     "form_army",
                     "construct_city_building",
                     "upgrade_city_settlement",
+                    "start_city_work",
                 }
                 and office.office_type in {"lord", "grand_general", "general"}
             )

@@ -59,7 +59,7 @@ export function simulationMeta() {
     speed: 1,
     can_control: false,
     live_step_index: 0,
-    speed_options: [0.5, 1, 2, 4],
+    speed_options: [0.5, 1, 2, 4, 6, 8, 16],
   };
 }
 
@@ -75,6 +75,15 @@ export function viewerTeamId() {
   return state.room?.viewer_team_id ?? state.room?.viewer_player_id ?? null;
 }
 
+export function viewerSeat() {
+  const id = viewerPlayerId();
+  return (state.room?.seats || []).find((seat) => seat.player_id === id) || null;
+}
+
+export function isAiTakeover() {
+  return Boolean(state.room?.viewer_ai_takeover || viewerSeat()?.ai_takeover);
+}
+
 export function isGameOver() {
   return Boolean(state.battle?.winner);
 }
@@ -86,7 +95,8 @@ export function canInteract() {
       && !isGameOver()
       && !isReplayMode()
       && viewerTeamId() !== null
-      && viewerTeamId() === inputPlayer(),
+      && viewerTeamId() === inputPlayer()
+      && !isAiTakeover(),
   );
 }
 
@@ -116,6 +126,20 @@ export function bundleFor(unitId) {
 
 export function allUnits() {
   return state.battle?.units ?? [];
+}
+
+export function displayUnitPosition(unit) {
+  return unit?.position || unit?.last_position || null;
+}
+
+export function boardUnits() {
+  const living = allUnits().filter((unit) => unit?.position);
+  if (living.length || !(isGameOver() || isReplayMode())) {
+    return living;
+  }
+  return (state.battle?.destroyed_units || [])
+    .filter((unit) => unit && (unit.position || unit.last_position))
+    .map((unit) => (unit.position ? unit : { ...unit, position: unit.last_position }));
 }
 
 export function unitById(unitId) {
@@ -258,11 +282,12 @@ export function unitHasLargeFootprint(unit) {
 }
 
 export function unitOccupiedCells(unit) {
-  if (!unit?.position) return [];
+  const position = displayUnitPosition(unit);
+  if (!position) return [];
   if (Array.isArray(unit.occupied_cells) && unit.occupied_cells.length) {
     return unit.occupied_cells.filter((cell) => cell && cell.x != null && cell.y != null);
   }
-  return [unit.position];
+  return [position];
 }
 
 export function unitFootprintBounds(unit) {

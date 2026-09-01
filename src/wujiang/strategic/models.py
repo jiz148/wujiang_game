@@ -65,6 +65,16 @@ def normalize_faction_color(value: Any, fallback: str = "") -> str:
     return fallback
 
 
+def infer_economy_class(settlement: str, level: int = 1) -> str:
+    if settlement == "city":
+        return "city"
+    if settlement == "town":
+        return "town"
+    if settlement == "fortress":
+        return "city" if int(level or 1) >= 3 else "town"
+    return "village"
+
+
 def infer_city_settlement(*, level: int, defense: int, traits: list[str] | None = None) -> str:
     names = {str(item) for item in (traits or [])}
     if "要塞" in names:
@@ -339,16 +349,21 @@ class City:
     troop_features: list[str] = field(default_factory=list)
     occupation: dict[str, Any] = field(default_factory=dict)
     settlement: str = ""
+    cannon_stock: int = 0
+    economy_class: str = ""
 
     def __post_init__(self) -> None:
         self.level = int(self.level)
         self.defense = int(self.defense)
+        self.cannon_stock = max(0, int(self.cannon_stock or 0))
         if self.settlement not in CITY_SETTLEMENTS:
             self.settlement = infer_city_settlement(
                 level=self.level,
                 defense=self.defense,
                 traits=self.traits,
             )
+        if self.economy_class not in {"village", "town", "city"}:
+            self.economy_class = infer_economy_class(self.settlement, self.level)
         if self.level <= 0:
             raise StrategyError("城市等级必须为正数。")
         if self.defense < 0:
@@ -394,6 +409,8 @@ class City:
             "troop_features": list(self.troop_features),
             "occupation": dict(self.occupation),
             "settlement": self.settlement,
+            "cannon_stock": int(self.cannon_stock),
+            "economy_class": self.economy_class,
         }
 
     @classmethod
@@ -420,6 +437,8 @@ class City:
             troop_features=_string_list(raw.get("troop_features")),
             settlement=str(raw.get("settlement") or raw.get("kind") or ""),
             occupation=_plain_dict(raw.get("occupation")),
+            cannon_stock=int(raw.get("cannon_stock") or 0),
+            economy_class=str(raw.get("economy_class") or ""),
         )
 
 
@@ -717,6 +736,7 @@ class StrategicHeroState:
     assignment_target_id: str | None = None
     last_personal_action_month: int | None = None
     strategic_specialty: str = ""
+    strategic_skills: list[str] = field(default_factory=list)
     relationships: dict[str, int] = field(default_factory=dict)
     personal_mission_id: str | None = None
     personal_mission_status: str = "none"
@@ -755,6 +775,7 @@ class StrategicHeroState:
             "assignment_target_id": self.assignment_target_id,
             "last_personal_action_month": self.last_personal_action_month,
             "strategic_specialty": self.strategic_specialty,
+            "strategic_skills": list(self.strategic_skills),
             "relationships": dict(self.relationships),
             "personal_mission_id": self.personal_mission_id,
             "personal_mission_status": self.personal_mission_status,
@@ -794,6 +815,7 @@ class StrategicHeroState:
                 int(last_personal_action_month) if last_personal_action_month is not None else None
             ),
             strategic_specialty=str(raw.get("strategic_specialty") or ""),
+            strategic_skills=_string_list(raw.get("strategic_skills")),
             relationships={
                 str(hero_code): int(score)
                 for hero_code, score in dict(raw.get("relationships") or {}).items()
@@ -2013,6 +2035,23 @@ class WorldState:
                 "aether_scholar",
             }:
                 raise StrategyError(f"战略武将 {hero.hero_code} 的战略专长无效。")
+            if any(
+                skill_id
+                not in {
+                    "raid",
+                    "inspire",
+                    "hold_line",
+                    "fortify",
+                    "drill",
+                    "conscript",
+                    "taxmaster",
+                    "logistics",
+                    "aether_rite",
+                    "envoy",
+                }
+                for skill_id in hero.strategic_skills
+            ):
+                raise StrategyError(f"战略武将 {hero.hero_code} 的战略技能无效。")
             if hero.personal_mission_status not in {"none", "active", "completed", "failed"}:
                 raise StrategyError(f"战略武将 {hero.hero_code} 的个人任务状态无效。")
             if hero.personal_mission_assignment_type is not None and hero.personal_mission_assignment_type not in {

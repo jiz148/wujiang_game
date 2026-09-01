@@ -11,8 +11,8 @@ import { renderMenu } from '../platform/menu.js';
 import { clearStrategyState, refreshStrategyCampaigns } from '../strategic/api.js';
 import { renderRecentMatches } from '../strategic/ui-base.js';
 import { isRoomConfigControlActive, isStrategyControlActive, renderProfileModal, renderStrategyPanel } from '../strategic/workbench.js';
-import { renderActionForecast, renderActionPanel, renderBattleEffects, renderBoard, renderBoardOverlays, renderChainPanel, renderGameOverOverlay, renderHoverCard, renderLogs, renderRoomActionButtons, renderScreens, renderSelectedCard, renderSidebarPanels, renderTargetCancelButton, renderTargetCompleteButton, renderUnitStrip } from '../tactical/battle-ui.js';
-import { renderHeroDetail, renderHeroPicker, renderRoomSetupDialog } from '../tactical/room-lobby.js';
+import { renderActionForecast, renderActionPanel, renderArmyOrderBar, renderBattleEffects, renderBattleTurnBanner, renderBoard, renderBoardOverlays, renderChainPanel, renderGameOverOverlay, renderHoverCard, renderLogs, renderRoomActionButtons, renderScreens, renderSelectedCard, renderSidebarPanels, renderTargetCancelButton, renderTargetCompleteButton, renderUnitStrip } from '../tactical/battle-ui.js';
+import { renderAutoConfigureDialog, renderHeroDetail, renderHeroPicker, renderRoomSetupDialog } from '../tactical/room-lobby.js';
 import { renderTopbar } from './topbar.js';
 import { applyRoomPayload, renderResumePanel, renderRoomListActive, renderTutorialGuide } from '../tactical/room-api.js';
 import { clearActionSelection, ensureDraftSelection, syncIdentityFromUrl } from '../tactical/session.js';
@@ -52,6 +52,7 @@ export function render() {
   renderProfileModal();
   if (!preserveRoomConfig) renderRoomPanels();
   renderRoomSetupDialog();
+  renderAutoConfigureDialog();
   renderHeroPicker();
   renderHeroDetail();
   syncModalIsolation();
@@ -59,6 +60,7 @@ export function render() {
   renderRoomListActive();
   renderHeader();
   renderConnectionAndTurnState();
+  renderBattleTurnBanner();
   renderBattleConsole();
   renderBoardZoomControls();
   renderMessage();
@@ -71,6 +73,7 @@ export function render() {
   renderActionPanel();
   renderActionForecast();
   renderUnitStrip();
+  renderArmyOrderBar();
   renderChainPanel();
   renderLogs();
   renderGameOverOverlay();
@@ -80,8 +83,13 @@ export function render() {
   renderTargetCancelButton();
   renderTargetCompleteButton();
   const tutorialStepId = tutorialState()?.step_id;
-  $("end-turn").disabled = !canInteract() || isChainMode() || isRespawnMode()
-    || Boolean(tutorialStepId && !["end_turn", "win_objective"].includes(tutorialStepId));
+  const endTurn = $("end-turn");
+  const reviewResults = Boolean(isGameOver() && state.battle && state.screen === "battle");
+  endTurn.textContent = reviewResults ? "查看结果" : "结束回合";
+  endTurn.disabled = reviewResults
+    ? false
+    : !canInteract() || isChainMode() || isRespawnMode()
+      || Boolean(tutorialStepId && !["end_turn", "win_objective"].includes(tutorialStepId));
   $("skip-chain").disabled = !canInteract() || !isChainMode();
 }
 

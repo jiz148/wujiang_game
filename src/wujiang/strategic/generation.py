@@ -73,20 +73,39 @@ def _snake_cell(index: int, cols: int) -> tuple[int, int]:
     return col, row
 
 
-def _place_city_coordinates(city_count: int, rng: random.Random) -> dict[int, tuple[float, float]]:
-    cols, rows = _map_grid_size(city_count)
-    placed: dict[int, tuple[float, float]] = {}
-    for index in range(1, city_count + 1):
-        col, row = _snake_cell(index, cols)
-        jitter_x = rng.uniform(-0.44, 0.44)
-        jitter_y = rng.uniform(-0.44, 0.44)
-        if rng.random() < 0.4:
-            jitter_x += rng.uniform(-0.22, 0.22)
-            jitter_y += rng.uniform(-0.22, 0.22)
-        x = 8 + ((col + 0.5 + jitter_x) / cols) * 84
-        y = 8 + ((row + 0.5 + jitter_y) / rows) * 84
-        placed[index] = (max(3.0, min(97.0, x)), max(3.0, min(97.0, y)))
-    for _ in range(8):
+def _farthest_point_indices(
+    points: list[tuple[float, float]],
+    count: int,
+    rng: random.Random,
+) -> list[int]:
+    remaining = list(range(len(points)))
+    if not remaining or count <= 0:
+        return []
+    chosen = [remaining.pop(rng.randrange(len(remaining)))]
+    while len(chosen) < min(count, len(points)) and remaining:
+        def _score(index: int) -> float:
+            px, py = points[index]
+            return min(math.hypot(px - points[item][0], py - points[item][1]) for item in chosen)
+
+        remaining.sort(key=lambda index: (_score(index), index))
+        window = remaining[max(0, len(remaining) - max(2, len(remaining) // 2)) :]
+        pick = rng.choice(window)
+        remaining.remove(pick)
+        chosen.append(pick)
+    return chosen
+
+
+def _clamp_map_point(x: float, y: float) -> tuple[float, float]:
+    return (max(3.0, min(97.0, x)), max(3.0, min(97.0, y)))
+
+
+def _separate_city_coordinates(
+    placed: dict[int, tuple[float, float]],
+    *,
+    min_distance: float,
+    rounds: int = 8,
+) -> dict[int, tuple[float, float]]:
+    for _ in range(rounds):
         indexes = list(placed)
         for left_pos, left_index in enumerate(indexes):
             ax, ay = placed[left_index]
@@ -95,39 +114,140 @@ def _place_city_coordinates(city_count: int, rng: random.Random) -> dict[int, tu
                 dx = ax - bx
                 dy = ay - by
                 distance = math.hypot(dx, dy)
-                if distance < 0.01 or distance >= 11.0:
+                if distance < 0.01 or distance >= min_distance:
                     continue
-                push = (11.0 - distance) / 2
+                push = (min_distance - distance) / 2
                 nx = dx / distance
                 ny = dy / distance
-                ax = max(3.0, min(97.0, ax + nx * push))
-                ay = max(3.0, min(97.0, ay + ny * push))
-                placed[right_index] = (
-                    max(3.0, min(97.0, bx - nx * push)),
-                    max(3.0, min(97.0, by - ny * push)),
-                )
+                ax, ay = _clamp_map_point(ax + nx * push, ay + ny * push)
+                placed[right_index] = _clamp_map_point(bx - nx * push, by - ny * push)
             placed[left_index] = (ax, ay)
     return placed
+
+
+def _nudge_remote_frontier_cities(
+    placed: dict[int, tuple[float, float]],
+    rng: random.Random,
+) -> dict[int, tuple[float, float]]:
+    if len(placed) < 4:
+        return placed
+    cx = sum(point[0] for point in placed.values()) / len(placed)
+    cy = sum(point[1] for point in placed.values()) / len(placed)
+    remote_count = max(1, len(placed) // 4)
+    farthest = sorted(
+        placed,
+        key=lambda index: -math.hypot(placed[index][0] - cx, placed[index][1] - cy),
+    )[:remote_count]
+    for index in farthest:
+        x, y = placed[index]
+        dx = x - cx
+        dy = y - cy
+        distance = math.hypot(dx, dy) or 1.0
+        push = rng.uniform(10.0, 16.0)
+        placed[index] = _clamp_map_point(x + dx / distance * push, y + dy / distance * push)
+    return _separate_city_coordinates(placed, min_distance=12.0, rounds=4)
+
+
+def _place_city_coordinates(
+    city_count: int,
+    rng: random.Random,
+    *,
+    capital_count: int | None = None,
+) -> dict[int, tuple[float, float]]:
+    cols, rows = _map_grid_size(city_count)
+    cells: list[tuple[float, float]] = []
+    for index in range(1, city_count + 1):
+        col, row = _snake_cell(index, cols)
+        jitter_x = rng.uniform(-0.52, 0.52)
+        jitter_y = rng.uniform(-0.52, 0.52)
+        if rng.random() < 0.45:
+            jitter_x += rng.uniform(-0.28, 0.28)
+            jitter_y += rng.uniform(-0.28, 0.28)
+        x = 4 + ((col + 0.5 + jitter_x) / cols) * 92
+        y = 4 + ((row + 0.5 + jitter_y) / rows) * 92
+        cells.append(_clamp_map_point(x, y))
+    placed: dict[int, tuple[float, float]] = {index + 1: cell for index, cell in enumerate(cells)}
+    placed = _separate_city_coordinates(placed, min_distance=13.0)
+    placed = _nudge_remote_frontier_cities(placed, rng)
+    spread_count = max(1, min(city_count, int(capital_count or 1)))
+    points = [placed[index] for index in range(1, city_count + 1)]
+    capital_slots = _farthest_point_indices(points, spread_count, rng)
+    leftover_slots = [index for index in range(city_count) if index not in set(capital_slots)]
+    rng.shuffle(capital_slots)
+    rng.shuffle(leftover_slots)
+    remapped: dict[int, tuple[float, float]] = {}
+    for offset, slot in enumerate(capital_slots):
+        remapped[offset + 1] = points[slot]
+    for offset, slot in enumerate(leftover_slots):
+        remapped[spread_count + offset + 1] = points[slot]
+    return remapped
 
 
 def _nearby_connection_pairs(
     city_count: int,
     coordinates: dict[int, tuple[float, float]],
 ) -> list[tuple[int, int]]:
+    return _mst_connection_pairs(city_count, coordinates)
+
+
+def _mst_connection_pairs(
+    city_count: int,
+    coordinates: dict[int, tuple[float, float]],
+) -> list[tuple[int, int]]:
+    if city_count < 2:
+        return []
+    edges: list[tuple[float, int, int]] = []
+    for left in range(1, city_count + 1):
+        ax, ay = coordinates[left]
+        for right in range(left + 1, city_count + 1):
+            bx, by = coordinates[right]
+            edges.append((math.hypot(ax - bx, ay - by), left, right))
+    edges.sort()
+    parent = {index: index for index in range(1, city_count + 1)}
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
     pairs: list[tuple[int, int]] = []
-    seen: set[tuple[int, int]] = set()
+    for _distance, left, right in edges:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root == right_root:
+            continue
+        parent[right_root] = left_root
+        pairs.append((left, right))
+        if len(pairs) >= city_count - 1:
+            break
+
+    degree = {index: 0 for index in range(1, city_count + 1)}
+    seen = {(min(left, right), max(left, right)) for left, right in pairs}
+    for left, right in pairs:
+        degree[left] += 1
+        degree[right] += 1
     for index in range(1, city_count + 1):
+        if degree[index] != 1:
+            continue
         ax, ay = coordinates[index]
         nearest = sorted(
             (other for other in range(1, city_count + 1) if other != index),
             key=lambda other: math.hypot(ax - coordinates[other][0], ay - coordinates[other][1]),
         )
-        for other in nearest[:2]:
-            key = (min(index, other), max(index, other))
-            if key in seen:
-                continue
-            seen.add(key)
-            pairs.append(key)
+        if len(nearest) < 2:
+            continue
+        first = nearest[0]
+        second = nearest[1]
+        first_dist = math.hypot(ax - coordinates[first][0], ay - coordinates[first][1])
+        second_dist = math.hypot(ax - coordinates[second][0], ay - coordinates[second][1])
+        if second_dist > first_dist * 1.28:
+            continue
+        key = (min(index, second), max(index, second))
+        if key in seen:
+            continue
+        seen.add(key)
+        pairs.append(key)
     return pairs
 
 
@@ -185,7 +305,7 @@ def generate_random_world(
     nodes: list[MapNode] = []
     cities: list[City] = []
     connections: dict[str, set[str]] = {}
-    coordinates = _place_city_coordinates(city_count, rng)
+    coordinates = _place_city_coordinates(city_count, rng, capital_count=faction_count)
 
     for index in range(1, city_count + 1):
         node_id = f"node_{index}"
@@ -202,25 +322,13 @@ def generate_random_world(
             )
         )
 
-    # A winding backbone keeps the map connected; nearby cities add irregular roads.
-    for index in range(1, city_count):
-        left = f"node_{index}"
-        right = f"node_{index + 1}"
-        connections[left].add(right)
-        connections[right].add(left)
-    for left_index, right_index in _nearby_connection_pairs(city_count, coordinates):
+    # Geographic MST keeps the map connected without the numbered backbone
+    # stretching long chords across the middle of the map.
+    for left_index, right_index in _mst_connection_pairs(city_count, coordinates):
         left = f"node_{left_index}"
         right = f"node_{right_index}"
         connections[left].add(right)
         connections[right].add(left)
-    for index in range(1, city_count + 1):
-        if rng.random() < 0.18:
-            target = rng.randint(1, city_count)
-            if target != index:
-                left = f"node_{index}"
-                right = f"node_{target}"
-                connections[left].add(right)
-                connections[right].add(left)
 
     for node in nodes:
         node.connected_node_ids = sorted(connections[node.node_id])
@@ -284,8 +392,8 @@ def generate_random_world(
                 ),
                 defense=defense,
                 governor_id=(f"officer:neutral_city_state_{index}:governor" if neutral_city_states and index > faction_count else None),
-                buildings=["政厅", "fields", "barracks", "ritual_site"],
-                building_levels={"fields": 1, "barracks": 1, "ritual_site": 1},
+                buildings=["政厅", "fields", "barracks", "ritual_site", "city_defense"],
+                building_levels={"fields": 1, "barracks": 1, "ritual_site": 1, "city_defense": 1},
                 support_by_faction=_support_for_owner(faction_ids, owner_faction_id),
                 local_factions=["local_autonomy"],
                 traits=(["主城候选"] if index <= faction_count else (["中立城邦"] if neutral_city_states else [])),
@@ -296,6 +404,7 @@ def generate_random_world(
                     defense=defense,
                     is_capital=index <= faction_count,
                 ),
+                cannon_stock=1 if index <= faction_count else 0,
             )
         )
 

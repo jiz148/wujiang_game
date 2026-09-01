@@ -22,6 +22,17 @@
     const timeline = byId("replay-timeline");
     const status = byId("replay-status");
     if (speed) {
+      const options = (simulation.speed_options || [0.5, 1, 2, 4, 6, 8, 16]).map(String);
+      const existing = Array.from(speed.options).map((item) => item.value);
+      if (existing.join() !== options.join()) {
+        speed.replaceChildren();
+        options.forEach((value) => {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = `${value}x`;
+          speed.append(option);
+        });
+      }
       speed.value = String(simulation.speed || 1);
       speed.disabled = !state.room?.viewer_is_host;
     }
@@ -31,8 +42,10 @@
     }
     if (timeline) {
       timeline.max = String(lastIndex);
-      timeline.value = String(currentIndex);
-      timeline.disabled = !replay.available;
+      if (!state.replayTimelineDragging) {
+        timeline.value = String(currentIndex);
+      }
+      timeline.disabled = !replay.available || lastIndex <= 0;
     }
     if (back) back.disabled = currentIndex <= 0;
     if (forward) forward.disabled = currentIndex >= lastIndex;
@@ -45,11 +58,15 @@
       pause.disabled = !simulation.can_control;
     }
     if (status) {
-      if (replayMode) status.textContent = `回放 ${currentIndex}/${lastIndex}`;
+      const completed = Number(state.battle?.completed_turns || 0);
+      const turnIndex = Math.max(1, Number(state.battle?.turn_number || completed + 1 || 1));
+      const turnLimit = Number(state.battle?.turn_timeout_limit || 0);
+      const turnLabel = turnLimit > 0 ? `第 ${turnIndex}/${turnLimit} 回合` : `第 ${turnIndex} 回合`;
+      if (replayMode) status.textContent = `回放 ${turnLabel}（${currentIndex}/${lastIndex}）`;
       else if (simulation.enabled) status.textContent = simulation.paused
-        ? `已暂停 ${liveIndex}/${lastIndex}`
-        : `实时 ${liveIndex}/${lastIndex}`;
-      else status.textContent = `本局 ${currentIndex}/${lastIndex}`;
+        ? `已暂停 ${turnLabel}（${liveIndex}/${lastIndex}）`
+        : `实时 ${turnLabel}（${liveIndex}/${lastIndex}）`;
+      else status.textContent = `本局 ${turnLabel}（${currentIndex}/${lastIndex}）`;
     }
   }
 

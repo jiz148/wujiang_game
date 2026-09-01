@@ -93,6 +93,60 @@
     return {...preferences};
   }
 
+  function playBufferedNoise(ctx, start, duration, peak) {
+    const sampleRate = ctx.sampleRate || 44100;
+    const count = Math.max(1, Math.floor(sampleRate * duration));
+    const buffer = ctx.createBuffer(1, count, sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let index = 0; index < count; index += 1) {
+      data[index] = (Math.random() * 2 - 1) * (1 - index / count);
+    }
+    const source = ctx.createBufferSource();
+    const filter = ctx.createBiquadFilter();
+    const gain = ctx.createGain();
+    source.buffer = buffer;
+    filter.type = "lowpass";
+    filter.frequency.setValueAtTime(480, start);
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.exponentialRampToValueAtTime(peak, start + 0.018);
+    gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+    source.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx.destination);
+    source.start(start);
+    source.stop(start + duration + 0.02);
+  }
+
+  function playCannonCue(ctx, now) {
+    const fire = ctx.createOscillator();
+    const fireGain = ctx.createGain();
+    fire.type = "sawtooth";
+    fire.frequency.setValueAtTime(96, now);
+    fire.frequency.exponentialRampToValueAtTime(46, now + 0.16);
+    fireGain.gain.setValueAtTime(0.0001, now);
+    fireGain.gain.exponentialRampToValueAtTime(0.07, now + 0.012);
+    fireGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+    fire.connect(fireGain);
+    fireGain.connect(ctx.destination);
+    fire.start(now);
+    fire.stop(now + 0.2);
+    playBufferedNoise(ctx, now, 0.12, 0.04);
+    const boom = ctx.createOscillator();
+    const boomGain = ctx.createGain();
+    const boomAt = now + 0.52;
+    boom.type = "triangle";
+    boom.frequency.setValueAtTime(150, boomAt);
+    boom.frequency.exponentialRampToValueAtTime(52, boomAt + 0.28);
+    boomGain.gain.setValueAtTime(0.0001, boomAt);
+    boomGain.gain.exponentialRampToValueAtTime(0.08, boomAt + 0.02);
+    boomGain.gain.exponentialRampToValueAtTime(0.0001, boomAt + 0.32);
+    boom.connect(boomGain);
+    boomGain.connect(ctx.destination);
+    boom.start(boomAt);
+    boom.stop(boomAt + 0.34);
+    playBufferedNoise(ctx, boomAt, 0.3, 0.055);
+  }
+
   function playCue(kind) {
     if (!preferences.sound) return;
     const AudioCtor = global.AudioContext || global.webkitAudioContext;
@@ -103,6 +157,23 @@
       const oscillator = audioContext.createOscillator();
       const gain = audioContext.createGain();
       const now = audioContext.currentTime;
+      if (kind === "cannon") {
+        playCannonCue(audioContext, now);
+        return;
+      }
+      if (kind === "tower") {
+        oscillator.type = "triangle";
+        oscillator.frequency.setValueAtTime(640, now);
+        oscillator.frequency.exponentialRampToValueAtTime(280, now + 0.09);
+        gain.gain.setValueAtTime(0.0001, now);
+        gain.gain.exponentialRampToValueAtTime(0.05, now + 0.012);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+        oscillator.connect(gain);
+        gain.connect(audioContext.destination);
+        oscillator.start(now);
+        oscillator.stop(now + 0.14);
+        return;
+      }
       const tones = {
         ready: [520, 0.08], attack: [180, 0.07], defense: [740, 0.1], chain: [420, 0.12], death: [120, 0.18], victory: [660, 0.28], defeat: [150, 0.28], skill: [520, 0.1],
       };
@@ -176,7 +247,9 @@
       if (event.kind === "defense") {
         pushFeedback("defense", defenseLabel(event.defense_reason), "defense");
       } else if (event.kind === "attack") {
-        pushFeedback("attack", `${unitName(battle, event.actor_id)} 发动攻击`, "attack");
+        const sound = event.metadata?.sound || "attack";
+        const actionName = event.display_name || "攻击";
+        pushFeedback("attack", `${unitName(battle, event.actor_id)} 发动${actionName}`, sound);
       } else if (event.kind === "skill") {
         pushFeedback("skill", `${unitName(battle, event.actor_id)} 使用 ${event.display_name || "技能"}`, "skill");
       }

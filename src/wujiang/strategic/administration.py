@@ -53,6 +53,13 @@ BUILDING_PROJECTS: dict[str, dict[str, Any]] = {
         "monthly_money": 35,
         "monthly_troops": 8,
     },
+    "city_defense": {
+        "name": "城防",
+        "money": 100,
+        "food": 20,
+        "effect": "攻城战在城门两侧部署两座箭塔",
+        "max_level": 1,
+    },
     "walls": {
         "name": "城墙",
         "money": 120,
@@ -125,6 +132,47 @@ SETTLEMENT_UPGRADES: dict[str, dict[str, Any]] = {
         "money": 260,
         "level": 2,
         "defense": 4,
+    },
+}
+
+CANNON_STOCK_CAPS = {
+    "village": 0,
+    "town": 2,
+    "city": 4,
+    "fortress": 8,
+}
+ECONOMY_GROWTH = {
+    "village": 1.00,
+    "town": 1.12,
+    "city": 1.35,
+}
+CITY_WORKS: dict[str, dict[str, Any]] = {
+    "forge_cannon": {
+        "name": "铸造火炮",
+        "money": 90,
+        "food": 40,
+        "required_tech": "cannon_foundry",
+        "kind": "forge",
+        "effect": "本城火炮库存 +1；城镇最多 2 门，城市 4 门，要塞 8 门。",
+    },
+    "convert_to_fortress": {
+        "name": "改建要塞",
+        "from_settlement": "city",
+        "to_settlement": "fortress",
+        "money": 220,
+        "food": 120,
+        "defense": 3,
+        "kind": "convert",
+        "effect": "城市改为要塞。钱粮人口增速保持城市档。",
+    },
+    "convert_to_city": {
+        "name": "改建城市",
+        "from_settlement": "fortress",
+        "to_settlement": "city",
+        "money": 180,
+        "food": 80,
+        "kind": "convert",
+        "effect": "要塞改为城市。经济档不变。",
     },
 }
 
@@ -316,13 +364,37 @@ def register_city_soldiers(
     return next_world
 
 
+def cannon_stock_cap(city) -> int:
+    return int(CANNON_STOCK_CAPS.get(str(getattr(city, "settlement", "") or "village"), 0))
+
+
+def city_economy_class(city) -> str:
+    current = str(getattr(city, "economy_class", "") or "")
+    if current in ECONOMY_GROWTH:
+        return current
+    from wujiang.strategic.models import infer_economy_class
+
+    return infer_economy_class(str(getattr(city, "settlement", "") or ""), int(getattr(city, "level", 1) or 1))
+
+
+def city_economy_growth(city) -> float:
+    return float(ECONOMY_GROWTH.get(city_economy_class(city), 1.0))
+
+
+def city_has_city_defense(city) -> bool:
+    levels = getattr(city, "building_levels", None) or {}
+    return int(levels.get("city_defense", 0) or 0) > 0
+
+
 def city_building_max_level(city, building_id: str) -> int:
     project = BUILDING_PROJECTS.get(str(building_id))
     if project is None:
         return 0
     if project.get("fortress_only") and str(getattr(city, "settlement", "") or "") != "fortress":
         return 0
-    return min(3, int(SETTLEMENT_BUILDING_RANK.get(str(getattr(city, "settlement", "") or "village"), 1)))
+    settlement_cap = min(3, int(SETTLEMENT_BUILDING_RANK.get(str(getattr(city, "settlement", "") or "village"), 1)))
+    project_cap = int(project.get("max_level") or 3)
+    return min(settlement_cap, project_cap)
 
 
 def construct_city_building(
@@ -404,6 +476,119 @@ def settlement_upgrades_public() -> list[dict[str, Any]]:
     return [{"id": target, **spec} for target, spec in SETTLEMENT_UPGRADES.items()]
 
 
+def city_works_public() -> list[dict[str, Any]]:
+    return [{"id": work_id, **spec} for work_id, spec in CITY_WORKS.items()]
+
+
+def city_work_options(world: WorldState, city, faction) -> list[dict[str, Any]]:
+    from wujiang.strategic.tactics import siege_tech_bonuses
+
+    bonuses = siege_tech_bonuses(faction)
+    options: list[dict[str, Any]] = []
+    for work_id, spec in CITY_WORKS.items():
+        required_tech = str(spec.get("required_tech") or "")
+        from_settlement = str(spec.get("from_settlement") or "")
+        cap = cannon_stock_cap(city)
+        stock = int(getattr(city, "cannon_stock", 0) or 0)
+        available = True
+        reason = ""
+        if required_tech and not int(bonuses.get("can_forge_cannon", 0) or 0):
+            available = False
+            reason = "需要先研究火炮铸造"
+        if from_settlement and str(city.settlement) != from_settlement:
+            available = False
+            reason = "当前城市类型不符"
+        if work_id == "forge_cannon":
+            if cap <= 0:
+                available = False
+                reason = "村庄不能储存火炮"
+            elif stock >= cap:
+                available = False
+                reason = f"库存已达上限 {cap}"
+        money = int(spec.get("money") or 0)
+        food = int(spec.get("food") or 0)
+        if available and (int(city.resources.money) < money or int(city.resources.food) < food):
+            available = False
+            reason = f"资源不足：钱 {money} / 粮 {food}"
+        options.append(
+            {
+                "id": work_id,
+                "name": spec["name"],
+                "effect": spec.get("effect") or "",
+                "money": money,
+                "food": food,
+                "required_tech": required_tech,
+                "kind": spec.get("kind") or "",
+                "cannon_stock": stock,
+                "cannon_stock_cap": cap,
+                "available": available,
+                "reason": reason,
+            }
+        )
+    return options
+
+
+def start_city_work(
+    world: WorldState,
+    *,
+    faction_id: str,
+    city_id: str,
+    work_id: str,
+    issuer_office_id: str,
+) -> WorldState:
+    next_world = _clone_world(world)
+    city = _owned_city(next_world, city_id, faction_id)
+    office = _building_office(next_world, issuer_office_id, faction_id, city, "开工")
+    work_id = str(work_id or "").strip()
+    spec = CITY_WORKS.get(work_id)
+    if spec is None:
+        raise StrategyError("城市工程项目不存在。")
+    faction = next((item for item in next_world.factions if item.faction_id == faction_id), None)
+    if faction is None:
+        raise StrategyError("势力不存在。")
+    from wujiang.strategic.tactics import siege_tech_bonuses
+
+    bonuses = siege_tech_bonuses(faction)
+    required_tech = str(spec.get("required_tech") or "")
+    if required_tech and not int(bonuses.get("can_forge_cannon", 0) or 0) and required_tech == "cannon_foundry":
+        raise StrategyError("需要先研究火炮铸造。")
+    from_settlement = str(spec.get("from_settlement") or "")
+    if from_settlement and city.settlement != from_settlement:
+        from_name = SETTLEMENT_LABELS.get(from_settlement, from_settlement)
+        raise StrategyError(f"只有{from_name}可以执行{spec['name']}。")
+    if work_id == "forge_cannon":
+        cap = cannon_stock_cap(city)
+        if cap <= 0:
+            raise StrategyError("村庄不能储存火炮。")
+        if int(city.cannon_stock) >= cap:
+            raise StrategyError(f"{SETTLEMENT_LABELS.get(city.settlement, city.settlement)}最多储存 {cap} 门火炮。")
+    _spend_city_resources(city, population=0, food=int(spec.get("food") or 0), money=int(spec.get("money") or 0))
+    if work_id == "forge_cannon":
+        city.cannon_stock += 1
+        message = f"{city.name}铸造火炮，库存 {city.cannon_stock}/{cannon_stock_cap(city)}。"
+    else:
+        target = str(spec.get("to_settlement") or "")
+        city.settlement = target
+        if int(spec.get("defense") or 0):
+            city.defense += int(spec["defense"])
+        if target == "city":
+            city.level = max(int(city.level), 3)
+        cap = cannon_stock_cap(city)
+        if city.cannon_stock > cap:
+            city.cannon_stock = cap
+        message = f"{city.name}完成{spec['name']}，现为{SETTLEMENT_LABELS.get(target, target)}。"
+    next_world.event_log.append(
+        EventLogEntry(
+            month=next_world.current_month,
+            category="city_work",
+            message=message,
+            related_ids=[faction_id, office.office_id, city.city_id, work_id],
+        )
+    )
+    next_world.validate()
+    return next_world
+
+
 def upgrade_city_settlement(
     world: WorldState,
     *,
@@ -427,8 +612,13 @@ def upgrade_city_settlement(
     _spend_city_resources(city, population=0, food=int(spec["food"]), money=int(spec["money"]))
     city.settlement = target
     city.level = max(int(city.level), int(spec["level"]))
+    if target in {"village", "town", "city"}:
+        city.economy_class = target
     if int(spec.get("defense") or 0):
         city.defense += int(spec["defense"])
+    cap = cannon_stock_cap(city)
+    if city.cannon_stock > cap:
+        city.cannon_stock = cap
     next_world.event_log.append(
         EventLogEntry(
             month=next_world.current_month,
@@ -588,7 +778,7 @@ def building_projects_public() -> list[dict[str, Any]]:
             "monthly_troops": int(project.get("monthly_troops") or 0),
             "fortress_only": bool(project.get("fortress_only")),
             "visible": project.get("visible", True) is not False,
-            "max_level": 3,
+            "max_level": int(project.get("max_level") or 3),
         }
         for project_id, project in BUILDING_PROJECTS.items()
     ]

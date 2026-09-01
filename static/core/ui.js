@@ -22,7 +22,7 @@ export function setModalIsolation(active) {
 
 // 弹窗不止一个，谁也不该单独决定背景要不要失活：各自渲染完之后统一看一眼当前
 // 还有没有开着的层。否则渲染顺序一变，后一个就会把前一个的隔离状态抹掉。
-const MODAL_IDS = ["profile-modal", "keyboard-help", "room-setup-dialog", "hero-picker", "hero-detail"];
+const MODAL_IDS = ["profile-modal", "keyboard-help", "room-setup-dialog", "auto-configure-dialog", "hero-picker", "hero-detail"];
 
 export function anyModalIsOpen() {
   return MODAL_IDS.some((id) => {
