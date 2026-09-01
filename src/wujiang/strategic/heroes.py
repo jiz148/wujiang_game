@@ -58,6 +58,24 @@ def _stable_index(world: WorldState, key: str, count: int) -> int:
     return int.from_bytes(digest[:4], "big") % count
 
 
+def _should_reset_hero_city_to_capital(
+    world: WorldState,
+    hero: StrategicHeroState,
+    faction: Faction,
+    *,
+    mobile_commander_codes: set[str],
+    city_ids: set[str],
+) -> bool:
+    if hero.city_id not in city_ids:
+        return True
+    if hero.hero_code in mobile_commander_codes:
+        return False
+    return not any(
+        city.city_id == hero.city_id and city.owner_faction_id == faction.faction_id
+        for city in world.cities
+    )
+
+
 def ensure_strategic_hero_system(world: WorldState, members: Any = None) -> WorldState:
     next_world = _clone_world(world)
     initializing_hero_system = not next_world.strategic_heroes
@@ -90,7 +108,13 @@ def ensure_strategic_hero_system(world: WorldState, members: Any = None) -> Worl
             if state is None:
                 continue
             state.faction_id = faction.faction_id
-            if state.hero_code not in mobile_commander_codes or state.city_id not in city_ids:
+            if _should_reset_hero_city_to_capital(
+                next_world,
+                state,
+                faction,
+                mobile_commander_codes=mobile_commander_codes,
+                city_ids=city_ids,
+            ):
                 state.city_id = faction.capital_city_id
             state.ritual_city_id = state.ritual_city_id or faction.capital_city_id
             state.status = "sleeping" if sleeping.get(code, 0) > next_world.current_month else "serving"
@@ -208,7 +232,13 @@ def ensure_strategic_hero_system(world: WorldState, members: Any = None) -> Worl
             state.status = "serving"
             state.faction_id = faction.faction_id
             state.loyalty = max(state.loyalty, 60)
-            if state.hero_code not in mobile_commander_codes or state.city_id not in city_ids:
+            if _should_reset_hero_city_to_capital(
+                next_world,
+                state,
+                faction,
+                mobile_commander_codes=mobile_commander_codes,
+                city_ids=city_ids,
+            ):
                 state.city_id = faction.capital_city_id
             state.ritual_city_id = state.ritual_city_id or faction.capital_city_id
             state.office_id = office.office_id
@@ -379,11 +409,11 @@ def normalize_strategic_hero_deployment(
             normalized.append(code)
     max_count = strategic_hero_deployment_limit(world, faction_id) if limit is None else max(0, int(limit))
     if len(normalized) > max_count:
-        raise StrategyError(f"æˆ˜ç•¥è‹±çµå‚æˆ˜ä¸Šé™ä¸º {max_count} åã€‚")
+        raise StrategyError(f"出征最多投入 {max_count} 名武将。")
     active_codes = set(active_strategic_hero_codes_for_faction(world, faction_id, limit=9999))
     invalid_codes = [code for code in normalized if code not in active_codes]
     if invalid_codes:
-        raise StrategyError("åªèƒ½æŠ•å…¥å·²å¬å”¤ä¸”æœªæ²‰ç¡çš„æœ¬åŠ¿åŠ›æˆ˜ç•¥è‹±çµã€‚")
+        raise StrategyError("只能投入已仕官且未负伤的本势力武将。")
     if check_command_acceptance:
         from wujiang.strategic.hero_personal import require_hero_command_acceptance
 
@@ -427,7 +457,7 @@ def set_strategic_defender_hero(world: WorldState, *, faction_id: str, hero_code
         EventLogEntry(
             month=next_world.current_month,
             category="strategic_hero_defender_set",
-            message=f"{faction.name}è®¾ç½®é˜²å®ˆè‹±çµï¼š{_hero_name(code) if code else 'è‡ªåŠ¨'}ã€‚",
+            message=f"{faction.name}设置防守武将：{_hero_name(code) if code else '自动'}。",
             related_ids=[faction_id, code] if code else [faction_id],
         )
     )
@@ -493,7 +523,7 @@ def record_strategic_hero_battle_losses(
                 EventLogEntry(
                     month=next_world.current_month,
                     category="strategic_hero_sleeping",
-                    message=f"{faction.name}çš„æˆ˜ç•¥è‹±çµ {_hero_name(code)} æˆ˜è´¥æ²‰ç¡è‡³ç¬¬ {sleep_until_month} æœˆã€‚",
+                    message=f"{faction.name}的武将 {_hero_name(code)} 战败负伤，第 {sleep_until_month} 月前无法行动。",
                     related_ids=[faction_id, code],
                 )
             )
@@ -515,6 +545,36 @@ def record_strategic_hero_battle_losses(
         )
     next_world.validate()
     return next_world, result
+
+
+def hero_is_wounded(hero: StrategicHeroState | None, current_month: int) -> bool:
+    if hero is None:
+        return False
+    return hero.status == "sleeping" and int(hero.sleeping_until_month or 0) > int(current_month)
+
+
+def station_heroes_in_city(
+    world: WorldState,
+    *,
+    hero_codes: list[str] | tuple[str, ...] | set[str] | None,
+    city_id: str,
+) -> list[str]:
+    city = next((item for item in world.cities if item.city_id == str(city_id)), None)
+    if city is None:
+        return []
+    wanted = {str(code) for code in (hero_codes or []) if code}
+    moved: list[str] = []
+    for hero in world.strategic_heroes:
+        if hero.hero_code not in wanted or hero.status not in {"serving", "sleeping"}:
+            continue
+        already_there = hero.city_id == city.city_id and hero.assignment_type == "garrison"
+        if already_there and hero.assignment_target_id == city.city_id:
+            continue
+        hero.city_id = city.city_id
+        hero.assignment_type = "garrison"
+        hero.assignment_target_id = city.city_id
+        moved.append(hero.hero_code)
+    return moved
 
 
 def nearby_roaming_hero_codes(world: WorldState, city_id: str) -> list[str]:
@@ -972,7 +1032,7 @@ def assign_strategic_hero_duty(
     normalized = str(assignment_type or "reserve")
     if issuer is None or issuer.faction_id != faction_id or issuer.office_type != "lord":
         raise StrategyError("只有本势力主公可以分配武将任务。")
-    if hero is None or hero.status != "serving" or hero.faction_id != faction_id:
+    if hero is None or hero.faction_id != faction_id:
         raise StrategyError("只能为本势力已仕官武将分配任务。")
     if normalized not in {"reserve", "administration", "training", "garrison", "campaign"}:
         raise StrategyError("武将任务类型无效。")
@@ -984,6 +1044,42 @@ def assign_strategic_hero_duty(
             raise StrategyError("只能把武将派往本势力城市。")
     elif normalized in {"garrison", "training"}:
         raise StrategyError("驻守或训练任务必须指定一座己方城市。")
+    wounded = hero_is_wounded(hero, next_world.current_month)
+    if wounded:
+        if normalized == "reserve":
+            hero.assignment_type = "reserve"
+            if stationed is not None:
+                hero.assignment_target_id = stationed.city_id
+                hero.city_id = stationed.city_id
+            faction = _faction(next_world, faction_id)
+            next_world.event_log.append(
+                EventLogEntry(
+                    month=next_world.current_month,
+                    category="strategic_hero_assignment",
+                    message=f"{faction.name}安排负伤的{_hero_name(hero.hero_code)}待命。",
+                    related_ids=[faction_id, issuer.office_id, hero.hero_code],
+                )
+            )
+            next_world.validate()
+            return next_world
+        if normalized != "garrison" or stationed is None:
+            raise StrategyError("负伤武将只能待命或转移驻地，无法参加任务。")
+        hero.assignment_type = "garrison"
+        hero.assignment_target_id = stationed.city_id
+        hero.city_id = stationed.city_id
+        faction = _faction(next_world, faction_id)
+        next_world.event_log.append(
+            EventLogEntry(
+                month=next_world.current_month,
+                category="strategic_hero_assignment",
+                message=f"{faction.name}将负伤的{_hero_name(hero.hero_code)}转移到{stationed.name}。",
+                related_ids=[faction_id, issuer.office_id, hero.hero_code, stationed.city_id],
+            )
+        )
+        next_world.validate()
+        return next_world
+    if hero.status != "serving":
+        raise StrategyError("只能为本势力已仕官武将分配任务。")
     from wujiang.strategic.hero_personal import require_hero_command_acceptance
 
     require_hero_command_acceptance(next_world, hero, f"assignment:{normalized}")

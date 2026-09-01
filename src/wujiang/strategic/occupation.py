@@ -56,6 +56,18 @@ def _city(world: WorldState, city_id: str) -> City:
     return city
 
 
+def has_pending_occupation(world: WorldState) -> bool:
+    return any(str((city.occupation or {}).get("status") or "") == "pending" for city in world.cities)
+
+
+def pending_occupation_city_ids(world: WorldState) -> list[str]:
+    return [
+        city.city_id
+        for city in world.cities
+        if str((city.occupation or {}).get("status") or "") == "pending"
+    ]
+
+
 def mark_city_captured(
     world: WorldState,
     *,
@@ -196,7 +208,9 @@ def apply_occupation_policy(world: WorldState, *, faction_id: str, city_id: str,
     ))
     next_world.memory_tags.append(f"occupation:{policy_id}:{next_world.current_month}:{city.city_id}:{faction_id}")
     next_world.validate()
-    return next_world
+    from wujiang.strategic.objectives import record_strategic_status_events
+
+    return record_strategic_status_events(next_world)
 
 
 def apply_occupation_month_start(city: City, *, month: int, events: list[EventLogEntry]) -> None:

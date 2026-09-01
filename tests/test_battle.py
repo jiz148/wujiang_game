@@ -69,9 +69,11 @@ class BattleSmokeTests(unittest.TestCase):
     def test_excel_roster_registers_every_generated_hero(self) -> None:
         self.assertEqual(len(EXCEL_HERO_REGISTRY), 370)
         strategy_codes = {code for code in HERO_REGISTRY if code.startswith("strategy_")}
-        self.assertEqual(len(strategy_codes), 8)
+        self.assertEqual(len(strategy_codes), 10)
         self.assertIn("strategy_snow_ghost", strategy_codes)
-        self.assertEqual(len(HERO_REGISTRY), 396)
+        self.assertIn("strategy_arrow_tower", strategy_codes)
+        self.assertIn("strategy_cannon", strategy_codes)
+        self.assertEqual(len(HERO_REGISTRY), 398)
         public_heroes = list_heroes()
         self.assertEqual(len(public_heroes), 67)
         public_codes = {str(hero["code"]) for hero in public_heroes}
@@ -2709,23 +2711,24 @@ class BattleSmokeTests(unittest.TestCase):
         resolve_pending_chain(battle)
         self.assertEqual(target.current_mana, before - 1)
 
-    def test_battle_randomly_resolves_winner_after_turn_timeout(self) -> None:
+    def test_battle_resolves_defender_after_turn_timeout(self) -> None:
         battle = create_battle("bard", "ellie")
         self.assertEqual(battle.initial_hero_count, 2)
-        self.assertEqual(battle.turn_timeout_limit, 40)
+        self.assertEqual(battle.turn_timeout_limit, 200)
+        self.assertEqual(battle.turn_timeout_winner, 2)
 
-        for _ in range(39):
+        for _ in range(199):
             battle.perform_action({"type": "end_turn"})
 
         self.assertIsNone(battle.winner)
-        self.assertEqual(battle.completed_turns, 39)
+        self.assertEqual(battle.completed_turns, 199)
 
-        with mock.patch("wujiang.tactical.engine.core.random.choice", return_value=2):
-            battle.perform_action({"type": "end_turn"})
+        battle.perform_action({"type": "end_turn"})
 
-        self.assertEqual(battle.completed_turns, 40)
+        self.assertEqual(battle.completed_turns, 200)
         self.assertEqual(battle.winner, 2)
-        self.assertIn("40 个武将回合上限", battle.logs[-1])
+        self.assertEqual(battle.win_reason_code, "turn_limit")
+        self.assertIn("200 个武将回合上限", battle.logs[-1])
 
     def test_ellie_experiment_counts_target_own_rounds_not_global_turns(self) -> None:
         battle = create_battle(["dark_human", "ellie"], ["bard"])

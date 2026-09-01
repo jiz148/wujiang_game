@@ -11,8 +11,8 @@ import { connectionStatusLabel, readyStateLabel } from '../strategic/ui-base.js'
 import { renderRecoveryButton, renderStrategyPanel } from '../strategic/workbench.js';
 import { chainQueuedActionPrompt, hideTooltip, renderHoverCard, roomStateLabel, scheduleBoardOverlayRender, showTooltip } from '../tactical/battle-ui.js';
 import { closeKeyboardHelp, focusMainContent, handleBattleKeyboard, onBoardClick, openKeyboardHelp } from '../tactical/board-input.js';
-import { canEditRoomSetup, canManageSeatRoster, closeHeroDetail, closeHeroPicker, closeRoomSetup, confirmRoomSetup, isSeatLocked, openHeroDetail, openHeroPicker, openRoomSetup, renderHeroPicker, renderRoomSetupDialog, roomHeroLimit, seatHeroEntries, updateRoomSetupDraft } from '../tactical/room-lobby.js';
-import { applyRoomPayload, autoConfigureRoom, canReclaimSeatByName, controlSimulation, copyInviteLink, createRoom, deleteRoom, exitTutorial, isRandomRoomMode, joinRoom, leaveReplayMode, leaveRoom, loadReplayStep, performAction, renderTutorialGuide, restartFromGameOver, resumeStoredSeat, resumeTutorialBattle, retryTutorialStep, roomModeMeta, selectRoomHero, setRoomSeatController, setRoomSeatTeam, setSeatRandomQuota, shouldShowLobbyPanel, startRoomBattle, startTutorialBattle, surrenderBattle, toggleRoomReady } from '../tactical/room-api.js';
+import { canEditRoomSetup, canManageSeatArmy, canManageSeatRoster, closeAutoConfigure, closeHeroDetail, closeHeroPicker, closeRoomSetup, confirmAutoConfigure, confirmRoomSetup, isSeatLocked, openAutoConfigure, openHeroDetail, openHeroPicker, openRoomSetup, renderAutoConfigureDialog, renderHeroPicker, renderRoomSetupDialog, roomHeroLimit, seatHeroEntries, updateAutoConfigureDraft, updateRoomSetupDraft } from '../tactical/room-lobby.js';
+import { applyRoomPayload, canReclaimSeatByName, controlSimulation, copyInviteLink, createRoom, deleteRoom, exitTutorial, isRandomRoomMode, joinRoom, leaveReplayMode, leaveRoom, loadReplayStep, performAction, renderTutorialGuide, restartFromGameOver, resumeStoredSeat, resumeTutorialBattle, retryTutorialStep, roomModeMeta, selectRoomHero, setAiStyles, setRoomSeatController, setRoomSeatTeam, setSeatArmyComposition, setSeatRandomQuota, shouldShowLobbyPanel, startRoomBattle, startTutorialBattle, surrenderBattle, toggleAiTakeover, toggleRoomReady } from '../tactical/room-api.js';
 import { clearActionSelection, loadStoredIdentity } from '../tactical/session.js';
 import { bodyDirectionSelection, canCompleteTargetSelection, choicePatternSelection, controllerTypeLabel, currentRoomSeat, hasCancelableTargetSelection, isBoardTargetSelectionActive, movePathSelection, multiUnitSelection, patternSelection, randomRoomRosterSize, reviveUnitCellSelection, roomSummaries, sanitizeRandomRosterSizeInput, seatHeroSummary, setStagedAttackVariant, setStagedBodyDirection, setStagedPatternChoice, setStagedReviveUnitId, setStagedStatName, stagedAttackActionPayload, stagedBodyCells, stagedBodyDirection, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, statCellSelection } from '../tactical/targeting.js';
 import { clearBattleVfx, selectedAction, tutorialState } from '../tactical/vfx.js';
@@ -143,7 +143,17 @@ export function bindEvents() {
     if (!state.room?.viewer_is_host) return;
     controlSimulation("set_speed", Number(event.target.value || 1));
   });
-  $("replay-timeline").addEventListener("input", (event) => {
+  const replayTimeline = $("replay-timeline");
+  const stopReplayTimelineDrag = () => {
+    state.replayTimelineDragging = false;
+  };
+  replayTimeline.addEventListener("pointerdown", () => {
+    state.replayTimelineDragging = true;
+  });
+  replayTimeline.addEventListener("pointerup", stopReplayTimelineDrag);
+  replayTimeline.addEventListener("pointercancel", stopReplayTimelineDrag);
+  window.addEventListener("pointerup", stopReplayTimelineDrag);
+  replayTimeline.addEventListener("input", (event) => {
     if (!replayMeta().available) return;
     loadReplayStep(Number(event.target.value || 0), { omniscient: state.replayOmniscient });
   });
@@ -266,6 +276,13 @@ export function bindEvents() {
   });
   $("room-battle").addEventListener("click", () => setScreen("battle"));
   $("return-room-lobby")?.addEventListener("click", () => exitBattle());
+  $("ai-takeover-toggle")?.addEventListener("click", () => toggleAiTakeover());
+  $("ai-hero-style")?.addEventListener("change", (event) => {
+    setAiStyles({ heroAiStyle: event.target.value });
+  });
+  $("ai-army-style")?.addEventListener("change", (event) => {
+    setAiStyles({ armyAiStyle: event.target.value });
+  });
   $("toggle-battle-console")?.addEventListener("click", () => {
     state.battleConsoleCollapsed = !state.battleConsoleCollapsed;
     renderBattleConsole();
@@ -277,8 +294,19 @@ export function bindEvents() {
     state.gameOverShowDetails = !state.gameOverShowDetails;
     render();
   });
+  $("game-over-review")?.addEventListener("click", () => {
+    state.gameOverDismissed = true;
+    state.battleConsoleCollapsed = false;
+    render();
+  });
   $("surrender-battle").addEventListener("click", surrenderBattle);
   $("end-turn").addEventListener("click", () => {
+    if (isGameOver() && hasBattle() && state.screen === "battle") {
+      state.gameOverDismissed = false;
+      if (isReplayMode()) leaveReplayMode({ renderAfter: false });
+      render();
+      return;
+    }
     if (!canInteract()) return;
     performAction({ type: "end_turn" });
   });
@@ -705,8 +733,7 @@ export function renderConnectionAndTurnState() {
   timerPanel.textContent = `${ownerLabel}${promptLabel}：${Math.max(0, remaining)} 秒`;
 }
 
-// 三个弹窗的开关都在这里接线。它们共用同一套关闭手势：点遮罩、按 Esc、或者
-// 点各自的关闭按钮；最上面那层先关，不会一次把三层都收掉。
+// 选将和详情：点遮罩或 Esc 可关。房间设置和自动配置只能点取消或确定关闭。
 function bindRoomLobbyDialogs() {
   $("open-room-setup")?.addEventListener("click", openRoomSetup);
   $("room-setup-cancel")?.addEventListener("click", closeRoomSetup);
@@ -746,7 +773,26 @@ function bindRoomLobbyDialogs() {
   $("room-board-height-input")?.addEventListener("input", (event) => {
     updateRoomSetupDraft("boardHeight", event.target.value);
   });
-  $("auto-configure-room")?.addEventListener("click", autoConfigureRoom);
+  $("auto-configure-room")?.addEventListener("click", openAutoConfigure);
+  $("auto-configure-cancel")?.addEventListener("click", closeAutoConfigure);
+  $("auto-configure-confirm")?.addEventListener("click", confirmAutoConfigure);
+  $("auto-configure-method-count")?.addEventListener("change", () => {
+    updateAutoConfigureDraft("method", "count");
+    renderAutoConfigureDialog();
+  });
+  $("auto-configure-method-points")?.addEventListener("change", () => {
+    updateAutoConfigureDraft("method", "points");
+    renderAutoConfigureDialog();
+  });
+  $("auto-configure-count-input")?.addEventListener("input", (event) => {
+    updateAutoConfigureDraft("count", event.target.value);
+  });
+  $("auto-configure-points-input")?.addEventListener("input", (event) => {
+    updateAutoConfigureDraft("points", event.target.value);
+  });
+  $("auto-configure-allow-duplicates")?.addEventListener("change", (event) => {
+    updateAutoConfigureDraft("allowDuplicates", Boolean(event.target.checked));
+  });
 
   $("hero-picker-close")?.addEventListener("click", closeHeroPicker);
   $("hero-search")?.addEventListener("input", (event) => {
@@ -764,7 +810,6 @@ function bindRoomLobbyDialogs() {
   $("hero-detail-close")?.addEventListener("click", closeHeroDetail);
 
   const backdrops = [
-    ["room-setup-dialog", closeRoomSetup],
     ["hero-picker", closeHeroPicker],
     ["hero-detail", closeHeroDetail],
   ];
@@ -916,6 +961,64 @@ function createSeatCard(seat) {
     }
   }
   card.append(roster);
+
+  const armyKinds = state.room.army_kinds?.length
+    ? state.room.army_kinds
+    : [
+      { kind: "infantry", name: "普通步兵" },
+      { kind: "archer", name: "弓兵" },
+      { kind: "cavalry", name: "骑兵" },
+    ];
+  const armyCounts = seat.army_counts || {};
+  const armyTotal = Number(seat.army_total_count || 0);
+  const manageArmy = canManageSeatArmy(seat);
+  if (manageArmy || armyTotal > 0) {
+    const army = document.createElement("div");
+    army.className = "seat-block seat-block--army seat-army";
+    const armyTitle = document.createElement("div");
+    armyTitle.className = "seat-army__title";
+    armyTitle.textContent = armyTotal > 0 ? `士兵 ${armyTotal}` : "士兵";
+    army.append(armyTitle);
+    armyKinds.forEach((kind) => {
+      const row = document.createElement("div");
+      row.className = "seat-army__row";
+      const name = document.createElement("span");
+      name.textContent = kind.name;
+      const count = Number(armyCounts[kind.kind] || 0);
+      const value = document.createElement("strong");
+      value.textContent = String(count);
+      row.append(name, value);
+      if (manageArmy) {
+        const minus = document.createElement("button");
+        minus.type = "button";
+        minus.className = "seat-army__step";
+        minus.textContent = "-";
+        minus.disabled = locked || count <= 0;
+        minus.addEventListener("click", () => {
+          if (minus.disabled) return;
+          setSeatArmyComposition(seat.player_id, {
+            ...armyCounts,
+            [kind.kind]: Math.max(0, count - 1),
+          });
+        });
+        const plus = document.createElement("button");
+        plus.type = "button";
+        plus.className = "seat-army__step";
+        plus.textContent = "+";
+        plus.disabled = locked;
+        plus.addEventListener("click", () => {
+          if (plus.disabled) return;
+          setSeatArmyComposition(seat.player_id, {
+            ...armyCounts,
+            [kind.kind]: count + 1,
+          });
+        });
+        row.append(minus, plus);
+      }
+      army.append(row);
+    });
+    card.append(army);
+  }
 
   const showConfig = Boolean(state.room.viewer_is_host && state.room.status === "lobby");
   if (showConfig || seat.occupied) {

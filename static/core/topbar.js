@@ -45,7 +45,14 @@ function build(host) {
     ariaLabel: "账号与导航",
     items: [
       { id: "profile", label: "用户信息", onClick: () => openProfileModal() },
-      { id: "menu", label: "返回主菜单", onClick: () => setScreen("menu") },
+      { id: "menu", label: "返回主菜单", onClick: () => {
+        state.strategyCampaign = null;
+        state.strategySelectedCityId = "";
+        state.strategySelectedCampaignId = 0;
+        state.strategyCreateOpen = false;
+        state.strategyNoticeKind = "";
+        setScreen("menu");
+      } },
       { separator: true },
       { id: "logout", label: "退出登录", tone: "danger", onClick: () => confirmLogout() },
     ],

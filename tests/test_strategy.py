@@ -48,6 +48,8 @@ from wujiang.strategic import (  # noqa: E402
     bind_relic,
     hero_ritual_capacity,
     hero_command_accepts,
+    hero_skills_for_code,
+    STRATEGIC_SKILLS,
     perform_hero_ritual,
     unbind_strategic_hero,
     accept_hero_recruitment,
@@ -108,6 +110,7 @@ from wujiang.strategic import (  # noqa: E402
     city_building_max_level,
     city_building_monthly_bonus,
     construct_city_building,
+    start_city_work,
     upgrade_city_settlement,
     nearby_roaming_hero_codes,
     grand_general_capacity,
@@ -175,6 +178,32 @@ from wujiang.strategic.political_ai import apply_major_political_ai_actions  # n
 from wujiang.strategic.rebellion import set_rebellion_force_troops  # noqa: E402
 from wujiang.platform.auth import AuthUser  # noqa: E402
 from wujiang.tactical.heroes.registry import create_battle, list_heroes  # noqa: E402
+
+
+def _ensure_city_road(world: WorldState, source_city_id: str, target_city_id: str) -> None:
+    source = next(city for city in world.cities if city.city_id == source_city_id)
+    target = next(city for city in world.cities if city.city_id == target_city_id)
+    source_node = next(node for node in world.nodes if node.node_id == source.node_id)
+    target_node = next(node for node in world.nodes if node.node_id == target.node_id)
+    if target_node.node_id not in source_node.connected_node_ids:
+        source_node.connected_node_ids.append(target_node.node_id)
+        source_node.connected_node_ids.sort()
+    if source_node.node_id not in target_node.connected_node_ids:
+        target_node.connected_node_ids.append(source_node.node_id)
+        target_node.connected_node_ids.sort()
+
+
+def _neutral_bordering_faction(world: WorldState, target_faction_id: str) -> str:
+    from wujiang.strategic.neutral_city_states import adjacent_city_ids
+
+    target_city_ids = {city.city_id for city in world.cities if city.owner_faction_id == target_faction_id}
+    for faction in world.factions:
+        if not faction.is_neutral_city_state:
+            continue
+        owned = [city for city in world.cities if city.owner_faction_id == faction.faction_id]
+        if any(adjacent_city_ids(world, city.city_id) & target_city_ids for city in owned):
+            return faction.faction_id
+    raise AssertionError(f"no neutral city state borders {target_faction_id}")
 
 
 class StrategyGenerationTests(unittest.TestCase):
@@ -1049,6 +1078,30 @@ class StrategyGenerationTests(unittest.TestCase):
         self.assertEqual(len(neutrals), 10)
         self.assertEqual(len({faction.color for faction in majors}), 10)
 
+    def test_major_capitals_are_spread_and_player_is_not_always_top_left(self) -> None:
+        positions: list[tuple[float, float]] = []
+        min_capital_gaps: list[float] = []
+        for seed in range(1, 13):
+            world = generate_random_world(seed=seed, city_count=8, faction_count=3, neutral_city_states=True)
+            capitals: list[tuple[float, float]] = []
+            for faction in world.factions:
+                if not faction.is_major:
+                    continue
+                city = next(item for item in world.cities if item.city_id == faction.capital_city_id)
+                node = next(item for item in world.nodes if item.node_id == city.node_id)
+                capitals.append((float(node.x), float(node.y)))
+                if faction.faction_id == "faction_1":
+                    positions.append((float(node.x), float(node.y)))
+            gaps = [
+                ((left[0] - right[0]) ** 2 + (left[1] - right[1]) ** 2) ** 0.5
+                for index, left in enumerate(capitals)
+                for right in capitals[index + 1 :]
+            ]
+            min_capital_gaps.append(min(gaps))
+        self.assertGreater(max(x for x, _y in positions) - min(x for x, _y in positions), 18)
+        self.assertFalse(all(x < 28 and y < 28 for x, y in positions))
+        self.assertGreater(sum(min_capital_gaps) / len(min_capital_gaps), 20)
+
     def test_first_campaign_contract_scales_major_factions(self) -> None:
         contract = first_campaign_contract(major_faction_count=8)
         self.assertEqual(contract["major_faction_count"], 8)
@@ -1071,7 +1124,7 @@ class StrategyGenerationTests(unittest.TestCase):
         neutral.relations["faction_1"] = 30
         city.resources.food = 0
         city.resources.population = 100_000
-        city.resources.troops = 1_000_000
+        city.resources.troops = 3_000_000
         hungry = neutral_city_state_profile(world, neutral.faction_id)
         relation = next(item for item in hungry["relationships"] if item["faction_id"] == "faction_1")
         self.assertEqual((relation["score"], relation["label"]), (30, "友好"))
@@ -3090,6 +3143,230 @@ class StrategyBattleTests(unittest.TestCase):
         self.assertEqual(resolved.cities[1].occupation["previous_owner_faction_id"], "faction_2")
         self.assertTrue(any(event.category == "occupation_policy_required" for event in resolved.event_log))
 
+    def test_city_capture_stations_surviving_attacker_heroes(self) -> None:
+        world = generate_random_world(seed=51, city_count=4, faction_count=2)
+        source = world.cities[0]
+        target = world.cities[1]
+        source.resources.troops = 2400
+        target.resources.troops = 20
+        target.defense = 0
+        hero = next(
+            item
+            for item in world.strategic_heroes
+            if item.faction_id == "faction_1" and item.status == "serving"
+        )
+        lord = next(item for item in world.offices if item.faction_id == "faction_1" and item.office_type == "lord")
+        gathered = assign_strategic_hero_duty(
+            world,
+            faction_id="faction_1",
+            issuer_office_id=lord.office_id,
+            hero_code=hero.hero_code,
+            assignment_type="garrison",
+            target_id=source.city_id,
+        )
+        resolved = declare_city_attack(
+            gathered,
+            faction_id="faction_1",
+            source_city_id=source.city_id,
+            target_city_id=target.city_id,
+            resolution_mode="quick",
+            attacker_hero_codes=[hero.hero_code],
+        )
+        stationed = next(item for item in resolved.strategic_heroes if item.hero_code == hero.hero_code)
+        self.assertEqual(stationed.status, "serving")
+        self.assertEqual(stationed.city_id, target.city_id)
+        self.assertEqual(stationed.assignment_type, "garrison")
+        self.assertEqual(stationed.assignment_target_id, target.city_id)
+
+    def test_city_capture_stations_fallen_attacker_heroes(self) -> None:
+        world = generate_random_world(seed=51, city_count=4, faction_count=2)
+        source = world.cities[0]
+        target = world.cities[1]
+        source.resources.troops = 2400
+        target.resources.troops = 20
+        target.defense = 0
+        hero = next(
+            item
+            for item in world.strategic_heroes
+            if item.faction_id == "faction_1" and item.status == "serving"
+        )
+        lord = next(item for item in world.offices if item.faction_id == "faction_1" and item.office_type == "lord")
+        gathered = assign_strategic_hero_duty(
+            world,
+            faction_id="faction_1",
+            issuer_office_id=lord.office_id,
+            hero_code=hero.hero_code,
+            assignment_type="garrison",
+            target_id=source.city_id,
+        )
+        pending = declare_city_attack(
+            gathered,
+            faction_id="faction_1",
+            source_city_id=source.city_id,
+            target_city_id=target.city_id,
+            resolution_mode="manual",
+            attacker_hero_codes=[hero.hero_code],
+        )
+        attached = attach_battle_room(
+            pending,
+            battle_id=pending.pending_battles[-1].battle_id,
+            room_id="fallen_station",
+            invite_path="/?room=FALLEN_STATION",
+        )
+        resolved = resolve_battle_room_result(
+            attached,
+            battle_room_id="FALLEN_STATION",
+            winner_team_id=1,
+            surviving_grid_units_by_team={1: 4, 2: 0},
+            surviving_hero_codes_by_team={1: set(), 2: set()},
+        )
+        stationed = next(item for item in resolved.strategic_heroes if item.hero_code == hero.hero_code)
+        self.assertTrue(resolved.pending_battles[-1].battle_result["city_captured"])
+        self.assertEqual(stationed.status, "sleeping")
+        self.assertEqual(stationed.sleeping_until_month, resolved.current_month + STRATEGIC_HERO_BATTLE_SLEEP_MONTHS)
+        self.assertEqual(stationed.city_id, target.city_id)
+        self.assertEqual(stationed.assignment_type, "garrison")
+        self.assertEqual(stationed.assignment_target_id, target.city_id)
+        self.assertNotIn(hero.hero_code, active_strategic_hero_codes_for_faction(resolved, "faction_1"))
+
+    def test_wounded_hero_can_transfer_but_cannot_take_missions(self) -> None:
+        world = generate_random_world(seed=51, city_count=4, faction_count=2)
+        source = world.cities[0]
+        other = next(item for item in world.cities if item.city_id != source.city_id)
+        other.owner_faction_id = "faction_1"
+        hero = next(
+            item
+            for item in world.strategic_heroes
+            if item.faction_id == "faction_1" and item.status == "serving"
+        )
+        lord = next(item for item in world.offices if item.faction_id == "faction_1" and item.office_type == "lord")
+        stationed = assign_strategic_hero_duty(
+            world,
+            faction_id="faction_1",
+            issuer_office_id=lord.office_id,
+            hero_code=hero.hero_code,
+            assignment_type="garrison",
+            target_id=source.city_id,
+        )
+        wounded = next(item for item in stationed.strategic_heroes if item.hero_code == hero.hero_code)
+        wounded.status = "sleeping"
+        wounded.sleeping_until_month = stationed.current_month + STRATEGIC_HERO_BATTLE_SLEEP_MONTHS
+        transferred = assign_strategic_hero_duty(
+            stationed,
+            faction_id="faction_1",
+            issuer_office_id=lord.office_id,
+            hero_code=hero.hero_code,
+            assignment_type="garrison",
+            target_id=other.city_id,
+        )
+        moved = next(item for item in transferred.strategic_heroes if item.hero_code == hero.hero_code)
+        self.assertEqual(moved.status, "sleeping")
+        self.assertEqual(moved.city_id, other.city_id)
+        self.assertEqual(moved.assignment_type, "garrison")
+        self.assertEqual(moved.assignment_target_id, other.city_id)
+        with self.assertRaises(StrategyError) as ctx:
+            assign_strategic_hero_duty(
+                transferred,
+                faction_id="faction_1",
+                issuer_office_id=lord.office_id,
+                hero_code=hero.hero_code,
+                assignment_type="training",
+                target_id=other.city_id,
+            )
+        self.assertIn("负伤", str(ctx.exception))
+        reserved = assign_strategic_hero_duty(
+            transferred,
+            faction_id="faction_1",
+            issuer_office_id=lord.office_id,
+            hero_code=hero.hero_code,
+            assignment_type="reserve",
+        )
+        waiting = next(item for item in reserved.strategic_heroes if item.hero_code == hero.hero_code)
+        self.assertEqual(waiting.status, "sleeping")
+        self.assertEqual(waiting.assignment_type, "reserve")
+        with self.assertRaises(StrategyError):
+            normalize_strategic_hero_deployment(reserved, "faction_1", [hero.hero_code])
+
+    def test_declare_city_attack_does_not_force_lord_into_the_party(self) -> None:
+        world = generate_random_world(seed=51, city_count=4, faction_count=2)
+        world.cities[0].resources.troops = 400
+        world.cities[1].resources.troops = 80
+        lord = next(item for item in world.offices if item.faction_id == "faction_1" and item.office_type == "lord")
+        companion = next(
+            item
+            for item in world.strategic_heroes
+            if item.faction_id == "faction_1"
+            and item.status == "serving"
+            and item.hero_code != lord.holder_id
+            and item.office_id != lord.office_id
+        )
+        stationed = assign_strategic_hero_duty(
+            world,
+            faction_id="faction_1",
+            issuer_office_id=lord.office_id,
+            hero_code=companion.hero_code,
+            assignment_type="garrison",
+            target_id=world.cities[0].city_id,
+        )
+        pending = declare_city_attack(
+            stationed,
+            faction_id="faction_1",
+            source_city_id=world.cities[0].city_id,
+            target_city_id=world.cities[1].city_id,
+            resolution_mode="pending_choice",
+            attacker_hero_codes=[companion.hero_code],
+        )
+        self.assertEqual(pending.pending_battles[-1].attacker_hero_codes, [companion.hero_code])
+        self.assertNotIn(lord.holder_id, pending.pending_battles[-1].attacker_hero_codes)
+
+    def test_city_capture_keeps_stationed_heroes_after_month_and_hero_sync(self) -> None:
+        world = generate_random_world(seed=51, city_count=4, faction_count=2)
+        source = world.cities[0]
+        target = world.cities[1]
+        source.resources.troops = 2400
+        target.resources.troops = 20
+        target.defense = 0
+        heroes = [
+            item
+            for item in world.strategic_heroes
+            if item.faction_id == "faction_1" and item.status == "serving"
+        ][:3]
+        self.assertGreaterEqual(len(heroes), 1)
+        lord = next(item for item in world.offices if item.faction_id == "faction_1" and item.office_type == "lord")
+        gathered = world
+        for hero in heroes:
+            gathered = assign_strategic_hero_duty(
+                gathered,
+                faction_id="faction_1",
+                issuer_office_id=lord.office_id,
+                hero_code=hero.hero_code,
+                assignment_type="garrison",
+                target_id=source.city_id,
+            )
+        resolved = declare_city_attack(
+            gathered,
+            faction_id="faction_1",
+            source_city_id=source.city_id,
+            target_city_id=target.city_id,
+            resolution_mode="quick",
+            attacker_hero_codes=[hero.hero_code for hero in heroes],
+        )
+        synced = ensure_strategic_hero_system(resolved)
+        advanced = advance_month(synced)
+        for hero in heroes:
+            stationed = next(item for item in advanced.strategic_heroes if item.hero_code == hero.hero_code)
+            self.assertEqual(stationed.city_id, target.city_id)
+            self.assertEqual(stationed.assignment_type, "garrison")
+            self.assertEqual(stationed.assignment_target_id, target.city_id)
+
+    def test_starting_capitals_have_one_cannon(self) -> None:
+        world = generate_random_world(seed=51, city_count=4, faction_count=2)
+        capitals = [city for city in world.cities if "主城候选" in (city.traits or [])]
+        others = [city for city in world.cities if "主城候选" not in (city.traits or [])]
+        self.assertTrue(capitals)
+        self.assertTrue(all(city.cannon_stock == 1 for city in capitals))
+        self.assertTrue(all(city.cannon_stock == 0 for city in others))
+
     def test_formula_city_attack_resolves_without_real_room_and_reduces_troops(self) -> None:
         world = generate_random_world(seed=51, city_count=4, faction_count=2)
         source = world.cities[0]
@@ -3131,6 +3408,7 @@ class StrategyBattleTests(unittest.TestCase):
         for mode in ("watch_ai", "ai_auto"):
             with self.subTest(mode=mode):
                 world = generate_random_world(seed=55, city_count=4, faction_count=2)
+                _ensure_city_road(world, "city_1", "city_2")
                 world.cities[0].resources.troops = 2400
                 world.cities[1].resources.troops = 20
 
@@ -3152,6 +3430,7 @@ class StrategyBattleTests(unittest.TestCase):
 
     def test_resolve_battle_room_result_uses_real_room_winner_and_is_idempotent(self) -> None:
         world = generate_random_world(seed=56, city_count=4, faction_count=2)
+        _ensure_city_road(world, "city_1", "city_2")
         world.cities[0].resources.troops = 2400
         world.cities[1].resources.troops = 120
         pending = declare_city_attack(
@@ -3248,6 +3527,7 @@ class StrategyBattleTests(unittest.TestCase):
 
     def test_public_world_includes_battle_resolution_modes_and_battle_records(self) -> None:
         world = generate_random_world(seed=53, city_count=4, faction_count=2)
+        _ensure_city_road(world, "city_1", "city_2")
         world.cities[0].resources.troops = 2400
         world.cities[1].resources.troops = 20
         world.cities[1].defense = 0
@@ -3270,6 +3550,7 @@ class StrategyBattleTests(unittest.TestCase):
 
     def test_pending_choice_attack_can_retreat_or_compose_units(self) -> None:
         world = generate_random_world(seed=57, city_count=4, faction_count=2)
+        _ensure_city_road(world, "city_1", "city_2")
         world.cities[0].resources.troops = 400
         world.cities[1].resources.troops = 80
         pending = declare_city_attack(
@@ -3308,6 +3589,7 @@ class StrategyBattleTests(unittest.TestCase):
 
     def test_city_attack_auto_composes_defender_for_real_battle(self) -> None:
         world = generate_random_world(seed=79, city_count=4, faction_count=2)
+        _ensure_city_road(world, "city_1", "city_2")
         world.cities[0].resources.troops = 1200
         world.cities[1].resources.troops = 300
         pending = declare_city_attack(
@@ -3329,6 +3611,7 @@ class StrategyBattleTests(unittest.TestCase):
 
     def test_city_attack_rejects_heroes_not_stationed_at_source(self) -> None:
         world = generate_random_world(seed=58, city_count=4, faction_count=2)
+        _ensure_city_road(world, "city_1", "city_2")
         world.cities[0].resources.troops = 400
         world.cities[1].resources.troops = 80
         own_cities = [city for city in world.cities if city.owner_faction_id == "faction_1"]
@@ -3435,11 +3718,21 @@ class StrategyBattleTests(unittest.TestCase):
         self.assertEqual(second.cities[0].resources.troops, 240)
         self.assertEqual(len([item for item in second.pending_battles if item.status == "pending"]), 2)
 
+    def test_strategy_battle_board_size_follows_settlement(self) -> None:
+        from wujiang.bridge.battle_bridge import strategy_battle_board_size
+
+        self.assertEqual(strategy_battle_board_size("village"), (20, 16))
+        self.assertEqual(strategy_battle_board_size("town"), (26, 18))
+        self.assertEqual(strategy_battle_board_size("city"), (32, 22))
+        self.assertEqual(strategy_battle_board_size("fortress"), (32, 22))
+        self.assertEqual(strategy_battle_board_size(""), (32, 22))
+
     def test_strategy_battle_board_fits_fifty_vs_fifty_units(self) -> None:
         from wujiang.bridge.battle_bridge import (
             STRATEGY_BATTLE_BOARD_HEIGHT,
             STRATEGY_BATTLE_BOARD_WIDTH,
             siege_wall_cells,
+            strategy_battle_board_size,
         )
         from wujiang.tactical.heroes.registry import RoomBattleEntry, create_room_battle, spawn_cells_for_anchor
 
@@ -3455,6 +3748,193 @@ class StrategyBattleTests(unittest.TestCase):
         walls = siege_wall_cells(battle.width, battle.height)
         for unit in battle.units.values():
             self.assertFalse(spawn_cells_for_anchor(unit, unit.position) & walls)
+
+        village_width, village_height = strategy_battle_board_size("village")
+        village = create_room_battle(
+            [RoomBattleEntry("strategy_infantry", 1, 1) for _ in range(20)],
+            [RoomBattleEntry("strategy_infantry", 2, 2) for _ in range(20)],
+            board_width=village_width,
+            board_height=village_height,
+        )
+        self.assertEqual((village.width, village.height), (20, 16))
+        village_walls = siege_wall_cells(village.width, village.height)
+        for unit in village.units.values():
+            self.assertFalse(spawn_cells_for_anchor(unit, unit.position) & village_walls)
+
+    def test_city_defense_deploys_gate_towers_and_starting_cannons(self) -> None:
+        from types import SimpleNamespace
+
+        from wujiang.bridge.battle_bridge import (
+            STRATEGY_BATTLE_BOARD_HEIGHT,
+            STRATEGY_BATTLE_BOARD_WIDTH,
+            deploy_city_defense_structures,
+            siege_wall_cells,
+            siege_wall_layout,
+            strategy_room_survivors_by_team,
+        )
+        from wujiang.tactical.heroes.registry import RoomBattleEntry, create_room_battle
+
+        layout = siege_wall_layout(STRATEGY_BATTLE_BOARD_WIDTH, STRATEGY_BATTLE_BOARD_HEIGHT)
+        blocked = siege_wall_cells(STRATEGY_BATTLE_BOARD_WIDTH, STRATEGY_BATTLE_BOARD_HEIGHT)
+        self.assertEqual(len(layout["tower_cells"]), 2)
+        for cell in layout["tower_cells"]:
+            self.assertNotIn(cell, blocked)
+            self.assertEqual(cell[0], layout["wall_x"])
+        left = [RoomBattleEntry("strategy_infantry", 1, 1)]
+        right = [RoomBattleEntry("strategy_infantry", 2, 2)]
+        battle = create_room_battle(
+            left,
+            right,
+            board_width=STRATEGY_BATTLE_BOARD_WIDTH,
+            board_height=STRATEGY_BATTLE_BOARD_HEIGHT,
+        )
+        battle.blocked_cells = set(blocked)
+        placed = deploy_city_defense_structures(battle, defender_has_towers=True, deploy_cannons=True)
+        self.assertEqual(placed["towers"], 2)
+        self.assertEqual(placed["cannons"], 2)
+        towers = [unit for unit in battle.all_units() if unit.hero_code == "strategy_arrow_tower"]
+        cannons = [unit for unit in battle.all_units() if unit.hero_code == "strategy_cannon"]
+        self.assertEqual({(unit.position.x, unit.position.y) for unit in towers}, set(layout["tower_cells"]))
+        self.assertEqual(len(cannons), 2)
+        self.assertTrue(all(unit.footprint_width == 2 and unit.footprint_height == 2 for unit in cannons))
+        survivors = strategy_room_survivors_by_team(SimpleNamespace(battle=battle))
+        self.assertEqual(survivors[1], 1)
+        self.assertEqual(survivors[2], 1)
+
+    def test_random_world_roads_stay_connected_and_sparse(self) -> None:
+        world = generate_random_world(seed=42, city_count=16, faction_count=4)
+        graph = {node.node_id: set(node.connected_node_ids) for node in world.nodes}
+        seen: set[str] = set()
+        stack = [world.nodes[0].node_id]
+        while stack:
+            node_id = stack.pop()
+            if node_id in seen:
+                continue
+            seen.add(node_id)
+            stack.extend(sorted(graph[node_id] - seen))
+        self.assertEqual(seen, set(graph))
+        degrees = [len(neighbors) for neighbors in graph.values()]
+        self.assertLessEqual(max(degrees), 4)
+        self.assertLessEqual(sum(degrees) / 2, 16 + 4)
+
+    def test_random_world_places_remote_frontier_cities(self) -> None:
+        world = generate_random_world(seed=42, city_count=16, faction_count=4)
+        remote = [
+            node
+            for node in world.nodes
+            if node.x <= 12 or node.x >= 88 or node.y <= 12 or node.y >= 88
+        ]
+        self.assertTrue(remote)
+
+    def test_siege_tech_tree_exposes_requirements_and_foundry_gate(self) -> None:
+        world = generate_random_world(seed=45, city_count=4, faction_count=2)
+        faction = world.factions[0]
+        faction.tactic_techs.extend(["civic_architecture_2", "fortified_garrison"])
+        tree = {item["id"]: item for item in tactic_tech_tree_public(faction, world)}
+        foundry = tree["cannon_foundry"]
+        self.assertEqual(foundry["category"], "siege")
+        self.assertEqual(foundry["required_building"], "academy")
+        self.assertEqual(foundry["required_building_level"], 2)
+        self.assertFalse(foundry["available"])
+        capital = next(city for city in world.cities if city.city_id == faction.capital_city_id)
+        capital.building_levels["academy"] = 2
+        if "academy" not in capital.buildings:
+            capital.buildings.append("academy")
+        opened = {item["id"]: item for item in tactic_tech_tree_public(faction, world)}
+        self.assertTrue(opened["cannon_foundry"]["available"])
+
+    def test_city_work_forges_cannon_and_converts_city_fortress(self) -> None:
+        world = generate_random_world(seed=746, city_count=4, faction_count=2)
+        faction = world.factions[0]
+        city = next(item for item in world.cities if item.owner_faction_id == faction.faction_id)
+        city.settlement = "city"
+        city.economy_class = "city"
+        city.resources.money = 800
+        city.resources.food = 800
+        city.building_levels["academy"] = 2
+        faction.tactic_techs.append("cannon_foundry")
+        lord = next(office for office in world.offices if office.faction_id == faction.faction_id and office.office_type == "lord")
+        forged = start_city_work(
+            world,
+            faction_id=faction.faction_id,
+            city_id=city.city_id,
+            work_id="forge_cannon",
+            issuer_office_id=lord.office_id,
+        )
+        forged_city = next(item for item in forged.cities if item.city_id == city.city_id)
+        self.assertEqual(forged_city.cannon_stock, int(city.cannon_stock) + 1)
+        converted = start_city_work(
+            forged,
+            faction_id=faction.faction_id,
+            city_id=city.city_id,
+            work_id="convert_to_fortress",
+            issuer_office_id=lord.office_id,
+        )
+        fortress = next(item for item in converted.cities if item.city_id == city.city_id)
+        self.assertEqual(fortress.settlement, "fortress")
+        self.assertEqual(fortress.economy_class, "city")
+        back = start_city_work(
+            converted,
+            faction_id=faction.faction_id,
+            city_id=city.city_id,
+            work_id="convert_to_city",
+            issuer_office_id=lord.office_id,
+        )
+        restored = next(item for item in back.cities if item.city_id == city.city_id)
+        self.assertEqual(restored.settlement, "city")
+        self.assertEqual(restored.economy_class, "city")
+
+    def test_city_economy_growth_follows_economy_class_not_fortress(self) -> None:
+        from wujiang.strategic.administration import city_economy_growth
+        from wujiang.strategic.simulation import _apply_policy
+
+        world = generate_random_world(seed=747, city_count=4, faction_count=2)
+        city = world.cities[0]
+        city.settlement = "fortress"
+        city.economy_class = "town"
+        city.policy = "稳定优先"
+        city.resources.money = 100
+        city.resources.food = 100
+        city.resources.population = 1000
+        town_growth = city_economy_growth(city)
+        self.assertAlmostEqual(town_growth, 1.12)
+        events = []
+        _apply_policy(city, events, 1)
+        self.assertTrue(any("人口 +" in event.message for event in events))
+        city.economy_class = "city"
+        self.assertAlmostEqual(city_economy_growth(city), 1.35)
+
+    def test_deploy_uses_city_cannon_stock_and_tech_bonuses(self) -> None:
+        from wujiang.bridge.battle_bridge import (
+            STRATEGY_BATTLE_BOARD_HEIGHT,
+            STRATEGY_BATTLE_BOARD_WIDTH,
+            deploy_city_defense_structures,
+            siege_wall_cells,
+        )
+        from wujiang.tactical.heroes.registry import RoomBattleEntry, create_room_battle
+
+        battle = create_room_battle(
+            [RoomBattleEntry("strategy_infantry", 1, 1)],
+            [RoomBattleEntry("strategy_infantry", 2, 2)],
+            board_width=STRATEGY_BATTLE_BOARD_WIDTH,
+            board_height=STRATEGY_BATTLE_BOARD_HEIGHT,
+        )
+        battle.blocked_cells = siege_wall_cells(STRATEGY_BATTLE_BOARD_WIDTH, STRATEGY_BATTLE_BOARD_HEIGHT)
+        placed = deploy_city_defense_structures(
+            battle,
+            defender_has_towers=True,
+            attacker_cannon_count=2,
+            defender_cannon_count=0,
+            attacker_bonuses={"cannon_attack": 1, "cannon_range": 1},
+            defender_bonuses={"tower_defense": 2},
+        )
+        self.assertEqual(placed["cannons"], 2)
+        cannons = [unit for unit in battle.all_units() if unit.hero_code == "strategy_cannon"]
+        towers = [unit for unit in battle.all_units() if unit.hero_code == "strategy_arrow_tower"]
+        self.assertEqual(len(cannons), 2)
+        self.assertTrue(all(int(unit.stat("attack")) == 4 for unit in cannons))
+        self.assertTrue(all(int(unit.stat("attack_range")) == 9 for unit in cannons))
+        self.assertTrue(all(int(unit.stat("defense")) == 7 for unit in towers))
 
 
 class StrategyWorldCrisisTests(unittest.TestCase):
@@ -4377,6 +4857,39 @@ class StrategyObjectiveTests(unittest.TestCase):
         self.assertTrue(status["campaign_complete"])
         self.assertEqual(status["winner_faction_ids"], ["faction_1"])
 
+    def test_early_victory_waits_until_occupation_policy_is_chosen(self) -> None:
+        world = generate_random_world(
+            seed=91,
+            city_count=4,
+            faction_count=2,
+            campaign_contract=first_campaign_contract(),
+        )
+        last_city = next(city for city in world.cities if city.owner_faction_id != "faction_1")
+        previous_owner = last_city.owner_faction_id
+        for city in world.cities:
+            city.owner_faction_id = "faction_1"
+        mark_city_captured(
+            world,
+            city_id=last_city.city_id,
+            previous_owner_faction_id=previous_owner,
+            occupier_faction_id="faction_1",
+        )
+
+        pending_status = evaluate_strategic_status(world)
+        self.assertTrue(pending_status["awaiting_occupation_policy"])
+        self.assertFalse(pending_status["awaiting_conclusion_choice"])
+        self.assertFalse(pending_status["campaign_complete"])
+        self.assertFalse(pending_status["conclusion"])
+
+        occupied = apply_occupation_policy(
+            world, faction_id="faction_1", city_id=last_city.city_id, policy_id="autonomy"
+        )
+        settled = evaluate_strategic_status(occupied)
+        self.assertFalse(settled["awaiting_occupation_policy"])
+        self.assertTrue(settled["awaiting_conclusion_choice"])
+        self.assertEqual(settled["conclusion"]["reason"], "early_victory")
+        self.assertTrue(occupied.campaign_conclusion)
+
     def test_record_strategic_status_events_is_idempotent(self) -> None:
         world = generate_random_world(seed=62, city_count=4, faction_count=2)
         for city in world.cities:
@@ -4678,6 +5191,25 @@ class StrategyHeroTests(unittest.TestCase):
         self.assertEqual(public["specialty"]["id"], hero.strategic_specialty)
         self.assertEqual(public["personal_mission"]["status"], "active")
         self.assertEqual(public["lord_relationship"], 0)
+        self.assertEqual(len(hero.strategic_skills), 2)
+        self.assertEqual(hero.strategic_skills, hero_skills_for_code(hero.hero_code))
+        self.assertEqual([item["id"] for item in public["strategic_skills"]], hero.strategic_skills)
+
+    def test_heroes_share_a_standard_strategic_skill_pool(self) -> None:
+        world = generate_random_world(
+            seed=611,
+            city_count=8,
+            faction_count=2,
+            neutral_city_states=True,
+            campaign_contract=first_campaign_contract(),
+        )
+        kits = {hero.hero_code: tuple(hero.strategic_skills) for hero in world.strategic_heroes}
+        used_skills = [skill_id for kit in kits.values() for skill_id in kit]
+        self.assertTrue(all(len(kit) == 2 for kit in kits.values()))
+        self.assertTrue(all(skill_id in STRATEGIC_SKILLS for skill_id in used_skills))
+        self.assertLess(len(set(used_skills)), len(used_skills))
+        self.assertGreater(len(set(kits.values())), 1)
+        self.assertEqual(hero_skills_for_code("ellie"), hero_skills_for_code("ellie"))
 
     def test_matching_duty_applies_specialty_and_completes_personal_mission_once(self) -> None:
         world = generate_random_world(
@@ -5021,6 +5553,7 @@ class StrategyHeroTests(unittest.TestCase):
 
     def test_summoned_strategic_hero_joins_real_city_battle_roster(self) -> None:
         world = generate_random_world(seed=75, city_count=4, faction_count=2)
+        _ensure_city_road(world, "city_1", "city_2")
         world.cities[0].resources.troops = 1200
         world.cities[1].resources.troops = 300
         summoned, hero = self._summon_faction_hero(world)
@@ -5048,6 +5581,7 @@ class StrategyHeroTests(unittest.TestCase):
 
     def test_defeated_strategic_hero_sleeps_after_real_battle_resolution(self) -> None:
         world = generate_random_world(seed=76, city_count=4, faction_count=2)
+        _ensure_city_road(world, "city_1", "city_2")
         world.cities[0].resources.troops = 1200
         world.cities[1].resources.troops = 300
         summoned, hero = self._summon_faction_hero(world)
@@ -5101,6 +5635,7 @@ class StrategyHeroTests(unittest.TestCase):
 
     def test_strategic_hero_deployment_requires_explicit_attacker_selection(self) -> None:
         world = generate_random_world(seed=77, city_count=4, faction_count=2)
+        _ensure_city_road(world, "city_1", "city_2")
         world.cities[0].resources.troops = 1200
         world.cities[1].resources.troops = 300
         summoned, hero = self._summon_faction_hero(world)
@@ -5143,7 +5678,7 @@ class StrategyHeroTests(unittest.TestCase):
         self.assertEqual(strategic_hero_deployment_limit(summoned, faction_id), 3)
         extra = [hero for hero in hero_pool if hero["faction_id"] == faction_id and hero["status"] == "serving"][:4]
         if len(extra) > 3:
-            with self.assertRaises(StrategyError):
+            with self.assertRaisesRegex(StrategyError, r"出征最多投入 \d+ 名武将"):
                 normalize_strategic_hero_deployment(summoned, faction_id, [str(hero["code"]) for hero in extra])
 
         boosted = WorldState.from_dict(summoned.to_dict())
@@ -5179,6 +5714,7 @@ class StrategyHeroTests(unittest.TestCase):
 
     def test_configured_strategic_defender_hero_joins_defender_roster(self) -> None:
         world = generate_random_world(seed=79, city_count=4, faction_count=2)
+        _ensure_city_road(world, "city_1", "city_2")
         world.cities[0].resources.troops = 1200
         world.cities[1].resources.troops = 300
         summoned, hero = self._summon_faction_hero(world, faction_id="faction_2")
@@ -5200,6 +5736,7 @@ class StrategyHeroTests(unittest.TestCase):
 
     def test_pending_battle_defender_override_uses_selected_hero(self) -> None:
         world = generate_random_world(seed=80, city_count=4, faction_count=2)
+        _ensure_city_road(world, "city_1", "city_2")
         world.cities[0].resources.troops = 1200
         world.cities[1].resources.troops = 300
         summoned, hero = self._summon_faction_hero(world, faction_id="faction_2")
@@ -5227,6 +5764,7 @@ class StrategyHeroTests(unittest.TestCase):
 
     def test_pending_battle_defender_override_validates_side_and_room_lock(self) -> None:
         world = generate_random_world(seed=81, city_count=4, faction_count=2)
+        _ensure_city_road(world, "city_1", "city_2")
         world.cities[0].resources.troops = 1200
         world.cities[1].resources.troops = 300
         summoned, hero = self._summon_faction_hero(world, faction_id="faction_2")
@@ -5655,6 +6193,7 @@ class StrategyRoleWorkspaceActionTests(unittest.TestCase):
         self.assertEqual(city_building_max_level(city, "walls"), 0)
         city.settlement = "city"
         self.assertEqual(city_building_max_level(city, "academy"), 3)
+        self.assertEqual(city_building_max_level(city, "city_defense"), 1)
         city.settlement = "fortress"
         self.assertEqual(city_building_max_level(city, "walls"), 3)
         self.assertEqual(city_building_max_level(city, "castle"), 3)
@@ -6051,10 +6590,11 @@ class StrategySimulationTests(unittest.TestCase):
             for battle in passive.pending_battles
         ))
 
+        neutral_id = _neutral_bordering_faction(passive, "faction_2")
         incited = incite_neutral_city_state(
             passive,
             instigator_faction_id="faction_1",
-            neutral_faction_id="neutral_city_state_3",
+            neutral_faction_id=neutral_id,
             target_faction_id="faction_2",
         )
         self.assertEqual(
@@ -6062,14 +6602,14 @@ class StrategySimulationTests(unittest.TestCase):
             next(faction for faction in passive.factions if faction.faction_id == "faction_1").resources.money - 60,
         )
         self.assertEqual(
-            next(faction for faction in incited.factions if faction.faction_id == "neutral_city_state_3").relations["faction_1"],
+            next(faction for faction in incited.factions if faction.faction_id == neutral_id).relations["faction_1"],
             -20,
         )
         acted = apply_strategy_ai_monthly_actions(
             incited,
             controlled_faction_ids={"faction_1", "faction_2"},
         )
-        neutral = next(faction for faction in acted.factions if faction.faction_id == "neutral_city_state_3")
+        neutral = next(faction for faction in acted.factions if faction.faction_id == neutral_id)
         self.assertIsNone(neutral.incited_against_faction_id)
         self.assertIsNone(neutral.incited_by_faction_id)
         self.assertTrue(any(event.category == "neutral_city_state_incitement_spent" for event in acted.event_log))
@@ -6871,6 +7411,7 @@ class StrategySimulationTests(unittest.TestCase):
 
     def test_occupation_policies_have_distinct_costs_rewards_and_three_month_lifecycle(self) -> None:
         world = generate_random_world(seed=51, city_count=4, faction_count=2)
+        _ensure_city_road(world, "city_1", "city_2")
         world.cities[0].resources.troops = 2400
         world.cities[1].resources.troops = 20
         world.cities[1].defense = 0

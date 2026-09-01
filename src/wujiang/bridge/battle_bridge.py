@@ -22,10 +22,31 @@ from wujiang.strategic import retreat_pending_battle
 from wujiang.strategic import set_pending_battle_composition
 from wujiang.strategic import set_world_crisis_showdown_resolution
 from wujiang.strategic import strategy_battle_rosters
+from wujiang.strategic.administration import city_has_city_defense
+from wujiang.strategic.campaign_runtime import strategy_city_name
+from wujiang.tactical.rooms.history import record_finished_room_history
+from wujiang.tactical.rooms.launch import bind_campaign_launch, make_launch_context
+from wujiang.tactical.engine.core import ENCOUNTER_HERO_TURN_LIMIT, SIEGE_HERO_TURN_LIMIT
+from wujiang.tactical.rooms.multiplayer import GameRoom
+from wujiang.tactical.rooms.multiplayer import ROOMS
+from wujiang.tactical.rooms.multiplayer import RoomError
+from wujiang.platform.http import runtime
+from wujiang.strategic import campaign_runtime
 
 STRATEGY_BATTLE_BOARD_WIDTH = 32
 STRATEGY_BATTLE_BOARD_HEIGHT = 22
-STRATEGY_AI_SIMULATION_MAX_STEPS = 12000
+STRATEGY_BATTLE_BOARD_BY_SETTLEMENT = {
+    "village": (20, 16),
+    "town": (26, 18),
+    "city": (32, 22),
+    "fortress": (32, 22),
+}
+STRATEGY_AI_SIMULATION_MAX_STEPS = 40000
+
+
+def strategy_battle_board_size(settlement: str | None = None) -> tuple[int, int]:
+    key = str(settlement or "").strip().lower()
+    return STRATEGY_BATTLE_BOARD_BY_SETTLEMENT.get(key, (STRATEGY_BATTLE_BOARD_WIDTH, STRATEGY_BATTLE_BOARD_HEIGHT))
 
 
 def _run_strategy_ai_simulation(room):
@@ -34,10 +55,13 @@ def _run_strategy_ai_simulation(room):
 
 def _resolve_strategy_ai_simulation(next_world, room, battle_room: dict[str, Any], battle_id: str):
     simulation_steps = _run_strategy_ai_simulation(room)
+    winner_team_id = getattr(getattr(room, "battle", None), "winner", None)
+    if winner_team_id not in {1, 2}:
+        simulation_steps += _run_strategy_ai_simulation(room)
+        winner_team_id = getattr(getattr(room, "battle", None), "winner", None)
     battle_room["status"] = room.status
-    battle_room["winner"] = getattr(getattr(room, "battle", None), "winner", None)
+    battle_room["winner"] = winner_team_id
     battle_room["simulation_steps"] = simulation_steps
-    winner_team_id = battle_room["winner"]
     if winner_team_id in {1, 2}:
         return resolve_strategy_battle_room_result(
             next_world,
@@ -56,27 +80,103 @@ def _resolve_strategy_ai_simulation(next_world, room, battle_room: dict[str, Any
     return next_world, battle_room
 
 
-def siege_wall_cells(width: int, height: int) -> set[tuple[int, int]]:
+def siege_wall_layout(width: int, height: int) -> dict[str, Any]:
     band = max(4, min(8, width // 4))
     wall_x = max(band + 2, width - band - 2)
-    gate = {height // 2, height // 2 - 1}
+    gate_ys = sorted({height // 2, height // 2 - 1})
+    tower_cells: list[tuple[int, int]] = []
+    above = min(gate_ys) - 1
+    below = max(gate_ys) + 1
+    if 0 <= above < height:
+        tower_cells.append((wall_x, above))
+    if 0 <= below < height:
+        tower_cells.append((wall_x, below))
+    tower_set = set(tower_cells)
+    gate = set(gate_ys)
     blocked: set[tuple[int, int]] = set()
     for y in range(1, height - 1):
-        if y in gate:
+        if y in gate or (wall_x, y) in tower_set:
             continue
         blocked.add((wall_x, y))
     for x, y in ((wall_x + 1, 1), (wall_x + 1, height - 2), (wall_x - 1, 2), (wall_x - 1, height - 3)):
-        if 0 <= x < width and 0 <= y < height:
+        if 0 <= x < width and 0 <= y < height and (x, y) not in tower_set:
             blocked.add((x, y))
-    return blocked
-from wujiang.strategic.campaign_runtime import strategy_city_name
-from wujiang.tactical.rooms.history import record_finished_room_history
-from wujiang.tactical.rooms.launch import bind_campaign_launch, make_launch_context
-from wujiang.tactical.rooms.multiplayer import GameRoom
-from wujiang.tactical.rooms.multiplayer import ROOMS
-from wujiang.tactical.rooms.multiplayer import RoomError
-from wujiang.platform.http import runtime
-from wujiang.strategic import campaign_runtime
+    return {
+        "wall_x": wall_x,
+        "gate_ys": gate_ys,
+        "tower_cells": tower_cells,
+        "blocked": blocked,
+    }
+
+
+def siege_wall_cells(width: int, height: int) -> set[tuple[int, int]]:
+    return set(siege_wall_layout(width, height)["blocked"])
+
+
+def _place_unit_near(battle, unit, prefer_x: int, prefer_y: int) -> bool:
+    from wujiang.tactical.engine.core import Position
+
+    candidates: list[tuple[int, int, int, int]] = []
+    for y in range(battle.height):
+        for x in range(battle.width):
+            anchor = Position(x, y)
+            if not battle.can_place_unit(unit, anchor):
+                continue
+            dist = abs(x - prefer_x) + abs(y - prefer_y)
+            candidates.append((dist, y, x, 0))
+    if not candidates:
+        return False
+    candidates.sort()
+    _, y, x, _ = candidates[0]
+    battle.add_unit(unit, Position(x, y))
+    return True
+
+
+def deploy_city_defense_structures(
+    battle,
+    *,
+    defender_has_towers: bool,
+    attacker_cannon_count: int = 0,
+    defender_cannon_count: int = 0,
+    attacker_bonuses: dict[str, int] | None = None,
+    defender_bonuses: dict[str, int] | None = None,
+    deploy_cannons: bool | None = None,
+) -> dict[str, int]:
+    from wujiang.tactical.engine.core import Position
+    from wujiang.tactical.engine.siege import apply_siege_tech_bonuses
+    from wujiang.tactical.heroes.registry import create_hero
+
+    layout = siege_wall_layout(battle.width, battle.height)
+    placed = {"towers": 0, "cannons": 0}
+    if defender_has_towers:
+        for x, y in layout["tower_cells"]:
+            tower = create_hero("strategy_arrow_tower", 2)
+            apply_siege_tech_bonuses(tower, defender_bonuses)
+            anchor = Position(int(x), int(y))
+            if not battle.can_place_unit(tower, anchor):
+                continue
+            battle.add_unit(tower, anchor)
+            placed["towers"] += 1
+    if deploy_cannons is True and attacker_cannon_count <= 0 and defender_cannon_count <= 0:
+        attacker_cannon_count = 1
+        defender_cannon_count = 1
+    for _ in range(max(0, int(attacker_cannon_count or 0))):
+        attacker = create_hero("strategy_cannon", 1)
+        apply_siege_tech_bonuses(attacker, attacker_bonuses)
+        if _place_unit_near(battle, attacker, 1, max(0, battle.height // 2 - 1)):
+            placed["cannons"] += 1
+    for _ in range(max(0, int(defender_cannon_count or 0))):
+        defender = create_hero("strategy_cannon", 2)
+        apply_siege_tech_bonuses(defender, defender_bonuses)
+        if _place_unit_near(
+            battle,
+            defender,
+            min(battle.width - 3, int(layout["wall_x"]) + 2),
+            max(0, battle.height // 2 - 1),
+        ):
+            placed["cannons"] += 1
+    return placed
+
 
 def create_strategy_battle_room(
     campaign,
@@ -99,6 +199,30 @@ def create_strategy_battle_room(
         campaign_id=campaign_id,
         battle_id=getattr(battle, "battle_id", ""),
     )
+    source_kind = str(getattr(battle, "source_kind", "") or "legacy_city_attack")
+    hero_turn_limit = ENCOUNTER_HERO_TURN_LIMIT if source_kind == "encounter" else SIEGE_HERO_TURN_LIMIT
+    cities = list(getattr(getattr(campaign, "world", None), "cities", []) or [])
+    target_city = next(
+        (
+            city
+            for city in cities
+            if str(getattr(city, "city_id", "") or "") == str(getattr(battle, "target_city_id", "") or "")
+        ),
+        None,
+    )
+    source_city = next(
+        (
+            city
+            for city in cities
+            if str(getattr(city, "city_id", "") or "") == str(getattr(battle, "source_city_id", "") or "")
+        ),
+        None,
+    )
+    if source_kind == "encounter":
+        board_settlement = "village"
+    else:
+        board_settlement = str(getattr(target_city, "settlement", "") or "") or "city"
+    board_width, board_height = strategy_battle_board_size(board_settlement)
     room, _player_id, player_token = ROOMS.create_preconfigured_battle_room(
         host_name=f"{auth_user.username} · {source_name}",
         opponent_name=f"{target_name}守军",
@@ -108,10 +232,12 @@ def create_strategy_battle_room(
         host_becomes_ai_after_start=resolution_mode in {"watch_ai", "ai_auto"},
         host_account_user_id=auth_user.user_id,
         room_id=room_id,
-        board_width=STRATEGY_BATTLE_BOARD_WIDTH,
-        board_height=STRATEGY_BATTLE_BOARD_HEIGHT,
+        board_width=board_width,
+        board_height=board_height,
         experience_kind="strategy_campaign",
         launch_context=launch_context,
+        hero_turn_limit=hero_turn_limit,
+        turn_limit_winner=2,
     )
     bind_campaign_launch(room, campaign_id=campaign_id, battle_id=str(getattr(battle, "battle_id", "") or ""))
     if getattr(room, "battle", None) is not None and str(getattr(battle, "source_kind", "") or "legacy_city_attack") in {
@@ -120,6 +246,44 @@ def create_strategy_battle_room(
         "",
     }:
         room.battle.blocked_cells = siege_wall_cells(room.battle.width, room.battle.height)
+        factions = list(getattr(getattr(campaign, "world", None), "factions", []) or [])
+        from wujiang.tactical.engine.army import cannon_ammo_options
+        from wujiang.strategic.tactics import siege_tech_bonuses
+
+        attacker_faction = next(
+            (item for item in factions if item.faction_id == str(getattr(battle, "attacker_faction_id", "") or "")),
+            None,
+        )
+        defender_faction = next(
+            (item for item in factions if item.faction_id == str(getattr(target_city, "owner_faction_id", "") or "")),
+            None,
+        )
+        attacker_bonuses = siege_tech_bonuses(attacker_faction) if attacker_faction is not None else {}
+        defender_bonuses = siege_tech_bonuses(defender_faction) if defender_faction is not None else {}
+        room.battle.siege_ammo_by_player = {
+            1: cannon_ammo_options(int(attacker_bonuses.get("cannon_splash", 0) or 0)),
+            2: cannon_ammo_options(int(defender_bonuses.get("cannon_splash", 0) or 0)),
+        }
+        deploy_city_defense_structures(
+            room.battle,
+            defender_has_towers=city_has_city_defense(target_city) if target_city is not None else False,
+            attacker_cannon_count=int(getattr(source_city, "cannon_stock", 0) or 0) if source_city is not None else 0,
+            defender_cannon_count=int(getattr(target_city, "cannon_stock", 0) or 0) if target_city is not None else 0,
+            attacker_bonuses=attacker_bonuses,
+            defender_bonuses=defender_bonuses,
+        )
+        from wujiang.tactical.engine.army import apply_army_order, present_army_kinds
+
+        room.battle.siege_defender_ai = True
+        for kind in present_army_kinds(room.battle, 2):
+            if kind == "cannon":
+                continue
+            apply_army_order(
+                room.battle.army_orders,
+                2,
+                {"order": "hold", "direction": "W", "stride": "full"},
+                kind=kind,
+            )
     return {
         "room_id": room.room_id,
         "invite_path": room.invite_path(),
@@ -155,6 +319,8 @@ def strategy_room_survivors_by_team(room) -> dict[int, int]:
             continue
         hero_code = str(getattr(unit, "hero_code", "") or "")
         if not hero_code.startswith("strategy_"):
+            continue
+        if hero_code in {"strategy_arrow_tower", "strategy_cannon"}:
             continue
         player_id = int(getattr(unit, "player_id", 0))
         if player_id in surviving_grid_units_by_team:

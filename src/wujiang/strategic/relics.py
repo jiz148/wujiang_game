@@ -522,7 +522,7 @@ def validate_relic_search(
     if hero.faction_id != faction_id or hero.status != "serving":
         raise StrategyError("只能派遣本势力仕官中的英灵搜索圣物。")
     if hero.sleeping_until_month is not None and hero.sleeping_until_month >= ensured.current_month:
-        raise StrategyError("沉睡中的英灵不能搜索圣物。")
+        raise StrategyError("负伤中的武将不能搜索圣物。")
     if hero.city_id != city.city_id or city.owner_faction_id != faction_id:
         raise StrategyError("搜索英灵必须驻扎在指定的己方出发城市。")
     if hero.last_personal_action_month == ensured.current_month:

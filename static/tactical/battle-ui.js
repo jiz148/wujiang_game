@@ -1,16 +1,16 @@
 // Battle screen rendering: board, units, action panel and log.
 import { $ } from '../core/dom.js';
 import { applyBoardCamera, boardBasePixels, clampBoardZoom } from '../core/events.js';
-import { activeBundles, allUnits, backstepFollowUpTargetIds, boardPieceZIndex, bundleFor, canInteract, currentRespawnPrompt, hasBattle, hasRoom, hoveredUnit, inspectBoardUnit, inspectedUnit, isChainMode, isGameOver, isReplayMode, isRespawnMode, selectedUnit, stagedBackstepRetreatCell, stagedTarget, unitById, unitFootprintBounds, unitHasLargeFootprint, unitOccupiedCells, unitsAtCell, viewerPlayerId, viewerTeamId } from '../core/net.js';
+import { activeBundles, allUnits, backstepFollowUpTargetIds, boardPieceZIndex, boardUnits, bundleFor, canInteract, currentRespawnPrompt, hasBattle, hasRoom, hoveredUnit, inspectBoardUnit, inspectedUnit, isAiTakeover, isChainMode, isGameOver, isReplayMode, isRespawnMode, selectedUnit, stagedBackstepRetreatCell, stagedTarget, unitById, unitFootprintBounds, unitHasLargeFootprint, unitOccupiedCells, unitsAtCell, viewerPlayerId, viewerTeamId } from '../core/net.js';
 import { render } from '../core/render.js';
 import { applyScreen } from '../core/router.js';
 import { state, ui } from '../core/state.js';
 import { effectiveProfileName } from '../platform/auth.js';
 import { currentBattleLaunch, isCampaignBattleLaunch } from '../bridge/battle-launch.js';
-import { isRandomRoomMode, loadReplayStep, onActionClick, roomModeMeta, shouldShowLobbyPanel } from '../tactical/room-api.js';
+import { isRandomRoomMode, loadReplayStep, onActionClick, roomModeMeta, setArmyOrder, shouldShowLobbyPanel } from '../tactical/room-api.js';
 import { clearActionSelection } from '../tactical/session.js';
 import { actionLabel, actionLimitLabel, actionManaLabel, actionNeedsTarget, actionTierLabel, actionTimingLabel, actionTitle, bodyDirectionSelection, canCompleteTargetSelection, choicePatternSelection, currentPreview, fieldEffectMarker, fieldEffectsByCell, hasCancelableTargetSelection, movePathSelection, multiUnitSelection, normalizedPatternCells, patternSelection, patternSelectionCanComplete, randomRoomFallbackSummary, randomRoomRosterSize, reviveUnitCellSelection, stagedAttackVariantCode, stagedBodyCells, stagedBodyDirection, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, statCellRequired, statCellSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
-import { actionByCode, actionWheelLayer, displayActions, fieldEffectDuration, fieldEffects, hoveredAction, hpRatio, manaDisplayClass, manaPipsMarkup, positionKey, positionsToSet, renderBattleVfx, selectedAction, trimNumber, tutorialState, unitBoundsRelativeToStage, unitStatusSummary } from '../tactical/vfx.js';
+import { actionByCode, actionWheelLayer, displayActions, fieldEffectDuration, fieldEffects, flushPendingArmyVfx, hoveredAction, hpRatio, manaDisplayClass, manaPipsMarkup, positionKey, positionsToSet, renderBattleVfx, selectedAction, trimNumber, tutorialState, unitBoundsRelativeToStage, unitStatusSummary } from '../tactical/vfx.js';
 
 export function renderScreens() {
   applyScreen();
@@ -254,6 +254,181 @@ export function renderBattleEffects() {
   });
 }
 
+function soldierKindOf(unit) {
+  const code = String(unit?.hero_code || "");
+  if (code.startsWith("strategy_")) return code.slice("strategy_".length);
+  if (!unit?.is_army_soldier) return "";
+  const byName = {
+    "普通步兵": "infantry",
+    "弓兵": "archer",
+    "骑兵": "cavalry",
+    "守备兵": "garrison",
+    "山地兵": "mountain_soldier",
+    "以太侦察兵": "ether_scout",
+    "城墙工兵": "wall_engineer",
+    "雪鬼": "snow_ghost",
+    "箭塔": "arrow_tower",
+    "火炮": "cannon",
+  };
+  return byName[unit.name] || "infantry";
+}
+
+function soldierIconSvg(kind) {
+  const icons = {
+    infantry: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.4 2.8 4v4.3c0 3.3 2.2 5.8 5.2 6.5 3-.7 5.2-3.2 5.2-6.5V4L8 1.4z"/></svg>',
+    archer: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.1 1.7c4.1 2.2 6.2 4.8 6.2 6.3s-2.1 4.1-6.2 6.3l.5-3.1c2.1-1.1 3.3-2.2 3.3-3.2S5.7 5.9 3.6 4.8z"/><path d="M3.2 8h10.2"/><path d="M11.1 5.7 14.2 8l-3.1 2.3"/></svg>',
+    cavalry: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.8 11.8c.4-2.6 1.6-4.5 3.4-5.3L6 3.2h2.4l.6 2.1c.9-.1 1.8.2 2.5.8 1 .8 1.7 2.1 2 3.7l.7 2H3.8zm-.6.8h10v1.4h-10z"/></svg>',
+    garrison: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 13V6.2h2V4.6h2V6.2h2V4.6h2V6.2h2V13H3zm2.2-2.2h5.6V8.4H5.2z"/></svg>',
+    mountain_soldier: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.4 12.8 6.2 5l2 4.2 1.6-2.8 3.8 6.4H2.4z"/></svg>',
+    ether_scout: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.2C4.2 3.2 1.6 8 1.6 8s2.6 4.8 6.4 4.8S14.4 8 14.4 8 11.8 3.2 8 3.2zm0 7.4A2.6 2.6 0 1 1 8 5.4a2.6 2.6 0 0 1 0 5.2z"/><circle cx="8" cy="8" r="1.3"/></svg>',
+    wall_engineer: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.8 2.4 13.6 6l-1.4 1.4-1.2-1.2-5.2 5.2H3.4V8.8l5.2-5.2-1.2-1.2z"/></svg>',
+    snow_ghost: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.6v12.8M3.4 4.2 12.6 11.8M12.6 4.2 3.4 11.8M8 4.4 6.2 7.1 8 9.8l1.8-2.7z"/></svg>',
+    arrow_tower: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 14V7.1h1.4V5.4h1.5V3.8h1.4V2.4h.8V3.8h1.4V5.4h1.5V7.1h1.4V14H3.2z"/><path d="M6.6 9.2h2.8v4.2H6.6z"/></svg>',
+    cannon: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.8 8.6h7.4l4.4-2.6v3.4L9.2 12H1.8z"/><circle cx="4.2" cy="12.5" r="1.6"/><circle cx="8.4" cy="12.5" r="1.6"/><path d="M3.2 6.4h3.2L7.6 8H3.6z"/></svg>',
+  };
+  return icons[kind] || icons.infantry;
+}
+
+function siegeReloadState(unit) {
+  const raw = String(unit?.siege_reload_state || "");
+  if (raw === "loading" || raw === "ready" || raw === "empty") return raw;
+  return unit?.siege_loaded ? "ready" : "empty";
+}
+
+function cannonAmmoName(unit) {
+  const army = state.battle?.army;
+  const ammoId = army?.orders?.[unit?.player_id]?.cannon?.ammo || unit?.siege_ammo || "shell";
+  const options = army?.ammo_options?.[unit?.player_id] || [];
+  const match = options.find((item) => item.id === ammoId);
+  if (match?.name) return match.name;
+  const names = { shell: "炮弹", heavy_shell: "重型炮弹", ultra_shell: "超重型炮弹" };
+  return names[ammoId] || "炮弹";
+}
+
+function siegeReloadLabel(loadState, unit = null) {
+  const ammo = unit ? cannonAmmoName(unit) : "";
+  if (loadState === "ready") return ammo ? `已装填${ammo}` : "已装填";
+  if (loadState === "loading") return ammo ? `正在装填${ammo}` : "正在装填";
+  return ammo ? `未装填${ammo}` : "未装填";
+}
+
+function pieceCoreMarkup(unit) {
+  const kind = soldierKindOf(unit);
+  if (kind === "arrow_tower") {
+    return `<div class="keep-body" aria-label="${unit.name}">${soldierIconSvg(kind)}</div>`;
+  }
+  if (kind === "cannon") {
+    const load = siegeReloadState(unit);
+    return `
+      <div class="cannon-body" aria-label="${unit.name}">
+        ${soldierIconSvg(kind)}
+        <span class="cannon-load is-${load}" title="${siegeReloadLabel(load, unit)}"></span>
+      </div>
+    `;
+  }
+  if (kind) {
+    return `<div class="piece-icon" aria-label="${unit.name}">${soldierIconSvg(kind)}</div>`;
+  }
+  return `<div class="piece-name">${unit.name}</div>`;
+}
+
+function boardCellAt(x, y) {
+  return document.querySelector(`#board .cell[data-x="${x}"][data-y="${y}"]`);
+}
+
+function placeMarchPiece(piece, x, y) {
+  if (!piece) return;
+  const width = Math.max(1, Number(piece.dataset.footprintWidth || 1));
+  const height = Math.max(1, Number(piece.dataset.footprintHeight || 1));
+  piece.dataset.x = String(x);
+  piece.dataset.y = String(y);
+  if (piece.classList.contains("is-footprint")) {
+    piece.style.gridColumn = `${x + 1} / span ${width}`;
+    piece.style.gridRow = `${y + 1} / span ${height}`;
+    return;
+  }
+  const host = boardCellAt(x, y);
+  if (!host) return;
+  host.classList.add("has-unit");
+  host.append(piece);
+}
+
+function armyMarchTraces() {
+  const army = state.battle?.army;
+  const traces = Array.isArray(army?.move_traces)
+    ? army.move_traces.filter((item) => Array.isArray(item?.path) && item.path.length > 1)
+    : [];
+  return { marchId: String(army?.march_id || ""), traces };
+}
+
+function ensureArmyMarchPlayback() {
+  const { marchId, traces } = armyMarchTraces();
+  if (!hasBattle() || isReplayMode() || isGameOver()) {
+    state.lastArmyMarchId = "";
+    state.armyMarch = null;
+    if (ui.armyMarchTimer) {
+      window.clearTimeout(ui.armyMarchTimer);
+      ui.armyMarchTimer = 0;
+    }
+    return [];
+  }
+  if (!marchId || !traces.length) return [];
+  if (globalThis.WujiangBattleFeedback?.reducedMotion()) {
+    state.lastArmyMarchId = marchId;
+    state.armyMarch = { id: marchId, tick: traces.reduce((max, item) => Math.max(max, item.path.length), 1) - 1 };
+    flushPendingArmyVfx();
+    return traces;
+  }
+  if (state.armyMarch?.id !== marchId) {
+    state.lastArmyMarchId = marchId;
+    state.armyMarch = { id: marchId, tick: 0 };
+  }
+  return traces;
+}
+
+function armyMarchCellForUnit(unit, traces) {
+  if (!state.armyMarch || !traces.length) return null;
+  const trace = traces.find((item) => String(item.unit_id) === String(unit.id));
+  if (!trace) return null;
+  return trace.path[Math.min(state.armyMarch.tick, trace.path.length - 1)] || null;
+}
+
+function applyArmyMarchFrame(traces, tick) {
+  traces.forEach((trace) => {
+    const cell = trace.path[Math.min(tick, trace.path.length - 1)];
+    if (!cell) return;
+    const piece = document.querySelector(`.board-piece[data-unit-id="${trace.unit_id}"]`);
+    if (piece) placeMarchPiece(piece, cell.x, cell.y);
+  });
+}
+
+function playArmyMarchIfNeeded() {
+  const traces = ensureArmyMarchPlayback();
+  const marchId = state.armyMarch?.id || "";
+  if (!marchId || !traces.length || globalThis.WujiangBattleFeedback?.reducedMotion()) {
+    if (!traces.length) flushPendingArmyVfx();
+    return;
+  }
+  const maxLen = traces.reduce((max, item) => Math.max(max, item.path.length), 0);
+  applyArmyMarchFrame(traces, state.armyMarch.tick);
+  if (state.armyMarch.tick >= maxLen - 1 || ui.armyMarchTimer) return;
+  const step = () => {
+    if (!state.armyMarch || state.armyMarch.id !== marchId) {
+      ui.armyMarchTimer = 0;
+      return;
+    }
+    state.armyMarch.tick += 1;
+    applyArmyMarchFrame(traces, state.armyMarch.tick);
+    if (state.armyMarch.tick < maxLen - 1) {
+      ui.armyMarchTimer = window.setTimeout(step, 110);
+    } else {
+      ui.armyMarchTimer = 0;
+      flushPendingArmyVfx();
+    }
+  };
+  ui.armyMarchTimer = window.setTimeout(step, 110);
+}
+
 export function renderBoard() {
   const board = $("board");
   const piecesLayer = $("board-pieces");
@@ -316,7 +491,7 @@ export function renderBoard() {
       cell.style.gridRow = String(y + 1);
       cell.disabled = false;
 
-      const unitsHere = allUnits().filter(
+      const unitsHere = boardUnits().filter(
         (unit) => unit.position && unitOccupiedCells(unit).some((cellPosition) => cellPosition.x === x && cellPosition.y === y),
       );
       const occupant = unitsHere.find((unit) => !unit.banished) || unitsHere[0] || null;
@@ -377,7 +552,8 @@ export function renderBoard() {
     }
   }
 
-  allUnits()
+  const marchTraces = ensureArmyMarchPlayback();
+  boardUnits()
     .filter((unit) => unit.position && !unit.banished)
     .sort((left, right) => {
       const layerGap = boardPieceZIndex(left) - boardPieceZIndex(right);
@@ -389,6 +565,9 @@ export function renderBoard() {
       const bounds = unitFootprintBounds(unit);
       const occupied = unitOccupiedCells(unit);
       const largeFootprint = unitHasLargeFootprint(unit);
+      const marchCell = armyMarchCellForUnit(unit, marchTraces);
+      const placeX = marchCell ? Number(marchCell.x) : bounds.minX;
+      const placeY = marchCell ? Number(marchCell.y) : bounds.minY;
       const footprintCellsMarkup = largeFootprint
         ? `
           <div class="piece-footprint-cells" style="grid-template-columns: repeat(${bounds.width}, minmax(0, 1fr)); grid-template-rows: repeat(${bounds.height}, minmax(0, 1fr));">
@@ -404,38 +583,54 @@ export function renderBoard() {
           </div>
         `
         : "";
+      const kind = soldierKindOf(unit);
       const piece = document.createElement("div");
-      piece.className = `piece board-piece player-${unit.player_id} ${largeFootprint ? "is-footprint" : ""} ${isStealthed ? "is-stealthed" : ""}`;
+      piece.className = [
+        "piece",
+        "board-piece",
+        `player-${unit.player_id}`,
+        largeFootprint ? "is-footprint" : "",
+        isStealthed ? "is-stealthed" : "",
+        kind ? "is-soldier" : "is-hero",
+        kind === "arrow_tower" ? "is-structure is-arrow-tower" : "",
+        kind === "cannon" ? "is-siege-engine is-cannon" : "",
+        kind === "cannon" && siegeReloadState(unit) === "ready" ? "is-loaded" : "",
+      ].filter(Boolean).join(" ");
       piece.dataset.unitId = unit.id;
-      if (unit.position) {
-        piece.dataset.x = String(unit.position.x);
-        piece.dataset.y = String(unit.position.y);
+      piece.dataset.footprintWidth = String(bounds.width);
+      piece.dataset.footprintHeight = String(bounds.height);
+      if (unit.position || marchCell) {
+        piece.dataset.x = String(placeX);
+        piece.dataset.y = String(placeY);
       }
       piece.style.zIndex = String(boardPieceZIndex(unit));
       piece.style.setProperty("--hp-angle", `${hpRatio(unit) * 360}deg`);
+      const hideMana = Boolean(kind);
       piece.innerHTML = `
         ${footprintCellsMarkup}
         <div class="piece-ring ${isStealthed ? "is-stealthed" : ""}">
           <div class="piece-core">
-            <div class="piece-name">${unit.name}</div>
+            ${pieceCoreMarkup(unit)}
           </div>
         </div>
+        ${hideMana ? "" : `
         <div class="${manaDisplayClass(unit)}" aria-label="魔力 ${trimNumber(unit.mana)} / ${trimNumber(unit.max_mana || unit.base_stats?.mana || unit.stats?.max_mana || unit.stats?.mana || unit.mana)}">
           ${manaPipsMarkup(unit)}
-        </div>
+        </div>`}
       `;
-      const host = !largeFootprint ? cellAt[bounds.minY * boardWidth + bounds.minX] : null;
+      const host = !largeFootprint ? cellAt[placeY * boardWidth + placeX] : null;
       if (host) {
         piece.classList.add("is-in-cell");
         host.classList.add("has-unit");
         host.append(piece);
       } else {
-        piece.style.gridColumn = `${bounds.minX + 1} / span ${bounds.width}`;
-        piece.style.gridRow = `${bounds.minY + 1} / span ${bounds.height}`;
+        piece.style.gridColumn = `${placeX + 1} / span ${bounds.width}`;
+        piece.style.gridRow = `${placeY + 1} / span ${bounds.height}`;
         (piecesLayer || board).append(piece);
       }
     });
   applyBoardCamera();
+  playArmyMarchIfNeeded();
 }
 
 export function renderActionPanel() {
@@ -554,7 +749,6 @@ function renderActionWheel() {
   const buttonWidth = document.body.classList.contains("battle-mode") ? 74 : 84;
   const buttonHeight = document.body.classList.contains("battle-mode") ? 40 : 46;
   const gap = 10;
-  const stagePadding = 12;
   const actionCount = actions.length;
   const columns = actionCount <= 3 ? 1 : actionCount <= 8 ? 2 : 3;
   const rows = Math.ceil(actionCount / columns);
@@ -588,12 +782,21 @@ function renderActionWheel() {
       required: clusterHeight + 16,
     },
   ];
+  if (bounds.right < 0 || bounds.bottom < 0 || bounds.left > stageRect.width || bounds.top > stageRect.height) {
+    return;
+  }
   const chosen = placements.find((placement) => placement.score >= placement.required)
     || placements.sort((a, b) => b.score - a.score)[0];
-  const maxLeft = Math.max(stagePadding, stageRect.width - clusterWidth - stagePadding);
-  const maxTop = Math.max(stagePadding, stageRect.height - clusterHeight - stagePadding);
-  const anchorLeft = Math.max(stagePadding, Math.min(maxLeft, chosen.left));
-  const anchorTop = Math.max(stagePadding, Math.min(maxTop, chosen.top));
+  const anchorLeft = chosen.left;
+  const anchorTop = chosen.top;
+  if (
+    anchorLeft + clusterWidth < 0
+    || anchorTop + clusterHeight < 0
+    || anchorLeft > stageRect.width
+    || anchorTop > stageRect.height
+  ) {
+    return;
+  }
 
   actions.forEach((action, index) => {
     const btn = document.createElement("button");
@@ -751,6 +954,15 @@ export function renderSidebarPanels() {
   const dock = $("battle-right-rail");
   if (!dock) return;
   const open = !state.rightRailCollapsed;
+  const army = state.battle?.army;
+  const hasAnyArmy = Boolean(army?.has_army?.[1] || army?.has_army?.[2]);
+  const armyTab = dock.querySelector('[data-battle-tab="army"]');
+  if (armyTab) {
+    armyTab.classList.toggle("hidden", !hasAnyArmy);
+  }
+  if (!hasAnyArmy && state.battleDockTab === "army") {
+    state.battleDockTab = "info";
+  }
   dock.classList.toggle("is-open", open);
   dock.classList.toggle("is-collapsed", !open);
   dock.querySelectorAll("[data-battle-tab]").forEach((button) => {
@@ -772,6 +984,35 @@ export function renderSidebarPanels() {
     const campaignBattle = isCampaignBattleLaunch();
     lobbyBtn.textContent = campaignBattle ? "返回战役" : "房间大厅";
     lobbyBtn.classList.toggle("hidden", !hasRoom());
+  }
+  const takeoverPanel = $("ai-takeover-panel");
+  const takeoverBtn = $("ai-takeover-toggle");
+  if (takeoverPanel) {
+    const tutorial = state.room?.experience_kind === "tutorial";
+    const visible = Boolean(
+      hasRoom()
+      && hasBattle()
+      && !isGameOver()
+      && !isReplayMode()
+      && !tutorial
+      && viewerPlayerId()
+    );
+    takeoverPanel.classList.toggle("hidden", !visible);
+  }
+  if (takeoverBtn) {
+    const active = isAiTakeover();
+    takeoverBtn.textContent = active ? "停止接管" : "让 AI 接管";
+    takeoverBtn.classList.toggle("is-active", active);
+    takeoverBtn.setAttribute("aria-pressed", active ? "true" : "false");
+  }
+  const heroStyle = $("ai-hero-style");
+  const armyStyle = $("ai-army-style");
+  const seat = (state.room?.seats || []).find((item) => item.player_id === viewerPlayerId());
+  if (heroStyle) {
+    heroStyle.value = seat?.hero_ai_style || state.room?.viewer_hero_ai_style || "follow";
+  }
+  if (armyStyle) {
+    armyStyle.value = seat?.army_ai_style || state.room?.viewer_army_ai_style || "seek";
   }
 }
 
@@ -832,6 +1073,7 @@ export function renderSelectedCard() {
         固定护盾 ${unit.shields || 0} · 临时护盾 ${unit.temporary_shields || 0} · 闪避 ${unit.dodge_charges || 0}
       </div>
       <div class="selected-card__vitals"><strong>状态</strong> ${statuses}</div>
+      ${unit.siege_reload_cycle ? `<div class="selected-card__vitals">装填：${siegeReloadLabel(siegeReloadState(unit), unit)}</div>` : ""}
     </div>
     <div class="selected-card__section">
       <div class="selected-card__stats">
@@ -857,6 +1099,232 @@ export function roomStateLabel(room) {
   if (room.can_join) return "\u53ef\u52a0\u5165";
   if (room.is_full) return "\u5df2\u6ee1";
   return "\u5927\u5385\u4e2d";
+}
+
+function armyKindGroups(army, teamId) {
+  const own = army?.present_kinds?.[teamId] || [];
+  const ownStructures = army?.structures?.[teamId] || [];
+  if (own.length || ownStructures.length) {
+    return [{ teamId, kinds: own, own: true }];
+  }
+  const groups = [];
+  for (const playerId of [1, 2]) {
+    const kinds = army?.present_kinds?.[playerId] || [];
+    if (kinds.length) {
+      groups.push({ teamId: playerId, kinds, own: false });
+    }
+  }
+  return groups;
+}
+
+function armyKindCommand(army, teamId, kind) {
+  return army?.orders?.[teamId]?.[kind] || {
+    order: "advance",
+    direction: teamId === 2 ? "W" : "E",
+    stride: "full",
+  };
+}
+
+function currentTurnPlayerId(battle) {
+  const armyTurn = Boolean(battle?.is_army_turn || battle?.army?.is_army_turn);
+  const unit = unitById(battle?.active_turn_unit_id);
+  const raw = armyTurn
+    ? (battle?.army?.army_turn_player_id ?? battle?.active_player)
+    : (unit?.player_id ?? battle?.active_player);
+  return Number(raw) === 2 ? 2 : 1;
+}
+
+function currentTurnSubject(battle) {
+  if (Boolean(battle?.is_army_turn || battle?.army?.is_army_turn)) {
+    return "军队";
+  }
+  const unit = unitById(battle?.active_turn_unit_id);
+  return unit?.name || battle?.active_turn_unit_name || "武将";
+}
+
+export function renderBattleTurnBanner() {
+  const banner = $("battle-turn-banner");
+  if (!banner) return;
+  const battle = state.battle;
+  const visible = hasBattle() && (!isGameOver() || isReplayMode());
+  banner.classList.toggle("hidden", !visible);
+  banner.replaceChildren();
+  if (!visible) return;
+  const playerId = currentTurnPlayerId(battle);
+  const completed = Number(battle?.completed_turns || 0);
+  const turnIndex = Math.max(1, Number(battle?.turn_number || completed + 1 || 1));
+  const limit = Number(battle?.turn_timeout_limit || 0);
+  const round = document.createElement("span");
+  round.className = "battle-turn-banner__round";
+  if (isGameOver()) {
+    round.textContent = limit > 0 ? `终局 · 原第 ${turnIndex}/${limit} 回合` : `终局 · 原第 ${turnIndex} 回合`;
+    banner.append(round);
+    return;
+  }
+  round.textContent = limit > 0 ? `第 ${turnIndex}/${limit} 回合` : `第 ${turnIndex} 回合`;
+  const tag = document.createElement("span");
+  tag.className = `battle-turn-banner__player is-player-${playerId}`;
+  tag.textContent = `玩家 ${playerId}`;
+  const subject = document.createElement("span");
+  subject.className = "battle-turn-banner__subject";
+  subject.textContent = `的${currentTurnSubject(battle)}回合`;
+  banner.append(round, "，当前", tag, subject);
+}
+
+export function renderArmyOrderBar() {
+  const panel = $("army-order-panel");
+  if (!panel) return;
+  const army = state.battle?.army;
+  const teamId = viewerTeamId();
+  const hasAnyArmy = Boolean(army?.has_army?.[1] || army?.has_army?.[2]);
+  if (!hasAnyArmy) {
+    panel.replaceChildren();
+    return;
+  }
+  const groups = armyKindGroups(army, teamId);
+  const canCommandOwn = Boolean(
+    hasBattle()
+    && !isGameOver()
+    && !isReplayMode()
+    && !isAiTakeover()
+    && teamId
+    && army?.has_army?.[teamId]
+    && state.playerToken
+  );
+  const orders = army?.order_options || [
+    { code: "advance", name: "进军" },
+    { code: "seek", name: "寻敌" },
+    { code: "hold", name: "固守" },
+    { code: "retreat", name: "后撤" },
+  ];
+  const directions = army?.direction_options || [
+    { code: "NW", name: "西北" }, { code: "N", name: "北" }, { code: "NE", name: "东北" },
+    { code: "W", name: "西" }, { code: "E", name: "东" },
+    { code: "SW", name: "西南" }, { code: "S", name: "南" }, { code: "SE", name: "东南" },
+  ];
+  panel.replaceChildren();
+  const lead = document.createElement("div");
+  lead.className = "army-order-panel__lead";
+  lead.textContent = isAiTakeover()
+    ? "AI 接管中，军队指令由 AI 调整。停止接管后可以再改。"
+    : canCommandOwn
+      ? "同一兵种共用一套全局指令。进军沿所选朝向走；后撤沿反方向走；寻敌则每人朝最近的敌人走。"
+      : "士兵按各兵种指令行动。进军沿所选朝向走；后撤沿反方向走；寻敌则每人朝最近的敌人走。";
+  panel.append(lead);
+  groups.forEach((group) => {
+    const canCommand = canCommandOwn && group.own;
+    if (groups.length > 1 || !group.own) {
+      const heading = document.createElement("div");
+      heading.className = "army-order-panel__side";
+      heading.textContent = `玩家 ${group.teamId}`;
+      panel.append(heading);
+    }
+    group.kinds.forEach((item) => {
+      const command = armyKindCommand(army, group.teamId, item.kind);
+      const card = document.createElement("section");
+      card.className = `army-order-card${canCommand ? "" : " is-readonly"}`;
+      const title = document.createElement("div");
+      title.className = "army-order-card__title";
+      title.textContent = `${item.name} ×${item.count}`;
+      card.append(title);
+      if (item.kind === "cannon") {
+        const note = document.createElement("div");
+        note.className = "army-order-card__note";
+        note.textContent = "不动则自动装填；装填完毕后移动结束仍可开炮。无法对范 1 开火，伤害不分敌我。";
+        card.append(note);
+        const ammoOptions = army?.ammo_options?.[group.teamId] || [{ id: "shell", name: "炮弹", splash: 0 }];
+        if (ammoOptions.length) {
+          const ammoGroup = document.createElement("div");
+          ammoGroup.className = "army-order-card__ammo";
+          ammoOptions.forEach((option) => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = `army-order-card__ammo-btn${(command.ammo || "shell") === option.id ? " is-active" : ""}`;
+            button.textContent = option.name || option.id;
+            button.title = `溅射 ${option.splash || 0}`;
+            button.disabled = !canCommand;
+            button.addEventListener("click", () => {
+              if (!canCommand || (command.ammo || "shell") === option.id) return;
+              setArmyOrder(command.order, command.direction, group.teamId, item.kind, command.stride, option.id);
+            });
+            ammoGroup.append(button);
+          });
+          card.append(ammoGroup);
+        }
+      }
+      const orderGroup = document.createElement("div");
+      orderGroup.className = "army-order-card__orders";
+      orders.forEach((option) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `army-order-card__order${command.order === option.code ? " is-active" : ""}`;
+        button.textContent = option.name;
+        button.disabled = !canCommand;
+        button.addEventListener("click", () => {
+          if (!canCommand || command.order === option.code) return;
+          setArmyOrder(option.code, command.direction, group.teamId, item.kind, command.stride, command.ammo);
+        });
+        orderGroup.append(button);
+      });
+      card.append(orderGroup);
+      if (command.order !== "hold" && command.order !== "seek") {
+        const dirGroup = document.createElement("div");
+        dirGroup.className = "army-order-card__dirs";
+        ["NW", "N", "NE", "W", "", "E", "SW", "S", "SE"].forEach((code) => {
+          if (!code) {
+            const spacer = document.createElement("span");
+            spacer.className = "army-order-card__dir is-blank";
+            dirGroup.append(spacer);
+            return;
+          }
+          const option = directions.find((entry) => entry.code === code);
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = `army-order-card__dir${command.direction === code ? " is-active" : ""}`;
+          button.textContent = option?.name || code;
+          button.title = option?.name || code;
+          button.disabled = !canCommand;
+          button.addEventListener("click", () => {
+            if (!canCommand || command.direction === code) return;
+            setArmyOrder(command.order, code, group.teamId, item.kind, command.stride, command.ammo);
+          });
+          dirGroup.append(button);
+        });
+        card.append(dirGroup);
+        const strideBtn = document.createElement("button");
+        strideBtn.type = "button";
+        strideBtn.className = `army-order-card__stride${command.stride === "step" ? " is-active" : ""}`;
+        strideBtn.textContent = command.stride === "step" ? "逐步：开" : "逐步：关";
+        strideBtn.title = "开启后每次军队回合只走一格";
+        strideBtn.disabled = !canCommand;
+        strideBtn.addEventListener("click", () => {
+          if (!canCommand) return;
+          setArmyOrder(
+            command.order,
+            command.direction,
+            group.teamId,
+            item.kind,
+            command.stride === "step" ? "full" : "step",
+            command.ammo,
+          );
+        });
+        card.append(strideBtn);
+      }
+      panel.append(card);
+    });
+    (army?.structures?.[group.teamId] || []).forEach((item) => {
+      const card = document.createElement("section");
+      card.className = "army-order-card is-readonly is-structure";
+      const title = document.createElement("div");
+      title.className = "army-order-card__title";
+      title.textContent = `${item.name} ×${item.count}`;
+      const note = document.createElement("div");
+      note.className = "army-order-card__note";
+      note.textContent = "自动射击 · 无法移动 · 需火炮摧毁";
+      card.append(title, note);
+      panel.append(card);
+    });
+  });
 }
 
 export function renderUnitStrip() {
@@ -1052,9 +1520,9 @@ export function renderGameOverOverlay() {
   const strategy = $("game-over-strategy");
   const back = $("game-over-back");
   const launch = currentBattleLaunch();
-  if (!state.battle || !isGameOver() || state.screen !== "battle" || isReplayMode()) {
+  if (!state.battle || !isGameOver() || state.screen !== "battle" || isReplayMode() || state.gameOverDismissed) {
     overlay.classList.add("hidden");
-    state.gameOverShowDetails = false;
+    if (!state.gameOverDismissed) state.gameOverShowDetails = false;
     return;
   }
   renderPostgameSummary();

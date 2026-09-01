@@ -18,9 +18,19 @@ let accountName = null;
 // 从主菜单选一个去处，就意味着离开你正在看的东西。不摘掉房间的话，地址栏上
 // 残留的 ?room= 会让房间大厅把目标流程盖掉——点战役却落进遭遇战的房间。
 // 房间和席位都还在，可以从遭遇战的房间列表或邀请链接回去。
+function leaveSelectedCampaign() {
+  // 主菜单的「战役」必须落在大厅/列表，不能带着上一局里选中的存档直接 resume。
+  state.strategyCampaign = null;
+  state.strategySelectedCityId = "";
+  state.strategySelectedCampaignId = 0;
+  state.strategyCreateOpen = false;
+  state.strategyNoticeKind = "";
+}
+
 function goto(flow) {
   state.homeFlow = flow;
   leaveRoomView();
+  if (flow === "campaign") leaveSelectedCampaign();
   setScreen("draft");
 }
 

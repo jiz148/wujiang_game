@@ -370,14 +370,18 @@ def evaluate_strategic_status(world: WorldState) -> dict[str, Any]:
             for faction_id in crisis.mainline_winner_faction_ids
         }
     )
+    from wujiang.strategic.occupation import has_pending_occupation, pending_occupation_city_ids
+
+    pending_occupation = has_pending_occupation(world)
+    pending_occupation_ids = pending_occupation_city_ids(world)
     condition_statuses: list[dict[str, Any]] = []
     for condition in VICTORY_CONDITIONS:
         achieved = False
         winner_faction_id = None
-        if condition.condition_id == "unify_cities" and unified_winner:
+        if condition.condition_id == "unify_cities" and unified_winner and not pending_occupation:
             achieved = True
             winner_faction_id = unified_winner
-        elif condition.condition_id == "eliminate_enemy_factions" and elimination_winner:
+        elif condition.condition_id == "eliminate_enemy_factions" and elimination_winner and not pending_occupation:
             achieved = True
             winner_faction_id = elimination_winner
         elif condition.condition_id == "world_mainline" and mainline_winners:
@@ -407,7 +411,8 @@ def evaluate_strategic_status(world: WorldState) -> dict[str, Any]:
     current_year = (max(1, world.current_month) - 1) // 12 + 1
     current_month_in_year = ((max(1, world.current_month) - 1) % 12) + 1
     conclusion = dict(world.campaign_conclusion)
-    if not conclusion and contract and (achieved_conditions or deadline_reached):
+    defer_early_victory = pending_occupation and not deadline_reached
+    if not conclusion and contract and (achieved_conditions or deadline_reached) and not defer_early_victory:
         conclusion = _campaign_conclusion_payload(
             world,
             reason="early_victory" if achieved_conditions else "time_limit",
@@ -445,7 +450,9 @@ def evaluate_strategic_status(world: WorldState) -> dict[str, Any]:
         "awaiting_conclusion_choice": campaign_state == "settled",
         "can_advance_month": campaign_state not in {"settled", "archived"},
         "conclusion": conclusion,
-        "campaign_complete": bool(achieved_conditions or conclusion),
+        "awaiting_occupation_policy": pending_occupation,
+        "pending_occupation_city_ids": pending_occupation_ids,
+        "campaign_complete": bool((achieved_conditions and not pending_occupation) or conclusion),
         "winner_faction_ids": list(conclusion.get("winner_faction_ids") or sorted(
             {
                 str(winner_faction_id)

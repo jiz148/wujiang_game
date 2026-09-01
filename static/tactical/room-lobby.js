@@ -1,4 +1,4 @@
-// 遭遇战大厅的三层弹窗：房间设置、选将、武将详情。
+// 遭遇战大厅的弹窗：房间设置、自动配置、选将、武将详情。
 //
 // 建房页此前把模式、席位数、席位卡和一整座武将库摊在同一屏上。每样东西都只分到
 // 一点地方，谁也看不清；而武将库那几十张卡片会把席位挤到屏幕之外，偏偏"谁坐在
@@ -11,7 +11,7 @@ import { $ } from '../core/dom.js';
 import { fetchJson, hasRoom, viewerPlayerId } from '../core/net.js';
 import { render } from '../core/render.js';
 import { state } from '../core/state.js';
-import { applyRoomPayload, availableRoomModes, isRandomRoomMode, reportRoomError, selectRoomHero, setRandomRosterSize, setRoomBoardSize, setRoomHeroLimit, setRoomMode, setRoomSeatCount, setRoomTurnTimeout } from '../tactical/room-api.js';
+import { applyRoomPayload, autoConfigureRoom, availableRoomModes, isRandomRoomMode, reportRoomError, selectRoomHero, setRandomRosterSize, setRoomBoardSize, setRoomHeroLimit, setRoomMode, setRoomSeatCount, setRoomTurnTimeout } from '../tactical/room-api.js';
 import { randomRoomRosterSize, seatHeroCount, seatIdentityLabel, setRoomEditSeat } from '../tactical/targeting.js';
 
 function heroByCode(code) {
@@ -38,6 +38,14 @@ export function canManageSeatRoster(seat) {
   if (!seat || !hasRoom() || state.room?.status !== "lobby") return false;
   if (state.room?.launch_context && state.room.launch_context.allow_roster_edit === false) return false;
   if (isRandomRoomMode()) return false;
+  if (seat.player_id === viewerPlayerId()) return true;
+  return Boolean(state.room?.viewer_is_host && seat.is_ai);
+}
+
+/** 遭遇战配兵：随机模式下也可以加士兵，战役房间则跟阵容一样锁住。 */
+export function canManageSeatArmy(seat) {
+  if (!seat || !hasRoom() || state.room?.status !== "lobby") return false;
+  if (state.room?.launch_context && state.room.launch_context.allow_roster_edit === false) return false;
   if (seat.player_id === viewerPlayerId()) return true;
   return Boolean(state.room?.viewer_is_host && seat.is_ai);
 }
@@ -99,6 +107,93 @@ export function closeRoomSetup() {
   state.roomSetupOpen = false;
   state.roomSetupDraft = null;
   render();
+}
+
+function clampAutoConfigureCount(value) {
+  const raw = Number.parseInt(value, 10);
+  if (!Number.isFinite(raw)) return 3;
+  return Math.max(1, Math.min(12, raw));
+}
+
+function clampAutoConfigurePoints(value) {
+  const raw = Number.parseInt(value, 10);
+  if (!Number.isFinite(raw)) return 15;
+  return Math.max(10, Math.min(50, raw));
+}
+
+export function openAutoConfigure() {
+  if (!canEditRoomSetup()) return;
+  state.autoConfigureDraft = {
+    method: "count",
+    count: "3",
+    points: "15",
+    allowDuplicates: false,
+  };
+  state.autoConfigureOpen = true;
+  render();
+}
+
+export function closeAutoConfigure() {
+  state.autoConfigureOpen = false;
+  state.autoConfigureDraft = null;
+  render();
+}
+
+export function updateAutoConfigureDraft(field, value) {
+  if (!state.autoConfigureDraft) return;
+  if (field === "allowDuplicates") {
+    state.autoConfigureDraft.allowDuplicates = Boolean(value);
+    return;
+  }
+  if (field === "method") {
+    state.autoConfigureDraft.method = value === "points" ? "points" : "count";
+    return;
+  }
+  state.autoConfigureDraft[field] = String(value);
+}
+
+export async function confirmAutoConfigure() {
+  const draft = state.autoConfigureDraft;
+  if (!draft || !canEditRoomSetup()) {
+    closeAutoConfigure();
+    return;
+  }
+  const method = draft.method === "points" ? "points" : "count";
+  const count = clampAutoConfigureCount(draft.count);
+  const points = clampAutoConfigurePoints(draft.points);
+  const allowDuplicates = Boolean(draft.allowDuplicates);
+  state.autoConfigureOpen = false;
+  state.autoConfigureDraft = null;
+  await autoConfigureRoom({ method, count, points, allowDuplicates });
+  render();
+}
+
+export function renderAutoConfigureDialog() {
+  const modal = $("auto-configure-dialog");
+  if (!modal) return;
+  const open = Boolean(state.autoConfigureOpen && state.autoConfigureDraft && canEditRoomSetup());
+  modal.classList.toggle("hidden", !open);
+  modal.setAttribute("aria-hidden", open ? "false" : "true");
+  if (!open) {
+    state.autoConfigureOpen = false;
+    state.autoConfigureDraft = null;
+    return;
+  }
+  const draft = state.autoConfigureDraft;
+  const methodCount = $("auto-configure-method-count");
+  const methodPoints = $("auto-configure-method-points");
+  if (methodCount) methodCount.checked = draft.method !== "points";
+  if (methodPoints) methodPoints.checked = draft.method === "points";
+  const countControl = $("auto-configure-count-control");
+  const pointsControl = $("auto-configure-points-control");
+  countControl?.classList.toggle("hidden", draft.method === "points");
+  pointsControl?.classList.toggle("hidden", draft.method !== "points");
+  const countInput = $("auto-configure-count-input");
+  if (countInput && document.activeElement !== countInput) countInput.value = draft.count;
+  const pointsInput = $("auto-configure-points-input");
+  if (pointsInput && document.activeElement !== pointsInput) pointsInput.value = draft.points;
+  const duplicates = $("auto-configure-allow-duplicates");
+  if (duplicates) duplicates.checked = Boolean(draft.allowDuplicates);
 }
 
 /**

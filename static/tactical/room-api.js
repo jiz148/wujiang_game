@@ -2,7 +2,7 @@
 import { confirmDialog } from '../core/dialog.js';
 import { $ } from '../core/dom.js';
 import { fallbackRoomModes } from '../core/events.js';
-import { canInteract, fetchJson, hasBattle, hasRoom, isChainMode, isGameOver, isReplayMode, recordProductEvent, replayMeta, roomQueryId, syncLocation, unitsAtCell, viewerPlayerId, viewerTeamId } from '../core/net.js';
+import { canInteract, fetchJson, hasBattle, hasRoom, isAiTakeover, isChainMode, isGameOver, isReplayMode, recordProductEvent, replayMeta, roomQueryId, syncLocation, unitsAtCell, viewerPlayerId, viewerTeamId } from '../core/net.js';
 import { refreshState, render } from '../core/render.js';
 import { LAST_COMPLETED_MATCH_KEY, LAST_TUTORIAL_ROOM_KEY, RECORDED_MATCH_ENDS_KEY, state } from '../core/state.js';
 import { setScreen, syncScreen } from '../core/ui.js';
@@ -134,6 +134,7 @@ export function applyRoomPayload(payload, { preserveScreen = false } = {}) {
   state.liveBattle = payload.battle || null;
   if (!state.room || state.room.room_id !== previousRoomId) {
     state.aiPreview = null;
+    state.gameOverDismissed = false;
   }
   if (!state.room || state.room.room_id !== previousRoomId || !state.room.replay?.available) {
     state.replayMode = false;
@@ -392,6 +393,66 @@ export async function leaveRoom() {
   $("lobby-caption").textContent = caption;
 }
 
+export async function setAiStyles({ heroAiStyle, armyAiStyle } = {}) {
+  if (!hasRoom() || !hasBattle() || !state.playerToken || isGameOver() || isReplayMode()) return;
+  try {
+    const payload = await fetchJson("/api/rooms/ai-style", {
+      method: "POST",
+      body: JSON.stringify({
+        room_id: state.room.room_id,
+        player_token: state.playerToken,
+        hero_ai_style: heroAiStyle,
+        army_ai_style: armyAiStyle,
+      }),
+    });
+    applyRoomPayload(payload, { preserveScreen: true });
+    render();
+  } catch (error) {
+    if (error.state) {
+      applyRoomPayload(error.state, { preserveScreen: true });
+      render();
+    }
+  }
+}
+
+export async function setAiTakeover(enabled) {
+  if (!hasRoom() || !hasBattle() || !state.playerToken || isGameOver() || isReplayMode()) return;
+  try {
+    const payload = await fetchJson("/api/rooms/ai-takeover", {
+      method: "POST",
+      body: JSON.stringify({
+        room_id: state.room.room_id,
+        player_token: state.playerToken,
+        enabled: Boolean(enabled),
+      }),
+    });
+    applyRoomPayload(payload, { preserveScreen: true });
+    if (enabled) clearActionSelection();
+    render();
+  } catch (error) {
+    if (error.state) {
+      applyRoomPayload(error.state, { preserveScreen: true });
+      render();
+    }
+  }
+}
+
+export async function toggleAiTakeover() {
+  if (!hasRoom() || !hasBattle() || !state.playerToken || isGameOver() || isReplayMode()) return;
+  if (state.room?.experience_kind === "tutorial") return;
+  if (isAiTakeover()) {
+    await setAiTakeover(false);
+    return;
+  }
+  const confirmed = await confirmDialog({
+    title: "让 AI 接管",
+    body: "确认后，AI 会代替你完成本局剩余操作，包括当前回合的武将行动和军队指令。你可以随时点「停止接管」收回控制。",
+    confirmLabel: "开始接管",
+  });
+  if (!confirmed) return;
+  await setAiTakeover(true);
+}
+
 export async function surrenderBattle() {
   if (!hasRoom() || !hasBattle() || !state.playerToken || isGameOver()) return;
   const confirmed = await confirmDialog({
@@ -546,14 +607,19 @@ export async function setRoomBoardSize(width, height) {
   }
 }
 
-export async function autoConfigureRoom() {
+export async function autoConfigureRoom(options = {}) {
   if (!hasRoom() || !state.playerToken || !state.room?.viewer_is_host || state.room?.status !== "lobby") return;
+  const method = options.method === "points" ? "points" : "count";
   try {
     const payload = await fetchJson("/api/rooms/auto-configure", {
       method: "POST",
       body: JSON.stringify({
         room_id: state.room.room_id,
         player_token: state.playerToken,
+        method,
+        count: Number.parseInt(options.count, 10) || 3,
+        points: Number.parseInt(options.points, 10) || 15,
+        allow_duplicates: Boolean(options.allowDuplicates),
       }),
     });
     applyRoomPayload(payload, { preserveScreen: true });
@@ -634,6 +700,56 @@ export async function setRoomSeatController(seatId, controllerType) {
       render();
     }
     reportRoomError(error.error || "调整席位状态失败。");
+  }
+}
+
+export async function setSeatArmyComposition(seatId, armyCounts) {
+  if (!hasRoom() || !state.playerToken) return;
+  try {
+    const payload = await fetchJson("/api/rooms/set-army-composition", {
+      method: "POST",
+      body: JSON.stringify({
+        room_id: state.room.room_id,
+        player_token: state.playerToken,
+        seat_id: seatId != null ? Number(seatId) : undefined,
+        army_counts: armyCounts,
+      }),
+    });
+    applyRoomPayload(payload, { preserveScreen: true });
+    render();
+  } catch (error) {
+    if (error.state) {
+      applyRoomPayload(error.state, { preserveScreen: true });
+      render();
+    }
+    reportRoomError(error.error || "调整士兵数量失败。");
+  }
+}
+
+export async function setArmyOrder(order, direction, teamId = null, kind = null, stride = null, ammo = null) {
+  if (!hasRoom() || !state.playerToken) return;
+  try {
+    const payload = await fetchJson("/api/rooms/set-army-order", {
+      method: "POST",
+      body: JSON.stringify({
+        room_id: state.room.room_id,
+        player_token: state.playerToken,
+        order,
+        direction,
+        team_id: teamId != null ? Number(teamId) : undefined,
+        kind: kind || undefined,
+        stride: stride || undefined,
+        ammo: ammo || undefined,
+      }),
+    });
+    applyRoomPayload(payload, { preserveScreen: true });
+    render();
+  } catch (error) {
+    if (error.state) {
+      applyRoomPayload(error.state, { preserveScreen: true });
+      render();
+    }
+    reportRoomError(error.error || "设置军队指令失败。");
   }
 }
 
@@ -978,7 +1094,17 @@ export async function loadReplayStep(stepIndex, { omniscient = state.replayOmnis
     state.replayMode = true;
     state.replayStepIndex = Number(payload.replay?.step_index || 0);
     state.replayOmniscient = Boolean(payload.replay?.omniscient);
-    state.battle = payload.battle || null;
+    const incoming = payload.battle || null;
+    const incomingHasPieces = (incoming?.units || []).some((unit) => unit?.position)
+      || (incoming?.destroyed_units || []).some((unit) => unit?.position || unit?.last_position);
+    if (
+      incoming?.winner
+      && !incomingHasPieces
+      && (state.battle?.units || []).some((unit) => unit?.position)
+    ) {
+      incoming.units = state.battle.units;
+    }
+    state.battle = incoming;
     syncSelectedUnitAfterStateChange();
     render();
   } catch {

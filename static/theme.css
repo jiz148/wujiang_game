@@ -429,6 +429,40 @@ select {
   flex-wrap: wrap;
 }
 
+.choice-toggle {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  overflow: hidden;
+}
+
+.choice-toggle__option {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-1);
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--surface-1);
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.choice-toggle__option:has(input:checked) {
+  background: rgba(229, 166, 78, 0.18);
+  color: var(--text-1);
+}
+
+.choice-toggle__option input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
 /* ============================================================================
  * 面板与卡片
  * ========================================================================== */

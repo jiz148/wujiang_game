@@ -14,7 +14,16 @@ if str(SRC) not in sys.path:
 
 from wujiang.tactical.engine.core import Position, QueuedAction, ReactionWindow  # noqa: E402
 from wujiang.tactical.heroes.registry import create_battle  # noqa: E402
-from wujiang.tactical.rooms.multiplayer import RoomError, RoomRegistry, hero_lookup, random_room_hero_codes  # noqa: E402
+from wujiang.tactical.rooms.multiplayer import (  # noqa: E402
+    RoomError,
+    RoomRegistry,
+    hero_lookup,
+    normalize_simulation_speed,
+    pending_preview_select_step,
+    pick_roster_by_count,
+    pick_roster_by_points,
+    random_room_hero_codes,
+)
 from wujiang.platform.http.server import normalize_public_base_url  # noqa: E402
 
 
@@ -210,6 +219,14 @@ class MultiplayerRoomTests(unittest.TestCase):
         with self.assertRaises(RoomError):
             room.set_turn_timeout(host_token, 90)
 
+    def test_skirmish_room_defaults_to_fifty_hero_turns(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        self.assertEqual(room.hero_turn_limit, 50)
+        self.assertEqual(room.turn_limit_winner, 2)
+        payload = room.serialize_state(host_token)["room"]
+        self.assertEqual(payload["hero_turn_limit"], 50)
+        self.assertEqual(payload["turn_limit_winner"], 2)
+
     def test_host_can_set_board_size_used_by_battle(self) -> None:
         room, _, host_token = self.registry.create_room("Alice")
         self.assertEqual(room.board_width, 10)
@@ -234,13 +251,68 @@ class MultiplayerRoomTests(unittest.TestCase):
     def test_auto_configure_fills_open_seats_with_ai_and_heroes(self) -> None:
         room, _, host_token = self.registry.create_room("Alice")
         room.set_hero_limit(host_token, 2)
-        room.auto_configure(host_token)
+        room.auto_configure(host_token, method="count", count=2)
 
         seats = room.serialize_state(host_token)["room"]["seats"]
         self.assertTrue(seats[1]["is_ai"])
         self.assertEqual(seats[0]["hero_total_count"], 2)
         self.assertEqual(seats[1]["hero_total_count"], 2)
         self.assertTrue(seats[0]["is_human"])
+        self.assertEqual(len(seats[0]["hero_counts"]), 2)
+
+    def test_auto_configure_by_count_can_repeat_heroes(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        tiny = [{"code": "ellie", "level": 3}, {"code": "bard", "level": 2}]
+        with mock.patch("wujiang.tactical.rooms.multiplayer.heroes_catalog", return_value=tiny):
+            room.auto_configure(host_token, method="count", count=4, allow_duplicates=True)
+
+        seat = room.seats[1]
+        self.assertEqual(seat.hero_total_count, 4)
+        self.assertGreater(max(seat.hero_counts.values()), 1)
+
+    def test_auto_configure_by_points_stays_within_budget(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        room.auto_configure(host_token, method="points", points=15, allow_duplicates=False)
+        lookup = hero_lookup()
+        for seat in room.seats.values():
+            total = sum(int(lookup[code]["level"]) * count for code, count in seat.hero_counts.items())
+            self.assertGreaterEqual(seat.hero_total_count, 1)
+            self.assertLessEqual(total, 15)
+            self.assertLessEqual(seat.hero_total_count, 12)
+            self.assertEqual(len(seat.hero_counts), seat.hero_total_count)
+
+    def test_auto_configure_by_points_can_repeat_when_budget_allows(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        tiny = [{"code": "ellie", "level": 5}]
+        with mock.patch("wujiang.tactical.rooms.multiplayer.heroes_catalog", return_value=tiny):
+            room.auto_configure(host_token, method="points", points=15, allow_duplicates=True)
+
+        seat = room.seats[1]
+        self.assertEqual(seat.hero_counts.get("ellie"), 3)
+
+    def test_pick_roster_helpers_follow_count_and_point_rules(self) -> None:
+        import random as random_module
+
+        choices = [("low", 2), ("mid", 5), ("high", 9)]
+        counted = pick_roster_by_count(choices, 3, allow_duplicates=False, rng=random_module.Random(1))
+        self.assertEqual(len(counted), 3)
+        self.assertEqual(len(set(counted)), 3)
+        repeated = pick_roster_by_count(choices, 4, allow_duplicates=True, rng=random_module.Random(2))
+        self.assertEqual(len(repeated), 4)
+        self.assertGreater(max(repeated.count(code) for code in set(repeated)), 1)
+        budgeted = pick_roster_by_points(choices, 12, allow_duplicates=False, rng=random_module.Random(3))
+        self.assertLessEqual(sum(dict(choices)[code] for code in budgeted), 12)
+        self.assertEqual(len(budgeted), len(set(budgeted)))
+        stacked = pick_roster_by_points(choices, 12, allow_duplicates=True, rng=random_module.Random(0))
+        self.assertLessEqual(sum(dict(choices)[code] for code in stacked), 12)
+        self.assertTrue(stacked)
+
+    def test_auto_configure_rejects_invalid_count_and_points(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        with self.assertRaises(RoomError):
+            room.auto_configure(host_token, method="count", count=13)
+        with self.assertRaises(RoomError):
+            room.auto_configure(host_token, method="points", points=9)
 
     def test_hero_limit_rejects_values_outside_1_to_20(self) -> None:
         room, _, host_token = self.registry.create_room("Alice")
@@ -1005,6 +1077,102 @@ class MultiplayerRoomTests(unittest.TestCase):
     def test_normalize_public_base_url_rejects_non_root_urls(self) -> None:
         with self.assertRaises(ValueError):
             normalize_public_base_url("https://example.com/wujiang")
+
+    def test_pending_preview_select_step_keeps_paths_one_cell_at_a_time(self) -> None:
+        step, delay = pending_preview_select_step(using_path=True, remaining=6)
+        self.assertEqual(step, 1)
+        self.assertGreater(delay, 0.1)
+
+        step, delay = pending_preview_select_step(using_path=False, remaining=20)
+        self.assertEqual(step, 20)
+
+    def test_ai_skill_cell_selection_reveals_all_cells_in_one_tick(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        room.set_seat_controller(host_token, 2, "ai")
+        room.select_hero(host_token, "bard")
+        room.select_hero(host_token, "elite_soldier", seat_id=2)
+        room.start_battle(host_token)
+
+        cells = [{"x": x, "y": y} for y in range(2) for x in range(10)]
+        room.pending_simulation_action = {
+            "id": 1001,
+            "reason": "ai_turn",
+            "payload": {"type": "end_turn"},
+            "path": [],
+            "cells": cells,
+            "visible_count": 0,
+            "phase": "announce",
+            "next_due_at": 0,
+        }
+
+        room._advance_pending_simulation_action(ignore_due=True)
+        self.assertEqual(room.pending_simulation_action["visible_count"], 20)
+        self.assertEqual(room.pending_simulation_action["phase"], "confirm")
+
+    def test_simulation_speed_accepts_fast_multipliers(self) -> None:
+        for value in (0.5, 1, 2, 4, 6, 8, 16):
+            self.assertEqual(normalize_simulation_speed(value), float(value))
+        with self.assertRaises(RoomError):
+            normalize_simulation_speed(3)
+
+    def test_ai_takeover_keeps_human_identity_but_lets_ai_act(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        with self.assertRaises(RoomError):
+            room.set_ai_takeover(host_token, True)
+
+        room.set_seat_controller(host_token, 2, "ai")
+        room.select_hero(host_token, "ellie")
+        room.select_hero(host_token, "bard", seat_id=2)
+        room.start_battle(host_token)
+
+        host = room.require_seat(host_token)
+        self.assertTrue(host.is_human)
+        self.assertFalse(host.is_ai)
+        self.assertFalse(host.is_ai_controlled)
+        self.assertTrue(room._has_interactive_human_presence())
+
+        room.set_ai_takeover(host_token, True)
+        self.assertTrue(host.ai_takeover)
+        self.assertTrue(host.is_ai_controlled)
+        self.assertTrue(host.is_human)
+        self.assertFalse(host.is_ai)
+        self.assertFalse(room._has_interactive_human_presence())
+        self.assertIn(host.team_id, room.battle.army_ai_players)
+        self.assertTrue(
+            room.pending_simulation_action is not None
+            or str((room.last_action_meta or {}).get("reason") or "").startswith("ai_")
+        )
+
+        payload = room.serialize_state(host_token)
+        self.assertTrue(payload["room"]["viewer_ai_takeover"])
+        self.assertTrue(payload["room"]["seats"][0]["ai_takeover"])
+        self.assertTrue(payload["room"]["seats"][0]["is_ai_controlled"])
+
+        with self.assertRaisesRegex(RoomError, "接管"):
+            room.perform_action(host_token, {"type": "end_turn"})
+
+        room.set_ai_takeover(host_token, False)
+        self.assertFalse(host.ai_takeover)
+        self.assertFalse(host.is_ai_controlled)
+        self.assertTrue(room._has_interactive_human_presence())
+        self.assertNotIn(host.team_id, room.battle.army_ai_players)
+
+        if room._current_prompt_seat() is host and room.battle.winner is None:
+            room.perform_action(host_token, {"type": "end_turn"})
+
+    def test_ai_styles_sync_to_battle_for_takeover(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        room.set_seat_controller(host_token, 2, "ai")
+        room.select_hero(host_token, "ellie")
+        room.select_hero(host_token, "bard", seat_id=2)
+        room.start_battle(host_token)
+        room.set_ai_styles(host_token, hero_ai_style="follow", army_ai_style="hold")
+        room.set_ai_takeover(host_token, True)
+        host = room.require_seat(host_token)
+        self.assertEqual(host.hero_ai_style, "follow")
+        self.assertEqual(host.army_ai_style, "hold")
+        self.assertEqual(room.battle.hero_ai_styles[host.team_id], "follow")
+        self.assertEqual(room.battle.army_ai_styles[host.team_id], "hold")
 
 
 if __name__ == "__main__":

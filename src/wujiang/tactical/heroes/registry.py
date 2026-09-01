@@ -4,6 +4,7 @@ import random
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
+from wujiang.tactical.engine.army import is_army_soldier
 from wujiang.tactical.engine.core import Battle, Position
 from wujiang.tactical.heroes.excel_roster import EXCEL_HERO_REGISTRY, IMPLEMENTED_EXCEL_HERO_CODES
 from wujiang.tactical.heroes.first_five import Bard, DarkHuman, EliteSoldier, Ellie, FireFuneral
@@ -17,6 +18,8 @@ from wujiang.tactical.heroes.strategy_soldiers import (
     StrategyMountainSoldier,
     StrategyWallEngineer,
     StrategySnowGhost,
+    StrategyArrowTower,
+    StrategySiegeCannon,
 )
 
 
@@ -50,6 +53,8 @@ HERO_REGISTRY: dict[str, HeroFactory] = {
     "strategy_ether_scout": StrategyEtherScout,
     "strategy_wall_engineer": StrategyWallEngineer,
     "strategy_snow_ghost": StrategySnowGhost,
+    "strategy_arrow_tower": StrategyArrowTower,
+    "strategy_cannon": StrategySiegeCannon,
 }
 HERO_REGISTRY.update(EXCEL_HERO_REGISTRY)
 
@@ -161,7 +166,7 @@ def sort_units_for_classic(units: Sequence[object]) -> list[object]:
     return sorted(units, key=lambda unit: start_order_key(unit, tie_breaker=tiebreaks[id(unit)]), reverse=True)
 
 
-def side_requirements(units: Sequence[object]) -> tuple[int, int]:
+def _stack_requirements(units: Sequence[object]) -> tuple[int, int]:
     if not units:
         return 1, 0
     bounds_list = [entry_footprint_bounds(unit) for unit in units]
@@ -169,6 +174,18 @@ def side_requirements(units: Sequence[object]) -> tuple[int, int]:
     total_height = sum(bounds["height"] for bounds in bounds_list)
     total_height += CLASSIC_SPAWN_GAP * max(0, len(bounds_list) - 1)
     return max_width, total_height
+
+
+def side_requirements(units: Sequence[object]) -> tuple[int, int]:
+    if not units:
+        return 1, 0
+    heroes = [unit for unit in units if not is_army_soldier(unit)]
+    soldiers = [unit for unit in units if is_army_soldier(unit)]
+    if heroes and soldiers:
+        hero_width, hero_height = _stack_requirements(heroes)
+        soldier_width, soldier_height = _stack_requirements(soldiers)
+        return hero_width + soldier_width, max(hero_height, soldier_height)
+    return _stack_requirements(units)
 
 
 def random_side_occupied_bands(
@@ -196,6 +213,37 @@ def spawn_cells_for_anchor(unit: object, anchor: Position) -> set[tuple[int, int
         (anchor.x + dx, anchor.y + dy)
         for dx, dy in entry_footprint_offsets(unit)
     }
+
+
+def _spread_target_ys(count: int, height: int) -> list[float]:
+    if count <= 0:
+        return []
+    if count == 1:
+        return [(max(0, height) - 1) / 2]
+    last = max(0, int(height) - 1)
+    return [index * last / (count - 1) for index in range(count)]
+
+
+def _preferred_spawn_x_rank(item: Position, *, prefer_high_x: bool, toward_enemy: bool) -> int:
+    if toward_enemy:
+        return item.x if prefer_high_x else -item.x
+    return -item.x if prefer_high_x else item.x
+
+
+def choose_spread_spawn_anchor(
+    candidates: Sequence[Position],
+    *,
+    prefer_high_x: bool,
+    toward_enemy: bool,
+    target_y: float,
+) -> Position:
+    def x_rank(item: Position) -> int:
+        return _preferred_spawn_x_rank(item, prefer_high_x=prefer_high_x, toward_enemy=toward_enemy)
+
+    best = min(x_rank(item) for item in candidates)
+    front = [item for item in candidates if x_rank(item) <= best + 1]
+    pool = front or list(candidates)
+    return min(pool, key=lambda item: (abs(item.y - target_y), x_rank(item), item.x, item.y))
 
 
 def random_side_spawn_positions(
@@ -231,21 +279,36 @@ def random_side_spawn_positions(
         return candidates
 
     ordered_units = sorted(units, key=placement_key, reverse=True)
+    home_is_high_x = occupied_min_x + occupied_max_x >= board_side
     for _ in range(48):
         occupied_cells: set[tuple[int, int]] = set()
         positions: dict[int, Position] = {}
-        attempt_units = sorted(
-            ordered_units,
-            key=lambda unit: (*placement_key(unit), random.random()),
-            reverse=True,
-        )
+        heroes = [unit for unit in ordered_units if not is_army_soldier(unit)]
+        soldiers = [unit for unit in ordered_units if is_army_soldier(unit)]
+        random.shuffle(heroes)
+        random.shuffle(soldiers)
+        hero_ys = _spread_target_ys(len(heroes), height)
+        soldier_ys = _spread_target_ys(len(soldiers), height)
+        attempt_units = [
+            (unit, hero_ys[index], True)
+            for index, unit in enumerate(heroes)
+        ] + [
+            (unit, soldier_ys[index], False)
+            for index, unit in enumerate(soldiers)
+        ]
         success = True
-        for unit in attempt_units:
+        for unit, target_y, toward_enemy in attempt_units:
             candidates = valid_anchors(unit, occupied_cells)
             if not candidates:
                 success = False
                 break
-            anchor = random.choice(candidates)
+            jitter = random.uniform(-1.25, 1.25) if height > 2 else 0.0
+            anchor = choose_spread_spawn_anchor(
+                candidates,
+                prefer_high_x=home_is_high_x,
+                toward_enemy=toward_enemy,
+                target_y=target_y + jitter,
+            )
             positions[id(unit)] = anchor
             occupied_cells.update(spawn_cells_for_anchor(unit, anchor))
         if success:
@@ -300,7 +363,16 @@ def classic_board_side(player1_units: Sequence[object], player2_units: Sequence[
 
 
 def _column_overflows(units: Sequence[object], height: int) -> bool:
-    return sum(entry_footprint_bounds(unit)["height"] for unit in units) > max(1, int(height))
+    heroes = [unit for unit in units if not is_army_soldier(unit)]
+    soldiers = [unit for unit in units if is_army_soldier(unit)]
+    groups = [heroes, soldiers] if heroes and soldiers else [list(units)]
+    limit = max(1, int(height))
+    for group in groups:
+        if not group:
+            continue
+        if sum(entry_footprint_bounds(unit)["height"] for unit in group) > limit:
+            return True
+    return False
 
 
 def packed_spawn_positions(
@@ -337,13 +409,63 @@ def packed_spawn_positions(
 
     occupied_cells: set[tuple[int, int]] = set()
     positions: dict[int, Position] = {}
-    for unit in sorted(units, key=placement_key, reverse=True):
+    heroes = [unit for unit in units if not is_army_soldier(unit)]
+    soldiers = [unit for unit in units if is_army_soldier(unit)]
+    hero_ys = _spread_target_ys(len(heroes), height)
+    soldier_ys = _spread_target_ys(len(soldiers), height)
+    random.shuffle(hero_ys)
+    random.shuffle(soldier_ys)
+    placement_order = [
+        (unit, hero_ys[index], True)
+        for index, unit in enumerate(sorted(heroes, key=placement_key, reverse=True))
+    ] + [
+        (unit, soldier_ys[index], False)
+        for index, unit in enumerate(sorted(soldiers, key=placement_key, reverse=True))
+    ]
+    for unit, target_y, toward_enemy in placement_order:
         candidates = valid_anchors(unit, occupied_cells)
         if not candidates:
             raise ValueError("当前战场放不下这些武将，请把战场调大后再开局。")
-        anchor = min(candidates, key=lambda item: ((-item.x, item.y) if prefer_high_x else (item.x, item.y)))
+        anchor = choose_spread_spawn_anchor(
+            candidates,
+            prefer_high_x=prefer_high_x,
+            toward_enemy=toward_enemy,
+            target_y=target_y,
+        )
         positions[id(unit)] = anchor
         occupied_cells.update(spawn_cells_for_anchor(unit, anchor))
+    return positions
+
+
+def _classic_column_positions(
+    units: Sequence[object],
+    board_side: int,
+    height: int,
+    *,
+    player_id: int,
+    column_x: int,
+) -> dict[int, Position]:
+    if not units:
+        return {}
+    bounds_list = [entry_footprint_bounds(unit) for unit in units]
+    body_height = sum(bounds["height"] for bounds in bounds_list)
+    gap = CLASSIC_SPAWN_GAP
+    if body_height + gap * max(0, len(bounds_list) - 1) > height:
+        gap = 0
+    total_height = body_height + gap * max(0, len(bounds_list) - 1)
+    top_y = max(0, (height - total_height) // 2)
+    positions: dict[int, Position] = {}
+    cursor_y = top_y
+    for unit, bounds in zip(units, bounds_list):
+        if player_id == 1:
+            anchor_x = column_x - bounds["min_dx"]
+        else:
+            anchor_x = column_x - bounds["max_dx"]
+        anchor_x = max(-bounds["min_dx"], min(anchor_x, board_side - 1 - bounds["max_dx"]))
+        anchor_y = cursor_y - bounds["min_dy"]
+        anchor_y = max(-bounds["min_dy"], min(anchor_y, height - 1 - bounds["max_dy"]))
+        positions[id(unit)] = Position(anchor_x, anchor_y)
+        cursor_y += bounds["height"] + gap
     return positions
 
 
@@ -357,26 +479,24 @@ def classic_spawn_positions(
     if not units:
         return {}
     height = board_side if board_height is None else int(board_height)
-    bounds_list = [entry_footprint_bounds(unit) for unit in units]
-    body_height = sum(bounds["height"] for bounds in bounds_list)
-    gap = CLASSIC_SPAWN_GAP
-    if body_height + gap * max(0, len(bounds_list) - 1) > height:
-        gap = 0
-    total_height = body_height + gap * max(0, len(bounds_list) - 1)
-    top_y = max(0, (height - total_height) // 2)
-    positions: dict[int, Position] = {}
-    cursor_y = top_y
-    for unit, bounds in zip(units, bounds_list):
-        if player_id == 1:
-            anchor_x = 1 - bounds["min_dx"]
-        else:
-            anchor_x = board_side - 2 - bounds["max_dx"]
-        anchor_x = max(-bounds["min_dx"], min(anchor_x, board_side - 1 - bounds["max_dx"]))
-        anchor_y = cursor_y - bounds["min_dy"]
-        anchor_y = max(-bounds["min_dy"], min(anchor_y, height - 1 - bounds["max_dy"]))
-        positions[id(unit)] = Position(anchor_x, anchor_y)
-        cursor_y += bounds["height"] + gap
-    return positions
+    heroes = [unit for unit in units if not is_army_soldier(unit)]
+    soldiers = [unit for unit in units if is_army_soldier(unit)]
+    if player_id == 1:
+        front_x, back_x = (2, 0) if heroes and soldiers and board_side >= 6 else (1, 0)
+    else:
+        front_x, back_x = (
+            (board_side - 3, board_side - 1)
+            if heroes and soldiers and board_side >= 6
+            else (board_side - 2, board_side - 1)
+        )
+    if heroes and soldiers:
+        positions = _classic_column_positions(heroes, board_side, height, player_id=player_id, column_x=front_x)
+        positions.update(
+            _classic_column_positions(soldiers, board_side, height, player_id=player_id, column_x=back_x)
+        )
+        return positions
+    column_x = 1 if player_id == 1 else board_side - 2
+    return _classic_column_positions(units, board_side, height, player_id=player_id, column_x=column_x)
 
 
 def interleaved_classic_turn_order(player1_units: Sequence[object], player2_units: Sequence[object]) -> list[object]:
@@ -409,7 +529,10 @@ def create_classic_battle(hero1_codes: Sequence[str], hero2_codes: Sequence[str]
         battle.add_unit(unit, player1_positions[id(unit)])
     for unit in sorted_player2:
         battle.add_unit(unit, player2_positions[id(unit)])
-    turn_order = interleaved_classic_turn_order(sorted_player1, sorted_player2)
+    turn_order = interleaved_classic_turn_order(
+        [unit for unit in sorted_player1 if not is_army_soldier(unit)],
+        [unit for unit in sorted_player2 if not is_army_soldier(unit)],
+    )
     battle.configure_turn_order([unit.unit_id for unit in turn_order], starting_index=0)
     battle.start_battle()
     return battle
@@ -440,7 +563,13 @@ def create_random_battle(hero1_codes: Sequence[str], hero2_codes: Sequence[str])
         battle.add_unit(unit, player1_positions[id(unit)])
     for unit in sorted_player2:
         battle.add_unit(unit, player2_positions[id(unit)])
-    turn_order = [unit.unit_id for unit in interleaved_classic_turn_order(sorted_player1, sorted_player2)]
+    turn_order = [
+        unit.unit_id
+        for unit in interleaved_classic_turn_order(
+            [unit for unit in sorted_player1 if not is_army_soldier(unit)],
+            [unit for unit in sorted_player2 if not is_army_soldier(unit)],
+        )
+    ]
     battle.configure_turn_order(turn_order, starting_index=0)
     battle.start_battle()
     return battle
@@ -464,6 +593,8 @@ def create_room_battle(
     mode: str = CLASSIC_BATTLE_MODE,
     board_width: int | None = None,
     board_height: int | None = None,
+    turn_timeout_limit: int | None = None,
+    turn_timeout_winner: int | None = None,
 ) -> Battle:
     normalized_mode = str(mode or CLASSIC_BATTLE_MODE).strip().lower()
     player1_units = _create_units_for_room_entries(player1_entries, 1)
@@ -507,8 +638,18 @@ def create_room_battle(
         battle.add_unit(unit, player1_positions[id(unit)])
     for unit in sorted_player2:
         battle.add_unit(unit, player2_positions[id(unit)])
-    turn_order = [unit.unit_id for unit in interleaved_classic_turn_order(sorted_player1, sorted_player2)]
+    turn_order = [
+        unit.unit_id
+        for unit in interleaved_classic_turn_order(
+            [unit for unit in sorted_player1 if not is_army_soldier(unit)],
+            [unit for unit in sorted_player2 if not is_army_soldier(unit)],
+        )
+    ]
     battle.configure_turn_order(turn_order, starting_index=0)
+    if turn_timeout_limit is not None:
+        battle.turn_timeout_limit = max(1, int(turn_timeout_limit))
+    if turn_timeout_winner in {1, 2}:
+        battle.turn_timeout_winner = int(turn_timeout_winner)
     battle.start_battle()
     return battle
 

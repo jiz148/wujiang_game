@@ -220,16 +220,84 @@ function removeBattleVfxEntry(entry) {
   (entry?.nodes || []).forEach(({ node }) => node?.remove?.());
 }
 
+function clearArmyVfxTimers() {
+  (ui.armyVfxTimers || []).forEach((handle) => {
+    if (handle && typeof window.clearTimeout === "function") window.clearTimeout(handle);
+  });
+  ui.armyVfxTimers = [];
+}
+
 export function clearBattleVfx() {
   clearBattleVfxCleanupTimer();
+  clearArmyVfxTimers();
   state.activeBattleVfx.forEach(removeBattleVfxEntry);
   state.activeBattleVfx = [];
+  state.pendingArmyVfx = [];
   const layer = battleVfxLayer();
   if (layer) layer.innerHTML = "";
 }
 
+function armyStrikeWaveOf(event) {
+  const wave = String(event?.metadata?.army_strike_wave || "");
+  if (wave === "ranged" || wave === "cannon") return wave;
+  return "melee";
+}
+
+function armyMarchWillAnimate() {
+  const army = state.battle?.army;
+  const marchId = String(army?.march_id || "");
+  const traces = Array.isArray(army?.move_traces)
+    ? army.move_traces.filter((item) => Array.isArray(item?.path) && item.path.length > 1)
+    : [];
+  if (!marchId || !traces.length) return false;
+  if (globalThis.WujiangBattleFeedback?.reducedMotion()) return false;
+  const maxTick = traces.reduce((max, item) => Math.max(max, item.path.length), 1) - 1;
+  if (state.armyMarch?.id === marchId && Number(state.armyMarch.tick || 0) >= maxTick) return false;
+  return true;
+}
+
+function playVisualEventNow(event) {
+  const entry = createBattleVfxEntry(event);
+  if (entry) state.activeBattleVfx.push(entry);
+}
+
+export function playArmyStrikeWaves(events, { staggerMs = 360 } = {}) {
+  const pending = Array.isArray(events) ? events.filter(Boolean) : [];
+  if (!pending.length) return;
+  if (globalThis.WujiangBattleFeedback?.reducedMotion()) {
+    pending.forEach(playVisualEventNow);
+    renderBattleVfx();
+    return;
+  }
+  const waves = ["melee", "ranged", "cannon"];
+  let delay = 0;
+  waves.forEach((wave) => {
+    const batch = pending.filter((event) => armyStrikeWaveOf(event) === wave);
+    if (!batch.length) return;
+    const start = delay;
+    const handle = window.setTimeout(() => {
+      batch.forEach(playVisualEventNow);
+      renderBattleVfx();
+    }, start);
+    ui.armyVfxTimers = [...(ui.armyVfxTimers || []), handle];
+    delay += staggerMs;
+  });
+}
+
+export function flushPendingArmyVfx() {
+  const pending = state.pendingArmyVfx || [];
+  state.pendingArmyVfx = [];
+  playArmyStrikeWaves(pending);
+}
+
+function battleVfxStyle(event) {
+  return String(event?.metadata?.vfx_style || "");
+}
+
 function battleVfxDuration(event) {
   if (globalThis.WujiangBattleFeedback?.reducedMotion()) return 160;
+  const custom = Number(event?.metadata?.duration_ms || 0);
+  if (custom > 0) return custom;
   if (!event) return 700;
   if (event.kind === "attack") return 620;
   if (event.kind === "defense") return 760;
@@ -239,6 +307,9 @@ function battleVfxDuration(event) {
 
 function battleVfxTheme(event) {
   if (!event) return "arcane";
+  const style = battleVfxStyle(event);
+  if (style === "shell") return "cannon";
+  if (style === "bolt") return "bolt";
   if (event.kind === "attack") return event.action_code === "counter" ? "storm" : "attack";
   if (event.kind === "defense") {
     if (event.defense_reason === "magic_immunity") return "void";
@@ -356,14 +427,76 @@ function createBattleVfxEntry(event) {
   const layer = battleVfxLayer();
   if (!layer || !event) return null;
   const duration = battleVfxDuration(event);
+  const linger = battleVfxStyle(event) === "shell" || battleVfxStyle(event) === "bolt" ? 180 : 0;
   const entry = {
     event,
-    expiresAt: Date.now() + duration,
+    expiresAt: Date.now() + duration + linger,
     nodes: [],
   };
   const refs = battleVfxTargetRefs(event);
   const theme = battleVfxTheme(event);
   const sourcePoint = battleVfxSourcePoint(event);
+  const style = battleVfxStyle(event);
+  const reduced = Boolean(globalThis.WujiangBattleFeedback?.reducedMotion());
+
+  if (style === "shell") {
+    const impactCell = normalizedCell(event?.metadata?.impact_cell);
+    const impactRef = impactCell
+      ? { kind: "cell", key: `impact:${positionKey(impactCell)}`, cell: impactCell }
+      : (refs[0] || null);
+    if (sourcePoint && !reduced) {
+      const muzzle = document.createElement("div");
+      muzzle.className = `battle-vfx-muzzle theme-${theme}`;
+      muzzle.style.setProperty("--vfx-duration", `${duration}ms`);
+      attachBattleVfxNode(muzzle, layer, entry, "muzzle");
+      const shell = document.createElement("div");
+      shell.className = `battle-vfx-shell theme-${theme}`;
+      shell.style.setProperty("--vfx-duration", `${duration}ms`);
+      attachBattleVfxNode(shell, layer, entry, "shell", impactRef);
+    }
+    if (impactRef) {
+      const explosion = document.createElement("div");
+      explosion.className = `battle-vfx-explosion theme-${theme}`;
+      explosion.style.setProperty("--vfx-duration", `${duration}ms`);
+      explosion.style.setProperty("--vfx-delay", reduced ? "0ms" : `${Math.round(duration * 0.58)}ms`);
+      attachBattleVfxNode(explosion, layer, entry, "explosion", impactRef);
+    }
+    refs.forEach((ref) => {
+      if (impactRef && ref.key === impactRef.key) return;
+      if (impactCell && ref.kind === "cell" && ref.cell?.x === impactCell.x && ref.cell?.y === impactCell.y) return;
+      const splash = document.createElement("div");
+      splash.className = `battle-vfx-splash theme-${theme}`;
+      splash.style.setProperty("--vfx-duration", `${duration}ms`);
+      splash.style.setProperty("--vfx-delay", reduced ? "0ms" : `${Math.round(duration * 0.66)}ms`);
+      attachBattleVfxNode(splash, layer, entry, "splash", ref);
+    });
+    return entry;
+  }
+
+  if (style === "bolt") {
+    const impactCell = normalizedCell(event?.metadata?.impact_cell);
+    const impactRef = impactCell
+      ? { kind: "cell", key: `impact:${positionKey(impactCell)}`, cell: impactCell }
+      : (refs[0] || null);
+    if (sourcePoint && !reduced) {
+      const muzzle = document.createElement("div");
+      muzzle.className = `battle-vfx-muzzle is-bolt theme-${theme}`;
+      muzzle.style.setProperty("--vfx-duration", `${duration}ms`);
+      attachBattleVfxNode(muzzle, layer, entry, "muzzle");
+      const bolt = document.createElement("div");
+      bolt.className = `battle-vfx-bolt theme-${theme}`;
+      bolt.style.setProperty("--vfx-duration", `${duration}ms`);
+      attachBattleVfxNode(bolt, layer, entry, "bolt", impactRef);
+    }
+    if (impactRef) {
+      const mark = document.createElement("div");
+      mark.className = `battle-vfx-bolt-mark theme-${theme}`;
+      mark.style.setProperty("--vfx-duration", `${duration}ms`);
+      mark.style.setProperty("--vfx-delay", reduced ? "0ms" : `${Math.round(duration * 0.48)}ms`);
+      attachBattleVfxNode(mark, layer, entry, "bolt-mark", impactRef);
+    }
+    return entry;
+  }
 
   if (event.kind === "attack") {
     refs.forEach((ref) => {
@@ -407,6 +540,45 @@ function positionBattleVfxEntry(entry) {
     let point = ref ? battleVfxPointForRef(ref) : sourcePoint;
     if (!point && type === "projectile") {
       node.classList.add("hidden");
+      return;
+    }
+    if (type === "muzzle") {
+      if (!sourcePoint) {
+        node.classList.add("hidden");
+        return;
+      }
+      node.classList.remove("hidden");
+      node.style.left = `${sourcePoint.x}px`;
+      node.style.top = `${sourcePoint.y}px`;
+      return;
+    }
+    if (type === "shell" || type === "bolt") {
+      const targetPoint = battleVfxPointForRef(ref);
+      if (!sourcePoint || !targetPoint) {
+        node.classList.add("hidden");
+        return;
+      }
+      node.classList.remove("hidden");
+      node.style.left = `${sourcePoint.x}px`;
+      node.style.top = `${sourcePoint.y}px`;
+      node.style.setProperty("--vfx-dx", `${targetPoint.x - sourcePoint.x}px`);
+      node.style.setProperty("--vfx-dy", `${targetPoint.y - sourcePoint.y}px`);
+      const angle = Math.atan2(targetPoint.y - sourcePoint.y, targetPoint.x - sourcePoint.x) * (180 / Math.PI);
+      if (type === "bolt") node.style.setProperty("--vfx-angle", `${angle}deg`);
+      return;
+    }
+    if (type === "bolt-mark") {
+      const cell = ref?.cell;
+      const rect = cell ? nodeRectRelativeToStage(boardCellNodeAt(cell.x, cell.y)) : null;
+      if (!rect) {
+        node.classList.add("hidden");
+        return;
+      }
+      node.classList.remove("hidden");
+      node.style.left = `${rect.left}px`;
+      node.style.top = `${rect.top}px`;
+      node.style.width = `${rect.width}px`;
+      node.style.height = `${rect.height}px`;
       return;
     }
     if (type === "projectile") {
@@ -474,9 +646,11 @@ export function syncBattleVfxState({ hadBattle = false, boardChanged = false } =
     return;
   }
   const unseen = events.filter((event) => Number(event?.id || 0) > state.lastSeenVisualEventId);
-  unseen.forEach((event) => {
-    const entry = createBattleVfxEntry(event);
-    if (entry) state.activeBattleVfx.push(entry);
-  });
   state.lastSeenVisualEventId = Math.max(state.lastSeenVisualEventId, newestEventId);
+  if (!unseen.length) return;
+  if (armyMarchWillAnimate()) {
+    state.pendingArmyVfx = [...(state.pendingArmyVfx || []), ...unseen];
+    return;
+  }
+  playArmyStrikeWaves(unseen);
 }

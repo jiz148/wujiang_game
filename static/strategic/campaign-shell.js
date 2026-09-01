@@ -10,12 +10,12 @@
 import { createButton } from '../core/components.js';
 import { $ } from '../core/dom.js';
 import { state } from '../core/state.js';
-import { STRATEGY_DUTY_LABELS, formatStrategyCalendar, strategyFactionCommandPoints, strategyOfficeLabel } from './ui-base.js';
+import { STRATEGY_DUTY_LABELS, appendStrategySkillTags, formatStrategyCalendar, strategyFactionCommandPoints, strategyOfficeLabel } from './ui-base.js';
 
 const STATUS_LABELS = {
   serving: "仕官",
   roaming: "在野",
-  sleeping: "沉睡",
+  sleeping: "负伤",
 };
 
 function cityName(campaign, cityId) {
@@ -29,7 +29,7 @@ function cityName(campaign, cityId) {
  */
 function heroDuty(campaign, hero) {
   if (hero.status === "sleeping") {
-    return `沉睡 · 第 ${hero.sleeping_until_month || "?"} 月醒`;
+    return `负伤 · 第 ${hero.sleeping_until_month || "?"} 月复原`;
   }
   if (hero.office_id) {
     const office = (campaign?.world?.offices || []).find((item) => item.id === hero.office_id);
@@ -67,6 +67,7 @@ function heroCard(campaign, hero, { onSelect, selected } = {}) {
   card.className = "hero-slot";
   card.dataset.heroCode = hero.code;
   if (idle) card.classList.add("is-idle");
+  if (hero.status === "sleeping") card.classList.add("is-wounded");
   if (hero.defender_assigned) card.classList.add("is-defending");
   if (typeof onSelect === "function") {
     card.classList.add("is-selectable");
@@ -90,6 +91,13 @@ function heroCard(campaign, hero, { onSelect, selected } = {}) {
   name.className = "hero-slot__name";
   name.textContent = hero.name || hero.code;
   head.append(name);
+  if (hero.status === "sleeping") {
+    const mark = document.createElement("span");
+    mark.className = "hero-slot__mark is-wounded";
+    mark.textContent = "伤";
+    mark.title = `负伤中 · 第 ${hero.sleeping_until_month || "?"} 月复原`;
+    head.append(mark);
+  }
   if (hero.defender_assigned) {
     const mark = document.createElement("span");
     mark.className = "hero-slot__mark";
@@ -104,14 +112,7 @@ function heroCard(campaign, hero, { onSelect, selected } = {}) {
 
   card.append(head, duties);
 
-  // 专长决定这名武将擅长什么差事，也是未来"可选动作由技能派生"的接口。
-  if (hero.specialty?.name) {
-    const specialty = document.createElement("span");
-    specialty.className = "hero-slot__specialty";
-    specialty.textContent = hero.specialty.name;
-    specialty.title = hero.specialty.effect || "";
-    card.append(specialty);
-  }
+  appendStrategySkillTags(card, hero, { compact: true });
 
   const loyalty = document.createElement("span");
   loyalty.className = "hero-slot__loyalty";
@@ -247,33 +248,6 @@ function campaignChromeButtons() {
     advance: $("strategy-advance-month"),
     exit: $("strategy-exit-campaign"),
   };
-}
-
-const REFRESH_ICON = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.2 8A5.2 5.2 0 1 1 8 2.8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M8 1.4 9.8 3.4 7.6 4.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-
-function findNamedClass(root, className) {
-  if (!root) return null;
-  if (String(root.className || "").split(/\s+/).includes(className)) return root;
-  for (const child of root.children || []) {
-    const found = findNamedClass(child, className);
-    if (found) return found;
-  }
-  return null;
-}
-
-function attachCampaignRefreshTool(stage) {
-  const tools = findNamedClass(stage, "strategy-map-tools");
-  if (!tools) return;
-  const source = campaignChromeButtons();
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "strategy-map-tool strategy-map-tool--refresh";
-  button.title = "刷新";
-  button.setAttribute("aria-label", "刷新");
-  button.disabled = Boolean(source.refresh?.disabled);
-  button.innerHTML = REFRESH_ICON;
-  button.addEventListener("click", () => source.refresh?.click());
-  tools.append(button);
 }
 
 function moreToggleLabel(kind, prefs) {
@@ -453,7 +427,6 @@ export function renderCampaignScreen(host, { campaign, faction, office, renderMa
   const stage = document.createElement("div");
   stage.className = "campaign-stage";
   renderMap(stage);
-  attachCampaignRefreshTool(stage);
   stage.append(createCampaignHud(campaign, faction));
   const toast = createCampaignTurnToast();
   if (toast) stage.append(toast);

@@ -10,7 +10,23 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from wujiang.tactical.engine.core import ActionError, Battle, Position, Unit
+from wujiang.tactical.engine.army import (
+    ARMY_KIND_LABELS,
+    army_codes_from_counts,
+    default_army_orders,
+    empty_army_counts,
+    is_army_soldier,
+    living_army_units,
+    normalize_army_command,
+    normalize_army_counts,
+)
+from wujiang.tactical.engine.core import (
+    ActionError,
+    Battle,
+    Position,
+    SKIRMISH_HERO_TURN_LIMIT,
+    Unit,
+)
 from wujiang.tactical.heroes.registry import RoomBattleEntry, create_room_battle, list_heroes
 from wujiang.tactical.rooms.ai import (
     choose_chain_reaction,
@@ -32,13 +48,24 @@ MIN_ROOM_SEAT_COUNT = 2
 MAX_ROOM_SEAT_COUNT = 6
 MIN_ROOM_HERO_LIMIT = 1
 MAX_ROOM_HERO_LIMIT = 20
+AUTO_CONFIGURE_COUNT_MIN = 1
+AUTO_CONFIGURE_COUNT_MAX = 12
+AUTO_CONFIGURE_COUNT_DEFAULT = 3
+AUTO_CONFIGURE_POINTS_MIN = 10
+AUTO_CONFIGURE_POINTS_MAX = 50
+AUTO_CONFIGURE_POINTS_DEFAULT = 15
+AUTO_CONFIGURE_ROSTER_CAP = 12
 TEAM_IDS = (1, 2)
 TEAM_LABELS = {1: "红队", 2: "蓝队"}
 CONTROLLER_TYPES = {"open", "human", "ai"}
 DEFAULT_AI_DIFFICULTY = "standard"
 AI_DIFFICULTIES = {"easy", "standard", "aggressive"}
+HERO_AI_STYLES = {"follow", "rush"}
+ARMY_AI_STYLES = {"seek", "advance", "hold"}
+DEFAULT_HERO_AI_STYLE = "follow"
+DEFAULT_ARMY_AI_STYLE = "seek"
 DEFAULT_SIMULATION_SPEED = 1.0
-SIMULATION_SPEED_OPTIONS = (0.5, 1.0, 2.0, 4.0)
+SIMULATION_SPEED_OPTIONS = (0.5, 1.0, 2.0, 4.0, 6.0, 8.0, 16.0)
 ROOM_ONLINE_WINDOW_SECONDS = 5.0
 ROOM_UNSTABLE_WINDOW_SECONDS = 20.0
 TURN_TIMEOUT_OPTIONS = (0, 30, 60, 120)
@@ -71,6 +98,105 @@ def heroes_catalog() -> list[dict[str, Any]]:
 
 def hero_lookup() -> dict[str, dict[str, Any]]:
     return {hero["code"]: hero for hero in heroes_catalog()}
+
+
+def auto_configure_hero_choices() -> list[tuple[str, int]]:
+    return [
+        (str(hero.get("code") or ""), max(1, int(hero.get("level") or 1)))
+        for hero in heroes_catalog()
+        if str(hero.get("code") or "").strip()
+    ]
+
+
+def normalize_auto_configure_method(method: Any) -> str:
+    normalized = str(method or "count").strip().lower()
+    aliases = {"count": "count", "points": "points", "数量": "count", "点数": "points"}
+    mapped = aliases.get(normalized)
+    if mapped is None:
+        raise RoomError("自动配置方式只能是按数量或按点数。")
+    return mapped
+
+
+def normalize_auto_configure_count(count: Any) -> int:
+    try:
+        value = int(count)
+    except (TypeError, ValueError) as exc:
+        raise RoomError("武将数量必须是整数。") from exc
+    if value < AUTO_CONFIGURE_COUNT_MIN or value > AUTO_CONFIGURE_COUNT_MAX:
+        raise RoomError(f"武将数量必须在 {AUTO_CONFIGURE_COUNT_MIN} 到 {AUTO_CONFIGURE_COUNT_MAX} 之间。")
+    return value
+
+
+def normalize_auto_configure_points(points: Any) -> int:
+    try:
+        value = int(points)
+    except (TypeError, ValueError) as exc:
+        raise RoomError("点数必须是整数。") from exc
+    if value < AUTO_CONFIGURE_POINTS_MIN or value > AUTO_CONFIGURE_POINTS_MAX:
+        raise RoomError(f"点数必须在 {AUTO_CONFIGURE_POINTS_MIN} 到 {AUTO_CONFIGURE_POINTS_MAX} 之间。")
+    return value
+
+
+def pick_roster_by_count(
+    choices: list[tuple[str, int]],
+    count: int,
+    *,
+    allow_duplicates: bool,
+    rng: Any = None,
+) -> list[str]:
+    picker = rng or random
+    codes = [code for code, _level in choices]
+    if not codes:
+        raise RoomError("当前没有可选择的武将。")
+    if allow_duplicates:
+        return [picker.choice(codes) for _ in range(count)]
+    take = min(count, len(codes))
+    return picker.sample(codes, take)
+
+
+def pick_roster_by_points(
+    choices: list[tuple[str, int]],
+    points: int,
+    *,
+    allow_duplicates: bool,
+    rng: Any = None,
+    roster_cap: int = AUTO_CONFIGURE_ROSTER_CAP,
+) -> list[str]:
+    picker = rng or random
+    if not choices:
+        raise RoomError("当前没有可选择的武将。")
+    remaining = int(points)
+    picked: list[str] = []
+    used: set[str] = set()
+    while len(picked) < max(1, int(roster_cap)):
+        candidates = [
+            (code, level)
+            for code, level in choices
+            if level <= remaining and (allow_duplicates or code not in used)
+        ]
+        if not candidates:
+            break
+        code, level = picker.choice(candidates)
+        picked.append(code)
+        used.add(code)
+        remaining -= level
+    if not picked:
+        raise RoomError("当前点数不足以选出任何武将。")
+    return picked
+
+
+def pick_auto_configure_roster(
+    *,
+    method: str,
+    count: int,
+    points: int,
+    allow_duplicates: bool,
+    rng: Any = None,
+) -> list[str]:
+    choices = auto_configure_hero_choices()
+    if method == "points":
+        return pick_roster_by_points(choices, points, allow_duplicates=allow_duplicates, rng=rng)
+    return pick_roster_by_count(choices, count, allow_duplicates=allow_duplicates, rng=rng)
 
 
 def normalize_room_id(room_id: str) -> str:
@@ -191,6 +317,38 @@ def normalize_ai_difficulty(difficulty: Any) -> str:
     if normalized not in AI_DIFFICULTIES:
         raise RoomError("AI 难度只能是 easy、standard 或 aggressive。")
     return normalized
+
+
+def normalize_hero_ai_style(style: Any) -> str:
+    aliases = {"跟队": "follow", "突击": "rush", "balanced": "follow", "aggressive": "rush"}
+    normalized = aliases.get(str(style or "").strip(), str(style or DEFAULT_HERO_AI_STYLE).strip().lower())
+    if normalized not in HERO_AI_STYLES:
+        raise RoomError("武将 AI 倾向只能是跟队或突击。")
+    return normalized
+
+
+def normalize_army_ai_style(style: Any) -> str:
+    aliases = {"寻敌": "seek", "进军": "advance", "固守": "hold"}
+    normalized = aliases.get(str(style or "").strip(), str(style or DEFAULT_ARMY_AI_STYLE).strip().lower())
+    if normalized not in ARMY_AI_STYLES:
+        raise RoomError("士兵 AI 倾向只能是寻敌、进军或固守。")
+    return normalized
+
+
+# AI 回放选格：路径仍一格一格走；范围技能一次轮询露出全部格子，不加快轮询。
+SIMULATION_ACTION_ANNOUNCE_SECONDS = 1.3
+SIMULATION_ACTION_CONFIRM_SECONDS = 0.7
+SIMULATION_PATH_SELECT_SECONDS = 0.18
+
+
+def pending_preview_select_step(*, using_path: bool, remaining: int) -> tuple[int, float]:
+    remaining = max(0, int(remaining))
+    if remaining <= 0:
+        return 0, SIMULATION_ACTION_CONFIRM_SECONDS
+    if using_path:
+        delay = SIMULATION_PATH_SELECT_SECONDS if remaining > 1 else SIMULATION_ACTION_CONFIRM_SECONDS
+        return 1, delay
+    return remaining, SIMULATION_ACTION_CONFIRM_SECONDS
 
 
 def normalize_simulation_speed(speed: Any) -> float:
@@ -337,7 +495,11 @@ def _active_units_for_viewer(battle: Battle) -> list[Unit]:
     if battle.pending_chain is not None:
         current_unit_id = battle.pending_chain.current_unit_id()
         return [battle.get_unit(current_unit_id)] if current_unit_id else []
-    return battle.current_turn_bundle_units(include_banished=False)
+    return [
+        unit
+        for unit in battle.current_turn_bundle_units(include_banished=False)
+        if not is_army_soldier(unit)
+    ]
 
 
 def _instant_units_for_viewer(battle: Battle, viewer_player_id: int) -> list[Unit]:
@@ -416,12 +578,16 @@ class PlayerSeat:
     token: Optional[str] = None
     name: str = ""
     hero_counts: dict[str, int] = field(default_factory=dict)
+    army_counts: dict[str, int] = field(default_factory=empty_army_counts)
     random_quota: int = 0
     ai_difficulty_override: Optional[str] = None
     joined_at: Optional[float] = None
     last_seen_at: Optional[float] = None
     ready: bool = False
     account_user_id: Optional[int] = None
+    ai_takeover: bool = False
+    hero_ai_style: str = DEFAULT_HERO_AI_STYLE
+    army_ai_style: str = DEFAULT_ARMY_AI_STYLE
 
     @property
     def occupied(self) -> bool:
@@ -434,6 +600,10 @@ class PlayerSeat:
     @property
     def is_ai(self) -> bool:
         return self.controller_type == "ai"
+
+    @property
+    def is_ai_controlled(self) -> bool:
+        return self.is_ai or bool(getattr(self, "ai_takeover", False))
 
     @property
     def can_join(self) -> bool:
@@ -453,6 +623,9 @@ class PlayerSeat:
         self.last_seen_at = self.joined_at
         self.ready = False
         self.account_user_id = int(account_user_id) if account_user_id is not None else None
+        self.ai_takeover = False
+        self.hero_ai_style = DEFAULT_HERO_AI_STYLE
+        self.army_ai_style = DEFAULT_ARMY_AI_STYLE
         return self.token
 
     def set_ai(self) -> None:
@@ -465,6 +638,9 @@ class PlayerSeat:
         self.last_seen_at = self.joined_at
         self.ready = False
         self.account_user_id = None
+        self.ai_takeover = False
+        self.hero_ai_style = "rush"
+        self.army_ai_style = "seek"
 
     def set_open(self) -> None:
         self.controller_type = "open"
@@ -477,6 +653,10 @@ class PlayerSeat:
         self.last_seen_at = None
         self.ready = False
         self.account_user_id = None
+        self.ai_takeover = False
+        self.hero_ai_style = DEFAULT_HERO_AI_STYLE
+        self.army_ai_style = DEFAULT_ARMY_AI_STYLE
+        self.army_counts = empty_army_counts()
 
     def clear_roster(self) -> None:
         self.hero_counts.clear()
@@ -585,9 +765,15 @@ class PlayerSeat:
             "occupied": self.occupied,
             "is_human": self.is_human,
             "is_ai": self.is_ai,
+            "ai_takeover": bool(getattr(self, "ai_takeover", False)),
+            "is_ai_controlled": self.is_ai_controlled,
+            "hero_ai_style": getattr(self, "hero_ai_style", DEFAULT_HERO_AI_STYLE),
+            "army_ai_style": getattr(self, "army_ai_style", DEFAULT_ARMY_AI_STYLE),
             "joinable": self.can_join,
             "name": self.name or None,
             "hero_counts": {code: int(count) for code, count in sorted(self.hero_counts.items()) if count > 0},
+            "army_counts": {kind: int(self.army_counts.get(kind, 0) or 0) for kind in ARMY_KIND_LABELS},
+            "army_total_count": sum(int(self.army_counts.get(kind, 0) or 0) for kind in ARMY_KIND_LABELS),
             "hero_roster": roster,
             "hero_total_count": self.hero_total_count,
             "hero_summary": self.hero_summary(heroes_by_code),
@@ -615,15 +801,19 @@ class GameRoom:
         self.board_width = DEFAULT_BOARD_WIDTH
         self.board_height = DEFAULT_BOARD_HEIGHT
         self.turn_timeout_seconds = DEFAULT_TURN_TIMEOUT_SECONDS
+        self.hero_turn_limit = SKIRMISH_HERO_TURN_LIMIT
+        self.turn_limit_winner = 2
         self.default_ai_difficulty = DEFAULT_AI_DIFFICULTY
         self.host_player_id = 1
         self.seats = self._build_seats(normalize_room_seat_count(seat_count))
+        self.army_orders_by_team = default_army_orders()
         self._reset_random_quotas_to_defaults()
         self.battle: Optional[Battle] = None
         self.replay: Optional[ReplayRecorder] = None
         self.match_number = 0
         self.current_match_id: Optional[str] = None
         self.simulation_paused = False
+        self.fast_ai_simulation = False
         self.simulation_speed = DEFAULT_SIMULATION_SPEED
         self.simulation_last_advanced_at: Optional[float] = None
         self.pending_simulation_action: Optional[dict[str, Any]] = None
@@ -654,6 +844,10 @@ class GameRoom:
             self.board_height = DEFAULT_BOARD_HEIGHT
         if not hasattr(self, "launch_context"):
             self.launch_context = make_launch_context("skirmish")
+        if not hasattr(self, "hero_turn_limit"):
+            self.hero_turn_limit = SKIRMISH_HERO_TURN_LIMIT
+        if not hasattr(self, "turn_limit_winner"):
+            self.turn_limit_winner = 2
         self._lock = threading.RLock()
 
     def checkpoint_bytes(self) -> bytes:
@@ -905,9 +1099,14 @@ class GameRoom:
             for unit in self.battle.all_units()
         )
 
+    def _has_human_ai_takeover(self) -> bool:
+        return any(seat.is_human and bool(getattr(seat, "ai_takeover", False)) for seat in self.seats.values())
+
     def _has_interactive_human_presence(self) -> bool:
         return any(
-            seat.is_human and self._seat_has_owned_hero_presence(seat)
+            seat.is_human
+            and not bool(getattr(seat, "ai_takeover", False))
+            and self._seat_has_owned_hero_presence(seat)
             for seat in self.seats.values()
         )
 
@@ -980,7 +1179,7 @@ class GameRoom:
             "actor_id": actor.unit_id if actor is not None else str(payload.get("unit_id") or ""),
             "actor_name": actor.name if actor is not None else "",
             "actor_player_id": actor.player_id if actor is not None else None,
-            "actor_is_ai": bool(actor is not None and self._seat_for_actor(actor) and self._seat_for_actor(actor).is_ai),
+            "actor_is_ai": self._actor_is_ai_controlled(actor),
             "path": [
                 {"x": int(cell["x"]), "y": int(cell["y"])}
                 for cell in path
@@ -1044,7 +1243,7 @@ class GameRoom:
             "actor_id": actor.unit_id if actor is not None else str(payload.get("unit_id") or ""),
             "actor_name": actor.name if actor is not None else "",
             "actor_player_id": actor.player_id if actor is not None else None,
-            "actor_is_ai": bool(actor is not None and self._seat_for_actor(actor) and self._seat_for_actor(actor).is_ai),
+            "actor_is_ai": self._actor_is_ai_controlled(actor),
             "path": [
                 {"x": int(cell["x"]), "y": int(cell["y"])}
                 for cell in path
@@ -1055,7 +1254,7 @@ class GameRoom:
             "visible_count": 0,
             "phase": "announce",
             "payload": dict(payload),
-            "next_due_at": time.time() + self._scaled_simulation_delay(1.3),
+            "next_due_at": time.time() + self._scaled_simulation_delay(SIMULATION_ACTION_ANNOUNCE_SECONDS),
         }
 
     def _visible_pending_action_for_viewer(self, viewer: Optional[PlayerSeat]) -> Optional[dict[str, Any]]:
@@ -1086,20 +1285,69 @@ class GameRoom:
         ]
         return payload
 
+    def _sync_army_ai_players(self) -> None:
+        if self.battle is None:
+            return
+        self.battle.army_ai_players = {
+            int(seat.team_id) for seat in self.seats.values() if seat.is_ai_controlled
+        }
+        self.battle.army_ai_styles = {
+            int(seat.team_id): getattr(seat, "army_ai_style", DEFAULT_ARMY_AI_STYLE)
+            for seat in self.seats.values()
+            if seat.is_ai_controlled
+        }
+        self.battle.hero_ai_styles = {
+            int(seat.team_id): getattr(seat, "hero_ai_style", DEFAULT_HERO_AI_STYLE)
+            for seat in self.seats.values()
+            if seat.is_ai_controlled
+        }
+
+    def _bind_replay_checkpoint(self) -> None:
+        if self.battle is None:
+            return
+        self.battle.on_replay_checkpoint = self._record_replay_step
+
     def _record_replay_step(self, reason: str) -> None:
         if self.battle is None:
             return
+        if bool(getattr(self, "fast_ai_simulation", False)) and reason not in {
+            "battle_start",
+            "surrender",
+            "turn_end",
+            "match_end",
+        }:
+            return
         if self.replay is None:
             self.replay = ReplayRecorder(self.room_id, self.mode, match_id=self.current_match_id)
+        omniscient_battle = self.battle.to_public_dict()
+        spectator_battle = battle_state_for_viewer(self.battle, None, None)
         seat_views = {
             str(seat.player_id): battle_state_for_viewer(self.battle, seat.team_id, seat.player_id)
             for seat in self.seats.values()
             if seat.occupied
         }
+        if (
+            reason == "match_end"
+            and self.replay.steps
+            and not any(unit.get("position") for unit in (omniscient_battle.get("units") or []))
+        ):
+            previous = self.replay.steps[-1]
+            omniscient_battle = dict(omniscient_battle)
+            omniscient_battle["units"] = list(previous.omniscient_battle.get("units") or [])
+            if not omniscient_battle.get("destroyed_units"):
+                omniscient_battle["destroyed_units"] = list(previous.omniscient_battle.get("destroyed_units") or [])
+            spectator_battle = dict(previous.spectator_battle)
+            spectator_battle["winner"] = omniscient_battle.get("winner")
+            spectator_battle["win_reason_text"] = omniscient_battle.get("win_reason_text")
+            spectator_battle["win_reason_code"] = omniscient_battle.get("win_reason_code")
+            seat_views = {
+                key: {**value, "winner": omniscient_battle.get("winner")}
+                for key, value in previous.seat_views.items()
+            }
         self.replay.append_step(
             reason=reason,
-            omniscient_battle=self.battle.to_public_dict(),
-            spectator_battle=battle_state_for_viewer(self.battle, None, None),
+            omniscient_battle=omniscient_battle,
+            spectator_battle=spectator_battle,
             seat_views=seat_views,
         )
 
@@ -1114,7 +1362,7 @@ class GameRoom:
         try:
             if self.battle.current_respawn_prompt() is not None:
                 seat = self._current_prompt_seat()
-                if seat is None or not seat.is_ai:
+                if seat is None or not seat.is_ai_controlled:
                     return None
                 prompt = self.battle.current_respawn_prompt()
                 if prompt is None:
@@ -1128,7 +1376,7 @@ class GameRoom:
                 return (payload, "ai_respawn", unit) if payload is not None else None
             if self.battle.pending_chain is not None:
                 seat = self._current_prompt_seat()
-                if seat is None or not seat.is_ai:
+                if seat is None or not seat.is_ai_controlled:
                     return None
                 current_unit_id = self.battle.pending_chain.current_unit_id()
                 if not current_unit_id:
@@ -1142,8 +1390,10 @@ class GameRoom:
             if instant_payload is not None:
                 actor = self.battle.get_unit(str(instant_payload.get("unit_id") or ""))
                 return instant_payload, "ai_instant", actor
+            if self.battle.is_army_turn():
+                return {"type": "end_turn"}, "army_turn", None
             seat = self._current_prompt_seat()
-            if seat is None or not seat.is_ai:
+            if seat is None or not seat.is_ai_controlled:
                 return None
             current_unit = self.battle.current_turn_unit()
             if current_unit is None:
@@ -1157,7 +1407,7 @@ class GameRoom:
             return payload, "ai_turn", actor or current_unit
         except ActionError:
             seat = self._current_prompt_seat()
-            if seat is None or not seat.is_ai or self.battle is None:
+            if seat is None or not seat.is_ai_controlled or self.battle is None:
                 return None
             if self.battle.pending_chain is not None:
                 current_unit_id = self.battle.pending_chain.current_unit_id()
@@ -1198,10 +1448,15 @@ class GameRoom:
         preview_cells = list(pending.get("path") or pending.get("cells") or [])
         visible_count = max(0, int(pending.get("visible_count") or 0))
         if visible_count < len(preview_cells):
-            visible_count += 1
+            using_path = bool(pending.get("path"))
+            step, delay = pending_preview_select_step(
+                using_path=using_path,
+                remaining=len(preview_cells) - visible_count,
+            )
+            visible_count += max(1, step)
             pending["visible_count"] = visible_count
             pending["phase"] = "selecting" if visible_count < len(preview_cells) else "confirm"
-            pending["next_due_at"] = time.time() + self._scaled_simulation_delay(0.6 if visible_count < len(preview_cells) else 1.3)
+            pending["next_due_at"] = time.time() + self._scaled_simulation_delay(delay)
             self.touch()
             return True
         payload = dict(pending.get("payload") or {})
@@ -1239,12 +1494,12 @@ class GameRoom:
             return False
         seat = self._current_prompt_seat()
         if self.battle.pending_chain is not None:
-            if seat is None or not seat.is_ai:
+            if seat is None or not seat.is_ai_controlled:
                 return False
             self._perform_battle_action({"type": "chain_skip"}, reason="ai_chain_fallback")
             return True
         if self.battle.current_respawn_prompt() is not None:
-            if seat is None or not seat.is_ai:
+            if seat is None or not seat.is_ai_controlled:
                 return False
             prompt = self.battle.current_respawn_prompt()
             if prompt is None:
@@ -1263,7 +1518,7 @@ class GameRoom:
         if current_unit is None or not self.battle.units_can_act_in_current_turn():
             self._perform_battle_action({"type": "end_turn"}, reason="ai_turn_fallback")
             return True
-        if seat is None or not seat.is_ai:
+        if seat is None or not seat.is_ai_controlled:
             return False
         self._perform_battle_action({"type": "end_turn"}, reason="ai_turn_fallback")
         return True
@@ -1273,6 +1528,9 @@ class GameRoom:
             return False
         if self.battle.pending_chain is not None or self.battle.current_respawn_prompt() is not None:
             return False
+        if self.battle.is_army_turn():
+            self._perform_battle_action({"type": "end_turn"}, reason="army_turn")
+            return True
         current_unit = self.battle.current_turn_unit()
         if current_unit is not None and self.battle.units_can_act_in_current_turn():
             return False
@@ -1535,7 +1793,23 @@ class GameRoom:
             self.board_height = next_height
             self.touch()
 
-    def auto_configure(self, token: str) -> None:
+    def auto_configure(
+        self,
+        token: str,
+        *,
+        method: Any = "count",
+        count: Any = AUTO_CONFIGURE_COUNT_DEFAULT,
+        points: Any = AUTO_CONFIGURE_POINTS_DEFAULT,
+        allow_duplicates: bool = False,
+    ) -> None:
+        normalized_method = normalize_auto_configure_method(method)
+        normalized_count = AUTO_CONFIGURE_COUNT_DEFAULT
+        normalized_points = AUTO_CONFIGURE_POINTS_DEFAULT
+        if normalized_method == "count":
+            normalized_count = normalize_auto_configure_count(count)
+        else:
+            normalized_points = normalize_auto_configure_points(points)
+        allow_repeat = bool(allow_duplicates)
         with self._lock:
             self.require_host(token)
             if self.status != "lobby":
@@ -1544,15 +1818,22 @@ class GameRoom:
                 if not seat.is_human and seat.controller_type != "ai":
                     seat.set_ai()
             if self.mode != "random":
-                pool = [hero["code"] for hero in heroes_catalog()]
-                if not pool:
-                    raise RoomError("当前没有可选择的武将。")
-                count = self.hero_limit if self.hero_limit > 0 else 1
-                count = min(count, len(pool))
-                for seat in self.seats.values():
+                rosters = [
+                    pick_auto_configure_roster(
+                        method=normalized_method,
+                        count=normalized_count,
+                        points=normalized_points,
+                        allow_duplicates=allow_repeat,
+                    )
+                    for _ in self.seats
+                ]
+                needed = max((len(roster) for roster in rosters), default=0)
+                if self.hero_limit > 0 and needed > self.hero_limit:
+                    self.hero_limit = needed
+                for seat, roster in zip(self.seats.values(), rosters):
                     if seat.is_human and seat.ready:
                         seat.ready = False
-                    seat.replace_roster(random.sample(pool, count))
+                    seat.replace_roster(roster)
             self.invalidate_readiness()
             self.touch()
 
@@ -1679,7 +1960,107 @@ class GameRoom:
                         owner_seat_id=seat.player_id,
                     )
                 )
+            for hero_code in army_codes_from_counts(seat.army_counts):
+                entries.append(
+                    RoomBattleEntry(
+                        hero_code=hero_code,
+                        player_id=team_id,
+                        owner_seat_id=seat.player_id,
+                    )
+                )
         return entries
+
+    def set_army_composition(self, token: str, composition: Any, seat_id: Any | None = None) -> None:
+        with self._lock:
+            if self.status != "lobby":
+                raise RoomError("对局已经开始，不能再增减士兵。")
+            seat = self._editable_seat(token, seat_id)
+            if seat.is_human and seat.ready:
+                raise RoomError("准备之后不能再改士兵，请先取消准备。")
+            try:
+                seat.army_counts = normalize_army_counts(composition)
+            except ValueError as exc:
+                raise RoomError(str(exc)) from exc
+            self.invalidate_readiness()
+            self.touch()
+
+    def set_army_order(
+        self,
+        token: str,
+        order: Any,
+        direction: Any = None,
+        team_id: Any | None = None,
+        kind: Any | None = None,
+        stride: Any | None = None,
+        ammo: Any | None = None,
+    ) -> dict[str, str]:
+        with self._lock:
+            from wujiang.tactical.engine.army import (
+                apply_army_order,
+                command_for_kind,
+                normalize_army_kind,
+                present_army_kinds,
+            )
+
+            seat = self.require_seat(token)
+            try:
+                next_team = 1 if int(team_id or seat.team_id) != 2 else 2
+            except (TypeError, ValueError) as exc:
+                raise RoomError("队伍编号无效。") from exc
+            if next_team != seat.team_id and seat.player_id != self.host_player_id:
+                raise RoomError("只能设置己方军队指令。")
+            if self.status == "lobby":
+                has_army = any(
+                    sum(int(item.army_counts.get(item_kind, 0) or 0) for item_kind in ARMY_KIND_LABELS) > 0
+                    for item in self._team_seats(next_team)
+                )
+                present_kinds = [
+                    item_kind
+                    for item_kind in ARMY_KIND_LABELS
+                    if any(int(item.army_counts.get(item_kind, 0) or 0) > 0 for item in self._team_seats(next_team))
+                ]
+            else:
+                has_army = self.battle is not None and bool(living_army_units(self.battle, next_team))
+                present_kinds = present_army_kinds(self.battle, next_team) if self.battle is not None else []
+            if not has_army:
+                raise RoomError("这一方还没有士兵，不能设置军队指令。")
+            if (
+                self.battle is not None
+                and bool(getattr(seat, "ai_takeover", False))
+                and next_team == seat.team_id
+            ):
+                raise RoomError("当前已交给 AI 接管，请先停止接管再调整军队指令。")
+            try:
+                target_kind = None if kind in {None, ""} else normalize_army_kind(kind)
+                previous = command_for_kind(self.army_orders_by_team, next_team, target_kind or "infantry")
+                command = normalize_army_command(
+                    order,
+                    direction,
+                    player_id=next_team,
+                    previous=previous,
+                    stride=stride,
+                    ammo=ammo,
+                )
+            except ValueError as exc:
+                raise RoomError(str(exc)) from exc
+            apply_army_order(
+                self.army_orders_by_team,
+                next_team,
+                command,
+                kind=target_kind,
+                kinds=present_kinds or None,
+            )
+            if self.battle is not None:
+                self.battle.set_army_order(
+                    next_team,
+                    command["order"],
+                    command["direction"],
+                    kind=target_kind,
+                    stride=command.get("stride"),
+                    ammo=command.get("ammo"),
+                )
+            self.touch()
+            return dict(command)
 
     def leave(self, token: str) -> int:
         with self._lock:
@@ -1709,6 +2090,12 @@ class GameRoom:
         if owner_seat_id is None:
             return None
         return self.seats.get(owner_seat_id)
+
+    def _actor_is_ai_controlled(self, actor: Optional[Unit]) -> bool:
+        if actor is None:
+            return False
+        seat = self._seat_for_actor(actor)
+        return bool(seat is not None and seat.is_ai_controlled)
 
     def _current_prompt_seat(self) -> Optional[PlayerSeat]:
         if self.battle is None:
@@ -1755,6 +2142,7 @@ class GameRoom:
             and prompt_key is not None
             and seat is not None
             and seat.is_human
+            and not bool(getattr(seat, "ai_takeover", False))
         )
         if not enabled:
             self.turn_prompt_key = None
@@ -1859,7 +2247,7 @@ class GameRoom:
             return None
         active_team = self.battle.active_player
         for seat in sorted(self.seats.values(), key=lambda item: item.player_id):
-            if not seat.is_ai or seat.team_id == active_team:
+            if not seat.is_ai_controlled or seat.team_id == active_team:
                 continue
             owned_units = [
                 unit
@@ -1905,6 +2293,8 @@ class GameRoom:
                 "board_width": int(getattr(self, "board_width", DEFAULT_BOARD_WIDTH) or DEFAULT_BOARD_WIDTH),
                 "board_height": int(getattr(self, "board_height", DEFAULT_BOARD_HEIGHT) or DEFAULT_BOARD_HEIGHT),
                 "turn_timeout_seconds": int(getattr(self, "turn_timeout_seconds", DEFAULT_TURN_TIMEOUT_SECONDS) or 0),
+                "hero_turn_limit": int(getattr(self, "hero_turn_limit", 0) or SKIRMISH_HERO_TURN_LIMIT),
+                "turn_limit_winner": int(getattr(self, "turn_limit_winner", 2) or 2),
                 "default_ai_difficulty": self.default_ai_difficulty,
                 "occupied_seat_count": occupied_count,
                 "human_seat_count": self.human_seat_count(),
@@ -2000,7 +2390,12 @@ class GameRoom:
             "paused": self.simulation_paused,
             "speed": self.simulation_speed,
             "speed_options": list(SIMULATION_SPEED_OPTIONS),
-            "can_control": viewer is not None and viewer.player_id == self.host_player_id and self._simulation_enabled(),
+            "can_control": (
+                viewer is not None
+                and viewer.player_id == self.host_player_id
+                and self._simulation_enabled()
+                and not self._has_human_ai_takeover()
+            ),
             "live_step_index": self.replay.last_index if self.replay is not None and self.replay.step_count > 0 else 0,
             "last_action": self._visible_last_action_for_viewer(viewer),
             "pending_action": self._visible_pending_action_for_viewer(viewer),
@@ -2032,9 +2427,34 @@ class GameRoom:
                     mode=self.mode,
                     board_width=int(getattr(self, "board_width", DEFAULT_BOARD_WIDTH) or DEFAULT_BOARD_WIDTH),
                     board_height=int(getattr(self, "board_height", DEFAULT_BOARD_HEIGHT) or DEFAULT_BOARD_HEIGHT),
+                    turn_timeout_limit=int(getattr(self, "hero_turn_limit", 0) or SKIRMISH_HERO_TURN_LIMIT),
+                    turn_timeout_winner=int(getattr(self, "turn_limit_winner", 2) or 2),
                 )
             except (ActionError, ValueError) as exc:
                 raise RoomError("当前战场放不下这些武将，请把战场调大后再开局。") from exc
+            self.battle.army_orders = default_army_orders()
+            for team_id, commands in self.army_orders_by_team.items():
+                if not isinstance(commands, dict):
+                    continue
+                if commands.get("order"):
+                    self.battle.set_army_order(
+                        int(team_id),
+                        commands.get("order", "advance"),
+                        commands.get("direction"),
+                        stride=commands.get("stride"),
+                    )
+                    continue
+                for kind, command in commands.items():
+                    if not isinstance(command, dict):
+                        continue
+                    self.battle.set_army_order(
+                        int(team_id),
+                        command.get("order", "advance"),
+                        command.get("direction"),
+                        kind=kind,
+                        stride=command.get("stride"),
+                        ammo=command.get("ammo"),
+                    )
             self.replay = ReplayRecorder(self.room_id, self.mode, match_id=self.current_match_id)
             self.simulation_paused = False
             self.simulation_speed = DEFAULT_SIMULATION_SPEED
@@ -2047,7 +2467,11 @@ class GameRoom:
             self.turn_deadline_at = None
             self.last_turn_timeout = None
             self.status = "battle"
+            for seat in self.seats.values():
+                seat.ai_takeover = False
+            self._bind_replay_checkpoint()
             self._record_replay_step("battle_start")
+            self._sync_army_ai_players()
             self._advance_simulation_due(force_steps=1)
             self._sync_turn_timer()
             self.touch()
@@ -2074,6 +2498,7 @@ class GameRoom:
             self.status = "lobby"
             for seat in self.seats.values():
                 seat.ready = False
+                seat.ai_takeover = False
             self.touch()
 
     def _resolve_ai_until_human_input(self, max_steps: Optional[int] = None) -> int:
@@ -2120,6 +2545,9 @@ class GameRoom:
                     instant_payload = self._choose_ai_instant_payload()
                     if instant_payload is not None:
                         self._perform_battle_action(instant_payload, reason="ai_instant")
+                        steps += 1
+                    elif self.battle.is_army_turn():
+                        self._perform_battle_action({"type": "end_turn"}, reason="army_turn")
                         steps += 1
                     else:
                         seat = self._current_prompt_seat()
@@ -2175,18 +2603,72 @@ class GameRoom:
         with self._lock:
             if self.battle is None:
                 return 0
+            self.fast_ai_simulation = True
+            self.battle.fast_ai_simulation = True
+            self._bind_replay_checkpoint()
             self.simulation_paused = False
             self.pending_simulation_action = None
+            self._sync_army_ai_players()
             steps = self._resolve_ai_until_human_input(max_steps=max_steps)
             if self.battle.winner is not None:
                 self.status = "finished"
                 self._ensure_replay_saved()
+            self.fast_ai_simulation = False
+            if self.battle is not None:
+                self.battle.fast_ai_simulation = False
             self.touch()
             return steps
+
+    def set_ai_takeover(self, token: str, enabled: Any) -> None:
+        with self._lock:
+            seat = self.require_seat(token)
+            if self.tutorial_state is not None or str(self.experience_kind or "") == "tutorial":
+                raise RoomError("教学模式不能交给 AI 接管。")
+            if self.battle is None or self.status != "battle" or self.battle.winner is not None:
+                raise RoomError("只有正在进行的对局里才能切换 AI 接管。")
+            if not seat.is_human:
+                raise RoomError("只有玩家席位才能切换 AI 接管。")
+            if isinstance(enabled, str):
+                next_enabled = enabled.strip().lower() in {"1", "true", "yes", "on"}
+            else:
+                next_enabled = bool(enabled)
+            if next_enabled == bool(getattr(seat, "ai_takeover", False)):
+                return
+            seat.ai_takeover = next_enabled
+            if not next_enabled:
+                current = self._current_prompt_seat()
+                if current is not None and current.player_id == seat.player_id:
+                    self.pending_simulation_action = None
+            self._sync_army_ai_players()
+            self._sync_turn_timer()
+            if next_enabled:
+                self.battle.log(f"{seat.name or f'席位 {seat.player_id}'} 让 AI 接管了操作。")
+                self._advance_simulation_due(force_steps=2)
+            else:
+                self.battle.log(f"{seat.name or f'席位 {seat.player_id}'} 收回了操作。")
+            self.touch()
+
+    def set_ai_styles(self, token: str, *, hero_ai_style: Any = None, army_ai_style: Any = None) -> None:
+        with self._lock:
+            seat = self.require_seat(token)
+            if self.tutorial_state is not None or str(self.experience_kind or "") == "tutorial":
+                raise RoomError("教学模式不能调整 AI 倾向。")
+            if self.battle is None or self.status != "battle" or self.battle.winner is not None:
+                raise RoomError("只有正在进行的对局里才能调整 AI 倾向。")
+            if not seat.is_human:
+                raise RoomError("只有玩家席位才能调整 AI 倾向。")
+            if hero_ai_style is not None:
+                seat.hero_ai_style = normalize_hero_ai_style(hero_ai_style)
+            if army_ai_style is not None:
+                seat.army_ai_style = normalize_army_ai_style(army_ai_style)
+            self._sync_army_ai_players()
+            self.touch()
 
     def perform_action(self, token: str, payload: dict[str, Any]) -> None:
         with self._lock:
             seat = self.require_seat(token)
+            if bool(getattr(seat, "ai_takeover", False)):
+                raise RoomError("当前已交给 AI 接管，请先停止接管再操作。")
             if self.battle is None:
                 raise RoomError("å½“å‰æˆ¿é—´è¿˜æ²¡æœ‰å¼€å§‹å¯¹å±€ã€‚")
             current_player = self.current_input_player_id()
@@ -2315,6 +2797,8 @@ class GameRoom:
                 "board_width": int(getattr(self, "board_width", DEFAULT_BOARD_WIDTH) or DEFAULT_BOARD_WIDTH),
                 "board_height": int(getattr(self, "board_height", DEFAULT_BOARD_HEIGHT) or DEFAULT_BOARD_HEIGHT),
                 "turn_timeout_seconds": int(getattr(self, "turn_timeout_seconds", DEFAULT_TURN_TIMEOUT_SECONDS) or 0),
+                "hero_turn_limit": int(getattr(self, "hero_turn_limit", 0) or SKIRMISH_HERO_TURN_LIMIT),
+                "turn_limit_winner": int(getattr(self, "turn_limit_winner", 2) or 2),
                 "default_ai_difficulty": self.default_ai_difficulty,
                 "seat_count": len(self.seats),
                 "seat_count_min": MIN_ROOM_SEAT_COUNT,
@@ -2322,6 +2806,9 @@ class GameRoom:
                 "viewer_player_id": viewer_player_id,
                 "viewer_team_id": viewer_team_id,
                 "viewer_name": viewer_name,
+                "viewer_ai_takeover": bool(viewer is not None and getattr(viewer, "ai_takeover", False)),
+                "viewer_hero_ai_style": getattr(viewer, "hero_ai_style", DEFAULT_HERO_AI_STYLE) if viewer else DEFAULT_HERO_AI_STYLE,
+                "viewer_army_ai_style": getattr(viewer, "army_ai_style", DEFAULT_ARMY_AI_STYLE) if viewer else DEFAULT_ARMY_AI_STYLE,
                 "viewer_is_host": viewer_player_id == self.host_player_id if viewer_player_id is not None else False,
                 "occupied_seat_count": self.occupied_seat_count(),
                 "human_seat_count": self.human_seat_count(),
@@ -2337,6 +2824,14 @@ class GameRoom:
                     and public_launch_context(self).get("allow_rematch", True)
                 ),
                 "seats": [seat.to_public_dict(heroes_by_code, self.host_player_id) for seat in self.seats.values()],
+                "army_orders": {
+                    1: dict(self.army_orders_by_team.get(1) or default_army_orders()[1]),
+                    2: dict(self.army_orders_by_team.get(2) or default_army_orders()[2]),
+                },
+                "army_kinds": [
+                    {"kind": kind, "name": ARMY_KIND_LABELS[kind]}
+                    for kind in ("infantry", "archer", "cavalry")
+                ],
                 "turn_timer": self._turn_timer_public_state(),
                 "postgame": build_postgame_summary(
                     self.battle,
@@ -2428,6 +2923,8 @@ class RoomRegistry:
         board_height: Optional[int] = None,
         experience_kind: str = "custom",
         launch_context: Optional[dict[str, Any]] = None,
+        hero_turn_limit: Optional[int] = None,
+        turn_limit_winner: Optional[int] = None,
     ) -> tuple[GameRoom, int, str]:
         with self._lock:
             normalized_room_id = normalize_room_id(room_id) if room_id else self._generate_room_id()
@@ -2446,6 +2943,10 @@ class RoomRegistry:
                 room.board_width = int(board_width)
             if board_height:
                 room.board_height = int(board_height)
+            if hero_turn_limit is not None:
+                room.hero_turn_limit = max(1, int(hero_turn_limit))
+            if turn_limit_winner in {1, 2}:
+                room.turn_limit_winner = int(turn_limit_winner)
             player_id, token = room.create_host(host_name, account_user_id=host_account_user_id)
             room.set_seat_controller(token, 2, "ai")
             room.default_ai_difficulty = normalize_ai_difficulty(ai_difficulty)
@@ -2459,6 +2960,7 @@ class RoomRegistry:
                 room.seats[1].controller_type = "ai"
                 room.seats[1].token = None
                 room.seats[1].name = normalize_player_name(host_name)
+                room._sync_army_ai_players()
                 room.touch()
             self._rooms[room.room_id] = room
             return room, player_id, token

@@ -5283,7 +5283,9 @@ class RoomBehaviorTests(unittest.TestCase):
         self.assertGreaterEqual(completed["loyalty"], hero["loyalty"] + 10)
         self.assertEqual(completed["lord_relationship"], 8)
         categories = [item["category"] for item in second["world"]["event_log"]]
-        self.assertIn("strategic_hero_specialty", categories)
+        self.assertTrue(
+            "strategic_hero_specialty" in categories or "strategic_hero_skills" in categories
+        )
         self.assertIn("strategic_hero_mission_completed", categories)
 
     def test_scenario_governor_can_perform_local_ritual_without_lord_approval(self) -> None:
@@ -5881,6 +5883,7 @@ class RoomBehaviorTests(unittest.TestCase):
                     "source_city_id": source["id"],
                     "target_city_id": target["id"],
                     "resolution_mode": "quick",
+                    "attacker_hero_codes": [lord["holder_id"]],
                 },
             },
         )["campaign"]
@@ -7295,24 +7298,24 @@ class CombatBehaviorTests(unittest.TestCase):
         self.assertEqual(battle.current_turn_unit().hero_code, "dark_human")
         self.assertEqual(battle.active_player, 1)
 
-    def test_scenario_timeout_rule_scales_with_opening_hero_count(self) -> None:
+    def test_scenario_timeout_rule_uses_fixed_hero_turn_limit(self) -> None:
         # Given a four-hero battle with no damage or kills happening
         battle = create_battle(["bard", "ellie"], ["dark_human", "elite_soldier"])
         self.assertEqual(battle.initial_hero_count, 4)
-        self.assertEqual(battle.turn_timeout_limit, 80)
+        self.assertEqual(battle.turn_timeout_limit, 200)
+        self.assertEqual(battle.turn_timeout_winner, 2)
 
-        # When 79 hero turns have completed
-        end_turns(battle, 79)
+        # When 199 hero turns have completed
+        end_turns(battle, 199)
 
         # Then the battle is still unresolved
         self.assertIsNone(battle.winner)
 
-        # And the 80th completed hero turn forces a random winner
-        with mock.patch("wujiang.tactical.engine.core.random.choice", return_value=1):
-            battle.perform_action({"type": "end_turn"})
+        # And the 200th completed hero turn awards the defender
+        battle.perform_action({"type": "end_turn"})
 
-        self.assertEqual(battle.winner, 1)
-        self.assertIn("80 个武将回合上限", battle.logs[-1])
+        self.assertEqual(battle.winner, 2)
+        self.assertIn("200 个武将回合上限", battle.logs[-1])
 
     def test_scenario_stealth_blocks_enemy_direct_targeting_but_friendly_support_still_works(self) -> None:
         # Given a stealthed Dark Human with a friendly Bard nearby
@@ -8164,11 +8167,16 @@ class FrontendBehaviorTests(unittest.TestCase):
 
         # 地图可拖拽可缩放：视口负责裁切与手势，画布负责承载世界。
         self.assertIn("STRATEGY_MAP_WORLD", app_source)
+        self.assertIn("width: 3200", app_source)
+        self.assertIn("function appendStrategyMapLand", app_source)
+        self.assertIn("strategy-map-land-layer", app_source)
         self.assertIn("function attachStrategyMapView", app_source)
         self.assertIn('viewport.addEventListener("pointerdown"', app_source)
         self.assertIn('viewport.addEventListener("wheel"', app_source)
-        self.assertIn("拖拽移动地图 · 滚轮缩放 · 点击城市下令", app_source)
+        self.assertNotIn("拖拽移动地图 · 滚轮缩放 · 点击城市下令", app_source)
         self.assertIn(".strategy-map-viewport", styles)
+        self.assertIn(".strategy-map-land-blob", styles)
+        self.assertIn(".strategy-map-route-line", styles)
         self.assertIn("touch-action: none", styles)
         self.assertIn("transform-origin: 0 0", styles)
 
@@ -8212,11 +8220,14 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertIn("button.strategy-map-node", styles)
         self.assertIn("height: auto", styles)
         self.assertIn("is-relic-route", app_source)
-        self.assertIn("strategy-map-legend", app_source)
+        self.assertNotIn("strategy-map-legend", app_source)
+        self.assertIn("strategy-map-tool--capital", app_source)
+        self.assertIn("function strategyFocusHomeCity", app_source)
         self.assertNotIn("is-crisis-route", app_source)
         self.assertIn("圣物搜索", app_source)
         self.assertIn("formatStrategyCalendar", app_source)
         self.assertIn("presentStrategyConclusionNotice", app_source)
+        self.assertIn("presentPendingOccupationNotice", app_source)
         self.assertIn("危机最早出现年份", app_source)
         self.assertNotIn(".strategy-map-node.is-owned {\n  border-left: 5px solid #2f7a4f;\n}", styles)
 
@@ -8227,11 +8238,14 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertIn("function strategyCityContextRiskLabels", app_source)
         for class_name in (
             "strategy-city-context-head",
+            "strategy-city-context-focus",
             "strategy-city-context-stats",
             "strategy-city-context-risks",
         ):
             self.assertIn(class_name, app_source)
             self.assertIn(f".{class_name}", styles)
+        self.assertIn("inspectStrategyCityOnMap(city.id, campaign)", app_source)
+        self.assertIn("在地图上定位这座城", app_source)
         self.assertNotIn("strategy-city-command-actions-head", app_source)
         self.assertNotIn("当前职位可执行", app_source)
         self.assertIn("当前无警报", app_source)
@@ -8519,6 +8533,7 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertIn("state.room.start_blocker", app_source)
         self.assertIn("isRoomConfigControlActive", app_source)
         self.assertIn('id="toggle-ready"', html)
+        self.assertIn('id="battle-turn-banner"', html)
         self.assertIn('id="battle-turn-timer"', html)
         self.assertIn("toggleRoomReady", app_source)
         self.assertIn("renderConnectionAndTurnState", app_source)
@@ -8536,6 +8551,11 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertIn('id="resume-tutorial"', html)
         self.assertNotIn('id="start-quick-ai"', html)
         self.assertIn('id="auto-configure-room"', html)
+        self.assertIn('id="auto-configure-dialog"', html)
+        self.assertIn("按数量", html)
+        self.assertIn("按点数", html)
+        self.assertIn("允许重复武将", html)
+        self.assertIn("房间设置和自动配置只能点取消或确定关闭", app_source)
         self.assertIn('id="room-board-width-input"', html)
         self.assertIn("修改设置", html)
         self.assertIn("LAST_TUTORIAL_ROOM_KEY", app_source)
@@ -8579,9 +8599,17 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertIn("createStrategyHeroAppointmentPanel", app_source)
         self.assertIn("createLordHeroDutyPanel", app_source)
         self.assertIn("strategy-hero-assign", app_source)
+        self.assertIn("负伤中，无法出征", app_source)
+        self.assertIn('row.classList.add("is-wounded")', app_source)
+        self.assertIn('availableDuties = wounded', app_source)
+        self.assertNotIn("主公随行", app_source)
+        self.assertIn(".hero-slot.is-wounded", styles)
+        self.assertIn(".strategy-hero-duty-row.is-wounded", styles)
+        self.assertIn(".strategy-hero-wounded-banner", styles)
         self.assertIn('if (attackKinds.has(kind) && own) return;', app_source)
         self.assertIn("createLordRitualPanel", app_source)
         self.assertIn("renderStrategyTechPanel", app_source)
+        self.assertIn("showStrategyTechTree", app_source)
         self.assertIn("createGrandGeneralMilitaryPanel", app_source)
         self.assertIn("createGeneralLogisticsPanel", app_source)
         self.assertIn("举行召唤祭祀", app_source)
@@ -9987,7 +10015,7 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertIn("剩余兵力：攻方 400", ctx.eval("globalThis.strategyText"))
         self.assertIn("存活单位：攻方 4/8", ctx.eval("globalThis.strategyText"))
         self.assertIn("英灵：攻方 参战 ellie", ctx.eval("globalThis.strategyText"))
-        self.assertIn("沉睡 ellie", ctx.eval("globalThis.strategyText"))
+        self.assertIn("负伤 ellie", ctx.eval("globalThis.strategyText"))
         self.assertIn("英灵：守方 参战 fire_funeral", ctx.eval("globalThis.strategyText"))
         self.assertIn("查看真实战斗", ctx.eval("globalThis.strategyText"))
         self.assertNotIn("本月行动队列", ctx.eval("globalThis.strategyText"))
