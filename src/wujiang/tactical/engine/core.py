@@ -275,6 +275,14 @@ class BattleComponent(ABC):
     ) -> Optional[list["Position"]]:
         return None
 
+    def basic_attack_area_affects_allies(
+        self,
+        battle: "Battle",
+        actor: "Unit",
+        payload: Optional[dict[str, Any]] = None,
+    ) -> bool:
+        return False
+
     def allows_block_counter(self, battle: "Battle", actor: "Unit") -> bool:
         return True
 
@@ -3380,7 +3388,11 @@ class Battle:
         attack_payload["attack_cells"] = [cell.to_dict() for cell in area_cells]
         actor.attacks_used += attack_cost
         actor.actions_taken_this_turn.append("attack")
-        friendly_fire = bool(attack_payload.get("friendly_fire"))
+        affects_allies = bool(attack_payload.get("friendly_fire")) or any(
+            component.basic_attack_area_affects_allies(self, actor, attack_payload)
+            for component in actor.iter_components()
+        )
+        forced_allied_target_id = str(attack_payload.get("forced_allied_attack_target_id") or "")
         impact = None
         raw_impact = attack_payload.get("impact_cell")
         if isinstance(raw_impact, dict) and raw_impact.get("x") is not None and raw_impact.get("y") is not None:
@@ -3389,7 +3401,11 @@ class Battle:
 
         targets = []
         for unit in self.effect_units_at_cells(area_cells):
-            if not friendly_fire and unit.player_id == actor.player_id:
+            if (
+                not affects_allies
+                and unit.player_id == actor.player_id
+                and unit.unit_id != forced_allied_target_id
+            ):
                 continue
             if attack_payload.get("structures_need_direct_hit") and is_siege_structure(unit):
                 if not structure_hit_by_impact(self, unit, impact):
@@ -3838,21 +3854,38 @@ class Battle:
                 return preview
         attack_targets: list[str] = []
         attack_cells: list[dict[str, int]] = []
-        for enemy in self.enemy_units(actor.player_id):
-            ignore_stealth = self.attack_ignores_stealth(actor, enemy)
-            if self.attack_target_allowed(actor, enemy, ignore_stealth=ignore_stealth, payload=resolved_payload)[0]:
-                attack_targets.append(enemy.unit_id)
+        candidates = list(self.enemy_units(actor.player_id))
+        forced_target = self.forced_basic_attack_target(actor)
+        if forced_target is not None and all(unit.unit_id != forced_target.unit_id for unit in candidates):
+            candidates.append(forced_target)
+        for target in candidates:
+            ignore_stealth = self.attack_ignores_stealth(actor, target)
+            if self.attack_target_allowed(actor, target, ignore_stealth=ignore_stealth, payload=resolved_payload)[0]:
+                attack_targets.append(target.unit_id)
                 valid_cells = []
-                for cell in self.unit_cells(enemy):
+                for cell in self.unit_cells(target):
                     cell_payload = dict(resolved_payload)
                     cell_payload["x"] = cell.x
                     cell_payload["y"] = cell.y
-                    if self.attack_target_allowed(actor, enemy, ignore_stealth=ignore_stealth, payload=cell_payload)[0]:
+                    if self.attack_target_allowed(actor, target, ignore_stealth=ignore_stealth, payload=cell_payload)[0]:
                         valid_cells.append(cell)
                 if not valid_cells:
-                    valid_cells = self.unit_cells(enemy)
+                    valid_cells = self.unit_cells(target)
                 attack_cells.extend(cell.to_dict() for cell in valid_cells)
         return {"cells": attack_cells, "target_unit_ids": attack_targets, "requires_target": True}
+
+    def forced_basic_attack_target(self, actor: Unit) -> Optional[Unit]:
+        for component in actor.iter_components():
+            target_id = str(getattr(component, "required_attack_target_id", "") or "")
+            if not target_id:
+                continue
+            forces = getattr(component, "forces_attack_target", None)
+            if callable(forces) and not bool(forces(self)):
+                continue
+            target = self.units.get(target_id)
+            if target is not None and target.alive and target.position is not None and not target.banished:
+                return target
+        return None
 
     def build_queued_action(self, payload: dict[str, Any]) -> QueuedAction:
         action_type = payload.get("type")
@@ -3904,6 +3937,9 @@ class Battle:
             )
         if action_type == "attack":
             queued_payload = self.resolved_basic_attack_payload(actor, queued_payload)
+            forced_target = self.forced_basic_attack_target(actor)
+            if forced_target is not None and forced_target.player_id == actor.player_id:
+                queued_payload["forced_allied_attack_target_id"] = forced_target.unit_id
             area_cells = self.basic_attack_area_cells_for_payload(actor, queued_payload)
             if area_cells is not None:
                 attack_cost = int(queued_payload.get("attack_cost", 1))
@@ -3924,11 +3960,29 @@ class Battle:
                     queued_payload["declared_source_x"] = actor.position.x
                     queued_payload["declared_source_y"] = actor.position.y
                 queued_payload["attack_cells"] = [cell.to_dict() for cell in area_cells]
-                target_units = [
-                    unit
-                    for unit in self.effect_units_at_cells(area_cells)
-                    if unit.player_id != actor.player_id
-                ]
+                affects_allies = bool(queued_payload.get("friendly_fire")) or any(
+                    component.basic_attack_area_affects_allies(self, actor, queued_payload)
+                    for component in actor.iter_components()
+                )
+                forced_allied_target_id = str(queued_payload.get("forced_allied_attack_target_id") or "")
+                impact = None
+                raw_impact = queued_payload.get("impact_cell")
+                if isinstance(raw_impact, dict) and raw_impact.get("x") is not None and raw_impact.get("y") is not None:
+                    impact = Position(int(raw_impact["x"]), int(raw_impact["y"]))
+                from wujiang.tactical.engine.siege import is_siege_structure, structure_hit_by_impact
+
+                target_units = []
+                for unit in self.effect_units_at_cells(area_cells):
+                    if (
+                        not affects_allies
+                        and unit.player_id == actor.player_id
+                        and unit.unit_id != forced_allied_target_id
+                    ):
+                        continue
+                    if queued_payload.get("structures_need_direct_hit") and is_siege_structure(unit):
+                        if not structure_hit_by_impact(self, unit, impact):
+                            continue
+                    target_units.append(unit)
                 if not target_units:
                     raise ActionError("攻击区域内没有有效目标。")
                 target_ids: list[str] = []
@@ -3967,6 +4021,8 @@ class Battle:
             queued_payload["ignore_shield"] = ignore_shield
             queued_payload["half_ignore_shield"] = half_ignore_shield
             queued_payload["ignore_stealth"] = ignore_stealth
+            if forced_target is not None and target.unit_id == forced_target.unit_id and target.player_id == actor.player_id:
+                queued_payload["allow_allied_attack_target"] = True
             return QueuedAction(
                 action_type="attack",
                 actor_id=actor.unit_id,

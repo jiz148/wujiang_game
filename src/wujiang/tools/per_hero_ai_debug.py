@@ -96,6 +96,8 @@ def run_per_hero_ai_debug(
     difficulty: str = "standard",
     output_dir: Optional[Path | str] = None,
     label: Optional[str] = None,
+    resume: bool = False,
+    progress: bool = False,
 ) -> PerHeroDebugResult:
     catalog = public_hero_catalog()
     heroes_by_code = {str(hero["code"]): hero for hero in catalog}
@@ -113,9 +115,19 @@ def run_per_hero_ai_debug(
     severity_counts: Counter[str] = Counter()
     target_counts: Counter[str] = Counter()
     target_high_signal: Counter[str] = Counter()
+    target_ordinals = {code: index + 1 for index, code in enumerate(target_codes)}
+    announced_target: str | None = None
 
     for match in plan:
         target = str(match["target"])
+        if progress and target != announced_target:
+            announced_target = target
+            hero_name = str(heroes_by_code.get(target, {}).get("name") or target)
+            print(
+                f"[{target_ordinals[target]}/{len(target_codes)}] auditing {hero_name} ({target}) "
+                f"with {matches_per_hero} matches...",
+                flush=True,
+            )
         target_counts[target] += 1
         match_label = (
             f"{sanitize_label(target)}-{int(match['target_match_index']):02d}-"
@@ -123,25 +135,53 @@ def run_per_hero_ai_debug(
         )
         match_dir = run_dir / sanitize_label(target) / match_label
         try:
-            result = run_match_audit(
-                match["team1"],
-                match["team2"],
-                seed=int(match["seed"]),
-                difficulty=difficulty,
-                max_steps=max_steps,
-                output_dir=match_dir,
-                label=match_label,
+            manifest = (
+                completed_audit_manifest(
+                    match_dir,
+                    team1=match["team1"],
+                    team2=match["team2"],
+                    seed=int(match["seed"]),
+                    difficulty=difficulty,
+                    max_steps=max_steps,
+                )
+                if resume
+                else None
             )
-            findings = read_jsonl(result.findings_jsonl_path)
+            resumed = manifest is not None
+            findings_file = match_dir / "findings.jsonl"
+            if manifest is not None:
+                findings = read_jsonl(findings_file)
+                winner = manifest.get("winner")
+                steps = int(manifest.get("steps_executed") or 0)
+                finding_count = len(findings)
+                report_file = match_dir / "battle_report.md"
+                findings_markdown_file = match_dir / "findings.md"
+            else:
+                result = run_match_audit(
+                    match["team1"],
+                    match["team2"],
+                    seed=int(match["seed"]),
+                    difficulty=difficulty,
+                    max_steps=max_steps,
+                    output_dir=match_dir,
+                    label=match_label,
+                )
+                findings = read_jsonl(result.findings_jsonl_path)
+                winner = result.winner
+                steps = result.step_count
+                finding_count = result.finding_count
+                report_file = result.report_path
+                findings_markdown_file = result.findings_markdown_path
             match_summary = {
                 **match,
                 "output_dir": str(match_dir),
-                "battle_report": str(result.report_path),
-                "findings_markdown": str(result.findings_markdown_path),
-                "winner": result.winner,
-                "steps": result.step_count,
-                "finding_count": result.finding_count,
+                "battle_report": str(report_file),
+                "findings_markdown": str(findings_markdown_file),
+                "winner": winner,
+                "steps": steps,
+                "finding_count": finding_count,
                 "high_signal_count": count_high_signal(findings),
+                "resumed": resumed,
             }
         except Exception as exc:
             findings = [
@@ -169,10 +209,26 @@ def run_per_hero_ai_debug(
                 "error": f"{type(exc).__name__}: {exc}",
             }
 
+        if progress:
+            outcome = "reused" if match_summary.get("resumed") else "finished"
+            if match_summary.get("error"):
+                outcome = "error"
+            print(
+                f"  [{int(match['target_match_index'])}/{matches_per_hero}] {outcome}; "
+                f"winner={match_summary.get('winner')}; steps={match_summary.get('steps')}; "
+                f"findings={match_summary.get('finding_count')}; high-signal={match_summary.get('high_signal_count')}",
+                flush=True,
+            )
+
         for finding in findings:
+            actor = finding.get("actor") if isinstance(finding.get("actor"), dict) else {}
+            actor_code = str(actor.get("hero_code") or "")
+            attributed_code = actor_code or target
             annotated = {
                 **finding,
                 "target": target,
+                "attributed_code": attributed_code,
+                "attributed_name": actor.get("name") or heroes_by_code.get(attributed_code, {}).get("name") or attributed_code,
                 "target_match_index": match["target_match_index"],
                 "global_match_index": match["global_match_index"],
                 "match_seed": match["seed"],
@@ -185,8 +241,8 @@ def run_per_hero_ai_debug(
             category_counts[str(finding.get("category"))] += 1
             severity_counts[str(finding.get("severity"))] += 1
             if is_high_signal(finding):
-                target_high_signal[target] += 1
-                suspected_defects.append(defect_stub(annotated, heroes_by_code.get(target, {})))
+                target_high_signal[attributed_code] += 1
+                suspected_defects.append(defect_stub(annotated, heroes_by_code.get(attributed_code, {})))
         match_summaries.append(match_summary)
 
     summary = {
@@ -229,6 +285,44 @@ def run_per_hero_ai_debug(
     )
 
 
+def completed_audit_manifest(
+    match_dir: Path,
+    *,
+    team1: Iterable[str],
+    team2: Iterable[str],
+    seed: int,
+    difficulty: str,
+    max_steps: int,
+) -> Optional[dict[str, Any]]:
+    """Return a reusable manifest only when the entire match output matches this plan."""
+    required_files = (
+        match_dir / "manifest.json",
+        match_dir / "trace.jsonl",
+        match_dir / "battle_report.md",
+        match_dir / "findings.jsonl",
+        match_dir / "findings.md",
+    )
+    if not all(path.is_file() for path in required_files):
+        return None
+    try:
+        manifest = json.loads(required_files[0].read_text(encoding="utf-8"))
+        expected = {
+            "team1": [str(code) for code in team1],
+            "team2": [str(code) for code in team2],
+            "seed": int(seed),
+            "difficulty": str(difficulty),
+            "max_steps": int(max_steps),
+        }
+        if any(manifest.get(key) != value for key, value in expected.items()):
+            return None
+        steps = int(manifest.get("steps_executed"))
+        if steps < 0 or steps > int(max_steps):
+            return None
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return manifest
+
+
 def default_output_dir(*, seed: int, label: Optional[str]) -> Path:
     suffix = sanitize_label(label) if label else "per-hero"
     stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -269,6 +363,8 @@ def defect_stub(finding: dict[str, Any], hero: dict[str, Any]) -> dict[str, Any]
         "severity": finding.get("severity"),
         "category": finding.get("category"),
         "target": finding.get("target"),
+        "attributed_code": finding.get("attributed_code"),
+        "attributed_name": finding.get("attributed_name"),
         "target_name": hero.get("name"),
         "actor_code": actor.get("hero_code"),
         "actor_name": actor.get("name"),
@@ -346,6 +442,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--difficulty", default="standard", choices=sorted(ai_policy.AI_DIFFICULTIES))
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--label", default=None)
+    parser.add_argument("--resume", action="store_true", help="Reuse complete match folders already present under --out.")
     args = parser.parse_args(argv)
 
     targets = parse_roster(args.targets) if args.targets else public_hero_codes()
@@ -359,6 +456,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         difficulty=args.difficulty,
         output_dir=args.out,
         label=args.label,
+        resume=args.resume,
+        progress=True,
     )
     print(f"wrote per-hero AI debug: {result.output_dir}")
     print(

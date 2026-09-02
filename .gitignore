@@ -217,6 +217,9 @@ replays/
 # Local generated audit reports
 reports/
 
+# Local generated work artifacts
+.tmp/
+
 # Local SQLite state for accounts / long-running game saves
 *.sqlite3
 *.sqlite3-journal

@@ -1379,6 +1379,287 @@ class AIDecisionBehaviorTests(unittest.TestCase):
         self.assertTrue(any(status["name"] == "销魂成长" and status["stacks"] == 1 for status in public_wraith["statuses"]))
 
 
+class HeroBatchH12AIDecisionTests(unittest.TestCase):
+    def test_general_ai_moves_toward_required_taunt_target_then_attacks_it(self) -> None:
+        battle = create_battle(["excel_r142", "fire_funeral"], "excel_r291")
+        cat = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r142")
+        decoy = next(unit for unit in battle.hero_units(1) if unit.hero_code == "fire_funeral")
+        taunted_actor = primary_hero(battle, 2)
+        cat.position = Position(5, 4)
+        decoy.position = Position(2, 5)
+        taunted_actor.position = Position(2, 4)
+        while battle.current_turn_unit() is not taunted_actor:
+            battle.perform_action({"type": "end_turn"})
+        skill_by_code(cat, "cat_taunt_roar").execute(battle, cat, {})
+        taunt = taunted_actor.get_status("嘲讽之吼")
+        taunt.on_owner_turn_start(battle)
+
+        move = choose_turn_action(battle, taunted_actor, "standard")
+        self.assertEqual(move["type"], "move")
+        old_distance = battle.distance_between_units(taunted_actor, cat)
+        battle.perform_action(move)
+        resolve_pending_chain(battle)
+        self.assertLess(battle.distance_between_units(taunted_actor, cat), old_distance)
+
+        attack = choose_turn_action(battle, taunted_actor, "standard")
+        self.assertEqual(attack["type"], "attack")
+        self.assertEqual(attack["target_unit_id"], cat.unit_id)
+
+    def test_required_attack_contract_exposes_and_executes_an_allied_taunt_target(self) -> None:
+        battle = create_battle(["excel_r142", "fire_funeral"], "bard")
+        cat = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r142")
+        ally = next(unit for unit in battle.hero_units(1) if unit.hero_code == "fire_funeral")
+        bard = primary_hero(battle, 2)
+        cat.position = Position(4, 4)
+        ally.position = Position(4, 5)
+        bard.position = Position(9, 9)
+        ally.max_health = ally.current_hp = 10
+        skill_by_code(cat, "cat_taunt_roar").execute(battle, cat, {})
+        battle.configure_turn_order([ally.unit_id, bard.unit_id])
+        battle.start_current_turn()
+
+        snapshot = battle.action_snapshot_for(ally)
+        action = choose_turn_action(battle, ally, "standard")
+
+        self.assertIn(cat.unit_id, snapshot["attack_targets"])
+        self.assertEqual(action["type"], "attack")
+        self.assertEqual(action["target_unit_id"], cat.unit_id)
+
+    def test_cat_ai_rejects_roar_when_friendly_damage_and_forced_attacks_outweigh_enemy_value(self) -> None:
+        battle = create_battle(["excel_r142", "fire_funeral", "excel_r126"], "bard")
+        cat = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r142")
+        allies = [unit for unit in battle.hero_units(1) if unit.unit_id != cat.unit_id]
+        bard = primary_hero(battle, 2)
+        while battle.current_turn_unit() is not cat:
+            battle.perform_action({"type": "end_turn"})
+        cat.position = Position(4, 4)
+        allies[0].position = Position(4, 5)
+        allies[1].position = Position(3, 4)
+        bard.position = Position(7, 4)
+
+        action = choose_turn_action(battle, cat, "standard")
+
+        self.assertNotEqual(action.get("skill_code"), "cat_taunt_roar")
+
+    def test_general_ai_prices_cat_retaliation_and_prefers_an_exposed_alternative_target(self) -> None:
+        battle = create_battle(["excel_r142", "fire_funeral"], "bard")
+        cat = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r142")
+        decoy = next(unit for unit in battle.hero_units(1) if unit.hero_code == "fire_funeral")
+        bard = primary_hero(battle, 2)
+        while battle.current_turn_unit() is not bard:
+            battle.perform_action({"type": "end_turn"})
+        bard.position = Position(4, 4)
+        cat.position = Position(5, 4)
+        decoy.position = Position(4, 5)
+        bard.current_mana = 3
+        decoy.current_hp = 0.125
+
+        action = choose_turn_action(battle, bard, "standard")
+
+        self.assertEqual(action["type"], "attack")
+        self.assertEqual(action["target_unit_id"], decoy.unit_id)
+
+    def test_solar_ai_prioritizes_sphinx_artillery_when_enemy_is_distant(self) -> None:
+        battle = create_battle("excel_r126", "bard")
+        solar = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        while battle.current_turn_unit() is not solar:
+            battle.perform_action({"type": "end_turn"})
+        solar.position = Position(0, 0)
+        bard.position = Position(9, 9)
+
+        action = choose_turn_action(battle, solar, "standard")
+
+        self.assertEqual(action["type"], "skill")
+        self.assertEqual(action["skill_code"], "sphinx_cannon")
+
+    def test_solar_ai_does_not_spend_judgment_on_one_unprotected_low_health_target(self) -> None:
+        battle = create_battle("excel_r126", "bard")
+        solar = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        while battle.current_turn_unit() is not solar:
+            battle.perform_action({"type": "end_turn"})
+        solar.position = Position(1, 1)
+        bard.position = Position(3, 1)
+        bard.current_hp = 0.125
+
+        action = choose_turn_action(battle, solar, "standard")
+
+        self.assertNotEqual(action.get("skill_code"), "solar_judgment")
+
+    def test_solar_ai_spends_judgment_to_break_a_clustered_shield_and_magic_immunity_defense(self) -> None:
+        battle = create_battle("excel_r126", ["bard", "ellie"])
+        solar = primary_hero(battle, 1)
+        enemies = battle.hero_units(2)
+        while battle.current_turn_unit() is not solar:
+            battle.perform_action({"type": "end_turn"})
+        solar.position = Position(0, 0)
+        enemies[0].position = Position(4, 4)
+        enemies[1].position = Position(4, 5)
+        enemies[0].shields = 1
+        enemies[1].magic_immunity = True
+
+        action = choose_turn_action(battle, solar, "standard")
+
+        self.assertEqual(action["type"], "skill")
+        self.assertEqual(action["skill_code"], "solar_judgment")
+
+    def test_general_shield_ai_preserves_active_damage_mana_for_nonlethal_ally_damage(self) -> None:
+        battle = create_battle(["excel_r126", "fire_funeral"], "bard")
+        solar = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r126")
+        ally = next(unit for unit in battle.hero_units(1) if unit.hero_code == "fire_funeral")
+        bard = primary_hero(battle, 2)
+        solar.position = Position(3, 3)
+        ally.position = Position(4, 3)
+        bard.position = Position(5, 3)
+        solar.current_mana = 2
+        battle.configure_turn_order([bard.unit_id, solar.unit_id, ally.unit_id])
+        battle.start_current_turn()
+        battle.perform_action({"type": "attack", "unit_id": bard.unit_id, "target_unit_id": ally.unit_id})
+
+        while battle.pending_chain is not None and battle.pending_chain.current_unit_id() != solar.unit_id:
+            current_id = battle.pending_chain.current_unit_id()
+            options = battle.pending_chain.options_by_unit.get(current_id, []) if current_id else []
+            block = next((option for option in options if option.action_code == "block"), None)
+            battle.perform_action(
+                {"type": "chain_react", "unit_id": current_id, "action_code": "block"}
+                if current_id and block is not None
+                else {"type": "chain_skip"}
+            )
+
+        self.assertIsNotNone(battle.pending_chain)
+        options = battle.reaction_snapshot_for(solar)["actions"]
+        reaction = choose_chain_reaction(battle, solar, options, "standard")
+        self.assertIsNone(reaction)
+
+    def test_general_shield_ai_can_break_reserve_to_protect_its_owner(self) -> None:
+        battle = create_battle("excel_r126", "bard")
+        solar = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        solar.position = Position(4, 3)
+        bard.position = Position(5, 3)
+        solar.current_mana = 2
+        battle.configure_turn_order([bard.unit_id, solar.unit_id])
+        battle.start_current_turn()
+        battle.perform_action({"type": "attack", "unit_id": bard.unit_id, "target_unit_id": solar.unit_id})
+
+        options = battle.reaction_snapshot_for(solar)["actions"]
+        reaction = choose_chain_reaction(battle, solar, options, "standard")
+
+        self.assertIsNotNone(reaction)
+        self.assertEqual(reaction["action_code"], "stone_wall")
+
+    def test_tricycle_ai_builds_its_summon_chain_early(self) -> None:
+        battle = create_battle("excel_r198", "bard")
+        rider = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        while battle.current_turn_unit() is not rider:
+            battle.perform_action({"type": "end_turn"})
+        rider.position = Position(1, 1)
+        bard.position = Position(9, 9)
+
+        action = choose_turn_action(battle, rider, "standard")
+
+        self.assertEqual(action["type"], "skill")
+        self.assertEqual(action["skill_code"], "summon_bicycle")
+
+    def test_tricycle_summon_ai_reserves_an_open_cell_for_the_bicycle_child(self) -> None:
+        battle = create_battle("excel_r198", "bard")
+        rider = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        while battle.current_turn_unit() is not rider:
+            battle.perform_action({"type": "end_turn"})
+        rider.position = Position(1, 1)
+        bard.position = Position(8, 8)
+        battle.blocked_cells.update({(0, 0), (0, 1), (0, 2), (1, 0), (2, 0)})
+
+        action = choose_turn_action(battle, rider, "standard")
+        destination = Position(int(action["x"]), int(action["y"]))
+        open_neighbors = [
+            cell
+            for cell in battle.neighbors(destination)
+            if battle.in_bounds(cell)
+            and not battle.units_at_cells([cell])
+            and (cell.x, cell.y) not in battle.blocked_cells
+        ]
+
+        self.assertEqual(action["skill_code"], "summon_bicycle")
+        self.assertTrue(open_neighbors)
+
+    def test_bicycle_ai_replans_movement_after_its_attack_resets_move_economy(self) -> None:
+        battle = create_battle("excel_r198", ["bard", "ellie"])
+        rider = primary_hero(battle, 1)
+        rider.position = Position(2, 2)
+        skill_by_code(rider, "summon_bicycle").execute(battle, rider, {"x": 3, "y": 2})
+        bicycle = next(unit for unit in battle.player_units(1) if unit.hero_code == "bicycle_rider")
+        enemies = battle.hero_units(2)
+        bicycle.turn_ready = True
+        bicycle.position = Position(3, 2)
+        enemies[0].alive = False
+        enemies[0].position = None
+        enemies[1].position = Position(8, 8)
+        bicycle.attacks_used = bicycle.attack_actions_per_turn()
+        bicycle.normal_move_actions_used = 1
+        bicycle.normal_move_steps_used = 5
+        unicycle_skill = skill_by_code(bicycle, "summon_unicycle")
+        unicycle_skill.uses_this_turn = 1
+        unicycle_skill._uses_turn_number = battle.turn_number
+        bicycle.notify_basic_attack_finished(battle, {}, [], missed=False)
+
+        action = choose_turn_action(battle, bicycle, "standard")
+
+        self.assertEqual(action["type"], "move")
+
+    def test_boxer_ai_rejects_ring_taunt_when_it_would_harm_two_allies(self) -> None:
+        battle = create_battle(["excel_r206", "fire_funeral", "excel_r126"], "bard")
+        boxer = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r206")
+        allies = [unit for unit in battle.hero_units(1) if unit.unit_id != boxer.unit_id]
+        bard = primary_hero(battle, 2)
+        while battle.current_turn_unit() is not boxer:
+            battle.perform_action({"type": "end_turn"})
+        boxer.position = Position(4, 4)
+        allies[0].position = Position(4, 5)
+        allies[1].position = Position(3, 4)
+        bard.position = Position(5, 4)
+
+        action = choose_turn_action(battle, boxer, "standard")
+
+        self.assertNotEqual(action.get("skill_code"), "ring_taunt")
+
+    def test_red_ai_uses_free_iron_chain_path_as_engage_and_damage(self) -> None:
+        battle = create_battle("excel_r291", "bard")
+        red = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        while battle.current_turn_unit() is not red:
+            battle.perform_action({"type": "end_turn"})
+        red.position = Position(2, 2)
+        bard.position = Position(5, 2)
+        bard.max_health = 10
+        bard.current_hp = 10
+
+        action = choose_turn_action(battle, red, "standard")
+
+        self.assertEqual(action["type"], "skill")
+        self.assertEqual(action["skill_code"], "iron_chain_path")
+
+    def test_boxer_ai_selects_combined_block_counter_reaction(self) -> None:
+        battle = create_battle("excel_r206", "bard")
+        boxer = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        boxer.position = Position(4, 4)
+        bard.position = Position(5, 4)
+        while battle.current_turn_unit() is not bard:
+            battle.perform_action({"type": "end_turn"})
+        battle.perform_action({"type": "attack", "unit_id": bard.unit_id, "target_unit_id": boxer.unit_id, "x": 4, "y": 4})
+
+        options = battle.reaction_snapshot_for(boxer)["actions"]
+        reaction = choose_chain_reaction(battle, boxer, options, "standard")
+
+        self.assertIsNotNone(reaction)
+        self.assertEqual(reaction["type"], "chain_react")
+        self.assertEqual(reaction["action_code"], "boxer_block_counter")
+
+
 class RoomBehaviorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

@@ -951,6 +951,13 @@ def unit_state(battle: Battle, unit: Unit) -> dict[str, Any]:
             "performed_active_skill": unit.performed_active_skill,
             "turn_ready": unit.turn_ready,
         },
+        "restrictions": {
+            "cannot_move": bool(getattr(unit, "cannot_move", False)),
+            "cannot_normal_move": bool(getattr(unit, "cannot_normal_move", False)),
+            "cannot_attack": bool(getattr(unit, "cannot_attack", False)),
+            "cannot_use_skills": bool(getattr(unit, "cannot_use_skills", False)),
+            "cannot_act": bool(getattr(unit, "cannot_act", False)),
+        },
         "statuses": [component_ref(status) for status in unit.statuses],
         "skills": [skill_ref(skill) for skill in unit.skills],
     }
@@ -1008,6 +1015,14 @@ def component_ref(component: Any) -> dict[str, Any]:
     duration = getattr(component, "duration", None)
     if duration is not None:
         data["duration"] = duration
+    for field in (
+        "required_attack_target_id",
+        "requirement_active",
+        "requirement_satisfied",
+        "target_unit_id",
+    ):
+        if hasattr(component, field):
+            data[field] = getattr(component, field)
     return data
 
 
