@@ -116,6 +116,7 @@ ACTION_PERMISSION = {
     "rebellion_action": "handle_rebellion",
     "rebellion_battle": "handle_rebellion",
     "declare_attack": "declare_attack",
+    "explore_city": "declare_attack",
     "form_army": "command_army",
     "disband_army": "command_army",
     "set_army_movement": "command_army",
@@ -125,6 +126,9 @@ ACTION_PERMISSION = {
     "incite_neutral_city_state": "diplomacy",
     "neutral_diplomacy": "diplomacy",
     "faction_diplomacy": "diplomacy",
+    "propose_resource_trade": "diplomacy",
+    "accept_resource_trade": "diplomacy",
+    "reject_resource_trade": "diplomacy",
     "peaceful_integration": "diplomacy",
     "choose_occupation_policy": "manage_occupation",
     "fund_rebellion": "diplomacy",
@@ -453,6 +457,8 @@ def office_action_entity_id(action_type: str, payload: dict[str, Any]) -> str:
         return str(payload.get("city_id") or "")
     if action_type == "declare_attack":
         return str(payload.get("source_city_id") or "")
+    if action_type == "explore_city":
+        return str(payload.get("from_city_id") or "")
     # Battle ids are not managed entities. Battle ownership is validated by the
     # battle service, while this layer verifies that a general signed the order.
     if action_type in {"set_battle_defender_hero"}:
@@ -494,6 +500,7 @@ def resolve_action_office(
             or (
                 action_type in {
                     "declare_attack",
+                    "explore_city",
                     "perform_hero_ritual",
                     "transfer_registered_units",
                     "request_registered_units",
@@ -542,6 +549,7 @@ def ai_office_for_action(
             or (
                 action_type in {
                     "declare_attack",
+                    "explore_city",
                     "perform_hero_ritual",
                     "transfer_registered_units",
                     "request_registered_units",

@@ -1145,6 +1145,10 @@ body.flow-campaign #draft-screen > .draft > .section-head,
   width: 160px;
 }
 
+.strategy-wizard__seed input[type="number"] {
+  width: 280px;
+}
+
 .strategy-wizard__lead {
   color: var(--text-2);
   font-size: var(--fs-sm);
@@ -1458,6 +1462,12 @@ button.strategy-wizard__variant.is-active {
   gap: 12px;
 }
 
+.strategy-event-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .strategy-campaign-card,
 .strategy-city-card,
 .strategy-tech-card {
@@ -1542,7 +1552,8 @@ button.strategy-wizard__variant.is-active {
   font-size: 12px;
 }
 
-.strategy-hero-path-form select {
+.strategy-hero-path-form select,
+.strategy-hero-path-form input[type="text"] {
   width: 100%;
   min-width: 0;
   border-color: rgba(225, 201, 136, 0.42);
@@ -2029,7 +2040,7 @@ button.campaign-end-turn.is-loading {
   min-height: 0;
   min-width: 0;
   flex: 1 1 auto;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   border-radius: var(--r-2);
   background: var(--surface-0);
   overflow: hidden;
@@ -2187,6 +2198,10 @@ button.campaign-dock__toggle {
   pointer-events: auto;
 }
 
+.campaign-dock.is-wide .campaign-dock__body {
+  width: min(680px, 62vw);
+}
+
 .campaign-dock.is-collapsed .campaign-dock__body {
   display: none;
 }
@@ -2197,6 +2212,13 @@ button.campaign-dock__toggle {
   flex: 0 0 auto;
   padding: var(--s-3);
   border-bottom: 1px solid var(--line);
+}
+
+.campaign-dock__title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .campaign-dock__head h4 {
@@ -2234,8 +2256,9 @@ button.campaign-dock__toggle {
 }
 
 .campaign-more-toolbar {
-  display: grid;
-  gap: var(--s-2);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .campaign-more-divider {
@@ -2496,6 +2519,10 @@ button.strategy-tech-row__btn {
 @media (max-width: 860px) {
   .campaign-dock__body {
     width: min(320px, 72vw);
+  }
+
+  .campaign-dock.is-wide .campaign-dock__body {
+    width: min(520px, 86vw);
   }
 
   .campaign-stage__overlay {
@@ -3011,9 +3038,24 @@ button.strategy-tech-row__btn {
   cursor: pointer;
 }
 
+.strategy-city-nation-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-style: normal;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  line-height: 1.4;
+  color: #fff8e4;
+  background: color-mix(in srgb, var(--faction-color, #c4a46a) 78%, #1c1610);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--faction-color, #c4a46a) 70%, #fff);
+}
+
 .strategy-city-context-head strong {
-  display: block;
-  margin-top: 2px;
+  display: inline;
+  margin-top: 0;
   color: #fff7dd;
   font-size: 16px;
 }
@@ -3494,7 +3536,7 @@ button.strategy-tech-row__btn {
   cursor: grab;
   /* 不写这一句的话，触摸拖动会被浏览器当成页面滚动抢走。 */
   touch-action: none;
-  background: #1a2620;
+  background: var(--surface-0);
 }
 
 .strategy-map-viewport::after {
@@ -3503,7 +3545,7 @@ button.strategy-tech-row__btn {
   inset: 0;
   z-index: 1;
   pointer-events: none;
-  background: radial-gradient(ellipse at center, transparent 52%, rgba(8, 12, 10, 0.38) 100%);
+  background: radial-gradient(ellipse 86% 80% at 50% 46%, transparent 58%, rgba(8, 12, 10, 0.18) 100%);
 }
 
 .strategy-map-viewport.is-dragging {
@@ -3517,13 +3559,9 @@ button.strategy-tech-row__btn {
   left: 0;
   transform-origin: 0 0;
   will-change: transform;
-  background:
-    radial-gradient(ellipse at 18% 22%, rgba(74, 112, 72, 0.38), transparent 42%),
-    radial-gradient(ellipse at 78% 20%, rgba(196, 168, 96, 0.2), transparent 38%),
-    radial-gradient(ellipse at 64% 78%, rgba(46, 78, 88, 0.26), transparent 46%),
-    radial-gradient(ellipse at 26% 82%, rgba(96, 74, 48, 0.2), transparent 36%),
-    radial-gradient(ellipse at 50% 46%, rgba(255, 232, 186, 0.05), transparent 58%),
-    #1c2a22;
+  overflow: visible;
+  /* 画布本身不铺色块，否则缩小时会出现一块方板。地形只靠地块和道路。 */
+  background: transparent;
 }
 
 /* 缩放条压在地图角上，而不是另占一行——它服务于地图，不是屏幕上的一块内容。 */
@@ -3585,6 +3623,7 @@ button.strategy-map-tool svg {
   inset: 0;
   width: 100%;
   height: 100%;
+  overflow: visible;
   pointer-events: none;
 }
 
@@ -3603,7 +3642,7 @@ button.strategy-map-tool svg {
 .strategy-map-route-line {
   fill: none;
   stroke: rgba(201, 166, 106, 0.55);
-  stroke-width: 0.22;
+  stroke-width: 0.15;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -3634,6 +3673,32 @@ button.strategy-map-tool svg {
   stroke: #e6c46a;
   stroke-width: 0.4;
   stroke-dasharray: 1.8 1.5;
+}
+
+.strategy-map-route-line.is-frontier-route {
+  stroke: rgba(201, 166, 106, 0.28);
+  stroke-width: 0.11;
+  stroke-dasharray: 0.7 0.9;
+}
+
+.strategy-map-canvas .strategy-map-node.is-hidden {
+  opacity: 0.72;
+}
+
+.strategy-map-canvas .strategy-map-node.is-hidden .strategy-map-marker {
+  filter: grayscale(0.35) brightness(0.85);
+}
+
+.strategy-map-canvas .strategy-map-node.is-hidden .strategy-map-name {
+  color: #b7b09c;
+  font-weight: 600;
+}
+
+.strategy-explore-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
 }
 
 .strategy-map-route.is-crisis-route{
@@ -3715,6 +3780,7 @@ button.strategy-map-tool svg {
 
 .strategy-map-marker {
   position: relative;
+  z-index: 1;
   display: grid;
   place-items: center;
   width: 56px;
@@ -3754,15 +3820,39 @@ button.strategy-map-tool svg {
 .strategy-map-marker.is-city { width: 68px; height: 68px; }
 .strategy-map-marker.is-fortress { width: 70px; height: 70px; }
 
+.strategy-map-canvas .strategy-map-node.is-marker::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 38%;
+  z-index: 0;
+  width: 128px;
+  height: 128px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--faction-color, #9d9681) 34%, transparent) 0%,
+    color-mix(in srgb, var(--faction-color, #9d9681) 16%, transparent) 42%,
+    transparent 72%
+  );
+  pointer-events: none;
+}
+
 .strategy-map-marker-halo {
   position: absolute;
   left: 50%;
   top: 52%;
-  width: 78%;
-  height: 78%;
+  width: 170%;
+  height: 170%;
   border-radius: 50%;
   transform: translate(-50%, -50%);
-  background: radial-gradient(circle at 50% 55%, rgba(0, 0, 0, 0.28), transparent 72%);
+  background: radial-gradient(
+    circle at 50% 50%,
+    color-mix(in srgb, var(--faction-color, #9d9681) 42%, transparent),
+    color-mix(in srgb, var(--faction-color, #9d9681) 12%, transparent) 48%,
+    transparent 74%
+  );
   pointer-events: none;
   transition: box-shadow 160ms ease, background 160ms ease;
 }
@@ -8638,4 +8728,69 @@ body.battle-mode .logs .log {
 .army-order-card__ammo-btn.is-active {
   border-color: rgba(214, 186, 132, 0.55);
   background: rgba(214, 186, 132, 0.14);
+}
+
+.strategy-resource-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+  gap: 6px;
+  margin-bottom: var(--s-3);
+}
+
+.strategy-resource-card {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  background: var(--surface-2);
+}
+
+.strategy-resource-card.is-rare {
+  border-color: rgba(214, 186, 132, 0.35);
+}
+
+.strategy-resource-card strong {
+  font-size: 11px;
+}
+
+.strategy-resource-card em {
+  font-style: normal;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.strategy-resource-card .strategy-meta {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.25;
+}
+
+.strategy-resource-offers,
+.strategy-resource-trade {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin-bottom: var(--s-3);
+}
+
+.strategy-resource-offer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  align-items: center;
+}
+
+.strategy-city-veins {
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+}
+
+.strategy-wizard__nations {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: var(--s-2);
 }

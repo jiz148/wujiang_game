@@ -585,7 +585,7 @@ def require_strategy_room_mutation_allowed(
         raise RoomError("这场战略战斗已经结算，只能查看，不能再次操作或重开。")
 
 
-def sync_finished_strategy_battle_room(room) -> dict[str, Any] | None:
+def sync_finished_strategy_battle_room(room, viewer_user_id: int | None = None) -> dict[str, Any] | None:
     battle = getattr(room, "battle", None)
     winner_team_id = getattr(battle, "winner", None)
     if winner_team_id not in {1, 2}:
@@ -599,7 +599,10 @@ def sync_finished_strategy_battle_room(room) -> dict[str, Any] | None:
     )
     if campaign is None:
         return None
-    return campaign.to_public_dict(resume_status=campaign_runtime.STRATEGY_STORE.resume_status(campaign.campaign_id))
+    return campaign.to_public_dict(
+        resume_status=campaign_runtime.STRATEGY_STORE.resume_status(campaign.campaign_id),
+        viewer_user_id=int(viewer_user_id) if viewer_user_id else None,
+    )
 
 
 def room_state_with_strategy_sync(
@@ -639,7 +642,12 @@ def room_state_with_strategy_sync(
                 )
             ),
         }
-    strategy_campaign = sync_finished_strategy_battle_room(room)
+    viewer_user_id = None
+    for seat in getattr(room, "seats", {}).values():
+        if str(getattr(seat, "token", "") or "") == str(player_token or "") and getattr(seat, "account_user_id", None):
+            viewer_user_id = int(seat.account_user_id)
+            break
+    strategy_campaign = sync_finished_strategy_battle_room(room, viewer_user_id)
     if strategy_campaign is not None:
         state["strategy_campaign"] = strategy_campaign
     return state

@@ -125,13 +125,30 @@ def ensure_strategic_hero_system(world: WorldState, members: Any = None) -> Worl
             state.status = "serving" if state.faction_id else "roaming"
             state.sleeping_until_month = None
 
+    from wujiang.strategic.catalog import contract_nation_for_faction, opening_hero_fill_mode
+
+    fill_mode = opening_hero_fill_mode(next_world)
+    reserved_roster_codes: set[str] = set()
+    if initializing_hero_system and fill_mode == "quota":
+        for faction in next_world.factions:
+            nation = contract_nation_for_faction(next_world, faction.faction_id)
+            if nation is None:
+                continue
+            reserved_roster_codes.update(str(code) for code in nation.get("roster_codes") or [])
+
     members_by_faction: dict[str, list[Any]] = {}
     for member in members or ():
         if str(getattr(member, "role", "")).lower() == "ai" or int(getattr(member, "user_id", 0)) <= 0:
             continue
         members_by_faction.setdefault(str(getattr(member, "faction_id", "")), []).append(member)
     assigned_codes = {hero.hero_code for hero in heroes_by_code.values() if hero.office_id}
-    available_codes = [str(hero.get("code") or "") for hero in public_heroes if str(hero.get("code") or "") not in assigned_codes]
+    available_codes = [
+        str(hero.get("code") or "")
+        for hero in public_heroes
+        if str(hero.get("code") or "") not in assigned_codes
+        and str(hero.get("code") or "") not in reserved_roster_codes
+    ]
+    heroes_by_public_code = {str(hero.get("code") or ""): hero for hero in public_heroes}
     controlled_player_user_ids = {
         int(hero.controller_user_id)
         for hero in heroes_by_code.values()
@@ -139,7 +156,42 @@ def ensure_strategic_hero_system(world: WorldState, members: Any = None) -> Worl
     }
 
     office_rank = {"lord": 0, "grand_general": 1, "general": 2, "governor": 3}
-    for faction in sorted(next_world.factions, key=lambda item: item.faction_id):
+
+    def _faction_fill_order(item: Faction) -> tuple[int, str]:
+        nation = contract_nation_for_faction(next_world, item.faction_id) or {}
+        nations = (next_world.campaign_contract or {}).get("nations") or []
+        order = next(
+            (index for index, raw in enumerate(nations) if isinstance(raw, dict) and str(raw.get("faction_id") or raw.get("id") or "") in {item.faction_id, item.nation_id}),
+            99,
+        )
+        return (order, item.faction_id)
+
+    def _pick_office_hero_code(office_id: str, *, roster_codes: list[str], quality: str) -> str | None:
+        while roster_codes:
+            selected = roster_codes.pop(0)
+            if selected in assigned_codes or selected not in heroes_by_code:
+                continue
+            return selected
+        if not available_codes:
+            return None
+        if fill_mode != "quota":
+            selected_index = _stable_index(next_world, f"office:{office_id}", len(available_codes))
+            return available_codes.pop(selected_index)
+
+        def _score(code: str) -> tuple[int, int, str]:
+            hero = heroes_by_public_code.get(code) or {}
+            level = int(hero.get("level", 1) or 1)
+            if quality == "high":
+                return (-level, 0, code)
+            if quality == "mid_high":
+                return (-min(level, 8), abs(level - 6), code)
+            return (abs(level - 4), 0, code)
+
+        selected_code = sorted(available_codes, key=_score)[0]
+        available_codes.remove(selected_code)
+        return selected_code
+
+    for faction in sorted(next_world.factions, key=_faction_fill_order):
         if not faction.is_major:
             continue
         founded_during_campaign = any(tag.startswith("hero_founded_faction:") for tag in faction.memory_tags) or any(
@@ -202,6 +254,15 @@ def ensure_strategic_hero_system(world: WorldState, members: Any = None) -> Worl
             player_member_by_office_id[target.office_id] = member
             occupied_office_ids.add(target.office_id)
             assigned_user_ids.add(user_id)
+        nation = contract_nation_for_faction(next_world, faction.faction_id) or {}
+        roster_codes = [
+            str(code)
+            for code in nation.get("roster_codes") or []
+            if str(code) in heroes_by_code and str(code) not in assigned_codes
+        ]
+        quality = str(nation.get("hero_quality") or "medium")
+        hero_quota = int(nation.get("hero_count") or 0) if fill_mode == "quota" and faction.is_major else 0
+        filled_offices = 0
         for office in faction_offices:
             if office.holder_type == "temporary_player":
                 continue
@@ -221,13 +282,20 @@ def ensure_strategic_hero_system(world: WorldState, members: Any = None) -> Worl
                     office.controller_user_id = None
                     office.status = "vacant"
                     continue
-                if not available_codes:
+                if hero_quota and filled_offices >= hero_quota:
+                    office.holder_id = None
+                    office.holder_type = None
+                    office.controller_type = "ai"
+                    office.controller_user_id = None
+                    office.status = "vacant"
+                    continue
+                selected_code = _pick_office_hero_code(office.office_id, roster_codes=roster_codes, quality=quality)
+                if selected_code is None:
                     office.holder_id = None
                     office.holder_type = None
                     office.status = "vacant"
                     continue
-                selected_index = _stable_index(next_world, f"office:{office.office_id}", len(available_codes))
-                selected_code = available_codes.pop(selected_index)
+                assigned_codes.add(selected_code)
                 state = heroes_by_code[selected_code]
             state.status = "serving"
             state.faction_id = faction.faction_id
@@ -257,6 +325,7 @@ def ensure_strategic_hero_system(world: WorldState, members: Any = None) -> Worl
                 office.controller_user_id = None
                 state.controller_type = "ai"
                 state.controller_user_id = None
+            filled_offices += 1
 
     next_world.strategic_heroes = sorted(heroes_by_code.values(), key=lambda hero: hero.hero_code)
     ritual_city_ids = {
@@ -316,6 +385,13 @@ def _hero_name(hero_code: str) -> str:
         if str(hero.get("code") or "") == hero_code:
             return str(hero.get("name") or hero_code)
     return hero_code
+
+
+def _founded_faction_name(hero_code: str, raw: str) -> str:
+    name = " ".join(str(raw or "").split())
+    if not name:
+        name = _hero_name(hero_code)
+    return name[:16]
 
 
 def strategic_hero_pool_public(world: WorldState) -> list[dict[str, Any]]:
@@ -1111,6 +1187,7 @@ def choose_player_hero_path(
     path: str,
     assigned_faction_id: str,
     target_faction_id: str = "",
+    faction_name: str = "",
     allow_reselect: bool = False,
 ) -> WorldState:
     from wujiang.strategic.offices import ensure_office_system
@@ -1138,7 +1215,7 @@ def choose_player_hero_path(
     if current is not None and current.hero_code != chosen.hero_code and not allow_reselect:
         raise StrategyError("战役开始后不能改为控制另一名武将；请继续操作当前武将。")
     if normalized_path == "lord":
-        faction_id = str(assigned_faction_id or target_faction_id)
+        faction_id = str(target_faction_id or assigned_faction_id)
         lord = next(
             (
                 office
@@ -1188,7 +1265,7 @@ def choose_player_hero_path(
             faction_id = f"faction_{max(faction_numbers, default=0) + 1}"
             faction = Faction(
                 faction_id=faction_id,
-                name=f"{_hero_name(code)}军",
+                name=_founded_faction_name(code, faction_name),
                 controller_user_id=int(user_id),
                 is_ai=False,
                 capital_city_id=city.city_id,
@@ -1229,8 +1306,10 @@ def choose_player_hero_path(
                     office.status = "vacant"
             chosen = next(item for item in next_world.strategic_heroes if item.hero_code == code)
         else:
-            faction_id = str(assigned_faction_id or target_faction_id)
+            faction_id = str(target_faction_id or assigned_faction_id)
         faction = _faction(next_world, faction_id)
+        if normalized_path == "lord" and " ".join(str(faction_name or "").split()):
+            faction.name = _founded_faction_name(code, faction_name)
         lord = next(
             (office for office in next_world.offices if office.faction_id == faction_id and office.office_type == "lord"),
             None,

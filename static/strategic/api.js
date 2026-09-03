@@ -5,7 +5,7 @@ import { fetchJson, recordProductEvent, recordStrategyConclusionIfNeeded, record
 import { refreshState, render } from '../core/render.js';
 import { FALLBACK_STRATEGY_VARIANTS, state } from '../core/state.js';
 import { effectiveProfileName, userLoggedIn } from '../platform/auth.js';
-import { createStrategyField, formatStrategyCalendar, showStrategyTurnToast, strategyCanResume, strategyCityById, strategyFactionCommandPoints, strategyMemberLabel, strategyOfficeLabel, strategyRememberSelectedCity } from '../strategic/ui-base.js';
+import { createStrategyField, formatStrategyCalendar, showStrategyTurnToast, strategyCanResume, strategyCityById, strategyCommandCost, strategyFaction, strategyFactionCommandPoints, strategyMemberLabel, strategyOfficeLabel, strategyRememberSelectedCity } from '../strategic/ui-base.js';
 import { isStrategyControlActive, presentStrategyNoticesAfterAdvance, renderStrategyPanel } from '../strategic/workbench.js';
 import { currentBattleLaunch, exitBattle, rememberBattleLaunch } from '../bridge/battle-launch.js';
 import { loadStoredIdentity, saveStoredIdentity } from '../bridge/campaign-battle.js';
@@ -34,6 +34,40 @@ export function syncStrategyCampaignFromRoomPayload(payload = {}) {
   }
 }
 
+function adoptStrategyCampaign(campaign) {
+  if (!campaign) return;
+  state.strategyCampaign = campaign;
+  const campaigns = Array.isArray(state.strategyCampaigns) ? state.strategyCampaigns.slice() : [];
+  const index = campaigns.findIndex((item) => Number(item.id) === Number(campaign.id));
+  if (index >= 0) campaigns[index] = campaign;
+  else campaigns.unshift(campaign);
+  state.strategyCampaigns = campaigns;
+}
+
+function applyOptimisticQueuedAction(actionType, actionPayload = {}) {
+  const campaign = state.strategyCampaign;
+  if (!campaign) return null;
+  const snapshot = campaign;
+  const faction = strategyFaction(campaign);
+  const optimistic = {
+    id: `pending:${Date.now()}`,
+    campaign_id: campaign.id,
+    user_id: Number(state.authUser?.id || 0),
+    faction_id: faction?.id || "",
+    month: campaign.world?.current_month,
+    action_type: actionType,
+    action_key: actionPayload.target_city_id || actionPayload.city_id || actionType,
+    payload: { ...actionPayload },
+    command_cost: strategyCommandCost(actionType, actionPayload),
+    status: "pending",
+  };
+  adoptStrategyCampaign({
+    ...campaign,
+    queued_actions: [...(campaign.queued_actions || []), optimistic],
+  });
+  return snapshot;
+}
+
 export async function refreshStrategyCampaigns({ renderAfter = true } = {}) {
   if (!userLoggedIn()) {
     clearStrategyState("请先登录账号。");
@@ -41,14 +75,37 @@ export async function refreshStrategyCampaigns({ renderAfter = true } = {}) {
     return;
   }
   try {
-    const payload = await fetchJson("/api/strategy/campaigns");
-    state.strategyCampaigns = payload.campaigns || [];
+    const params = new URLSearchParams();
+    if (state.strategyCampaign?.id) params.set("focus_id", String(state.strategyCampaign.id));
+    else params.set("summary", "1");
+    const payload = await fetchJson(`/api/strategy/campaigns?${params.toString()}`);
+    const incoming = payload.campaigns || [];
+    state.strategyCampaigns = incoming.map((campaign) => {
+      if (
+        campaign.detail === false
+        && state.strategyCampaign
+        && Number(campaign.id) === Number(state.strategyCampaign.id)
+      ) {
+        return {
+          ...state.strategyCampaign,
+          status: campaign.status || state.strategyCampaign.status,
+          updated_at: campaign.updated_at,
+          resume: campaign.resume || state.strategyCampaign.resume,
+          invite: campaign.invite || state.strategyCampaign.invite,
+        };
+      }
+      return campaign;
+    });
     state.strategyVariants = Array.isArray(payload.campaign_variants) && payload.campaign_variants.length
       ? payload.campaign_variants
       : FALLBACK_STRATEGY_VARIANTS;
-    if (state.strategyCampaign) {
-      state.strategyCampaign = state.strategyCampaigns.find((campaign) => campaign.id === state.strategyCampaign.id) || state.strategyCampaign;
-    }
+    if (payload.world_catalog) state.strategyWorldCatalog = payload.world_catalog;
+    const focused = incoming.find((campaign) => (
+      campaign.detail !== false
+      && Number(campaign.id) === Number(state.strategyCampaign?.id || 0)
+      && campaign.world?.nodes
+    ));
+    if (focused) state.strategyCampaign = focused;
   } catch (error) {
     state.strategyMessage = error.error || "读取战役列表失败。";
   } finally {
@@ -148,7 +205,7 @@ export function openStrategyCampaignCreator() {
   state.strategyCreateOpen = true;
   state.strategyCreateStep = 0;
   state.strategyName = "英灵城邦";
-  state.strategySeed = String(Math.max(1, Math.floor(Date.now() / 1000) % 999983));
+  state.strategySeed = String(10000000 + Math.floor(Math.random() * 899999999));
   state.strategyVariantId = state.strategyVariantId || "classic_frontier";
   state.strategyCrisisEarliestYear = 10;
   state.strategyYearLimit = 0;
@@ -178,6 +235,8 @@ export async function createStrategyCampaign() {
     crisis_earliest_year: Math.max(1, Math.min(100, Number(state.strategyCrisisEarliestYear) || 10)),
     year_limit: Math.max(0, Math.min(100, Number(state.strategyYearLimit) || 0)),
     major_faction_count: Math.max(2, Math.min(10, Number(state.strategyMajorFactionCount) || 2)),
+    mode: state.strategyCampaignMode === "true_campaign" ? "true_campaign" : "random_campaign",
+    scenario_id: state.strategyScenarioId || "true_world_v1",
   });
   if (!payload) {
     renderStrategyPanel();
@@ -223,13 +282,14 @@ export async function joinStrategyCampaignByCode() {
   focusStrategyWarRoom();
 }
 
-export async function chooseStrategyHeroPath(heroCode, path, targetFactionId = "") {
+export async function chooseStrategyHeroPath(heroCode, path, targetFactionId = "", factionName = "") {
   if (!state.strategyCampaign || !heroCode || !path) return;
   const payload = await strategyPost("/api/strategy/campaigns/choose-hero-path", {
     campaign_id: state.strategyCampaign.id,
     hero_code: heroCode,
     path,
     target_faction_id: targetFactionId,
+    faction_name: factionName,
   });
   if (!payload) {
     renderStrategyPanel();
@@ -746,19 +806,20 @@ export async function cancelQueuedStrategyAction(actionId) {
     renderStrategyPanel();
     return;
   }
-  state.strategyCampaign = payload.campaign;
+  adoptStrategyCampaign(payload.campaign);
   const points = payload.command_points || strategyFactionCommandPoints(payload.campaign);
   state.strategyMessage = `已删除这条军令；剩余军令 ${points.remaining}/${points.maximum}。`;
-  await refreshStrategyCampaigns({ renderAfter: false });
-  render();
+  renderStrategyPanel();
 }
 
 export async function queueStrategyAction(actionType, actionPayload) {
-  if (!state.strategyCampaign) return;
+  if (!state.strategyCampaign || state.strategyBusy) return;
   if (actionType === "declare_attack") {
     state.strategyExpeditionError = "";
     state.strategyExpeditionHeroCodes = Array.from(actionPayload?.attacker_hero_codes || []);
   }
+  const snapshot = applyOptimisticQueuedAction(actionType, actionPayload || {});
+  renderStrategyPanel();
   const payload = await strategyPost("/api/strategy/campaigns/queue-action", {
     campaign_id: state.strategyCampaign.id,
     action_type: actionType,
@@ -768,16 +829,17 @@ export async function queueStrategyAction(actionType, actionPayload) {
     },
   });
   if (!payload) {
+    if (snapshot) state.strategyCampaign = snapshot;
     if (actionType === "declare_attack") {
       state.strategyExpeditionError = state.strategyMessage || "出征计划未能提交。";
     }
-    render();
+    renderStrategyPanel();
     return;
   }
   if (actionType === "declare_attack") {
     state.strategyExpeditionError = "";
   }
-  state.strategyCampaign = payload.campaign;
+  adoptStrategyCampaign(payload.campaign);
   const submission = payload.submission || {};
   const points = submission.command_points || strategyFactionCommandPoints(payload.campaign);
   const resources = submission.resource_balance || {};
@@ -790,8 +852,7 @@ export async function queueStrategyAction(actionType, actionPayload) {
     const executor = (state.strategyCampaign?.world?.offices || []).find((office) => office.id === submission.execution.executor_office_id);
     state.strategyMessage += ` 执行者：${strategyOfficeLabel(executor, state.strategyCampaign)}；成本 ${submission.execution.command_cost} 军令；预计第 ${submission.execution.expected_completion_month} 月回执。`;
   }
-  await refreshStrategyCampaigns({ renderAfter: false });
-  render();
+  renderStrategyPanel();
 }
 
 export async function resolveStrategyBattleChoice(battleId, choice, composition = {}) {

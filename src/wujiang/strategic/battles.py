@@ -628,6 +628,10 @@ def declare_city_attack(
         raise StrategyError("Cannot attack a city controlled by your own faction.")
     if not _cities_are_connected(next_world, source, target):
         raise StrategyError("Only adjacent city nodes can be attacked.")
+    from wujiang.strategic.vision import city_is_visible
+
+    if not city_is_visible(next_world, faction_id, target.city_id):
+        raise StrategyError("尚未探明目标，不能出征。")
     attacker_office = next(
         (
             item

@@ -75,11 +75,19 @@ from wujiang.strategic import validate_relic_search
 from wujiang.strategic import validate_relic_transfer
 from wujiang.strategic import validate_story_event_choice
 from wujiang.strategic import validate_world_crisis_choice
+from wujiang.strategic.rare_resources import (
+    accept_resource_trade,
+    propose_resource_trade,
+    reject_resource_trade,
+    validate_resource_trade_proposal,
+    validate_resource_trade_response,
+)
 from wujiang.strategic.campaign_runtime import CITY_MONTHLY_ORDER_LIMIT
 from wujiang.strategic.command import faction_command_points
 from wujiang.strategic.command import strategy_action_command_cost
 from wujiang.strategic.neutral_city_states import incite_neutral_city_state
 from wujiang.strategic.neutral_city_states import validate_neutral_city_state_incitement
+from wujiang.strategic.vision import apply_explore_city, validate_explore_city
 
 def campaign_member_faction_id(campaign, user_id: int) -> str:
     controlled_hero = next(
@@ -319,6 +327,20 @@ def normalize_strategy_action_payload(campaign, user_id: int, action_type: str, 
         normalized_payload = {"city_id": city_id, "policy": policy}
         set_city_policy(campaign.world, faction_id=faction_id, city_id=city_id, policy=policy)
         return finalize(city_id, normalized_payload)
+    if normalized_type == "explore_city":
+        target_city_id = str(payload.get("target_city_id") or payload.get("city_id") or "").strip()
+        from_city_id = str(payload.get("from_city_id") or "").strip()
+        preview = validate_explore_city(
+            campaign.world,
+            faction_id=faction_id,
+            target_city_id=target_city_id,
+            from_city_id=from_city_id,
+        )
+        normalized_payload = {
+            "target_city_id": preview["target_city_id"],
+            "from_city_id": preview["from_city_id"],
+        }
+        return finalize(preview["target_city_id"], normalized_payload)
     if normalized_type == "incite_neutral_city_state":
         neutral_faction_id = str(payload.get("neutral_faction_id") or "").strip()
         target_faction_id = str(payload.get("target_faction_id") or "").strip()
@@ -361,6 +383,39 @@ def normalize_strategy_action_payload(campaign, user_id: int, action_type: str, 
             action_id=diplomacy_action_id,
         )
         return finalize(f"{target_faction_id}:{diplomacy_action_id}", normalized_payload)
+    if normalized_type == "propose_resource_trade":
+        target_faction_id = str(payload.get("target_faction_id") or "").strip()
+        direction = str(payload.get("direction") or "sell").strip()
+        resource_id = str(payload.get("resource_id") or "").strip()
+        amount = max(1, int(payload.get("amount") or 1))
+        money = max(1, int(payload.get("money") or 1))
+        normalized_payload = {
+            "target_faction_id": target_faction_id,
+            "direction": direction,
+            "resource_id": resource_id,
+            "amount": amount,
+            "money": money,
+        }
+        validate_resource_trade_proposal(
+            campaign.world,
+            actor_faction_id=faction_id,
+            target_faction_id=target_faction_id,
+            direction=direction,
+            resource_id=resource_id,
+            amount=amount,
+            money=money,
+        )
+        return finalize(f"{target_faction_id}:{direction}:{resource_id}", normalized_payload)
+    if normalized_type in {"accept_resource_trade", "reject_resource_trade"}:
+        offer_id = str(payload.get("offer_id") or "").strip()
+        normalized_payload = {"offer_id": offer_id}
+        validate_resource_trade_response(
+            campaign.world,
+            actor_faction_id=faction_id,
+            offer_id=offer_id,
+            accept=normalized_type == "accept_resource_trade",
+        )
+        return finalize(offer_id, normalized_payload)
     if normalized_type == "world_crisis_choice":
         choice_id = str(payload.get("choice_id") or payload.get("action_id") or "").strip()
         target_faction_id = str(payload.get("target_faction_id") or "").strip()
@@ -947,6 +1002,13 @@ def apply_strategy_action_queue(campaign):
                     city_id=str(payload.get("city_id") or ""),
                     policy=str(payload.get("policy") or ""),
                 )
+            elif action.action_type == "explore_city":
+                next_world = apply_explore_city(
+                    next_world,
+                    faction_id=faction_id,
+                    target_city_id=str(payload.get("target_city_id") or ""),
+                    from_city_id=str(payload.get("from_city_id") or ""),
+                )
             elif action.action_type == "incite_neutral_city_state":
                 next_world = incite_neutral_city_state(
                     next_world,
@@ -967,6 +1029,31 @@ def apply_strategy_action_queue(campaign):
                     actor_faction_id=faction_id,
                     target_faction_id=str(payload.get("target_faction_id") or ""),
                     action_id=str(payload.get("diplomacy_action_id") or ""),
+                )
+            elif action.action_type == "propose_resource_trade":
+                next_world = propose_resource_trade(
+                    next_world,
+                    actor_faction_id=faction_id,
+                    target_faction_id=str(payload.get("target_faction_id") or ""),
+                    direction=str(payload.get("direction") or "sell"),
+                    resource_id=str(payload.get("resource_id") or ""),
+                    amount=int(payload.get("amount") or 1),
+                    money=int(payload.get("money") or 1),
+                    issuer_office_id=office.office_id,
+                )
+            elif action.action_type == "accept_resource_trade":
+                next_world = accept_resource_trade(
+                    next_world,
+                    actor_faction_id=faction_id,
+                    offer_id=str(payload.get("offer_id") or ""),
+                    issuer_office_id=office.office_id,
+                )
+            elif action.action_type == "reject_resource_trade":
+                next_world = reject_resource_trade(
+                    next_world,
+                    actor_faction_id=faction_id,
+                    offer_id=str(payload.get("offer_id") or ""),
+                    issuer_office_id=office.office_id,
                 )
             elif action.action_type == "world_crisis_choice":
                 next_world = resolve_world_crisis_choice(

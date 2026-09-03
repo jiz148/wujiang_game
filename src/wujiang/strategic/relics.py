@@ -357,6 +357,9 @@ def apply_city_control_change_consequences(
                 item for item in next_world.strategic_heroes if item.hero_code == hero_code
             ).faction_id != previous_faction_id
         )
+        from wujiang.strategic.vision import refresh_after_city_control_change
+
+        refresh_after_city_control_change(next_world, city_id=str(city_id), new_faction_id=str(new_faction_id))
         return next_world, summary
     ensured = ensure_relic_system(world)
     next_world = ensured
@@ -488,6 +491,9 @@ def apply_city_control_change_consequences(
                 ],
             )
         )
+    from wujiang.strategic.vision import refresh_after_city_control_change
+
+    refresh_after_city_control_change(next_world, city_id=str(city_id), new_faction_id=str(new_faction_id))
     next_world.validate()
     return next_world, summary
 
