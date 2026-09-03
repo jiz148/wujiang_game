@@ -174,6 +174,14 @@ export function strategyCommandCost(actionType, payload = {}) {
   return 1;
 }
 
+export function strategyCityIsHidden(city) {
+  return String(city?.visibility || "known") === "hidden";
+}
+
+export function strategyCityExploreFromIds(city) {
+  return (Array.isArray(city?.explore_from_city_ids) ? city.explore_from_city_ids : []).map((item) => String(item || "")).filter(Boolean);
+}
+
 export function strategyCanAffordCommand(campaign, faction, actionType, payload = {}, actionKey = "") {
   let available = strategyFactionCommandPoints(campaign, faction).remaining;
   if (actionKey) {
@@ -202,7 +210,7 @@ export function strategyAttackTargetsForCity(campaign, sourceCity, factionId) {
   if (!sourceNode || sourceCity?.owner_faction_id !== factionId) return [];
   return (sourceNode.connected_node_ids || [])
     .map((nodeId) => citiesByNodeId.get(nodeId))
-    .filter((city) => city && city.owner_faction_id !== factionId);
+    .filter((city) => city && city.owner_faction_id !== factionId && !strategyCityIsHidden(city));
 }
 
 function strategyCitiesAreAdjacent(campaign, firstCityId, secondCityId) {
@@ -758,6 +766,8 @@ function strategyQueuedActionsForCity(campaign, cityId) {
     const payload = action?.payload || {};
     if (String(payload.city_id || "") === id) return true;
     if (String(payload.source_city_id || "") === id) return true;
+    if (String(payload.from_city_id || "") === id) return true;
+    if (String(payload.target_city_id || "") === id) return true;
     return false;
   });
 }
@@ -810,7 +820,7 @@ function strategyCityOrderLimitReached(campaign, cityId) {
 }
 
 function strategyDefaultSelectedCity(campaign, faction) {
-  const cities = campaign?.world?.cities || [];
+  const cities = (campaign?.world?.cities || []).filter((city) => !strategyCityIsHidden(city));
   return cities.find((city) => (
     city.owner_faction_id === faction?.id && strategyCityRebellionForce(city) > 0
   )) || cities.find((city) => (
@@ -850,37 +860,50 @@ export function strategySelectedCity(campaign, faction) {
   return fallback;
 }
 
-function strategyMapNodePositions(nodes) {
+function strategyMapLayout(nodes, campaign) {
+  const bounds = campaign?.world?.map_bounds;
+  const boundValues = [bounds?.min_x, bounds?.min_y, bounds?.max_x, bounds?.max_y].map(Number);
+  const useBounds = boundValues.every(Number.isFinite);
+  const numeric = (Array.isArray(nodes) ? nodes : []).filter((node) => (
+    Number.isFinite(Number(node.x)) && Number.isFinite(Number(node.y))
+  ));
+  const xs = numeric.map((node) => Number(node.x));
+  const ys = numeric.map((node) => Number(node.y));
+  const minX = useBounds ? boundValues[0] : (xs.length ? Math.min(...xs) : 0);
+  const maxX = useBounds ? boundValues[2] : (xs.length ? Math.max(...xs) : 100);
+  const minY = useBounds ? boundValues[1] : (ys.length ? Math.min(...ys) : 0);
+  const maxY = useBounds ? boundValues[3] : (ys.length ? Math.max(...ys) : 100);
+  const spanX = Math.max(80, maxX - minX);
+  const spanY = Math.max(80, maxY - minY);
+  const pad = Math.max(18, Math.min(spanX, spanY) * 0.16);
+  const unit = 48;
+  return {
+    minX,
+    minY,
+    spanX,
+    spanY,
+    pad,
+    width: Math.round((spanX + pad * 2) * unit * 1.12),
+    height: Math.round((spanY + pad * 2) * unit),
+  };
+}
+
+function strategyMapNodePositions(nodes, layout = strategyMapLayout(nodes)) {
   const positions = new Map();
   const source = Array.isArray(nodes) ? nodes : [];
-  const numeric = source.filter((node) => Number.isFinite(Number(node.x)) && Number.isFinite(Number(node.y)));
-  if (numeric.length) {
-    const xs = numeric.map((node) => Number(node.x));
-    const ys = numeric.map((node) => Number(node.y));
-    const minX = Math.min(...xs);
-    const maxX = Math.max(...xs);
-    const minY = Math.min(...ys);
-    const maxY = Math.max(...ys);
-    const spanX = Math.max(1, maxX - minX);
-    const spanY = Math.max(1, maxY - minY);
-    source.forEach((node, index) => {
-      const nodeId = strategyMapNodeId(node);
-      if (!nodeId) return;
-      if (Number.isFinite(Number(node.x)) && Number.isFinite(Number(node.y))) {
-        positions.set(nodeId, {
-          x: 12 + ((Number(node.x) - minX) / spanX) * 76,
-          y: 14 + ((Number(node.y) - minY) / spanY) * 72,
-        });
-        return;
-      }
-      const angle = (Math.PI * 2 * index) / Math.max(1, source.length) - Math.PI / 2;
-      positions.set(nodeId, { x: 50 + Math.cos(angle) * 34, y: 50 + Math.sin(angle) * 30 });
-    });
-    return positions;
-  }
+  const { minX, minY, spanX, spanY, pad } = layout;
+  const worldX = spanX + pad * 2;
+  const worldY = spanY + pad * 2;
   source.forEach((node, index) => {
     const nodeId = strategyMapNodeId(node);
     if (!nodeId) return;
+    if (Number.isFinite(Number(node.x)) && Number.isFinite(Number(node.y))) {
+      positions.set(nodeId, {
+        x: ((Number(node.x) - minX + pad) / worldX) * 100,
+        y: ((Number(node.y) - minY + pad) / worldY) * 100,
+      });
+      return;
+    }
     const angle = (Math.PI * 2 * index) / Math.max(1, source.length) - Math.PI / 2;
     positions.set(nodeId, { x: 50 + Math.cos(angle) * 34, y: 50 + Math.sin(angle) * 30 });
   });
@@ -889,6 +912,11 @@ function strategyMapNodePositions(nodes) {
 
 function strategyCityMapClass(city, campaign, faction, selectedCityId) {
   const classes = ["strategy-map-node"];
+  if (strategyCityIsHidden(city)) {
+    classes.push("is-hidden");
+    if (city.id === selectedCityId) classes.push("is-selected");
+    return classes.join(" ");
+  }
   if (city.owner_faction_id === faction?.id) classes.push("is-owned");
   else if (strategyIsNeutralCityState(campaign, city.owner_faction_id)) classes.push("is-city-state");
   else if (city.owner_faction_id) classes.push("is-enemy");
@@ -1091,10 +1119,7 @@ export function showStrategyTurnToast(month) {
   }, 2600);
 }
 
-// 世界的像素尺寸。节点坐标是 0~100 的百分比，落在这块画布上就成了具体位置；
-// 画布比视口大，所以地图需要被拖着看——这正是要的效果。
-const STRATEGY_MAP_WORLD = { width: 3200, height: 2200 };
-const STRATEGY_MAP_ZOOM = { min: 0.28, max: 2.4 };
+const STRATEGY_MAP_ZOOM = { min: 0.12, max: 2.6 };
 const STRATEGY_CAPITAL_ICON = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 13.4h10V8.1L10.4 10 8 5.8 5.6 10 3 8.1v5.3z" fill="currentColor"/><path d="M2.2 13.4h11.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="8" cy="3.4" r="1.15" fill="currentColor"/></svg>';
 
 function strategyOwnedCities(campaign, faction) {
@@ -1125,25 +1150,35 @@ function clampMapScale(scale) {
  * 视图状态存在 state 里而不是 DOM 上：这一屏每次轮询都可能整块重建，把平移量
  * 留在元素上就意味着每次刷新都把玩家拽回原点。
  */
-function attachStrategyMapView(viewport, canvas, campaignId) {
+function attachStrategyMapView(viewport, canvas, { campaignId, layout, homePosition } = {}) {
   const view = state.strategyMapView;
+  const world = layout || { width: 3200, height: 2200, spanX: 100, spanY: 100, pad: 10 };
   const apply = () => {
     canvas.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale})`;
   };
 
-  // 开局把整张图装进视口——第一眼要回答的是"这局的地形是什么样"，而不是某个
-  // 角落。视口和画布同底色，所以没装满的地方看起来是延续出去的空地，不是黑边。
-  const center = () => {
+  const visibleSize = () => {
     const height = viewport.clientHeight || 0;
-    // 操作面板盖住了视口右边一条。取景要按看得见的那块算，否则地图正中会被压在
-    // 面板底下，屏幕左边留出一片空地。
     const dock = viewport.closest?.(".campaign-stage")?.querySelector?.(".campaign-dock");
     const occluded = dock ? Math.round(dock.getBoundingClientRect().width) : 0;
     const width = Math.max(240, (viewport.clientWidth || 0) - occluded);
+    return { width, height };
+  };
+
+  const center = () => {
+    const { width, height } = visibleSize();
     if (!width || !height) return;
-    view.scale = clampMapScale(Math.min(width / STRATEGY_MAP_WORLD.width, height / STRATEGY_MAP_WORLD.height) * 0.98);
-    view.x = (width - STRATEGY_MAP_WORLD.width * view.scale) / 2;
-    view.y = (height - STRATEGY_MAP_WORLD.height * view.scale) / 2;
+    const unitPx = world.width / Math.max(1, world.spanX + world.pad * 2);
+    view.scale = clampMapScale((Math.min(width, height) / 30) / unitPx);
+    if (homePosition) {
+      const worldX = (homePosition.x / 100) * world.width;
+      const worldY = (homePosition.y / 100) * world.height;
+      view.x = width / 2 - worldX * view.scale;
+      view.y = height / 2 - worldY * view.scale;
+    } else {
+      view.x = (width - world.width * view.scale) / 2;
+      view.y = (height - world.height * view.scale) / 2;
+    }
     view.campaignId = campaignId;
     apply();
   };
@@ -1208,37 +1243,57 @@ function attachStrategyMapView(viewport, canvas, campaignId) {
   return { zoomBy, reset: center };
 }
 
+function requestStrategyMapFocus(viewport, positions, cities) {
+  const focusCityId = state.strategyMapFocusCityId;
+  if (!focusCityId || !viewport) return;
+  state.strategyMapFocusCityId = "";
+  const focusCity = (cities || []).find((city) => String(city.id) === String(focusCityId));
+  const pan = () => panStrategyMapToNode(viewport, positions, focusCity?.node_id);
+  if (typeof window !== "undefined" && window.requestAnimationFrame) window.requestAnimationFrame(pan);
+  else pan();
+}
+
 function panStrategyMapToNode(viewport, positions, nodeId) {
   const position = positions.get(nodeId);
   if (!position) return;
   const view = state.strategyMapView;
+  const canvas = viewport.querySelector?.(".strategy-map-canvas");
   const dock = viewport.closest?.(".campaign-stage")?.querySelector?.(".campaign-dock");
   const occluded = dock && state.strategyDockOpen ? Math.round(dock.getBoundingClientRect().width) : 0;
   const width = Math.max(240, (viewport.clientWidth || 0) - occluded);
   const height = viewport.clientHeight || 0;
   if (!width || !height) return;
-  const worldX = (position.x / 100) * STRATEGY_MAP_WORLD.width;
-  const worldY = (position.y / 100) * STRATEGY_MAP_WORLD.height;
+  const worldX = (position.x / 100) * Number(canvas?.offsetWidth || 3200);
+  const worldY = (position.y / 100) * Number(canvas?.offsetHeight || 2200);
   view.x = width / 2 - worldX * view.scale;
   view.y = height / 2 - worldY * view.scale;
-  const canvas = viewport.querySelector?.(".strategy-map-canvas");
   if (canvas) canvas.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale})`;
 }
 
-function strategyMapRouteBend(sourcePos, targetPos) {
+function strategyMapRouteBend(sourcePos, targetPos, sourceId = "", targetId = "") {
   const dx = targetPos.x - sourcePos.x;
   const dy = targetPos.y - sourcePos.y;
   const length = Math.hypot(dx, dy) || 1;
-  const hash = Math.abs(Math.round(sourcePos.x * 17 + targetPos.y * 31 + sourcePos.y * 9 + targetPos.x * 13));
-  const bend = ((hash % 9) - 4) * Math.min(4.4, length * 0.16);
+  const pair = [String(sourceId || ""), String(targetId || "")].filter(Boolean).sort().join("::");
+  let hash = 0;
+  if (pair) {
+    for (let index = 0; index < pair.length; index += 1) {
+      hash = (hash * 33 + pair.charCodeAt(index)) >>> 0;
+    }
+  } else {
+    hash = Math.abs(Math.round(sourcePos.x * 17 + targetPos.y * 31 + sourcePos.y * 9 + targetPos.x * 13));
+  }
+  const slot = hash % 8;
+  const signed = slot < 4 ? slot - 4 : slot - 3;
+  const bend = signed * Math.min(4.4, Math.max(1.2, length * 0.16));
   return {
     x: (sourcePos.x + targetPos.x) / 2 - (dy / length) * bend,
     y: (sourcePos.y + targetPos.y) / 2 + (dx / length) * bend,
   };
 }
 
-function appendStrategyMapRouteLine(layer, sourcePos, targetPos, className, titleText = "") {
-  const control = strategyMapRouteBend(sourcePos, targetPos);
+function appendStrategyMapRouteLine(layer, sourcePos, targetPos, className, titleText = "", sourceId = "", targetId = "") {
+  const control = strategyMapRouteBend(sourcePos, targetPos, sourceId, targetId);
   const d = `M ${sourcePos.x} ${sourcePos.y} Q ${control.x} ${control.y} ${targetPos.x} ${targetPos.y}`;
   const line = createStrategySvgElement("path");
   line.setAttribute("d", d);
@@ -1256,14 +1311,15 @@ function appendStrategyMapLand(canvas, positions, campaign) {
   land.setAttribute("class", "strategy-map-land-layer");
   land.setAttribute("viewBox", "0 0 100 100");
   land.setAttribute("preserveAspectRatio", "none");
+  land.setAttribute("overflow", "visible");
   const seed = Number(campaign?.id || campaign?.world?.seed || 1);
   const mix = (value, span) => ((seed * 17 + value * 53) % 1000) / 1000 * span - span / 2;
   const patches = [
-    [20 + mix(1, 8), 26 + mix(2, 6), 30, 21, "is-wood"],
-    [74 + mix(3, 7), 24 + mix(4, 6), 26, 18, "is-plain"],
-    [48 + mix(5, 8), 74 + mix(6, 6), 34, 20, "is-water"],
-    [82 + mix(7, 6), 72 + mix(8, 6), 20, 16, "is-hill"],
-    [28 + mix(9, 6), 78 + mix(10, 5), 18, 14, "is-hill"],
+    [32 + mix(1, 6), 34 + mix(2, 5), 16, 12, "is-wood"],
+    [68 + mix(3, 6), 30 + mix(4, 5), 14, 11, "is-plain"],
+    [52 + mix(5, 6), 68 + mix(6, 5), 16, 12, "is-water"],
+    [76 + mix(7, 5), 70 + mix(8, 5), 12, 10, "is-hill"],
+    [30 + mix(9, 5), 72 + mix(10, 4), 11, 9, "is-hill"],
   ];
   patches.forEach(([cx, cy, rx, ry, kind]) => {
     const blob = createStrategySvgElement("ellipse");
@@ -1286,17 +1342,46 @@ function appendStrategyMapLand(canvas, positions, campaign) {
   canvas.prepend(land);
 }
 
+function strategyMapVisionKey(campaign) {
+  return (campaign?.world?.cities || []).map((city) => (
+    `${city.id}:${city.visibility || "known"}:${city.owner_faction_id || ""}:${city.node_id || ""}`
+  )).join("|");
+}
+
 export function renderStrategyMap(current, campaign, faction) {
   const nodes = campaign?.world?.nodes || [];
   const cities = campaign?.world?.cities || [];
   if (!nodes.length && !cities.length) return;
 
+  const selectedCityId = strategySelectedCity(campaign, faction)?.id || "";
+  const existing = current.querySelector(":scope > .strategy-map.strategy-map-stage");
+  const visionKey = strategyMapVisionKey(campaign);
+  const monthKey = String(campaign?.world?.current_month || "");
+  if (
+    existing
+    && existing.dataset.campaignId === String(campaign?.id || "")
+    && existing.dataset.month === monthKey
+    && existing.dataset.visionKey === visionKey
+  ) {
+    existing.querySelectorAll(".strategy-map-node").forEach((card) => {
+      card.classList.toggle("is-selected", String(card.dataset.cityId || "") === String(selectedCityId || ""));
+    });
+    const layout = strategyMapLayout(nodes, campaign);
+    const positions = strategyMapNodePositions(nodes, layout);
+    requestStrategyMapFocus(existing.querySelector(".strategy-map-viewport"), positions, cities);
+    return;
+  }
+  if (existing) existing.remove();
+
   const map = document.createElement("div");
   map.className = "strategy-map strategy-map-stage";
+  map.dataset.campaignId = String(campaign?.id || "");
+  map.dataset.month = monthKey;
+  map.dataset.visionKey = visionKey;
   const nodesById = new Map(nodes.map((node) => [strategyMapNodeId(node), node]));
   const citiesByNodeId = new Map(cities.map((city) => [city.node_id, city]));
-  const positions = strategyMapNodePositions(nodes);
-  const selectedCityId = strategySelectedCity(campaign, faction)?.id || "";
+  const layout = strategyMapLayout(nodes, campaign);
+  const positions = strategyMapNodePositions(nodes, layout);
   const activeArmies = (campaign?.world?.armies || []).filter((army) => !["disbanded", "destroyed"].includes(army.status));
   const activeEncounters = strategyActiveEncounters(campaign);
   const encountersByNodeId = new Map(activeEncounters.map((encounter) => [encounter.node_id, encounter]));
@@ -1330,8 +1415,8 @@ export function renderStrategyMap(current, campaign, faction) {
   viewport.className = "strategy-map-viewport";
   const canvas = document.createElement("div");
   canvas.className = "strategy-map-canvas strategy-map-stage-canvas";
-  canvas.style.width = `${STRATEGY_MAP_WORLD.width}px`;
-  canvas.style.height = `${STRATEGY_MAP_WORLD.height}px`;
+  canvas.style.width = `${layout.width}px`;
+  canvas.style.height = `${layout.height}px`;
   const routeLayer = createStrategySvgElement("svg");
   // SVG 元素的 className 是只读的 SVGAnimatedString，赋值会抛 TypeError——而这
   // 一句就在地图渲染的开头，于是整个战役屏什么都渲染不出来，异常还被
@@ -1354,7 +1439,12 @@ export function renderStrategyMap(current, campaign, faction) {
       const targetPos = positions.get(targetId);
       if (!sourcePos || !targetPos) return;
       const classes = ["strategy-map-route-line"];
-      let titleText = "道路";
+      const sourceCity = citiesByNodeId.get(sourceId);
+      const targetCity = citiesByNodeId.get(targetId);
+      const sourceHidden = strategyCityIsHidden(sourceCity);
+      const targetHidden = strategyCityIsHidden(targetCity);
+      if (sourceHidden || targetHidden) classes.push("is-frontier-route");
+      let titleText = sourceHidden || targetHidden ? "未探明的道路" : "道路";
       if (armySupplyRouteKeys.has(key)) {
         classes.push("is-supply-route");
         titleText = "补给线";
@@ -1367,7 +1457,7 @@ export function renderStrategyMap(current, campaign, faction) {
         classes.push("is-army-route");
         titleText = "行军路线";
       }
-      appendStrategyMapRouteLine(routeLayer, sourcePos, targetPos, classes.join(" "), titleText);
+      appendStrategyMapRouteLine(routeLayer, sourcePos, targetPos, classes.join(" "), titleText, sourceId, targetId);
     });
   });
 
@@ -1407,20 +1497,23 @@ export function renderStrategyMap(current, campaign, faction) {
   cities.forEach((city) => {
     const node = nodesById.get(city.node_id);
     const position = positions.get(city.node_id) || { x: 50, y: 50 };
+    const hidden = strategyCityIsHidden(city);
     const card = document.createElement("button");
     card.type = "button";
     card.className = strategyCityMapClass(city, campaign, faction, selectedCityId);
     card.style.left = `${position.x}%`;
     card.style.top = `${position.y}%`;
     card.dataset.cityId = city.id;
-    card.dataset.cityName = city.name;
+    card.dataset.cityName = hidden ? "未探明" : city.name;
     card.disabled = state.strategyBusy;
     const queuedActions = strategyQueuedActionsForCity(campaign, city.id);
     const cityArmies = armiesByNodeId.get(city.node_id) || [];
     const encounter = encountersByNodeId.get(city.node_id);
     const siege = siegesByNodeId.get(city.node_id);
-    const ownership = strategyMapOwnership(city, campaign, faction);
-    const cityStateLabels = strategyCityStateLabels(city);
+    const ownership = hidden
+      ? { className: "is-hidden", marker: "·", label: "未探明" }
+      : strategyMapOwnership(city, campaign, faction);
+    const cityStateLabels = hidden ? [] : strategyCityStateLabels(city);
     const isSelected = city.id === selectedCityId;
     const isCrisisThreatened = (campaign?.world?.world_crises || []).some((crisis) =>
       (crisis.threatened_city_ids || []).includes(city.id)
@@ -1434,16 +1527,18 @@ export function renderStrategyMap(current, campaign, faction) {
       encounter ? "发生遭遇" : "",
       siege ? "正在围城" : "",
     ].filter(Boolean);
-    const settlement = strategyCitySettlement(city);
+    const settlement = hidden ? "village" : strategyCitySettlement(city);
     card.className = `${card.className} is-marker is-${settlement}`;
-    if (cityArmies.some((army) => army.army_kind === "snow_ghost")) card.className += " is-snow-ghost";
-    const factionColor = strategyFactionColor(campaign, city.owner_faction_id);
+    if (!hidden && cityArmies.some((army) => army.army_kind === "snow_ghost")) card.className += " is-snow-ghost";
+    const factionColor = hidden ? "#8a8476" : strategyFactionColor(campaign, city.owner_faction_id);
     if (typeof card.style?.setProperty === "function") card.style.setProperty("--faction-color", factionColor);
     else card.style["--faction-color"] = factionColor;
     card.setAttribute("aria-pressed", isSelected ? "true" : "false");
     card.setAttribute(
       "aria-label",
-      `${city.name}，${SETTLEMENT_LABELS[settlement]}，${ownership.label}，${strategyFactionName(campaign, city.owner_faction_id)}，兵力 ${city.resources?.troops || 0}，城防 ${city.defense || 0}${accessibleStates.length ? `，${accessibleStates.join("，")}` : ""}`
+      hidden
+        ? `未探明的聚落${isSelected ? "，当前目标" : ""}`
+        : `${city.name}，${SETTLEMENT_LABELS[settlement]}，${ownership.label}，${strategyFactionName(campaign, city.owner_faction_id)}，兵力 ${city.resources?.troops || 0}，城防 ${city.defense || 0}${accessibleStates.length ? `，${accessibleStates.join("，")}` : ""}`
     );
     card.addEventListener("click", () => {
       strategyRememberSelectedCity(city.id, campaign);
@@ -1460,7 +1555,7 @@ export function renderStrategyMap(current, campaign, faction) {
     art.className = "strategy-map-marker-art";
     art.innerHTML = SETTLEMENT_MARKERS[settlement];
     marker.append(halo, art);
-    if (faction?.capital_city_id && city.id === faction.capital_city_id && city.owner_faction_id === faction.id) {
+    if (!hidden && faction?.capital_city_id && city.id === faction.capital_city_id && city.owner_faction_id === faction.id) {
       const crown = document.createElement("span");
       crown.className = "strategy-map-capital-mark";
       crown.setAttribute("aria-hidden", "true");
@@ -1471,27 +1566,31 @@ export function renderStrategyMap(current, campaign, faction) {
     caption.className = "strategy-map-caption";
     const strong = document.createElement("strong");
     strong.className = "strategy-map-name";
-    strong.textContent = city.name;
-    const troops = document.createElement("span");
-    troops.className = "strategy-map-troops";
-    troops.textContent = `兵力：${city.resources?.troops || 0}`;
-    caption.append(strong, troops);
+    strong.textContent = hidden ? "未探明" : city.name;
+    if (!hidden) {
+      const troops = document.createElement("span");
+      troops.className = "strategy-map-troops";
+      troops.textContent = `兵力：${city.resources?.troops || 0}`;
+      caption.append(strong, troops);
+    } else {
+      caption.append(strong);
+    }
     card.append(marker, caption);
-    appendTextLine(card, "strategy-map-hidden-text", `${ownership.label} · ${SETTLEMENT_LABELS[settlement]}`);
+    appendTextLine(card, "strategy-map-hidden-text", hidden ? "未探明的聚落" : `${ownership.label} · ${SETTLEMENT_LABELS[settlement]}`);
     if (isSelected) appendTextLine(card, "strategy-map-hidden-text", "当前目标");
-    if (cityStateLabels.length) appendTextLine(card, "strategy-map-hidden-text", cityStateLabels.join("、"));
-    if (isCrisisThreatened) appendTextLine(card, "strategy-map-hidden-text", "雪鬼威胁");
+    if (!hidden && cityStateLabels.length) appendTextLine(card, "strategy-map-hidden-text", cityStateLabels.join("、"));
+    if (!hidden && isCrisisThreatened) appendTextLine(card, "strategy-map-hidden-text", "雪鬼威胁");
     if (queuedActions.length) appendTextLine(card, "strategy-map-hidden-text", `已计划 ${queuedActions.length}`);
-    if (cityArmies.length) appendTextLine(card, "strategy-map-hidden-text", `${cityArmies.length} 支军队`);
-    if (encounter) appendTextLine(card, "strategy-map-hidden-text", "发生遭遇");
-    if (siege) appendTextLine(card, "strategy-map-hidden-text", `围城 · ${strategySiegeStatusLabel(siege.status)}`);
+    if (!hidden && cityArmies.length) appendTextLine(card, "strategy-map-hidden-text", `${cityArmies.length} 支军队`);
+    if (!hidden && encounter) appendTextLine(card, "strategy-map-hidden-text", "发生遭遇");
+    if (!hidden && siege) appendTextLine(card, "strategy-map-hidden-text", `围城 · ${strategySiegeStatusLabel(siege.status)}`);
     const adjacentCities = (node?.connected_node_ids || [])
       .map((nodeId) => citiesByNodeId.get(nodeId))
-      .filter(Boolean);
+      .filter((item) => item && !strategyCityIsHidden(item) && item.name);
     if (adjacentCities.length) {
       appendTextLine(card, "strategy-map-hidden-text", `相邻：${adjacentCities.map((item) => item.name).join("、")}`);
     }
-    const targets = strategyAttackTargetsForCity(campaign, city, faction?.id);
+    const targets = hidden ? [] : strategyAttackTargetsForCity(campaign, city, faction?.id);
     if (targets.length) {
       appendTextLine(card, "strategy-map-hidden-text", `可进攻：${targets.map((item) => item.name).join("、")}`);
     }
@@ -1526,15 +1625,16 @@ export function renderStrategyMap(current, campaign, faction) {
   });
   viewport.append(canvas);
   map.append(viewport);
-  const controller = attachStrategyMapView(viewport, canvas, campaign?.id || 0);
-  const focusCityId = state.strategyMapFocusCityId;
-  if (focusCityId) {
-    const focusCity = cities.find((city) => city.id === focusCityId);
-    state.strategyMapFocusCityId = "";
-    const pan = () => panStrategyMapToNode(viewport, positions, focusCity?.node_id);
-    if (typeof window !== "undefined" && window.requestAnimationFrame) window.requestAnimationFrame(pan);
-    else pan();
-  }
+  const homeCity = strategySelectedCity(campaign, faction)
+    || (campaign?.world?.cities || []).find((city) => city.id === faction?.capital_city_id)
+    || (campaign?.world?.cities || []).find((city) => city.owner_faction_id === faction?.id)
+    || (campaign?.world?.cities || [])[0];
+  const controller = attachStrategyMapView(viewport, canvas, {
+    campaignId: campaign?.id || 0,
+    layout,
+    homePosition: positions.get(homeCity?.node_id || homeCity?.nodeId),
+  });
+  requestStrategyMapFocus(viewport, positions, cities);
 
   // 缩放条压在地图角上，而不是另占一行——它服务于地图，不是屏幕上的一块内容。
   const tools = document.createElement("div");
@@ -1746,7 +1846,15 @@ function createStrategyCityBuildings(campaign, city, faction, office) {
     const atCap = nextLevel > maxLevel;
     const moneyCost = Number(project.money || 0) * nextLevel;
     const foodCost = Number(project.food || 0) * nextLevel;
-    const canAfford = Number(city.resources?.money || 0) >= moneyCost && Number(city.resources?.food || 0) >= foodCost;
+    const rareCost = Number(project.rare || 0) * nextLevel;
+    const rareId = project.rare_resource || "";
+    const rareName = project.rare_resource_name || "";
+    const rareStock = Number(faction?.rare_resources?.[rareId] || faction?.resource_board?.goods?.find((item) => item.id === rareId)?.stock || 0);
+    const canAfford = (
+      Number(city.resources?.money || 0) >= moneyCost
+      && Number(city.resources?.food || 0) >= foodCost
+      && (!rareId || !rareCost || rareStock >= rareCost)
+    );
     const canBuild = (
       ownCity
       && canGovern
@@ -1774,7 +1882,7 @@ function createStrategyCityBuildings(campaign, city, faction, office) {
       project.effect || "",
       atCap
         ? (maxLevel ? `已达 ${maxLevel} 级上限` : "当前类型无法建造")
-        : `升级 ${nextLevel} 级 · 钱 ${moneyCost} / 粮 ${foodCost}`,
+        : `升级 ${nextLevel} 级 · 钱 ${moneyCost} / 粮 ${foodCost}${rareId && rareCost ? ` / ${rareName || "稀有资源"} ${rareCost}` : ""}`,
     ];
     bindStrategyHoverTip(chip, tip);
     if (canBuild) {
@@ -1800,6 +1908,14 @@ export function createStrategyCityDetailCard(campaign, city, faction, office = s
     appendTextLine(card, "strategy-meta", "地图上还没有可查看的城市。");
     return card;
   }
+  if (strategyCityIsHidden(city)) {
+    card.classList.add("is-hidden");
+    const title = document.createElement("strong");
+    title.textContent = "未探明的聚落";
+    card.append(title);
+    appendTextLine(card, "strategy-meta", "沿已知道路派出斥候后，才能看到这座城的名字、归属和城防。");
+    return card;
+  }
 
   const cityFaction = strategyFactionById(campaign, city.owner_faction_id);
   const ownership = strategyMapOwnership(city, campaign, faction);
@@ -1821,11 +1937,18 @@ export function createStrategyCityDetailCard(campaign, city, faction, office = s
     ["defense", "火炮", `${city.cannon_stock || 0}/${city.cannon_stock_cap || 0}`],
   ].forEach(([icon, label, value]) => stats.append(createStrategyCityStatChip(icon, label, value)));
   card.append(stats);
-  appendTextLine(card, "strategy-city-context-faction", strategyFactionName(campaign, city.owner_faction_id));
   if (city.owner_faction_id === faction?.id) {
     const used = strategyQueuedActionsForCity(campaign, city.id).length;
     const limit = strategyCityOrderLimit(campaign);
     appendTextLine(card, "strategy-city-order-budget", `本城军令 ${Math.max(0, limit - used)}/${limit} 可用 · 已排 ${used} 条`);
+  }
+  const veinLabels = Array.isArray(city.vein_labels) ? city.vein_labels : [];
+  if (veinLabels.length) {
+    appendTextLine(
+      card,
+      "strategy-city-veins",
+      `矿脉 · ${veinLabels.map((item) => `${item.name}×${item.count}`).join("　")}`,
+    );
   }
   card.append(createStrategyCityBuildings(campaign, city, faction, office));
   const ownCityForWorks = city.owner_faction_id === faction?.id;

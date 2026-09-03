@@ -289,7 +289,13 @@ class CampaignRecord:
     office_takeovers: tuple[OfficeTakeoverRecord, ...] = ()
     battle_recoveries: tuple[BattleRecoveryRecord, ...] = ()
 
-    def to_public_dict(self, *, resume_status: ResumeStatus | None = None) -> dict[str, Any]:
+    def to_public_dict(
+        self,
+        *,
+        resume_status: ResumeStatus | None = None,
+        viewer_user_id: int | None = None,
+        viewer_faction_id: str | None = None,
+    ) -> dict[str, Any]:
         from wujiang.strategic.campaign_tutorial import campaign_tutorial_public
         from wujiang.strategic.campaign_retrospective import campaign_retrospective_public
         from wujiang.strategic.ai_goals import ai_strategic_goals_public
@@ -304,6 +310,7 @@ class CampaignRecord:
         public_join_code = self.join_code if invite_status == "open" else ""
         payload = {
             "id": self.campaign_id,
+            "detail": True,
             "join_code": public_join_code,
             "invite": {
                 "status": invite_status,
@@ -358,6 +365,57 @@ class CampaignRecord:
         payload["world"]["campaign_retrospective"] = campaign_retrospective_public(self.world)
         payload["world"]["ai_strategic_goals"] = ai_strategic_goals_public(self.world)
         payload["world"]["office_coordination"] = office_coordination_public(self.world, self.queued_actions)
+        if resume_status is not None:
+            payload["resume"] = resume_status.to_dict()
+        if viewer_faction_id is None and viewer_user_id is not None:
+            from wujiang.strategic.service import campaign_member_faction_id
+            from wujiang.strategic.errors import StrategyError as CampaignAccessError
+
+            try:
+                viewer_faction_id = campaign_member_faction_id(self, int(viewer_user_id))
+            except CampaignAccessError:
+                viewer_faction_id = None
+        if viewer_faction_id and self.status not in {"lobby"}:
+            from wujiang.strategic.vision import mask_campaign_public_for_faction
+
+            payload = mask_campaign_public_for_faction(payload, self.world, viewer_faction_id)
+        payload["detail"] = True
+        return payload
+
+    def to_list_dict(self, *, resume_status: ResumeStatus | None = None) -> dict[str, Any]:
+        invite_status = "locked" if self.status != "lobby" else ("open" if self.join_code_enabled else "revoked")
+        public_join_code = self.join_code if invite_status == "open" else ""
+        conclusion = dict(self.world.campaign_conclusion or {})
+        payload = {
+            "id": self.campaign_id,
+            "detail": False,
+            "join_code": public_join_code,
+            "invite": {
+                "status": invite_status,
+                "join_code": public_join_code,
+                "can_join": invite_status == "open",
+            },
+            "name": self.name,
+            "owner_user_id": self.owner_user_id,
+            "status": self.status,
+            "current_month": self.current_month,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "world": {
+                "current_month": self.world.current_month,
+                "cities": [{"id": city.city_id} for city in self.world.cities],
+                "factions": [{"id": faction.faction_id} for faction in self.world.factions],
+                "strategic_status": {
+                    "awaiting_conclusion_choice": bool(conclusion.get("state") == "awaiting_choice"),
+                    "conclusion": {
+                        "result_label": conclusion.get("result_label") or "",
+                        "state": conclusion.get("state") or "",
+                    },
+                    "can_advance_month": bool(resume_status.can_advance_month) if resume_status is not None else False,
+                },
+            },
+            "members": [member.to_dict() for member in self.members],
+        }
         if resume_status is not None:
             payload["resume"] = resume_status.to_dict()
         return payload

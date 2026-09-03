@@ -25,6 +25,8 @@ from wujiang.strategic import campaign_variant_catalog_public
 from wujiang.strategic import choose_player_hero_path
 from wujiang.strategic import continue_campaign_as_sandbox
 from wujiang.strategic import first_campaign_contract
+from wujiang.strategic import true_campaign_contract
+from wujiang.strategic import world_catalog_public
 from wujiang.strategic.world_crisis import apply_campaign_play_settings
 from wujiang.strategic import normalize_strategic_hero_deployment
 from wujiang.strategic import quick_campaign_contract
@@ -56,6 +58,15 @@ from wujiang.platform.http import runtime
 from wujiang.strategic import campaign_runtime
 
 
+def _public_campaign(campaign, user, resume_status=None):
+    if resume_status is None:
+        resume_status = campaign_runtime.STRATEGY_STORE.resume_status(campaign.campaign_id)
+    return campaign.to_public_dict(
+        resume_status=resume_status,
+        viewer_user_id=int(getattr(user, "user_id", 0) or 0) or None,
+    )
+
+
 @get("/api/strategy/campaigns")
 def get_strategy_campaigns(ctx: RequestContext) -> None:
     handler = ctx.handler
@@ -63,21 +74,31 @@ def get_strategy_campaigns(ctx: RequestContext) -> None:
     try:
         user = authenticated_user_from_request(handler, query=query)
         campaigns = campaign_runtime.STRATEGY_STORE.list_campaigns_for_user(user.user_id)
+        focus_id = int(ctx.query_value("focus_id") or 0)
+        summary_only = ctx.query_value("summary") == "1"
     except AuthError as exc:
         auth_error_response(handler, exc)
         return
     except StrategyError as exc:
         strategy_error_response(handler, exc)
         return
+    except (TypeError, ValueError):
+        json_response(handler, HTTPStatus.BAD_REQUEST, {"error": "focus_id 必须是整数。"})
+        return
+    listed = []
+    for campaign in campaigns:
+        resume_status = campaign_runtime.STRATEGY_STORE.resume_status(campaign.campaign_id)
+        if summary_only or (focus_id and campaign.campaign_id != focus_id):
+            listed.append(campaign.to_list_dict(resume_status=resume_status))
+            continue
+        listed.append(_public_campaign(campaign, user, resume_status))
     json_response(
         handler,
         HTTPStatus.OK,
         {
             "campaign_variants": campaign_variant_catalog_public(),
-            "campaigns": [
-                campaign.to_public_dict(resume_status=campaign_runtime.STRATEGY_STORE.resume_status(campaign.campaign_id))
-                for campaign in campaigns
-            ],
+            "world_catalog": world_catalog_public(),
+            "campaigns": listed,
         },
     )
     return
@@ -90,10 +111,17 @@ def post_strategy_campaigns_create(ctx: RequestContext) -> None:
     auth_user = ctx.auth_user
     try:
         assert auth_user is not None
-        campaign_contract = first_campaign_contract(
-            str(payload.get("variant_id") or "classic_frontier"),
-            major_faction_count=int(payload.get("major_faction_count") or 2),
-        )
+        mode = str(payload.get("mode") or "random_campaign").strip() or "random_campaign"
+        if mode == "true_campaign":
+            campaign_contract = true_campaign_contract(
+                payload.get("scenario_id"),
+                variant_id=str(payload.get("variant_id") or "classic_frontier"),
+            )
+        else:
+            campaign_contract = first_campaign_contract(
+                str(payload.get("variant_id") or "classic_frontier"),
+                major_faction_count=int(payload.get("major_faction_count") or 2),
+            )
         if "crisis_earliest_year" in payload or "year_limit" in payload:
             campaign_contract = apply_campaign_play_settings(
                 campaign_contract,
@@ -119,7 +147,7 @@ def post_strategy_campaigns_create(ctx: RequestContext) -> None:
     json_response(
         handler,
         HTTPStatus.OK,
-        {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+        {"campaign": _public_campaign(campaign, auth_user, resume_status)},
     )
     return
 
@@ -162,7 +190,7 @@ def post_strategy_campaigns_quick_start(ctx: RequestContext) -> None:
     json_response(
         handler,
         HTTPStatus.OK,
-        {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+        {"campaign": _public_campaign(campaign, auth_user, resume_status)},
     )
     return
 
@@ -188,7 +216,7 @@ def post_strategy_campaigns_join(ctx: RequestContext) -> None:
     json_response(
         handler,
         HTTPStatus.OK,
-        {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+        {"campaign": _public_campaign(campaign, auth_user, resume_status)},
     )
     return
 
@@ -220,7 +248,7 @@ def post_strategy_campaigns_lock(ctx: RequestContext) -> None:
     json_response(
         handler,
         HTTPStatus.OK,
-        {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+        {"campaign": _public_campaign(campaign, auth_user, resume_status)},
     )
     return
 
@@ -244,7 +272,7 @@ def post_strategy_campaigns_rotate_join_code(ctx: RequestContext) -> None:
     json_response(
         handler,
         HTTPStatus.OK,
-        {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+        {"campaign": _public_campaign(campaign, auth_user, resume_status)},
     )
     return
 
@@ -268,7 +296,7 @@ def post_strategy_campaigns_revoke_join_code(ctx: RequestContext) -> None:
     json_response(
         handler,
         HTTPStatus.OK,
-        {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+        {"campaign": _public_campaign(campaign, auth_user, resume_status)},
     )
     return
 
@@ -292,7 +320,7 @@ def post_strategy_campaigns_enter(ctx: RequestContext) -> None:
     json_response(
         handler,
         HTTPStatus.OK,
-        {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+        {"campaign": _public_campaign(campaign, auth_user, resume_status)},
     )
     return
 
@@ -354,7 +382,7 @@ def post_strategy_campaigns_resume(ctx: RequestContext) -> None:
     json_response(
         handler,
         HTTPStatus.OK,
-        {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+        {"campaign": _public_campaign(campaign, auth_user, resume_status)},
     )
     return
 
@@ -388,6 +416,7 @@ def post_strategy_campaigns_choose_hero_path(ctx: RequestContext) -> None:
             path=path,
             assigned_faction_id=assigned_faction_id,
             target_faction_id=str(payload.get("target_faction_id") or ""),
+            faction_name=str(payload.get("faction_name") or ""),
             allow_reselect=campaign.status == "lobby",
         )
         campaign = campaign_runtime.STRATEGY_STORE.update_world(campaign_id, auth_user.user_id, next_world)
@@ -401,7 +430,7 @@ def post_strategy_campaigns_choose_hero_path(ctx: RequestContext) -> None:
     json_response(
         handler,
         HTTPStatus.OK,
-        {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+        {"campaign": _public_campaign(campaign, auth_user, resume_status)},
     )
     return
 
@@ -435,7 +464,7 @@ def post_strategy_campaigns_quick_opening_choice(ctx: RequestContext) -> None:
     json_response(
         handler,
         HTTPStatus.OK,
-        {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+        {"campaign": _public_campaign(campaign, auth_user, resume_status)},
     )
     return
 
@@ -468,7 +497,7 @@ def post_strategy_campaigns_guide_action(ctx: RequestContext) -> None:
     json_response(
         handler,
         HTTPStatus.OK,
-        {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+        {"campaign": _public_campaign(campaign, auth_user, resume_status)},
     )
     return
 
@@ -496,7 +525,7 @@ def post_strategy_campaigns_month_ready(ctx: RequestContext) -> None:
     json_response(
         handler,
         HTTPStatus.OK,
-        {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+        {"campaign": _public_campaign(campaign, auth_user, resume_status)},
     )
     return
 
@@ -526,7 +555,7 @@ def post_strategy_campaigns_office_change_request(ctx: RequestContext) -> None:
     json_response(
         handler,
         HTTPStatus.OK,
-        {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+        {"campaign": _public_campaign(campaign, auth_user, resume_status)},
     )
     return
 
@@ -555,7 +584,7 @@ def post_strategy_campaigns_office_change_respond(ctx: RequestContext) -> None:
     json_response(
         handler,
         HTTPStatus.OK,
-        {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+        {"campaign": _public_campaign(campaign, auth_user, resume_status)},
     )
     return
 
@@ -581,7 +610,7 @@ def post_strategy_campaigns_office_takeover_grant(ctx: RequestContext) -> None:
     except StrategyError as exc:
         strategy_error_response(handler, exc)
         return
-    json_response(handler, HTTPStatus.OK, {"campaign": campaign.to_public_dict(resume_status=resume_status)})
+    json_response(handler, HTTPStatus.OK, {"campaign": _public_campaign(campaign, auth_user, resume_status)})
     return
 
 
@@ -605,7 +634,7 @@ def post_strategy_campaigns_office_takeover_revoke(ctx: RequestContext) -> None:
     except StrategyError as exc:
         strategy_error_response(handler, exc)
         return
-    json_response(handler, HTTPStatus.OK, {"campaign": campaign.to_public_dict(resume_status=resume_status)})
+    json_response(handler, HTTPStatus.OK, {"campaign": _public_campaign(campaign, auth_user, resume_status)})
     return
 
 
@@ -631,7 +660,7 @@ def post_strategy_campaigns_close_month_deadline(ctx: RequestContext) -> None:
     json_response(
         handler,
         HTTPStatus.OK,
-        {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+        {"campaign": _public_campaign(campaign, auth_user, resume_status)},
     )
     return
 
@@ -714,7 +743,7 @@ def post_strategy_campaigns_advance_month(ctx: RequestContext) -> None:
         handler,
         HTTPStatus.OK,
         {
-            "campaign": campaign.to_public_dict(resume_status=resume_status),
+            "campaign": _public_campaign(campaign, auth_user, resume_status),
             **({"battle_rooms": battle_rooms} if battle_rooms else {}),
         },
     )
@@ -744,7 +773,7 @@ def post_strategy_campaigns_continue_sandbox(ctx: RequestContext) -> None:
     json_response(
         handler,
         HTTPStatus.OK,
-        {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+        {"campaign": _public_campaign(campaign, auth_user, resume_status)},
     )
     return
 
@@ -775,7 +804,7 @@ def post_strategy_campaigns_archive(ctx: RequestContext) -> None:
     json_response(
         handler,
         HTTPStatus.OK,
-        {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+        {"campaign": _public_campaign(campaign, auth_user, resume_status)},
     )
     return
 
@@ -839,7 +868,7 @@ def post_strategy_campaigns_queue_action(ctx: RequestContext) -> None:
         handler,
         HTTPStatus.OK,
         {
-            "campaign": campaign.to_public_dict(resume_status=resume_status),
+            "campaign": _public_campaign(campaign, auth_user, resume_status),
             "submission": {
                 "replaced": previous_action is not None,
                 "previous_action": previous_action.to_dict() if previous_action is not None else None,
@@ -899,7 +928,7 @@ def post_strategy_campaigns_cancel_action(ctx: RequestContext) -> None:
         handler,
         HTTPStatus.OK,
         {
-            "campaign": campaign.to_public_dict(resume_status=resume_status),
+            "campaign": _public_campaign(campaign, auth_user, resume_status),
             "command_points": faction_command_points(
                 campaign_member_faction_id(campaign, auth_user.user_id),
                 campaign.queued_actions,
@@ -945,7 +974,7 @@ def post_strategy_campaigns_set_city_policy(ctx: RequestContext) -> None:
     json_response(
         handler,
         HTTPStatus.OK,
-        {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+        {"campaign": _public_campaign(campaign, auth_user, resume_status)},
     )
     return
 
@@ -984,7 +1013,7 @@ def post_strategy_campaigns_set_defense_hero(ctx: RequestContext) -> None:
     json_response(
         handler,
         HTTPStatus.OK,
-        {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+        {"campaign": _public_campaign(campaign, auth_user, resume_status)},
     )
     return
 
@@ -1025,7 +1054,7 @@ def post_strategy_campaigns_set_battle_defense_hero(ctx: RequestContext) -> None
     json_response(
         handler,
         HTTPStatus.OK,
-        {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+        {"campaign": _public_campaign(campaign, auth_user, resume_status)},
     )
     return
 
@@ -1060,7 +1089,7 @@ def post_strategy_campaigns_unlock_tactic_tech(ctx: RequestContext) -> None:
     json_response(
         handler,
         HTTPStatus.OK,
-        {"campaign": campaign.to_public_dict(resume_status=resume_status)},
+        {"campaign": _public_campaign(campaign, auth_user, resume_status)},
     )
     return
 
@@ -1106,7 +1135,7 @@ def post_strategy_campaigns_resolve_world_crisis_showdown(ctx: RequestContext) -
         handler,
         HTTPStatus.OK,
         {
-            "campaign": campaign.to_public_dict(resume_status=resume_status),
+            "campaign": _public_campaign(campaign, auth_user, resume_status),
             **({"battle_room": battle_room} if battle_room is not None else {}),
         },
     )
@@ -1193,7 +1222,7 @@ def post_strategy_campaigns_resolve_strategic_battle(ctx: RequestContext) -> Non
         handler,
         HTTPStatus.OK,
         {
-            "campaign": campaign.to_public_dict(resume_status=resume_status),
+            "campaign": _public_campaign(campaign, auth_user, resume_status),
             **({"battle_room": battle_room} if battle_room is not None else {}),
         },
     )
@@ -1236,7 +1265,7 @@ def post_strategy_campaigns_resolve_battle_choice(ctx: RequestContext) -> None:
         handler,
         HTTPStatus.OK,
         {
-            "campaign": campaign.to_public_dict(resume_status=resume_status),
+            "campaign": _public_campaign(campaign, auth_user, resume_status),
             **({"battle_room": battle_room} if battle_room is not None else {}),
         },
     )
@@ -1296,7 +1325,7 @@ def post_strategy_campaigns_declare_attack(ctx: RequestContext) -> None:
         handler,
         HTTPStatus.OK,
         {
-            "campaign": campaign.to_public_dict(resume_status=resume_status),
+            "campaign": _public_campaign(campaign, auth_user, resume_status),
             **({"battle_room": battle_room} if battle_room is not None else {}),
         },
     )
@@ -1361,9 +1390,7 @@ def post_strategy_campaigns_restart_battle_from_snapshot(ctx: RequestContext) ->
         handler,
         HTTPStatus.OK,
         {
-            "campaign": campaign.to_public_dict(
-                resume_status=campaign_runtime.STRATEGY_STORE.resume_status(campaign.campaign_id)
-            ),
+            "campaign": _public_campaign(campaign, auth_user),
             "battle_room": battle_room,
         },
     )

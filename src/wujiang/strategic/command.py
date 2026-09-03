@@ -21,13 +21,13 @@ def strategy_action_command_cost(action_type: str, payload: dict[str, Any] | Non
         return 2 if action_id == "suppress" else 1
     if normalized_type in {"send_office_request", "request_registered_units"}:
         return 0
-    if normalized_type in {"approve_registered_unit_request", "assign_strategic_hero_duty", "cancel_tactic_research"}:
+    if normalized_type in {"approve_registered_unit_request", "assign_strategic_hero_duty", "cancel_tactic_research", "accept_resource_trade", "reject_resource_trade"}:
         return 0
     if normalized_type == "issue_office_order":
         return 1
     if normalized_type == "peaceful_integration":
         return 2
-    if normalized_type in {"incite_neutral_city_state", "neutral_diplomacy", "faction_diplomacy", "world_crisis_choice"}:
+    if normalized_type in {"incite_neutral_city_state", "neutral_diplomacy", "faction_diplomacy", "world_crisis_choice", "propose_resource_trade"}:
         return 1
     if normalized_type in {
         "set_city_policy",
@@ -53,6 +53,7 @@ def strategy_action_command_cost(action_type: str, payload: dict[str, Any] | Non
         "construct_city_building",
         "upgrade_city_settlement",
         "start_city_work",
+        "explore_city",
     }:
         return 1
     return 1

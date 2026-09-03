@@ -216,6 +216,9 @@ def advance_month(world: WorldState) -> WorldState:
     from wujiang.strategic.offices import ensure_office_system
 
     next_world = ensure_strategic_hero_system(ensure_office_system(next_world))
+    from wujiang.strategic.vision import refresh_all_territory_vision
+
+    refresh_all_territory_vision(next_world)
     next_world.current_month += 1
     month = next_world.current_month
     events: list[EventLogEntry] = [
@@ -256,6 +259,10 @@ def advance_month(world: WorldState) -> WorldState:
         resolve_rebellion_political_outcome(next_world, city, events=events, month=month)
         finish_occupation_month(city, month=month, events=events)
 
+    from wujiang.strategic.rare_resources import apply_monthly_vein_income, expire_trade_offers
+
+    apply_monthly_vein_income(next_world, events, month)
+    expire_trade_offers(next_world, events, month)
     next_world.event_log.extend(events)
     next_world.memory_tags.append(f"month_{month}_resolved")
     next_world = record_strategic_status_events(next_world)

@@ -1939,6 +1939,19 @@ class RoomBehaviorTests(unittest.TestCase):
             params={"session_token": self.default_session_token()},
         )
         self.assertEqual([item["id"] for item in listed["campaigns"]], [campaign_id])
+        self.assertTrue(listed["campaigns"][0].get("detail"))
+        summary = self.api_get(
+            "/api/strategy/campaigns",
+            params={"session_token": self.default_session_token(), "summary": "1"},
+        )
+        self.assertEqual(summary["campaigns"][0].get("detail"), False)
+        self.assertNotIn("nodes", summary["campaigns"][0]["world"])
+        focused = self.api_get(
+            "/api/strategy/campaigns",
+            params={"session_token": self.default_session_token(), "focus_id": str(campaign_id)},
+        )
+        self.assertTrue(focused["campaigns"][0].get("detail"))
+        self.assertIn("nodes", focused["campaigns"][0]["world"])
 
         entered = self.api_post("/api/strategy/campaigns/enter", {"campaign_id": campaign_id})
         self.assertFalse(entered["campaign"]["resume"]["can_resume"])
@@ -8336,13 +8349,15 @@ class FrontendBehaviorTests(unittest.TestCase):
         for module_id, label in (
             ("city", "城市"),
             ("diplomacy", "外交"),
+            ("resources", "资源"),
             ("heroes", "武将"),
             ("orders", "军令"),
             ("expedition", "出征"),
             ("tech", "科技"),
             ("crisis", "危机"),
             ("relic", "圣物"),
-            ("log", "战况"),
+            ("log", "事件"),
+            ("seats", "成员"),
             ("more", "更多"),
         ):
             self.assertIn(f'id: "{module_id}"', war_room_source)
@@ -9526,7 +9541,7 @@ class FrontendBehaviorTests(unittest.TestCase):
             }
             // 操作面板一次只挂出一个模块，所以"翻到某一页"是探测这一屏的前提；
             // 屏幕文本因此是各页文本之和，而不是某一次渲染的结果。
-            const DOCK_TABS = ["city", "diplomacy", "heroes", "orders", "expedition", "tech", "crisis", "relic", "log"];
+            const DOCK_TABS = ["city", "diplomacy", "resources", "heroes", "orders", "expedition", "tech", "crisis", "relic", "log", "seats", "more"];
             function openDockTab(tab) {
               state.strategyDockTab = tab;
               state.strategyDockOpen = true;
@@ -9539,7 +9554,7 @@ class FrontendBehaviorTests(unittest.TestCase):
               openDockTab("city");
               return text;
             }
-            const rotateButton = findButtonByText(openDockTab("log"), "重新生成加入码");
+            const rotateButton = findButtonByText(openDockTab("seats"), "重新生成加入码");
             globalThis.hasRotateJoinCodeButton = Boolean(rotateButton);
             if (rotateButton) rotateButton.listeners.click[0]();
             const ordersPage = openDockTab("orders");
@@ -9828,7 +9843,7 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertTrue(ctx.eval("globalThis.mapIsUnderTheDock"))
         self.assertEqual(
             json.loads(ctx.eval("JSON.stringify(globalThis.dockTabLabels)")),
-            ["城市", "外交", "武将", "军令 1", "出征", "科技", "危机", "圣物", "战况", "更多", "›"],
+            ["城市", "外交", "资源", "武将", "军令 1", "出征", "科技", "危机", "圣物", "事件", "成员", "更多", "»"],
         )
         self.assertFalse(ctx.eval("globalThis.dockOpenAfterClickingActiveTab"))
         self.assertTrue(ctx.eval("globalThis.dockOpenAfterClickingAgain"))

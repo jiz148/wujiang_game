@@ -973,8 +973,11 @@ def apply_strategy_ai_monthly_actions(
     enable_attacks: bool = True,
     command_remaining_by_faction: dict[str, int] | None = None,
 ) -> WorldState:
+    from wujiang.strategic.rare_resources import apply_ai_trade_responses
+
     controlled = {str(faction_id) for faction_id in controlled_faction_ids}
     next_world = ensure_office_system(_clone_world(world))
+    next_world = apply_ai_trade_responses(next_world, controlled_faction_ids=controlled)
 
     for faction_id in sorted(faction.faction_id for faction in next_world.factions):
         if faction_id in controlled or faction_is_exiled(next_world, faction_id):
@@ -1396,6 +1399,31 @@ def apply_strategy_ai_monthly_actions(
                     actions.append(action)
                     office_actions.append(f"{attack_office.office_id}:{action}")
                     command_remaining -= 2
+
+        if command_remaining >= 1:
+            from wujiang.strategic.vision import apply_explore_city, explore_options
+
+            scout = next(iter(explore_options(next_world, faction_id)), None)
+            explore_office = ai_office_for_action(
+                next_world,
+                faction_id=faction_id,
+                action_type="explore_city",
+                payload={
+                    "target_city_id": (scout or {}).get("target_city_id") or "",
+                    "from_city_id": (scout or {}).get("from_city_id") or "",
+                },
+            )
+            if scout is not None and explore_office is not None:
+                next_world = apply_explore_city(
+                    next_world,
+                    faction_id=faction_id,
+                    target_city_id=scout["target_city_id"],
+                    from_city_id=scout["from_city_id"],
+                )
+                action = f"explore:{scout['from_city_id']}->{scout['target_city_id']}"
+                actions.append(action)
+                office_actions.append(f"{explore_office.office_id}:{action}")
+                command_remaining -= 1
 
         update_ai_strategic_goal(next_world, faction_id, actions)
 

@@ -56,7 +56,9 @@ def campaign_map_scale(major_faction_count: int | None = None) -> tuple[int, int
         MIN_MAJOR_FACTION_COUNT,
         min(MAX_MAJOR_FACTION_COUNT, int(major_faction_count or FIRST_CAMPAIGN_MAJOR_FACTION_COUNT)),
     )
-    city_count = max(FIRST_CAMPAIGN_CITY_COUNT, majors * 2)
+    from wujiang.strategic.catalog import MAX_WORLD_CITIES
+
+    city_count = min(MAX_WORLD_CITIES, max(FIRST_CAMPAIGN_CITY_COUNT, majors * 2))
     return majors, city_count, city_count - majors
 
 

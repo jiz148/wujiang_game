@@ -772,6 +772,11 @@ def enrich_world_public_state(world: WorldState) -> dict[str, Any]:
                 for other in world.factions
                 if other.faction_id != faction.faction_id and other.is_major
             }
+        from wujiang.strategic.rare_resources import rare_resources_public
+
+        faction_payload["rare_resources"] = dict(faction.rare_resources)
+        faction_payload["resource_board"] = rare_resources_public(world, faction.faction_id)
+        faction_payload["nation_id"] = faction.nation_id
     for city_payload, city in zip(payload["cities"], world.cities):
         faction = factions_by_id[city.owner_faction_id]
         city_payload["troop_conversion"] = city_troop_conversion(city, faction)
@@ -785,6 +790,18 @@ def enrich_world_public_state(world: WorldState) -> dict[str, Any]:
         city_payload["cannon_stock_cap"] = cannon_stock_cap(city)
         city_payload["economy_class"] = city_economy_class(city)
         city_payload["economy_class_label"] = SETTLEMENT_LABELS.get(city_economy_class(city), city_economy_class(city))
+        from wujiang.strategic.catalog import rare_resource_def
+
+        city_payload["veins"] = dict(getattr(city, "veins", None) or {})
+        city_payload["vein_labels"] = [
+            {
+                "id": resource_id,
+                "name": (rare_resource_def(resource_id) or {}).get("name") or resource_id,
+                "count": int(amount),
+            }
+            for resource_id, amount in dict(getattr(city, "veins", None) or {}).items()
+            if int(amount) > 0
+        ]
         city_payload["city_works"] = city_work_options(world, city, faction)
         city_payload["occupation_governance"] = occupation_status_public(world, city.city_id)
         city_payload["rebellion_funding_options"] = {
@@ -809,6 +826,12 @@ def enrich_world_public_state(world: WorldState) -> dict[str, Any]:
     payload["scheduled_consequences"] = scheduled_consequences_public(world)
     payload["office_system"] = office_system_public(world)
     payload["building_projects"] = building_projects_public()
+    from wujiang.strategic.catalog import world_catalog_public
+    from wujiang.strategic.rare_resources import trade_good_defs
+
+    payload["rare_resource_catalog"] = world_catalog_public()["rare_resources"]
+    payload["trade_goods"] = trade_good_defs()
+    payload["trade_offers"] = [offer.to_public_dict() for offer in world.trade_offers]
     payload["city_works"] = city_works_public()
     payload["settlement_upgrades"] = settlement_upgrades_public()
     payload["registered_unit_types"] = registered_unit_types_public()

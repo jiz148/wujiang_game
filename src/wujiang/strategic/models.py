@@ -39,6 +39,25 @@ def _plain_dict(raw: Any) -> dict[str, Any]:
     return {str(key): value for key, value in raw.items()}
 
 
+def _known_city_ids_by_faction(raw: Any, *, cities: list[City] | None = None, factions: list[Faction] | None = None) -> dict[str, list[str]]:
+    city_ids = {city.city_id for city in (cities or [])}
+    faction_ids = {faction.faction_id for faction in (factions or [])}
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, list[str]] = {}
+    for faction_id, values in raw.items():
+        key = str(faction_id)
+        if faction_ids and key not in faction_ids:
+            continue
+        known = [
+            str(city_id)
+            for city_id in (values or [])
+            if str(city_id) and (not city_ids or str(city_id) in city_ids)
+        ]
+        result[key] = sorted(set(known))
+    return result
+
+
 FACTION_THEME_COLORS = (
     "#3d7ea6",
     "#c45c4a",
@@ -168,9 +187,19 @@ class Faction:
     incited_against_faction_id: str | None = None
     incited_by_faction_id: str | None = None
     color: str = ""
+    nation_id: str = ""
+    founded_in_campaign: bool = False
+    rare_resources: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.color = normalize_faction_color(self.color)
+        self.nation_id = str(self.nation_id or "")
+        self.founded_in_campaign = bool(self.founded_in_campaign)
+        self.rare_resources = {
+            str(resource_id): max(0, int(amount))
+            for resource_id, amount in (self.rare_resources or {}).items()
+            if str(resource_id)
+        }
         self.diplomatic_reputation = max(0, min(100, int(self.diplomatic_reputation)))
         self.relations = {
             str(faction_id): max(-100, min(100, int(score)))
@@ -215,6 +244,9 @@ class Faction:
             "incited_against_faction_id": self.incited_against_faction_id,
             "incited_by_faction_id": self.incited_by_faction_id,
             "color": self.color,
+            "nation_id": self.nation_id,
+            "founded_in_campaign": self.founded_in_campaign,
+            "rare_resources": dict(self.rare_resources),
         }
 
     @classmethod
@@ -242,6 +274,9 @@ class Faction:
                 str(raw.get("incited_by_faction_id")) if raw.get("incited_by_faction_id") else None
             ),
             color=str(raw.get("color") or ""),
+            nation_id=str(raw.get("nation_id") or ""),
+            founded_in_campaign=bool(raw.get("founded_in_campaign", False)),
+            rare_resources=_int_dict(raw.get("rare_resources")),
         )
 
 
@@ -289,6 +324,70 @@ class DiplomaticAgreement:
             ended_month=(int(raw["ended_month"]) if raw.get("ended_month") is not None else None),
             end_reason=(str(raw["end_reason"]) if raw.get("end_reason") else None),
             terms=_plain_dict(raw.get("terms")),
+        )
+
+
+@dataclass(slots=True)
+class TradeOffer:
+    offer_id: str
+    proposer_faction_id: str
+    target_faction_id: str
+    direction: str
+    resource_id: str
+    amount: int
+    money: int
+    status: str = "pending"
+    created_month: int = 1
+    expires_month: int | None = None
+    resolved_month: int | None = None
+    issuer_office_id: str = ""
+    resolver_office_id: str = ""
+
+    def __post_init__(self) -> None:
+        self.amount = max(1, int(self.amount))
+        self.money = max(1, int(self.money))
+        self.created_month = max(1, int(self.created_month or 1))
+        self.direction = str(self.direction or "sell")
+        self.status = str(self.status or "pending")
+        self.issuer_office_id = str(self.issuer_office_id or "")
+        self.resolver_office_id = str(self.resolver_office_id or "")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.offer_id,
+            "proposer_faction_id": self.proposer_faction_id,
+            "target_faction_id": self.target_faction_id,
+            "direction": self.direction,
+            "resource_id": self.resource_id,
+            "amount": self.amount,
+            "money": self.money,
+            "status": self.status,
+            "created_month": self.created_month,
+            "expires_month": self.expires_month,
+            "resolved_month": self.resolved_month,
+            "issuer_office_id": self.issuer_office_id,
+            "resolver_office_id": self.resolver_office_id,
+        }
+
+    def to_public_dict(self) -> dict[str, Any]:
+        return self.to_dict()
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> TradeOffer:
+        return cls(
+            offer_id=str(raw.get("id") or raw.get("offer_id") or ""),
+            proposer_faction_id=str(raw.get("proposer_faction_id") or ""),
+            target_faction_id=str(raw.get("target_faction_id") or ""),
+            direction=str(raw.get("direction") or "sell"),
+            resource_id=str(raw.get("resource_id") or ""),
+            amount=int(raw.get("amount") or 1),
+            money=int(raw.get("money") or 1),
+            status=str(raw.get("status") or "pending"),
+            created_month=max(1, int(raw.get("created_month") or 1)),
+            expires_month=(int(raw["expires_month"]) if raw.get("expires_month") is not None else None),
+            resolved_month=(int(raw["resolved_month"]) if raw.get("resolved_month") is not None else None),
+            issuer_office_id=str(raw.get("issuer_office_id") or ""),
+            resolver_office_id=str(raw.get("resolver_office_id") or ""),
         )
 
 
@@ -351,6 +450,7 @@ class City:
     settlement: str = ""
     cannon_stock: int = 0
     economy_class: str = ""
+    veins: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.level = int(self.level)
@@ -385,6 +485,11 @@ class City:
             for unit_type, count in self.registered_units.items()
             if str(unit_type) and int(count) > 0
         }
+        self.veins = {
+            str(resource_id): max(0, int(amount))
+            for resource_id, amount in (self.veins or {}).items()
+            if str(resource_id) and int(amount) > 0
+        }
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -411,6 +516,7 @@ class City:
             "settlement": self.settlement,
             "cannon_stock": int(self.cannon_stock),
             "economy_class": self.economy_class,
+            "veins": dict(self.veins),
         }
 
     @classmethod
@@ -439,6 +545,7 @@ class City:
             occupation=_plain_dict(raw.get("occupation")),
             cannon_stock=int(raw.get("cannon_stock") or 0),
             economy_class=str(raw.get("economy_class") or ""),
+            veins=_int_dict(raw.get("veins")),
         )
 
 
@@ -1728,6 +1835,8 @@ class WorldState:
     encounters: list[StrategicEncounter] = field(default_factory=list)
     sieges: list[StrategicSiege] = field(default_factory=list)
     world_crises: list[WorldCrisis] = field(default_factory=list)
+    trade_offers: list[TradeOffer] = field(default_factory=list)
+    known_city_ids_by_faction: dict[str, list[str]] = field(default_factory=dict)
     save_format_version: int = CURRENT_STRATEGY_SAVE_VERSION
 
     def __post_init__(self) -> None:
@@ -1763,6 +1872,10 @@ class WorldState:
         encounter_ids = {item.encounter_id for item in self.encounters}
         siege_ids = {item.siege_id for item in self.sieges}
         crisis_ids = {item.crisis_id for item in self.world_crises}
+        offer_ids = {item.offer_id for item in self.trade_offers}
+        from wujiang.strategic.vision import prune_known_city_ids
+
+        prune_known_city_ids(self)
         if len(node_ids) != len(self.nodes):
             raise StrategyError("地图节点 ID 不能重复。")
         if len(city_ids) != len(self.cities):
@@ -1808,6 +1921,15 @@ class WorldState:
             raise StrategyError("战略围城 ID 不能重复。")
         if len(crisis_ids) != len(self.world_crises):
             raise StrategyError("世界危机 ID 不能重复。")
+        if len(offer_ids) != len(self.trade_offers):
+            raise StrategyError("贸易请求 ID 不能重复。")
+        for offer in self.trade_offers:
+            if offer.proposer_faction_id not in faction_ids or offer.target_faction_id not in faction_ids:
+                raise StrategyError(f"贸易请求 {offer.offer_id} 的势力不存在。")
+            if offer.direction not in {"sell", "buy"}:
+                raise StrategyError(f"贸易请求 {offer.offer_id} 方向无效。")
+            if offer.status not in {"pending", "accepted", "rejected", "expired"}:
+                raise StrategyError(f"贸易请求 {offer.offer_id} 状态无效。")
         for node in self.nodes:
             unknown = [target_id for target_id in node.connected_node_ids if target_id not in node_ids]
             if unknown:
@@ -2291,6 +2413,11 @@ class WorldState:
             "encounters": [item.to_dict() for item in self.encounters],
             "sieges": [item.to_dict() for item in self.sieges],
             "world_crises": [item.to_dict() for item in self.world_crises],
+            "trade_offers": [item.to_dict() for item in self.trade_offers],
+            "known_city_ids_by_faction": {
+                str(faction_id): list(city_ids)
+                for faction_id, city_ids in self.known_city_ids_by_faction.items()
+            },
         }
 
     def to_public_dict(self) -> dict[str, Any]:
@@ -2298,18 +2425,35 @@ class WorldState:
         from wujiang.strategic.relics import ensure_relic_system
         from wujiang.strategic.world_crisis import ensure_world_crises
 
-        return enrich_world_public_state(ensure_world_crises(ensure_relic_system(self)))
+        payload = enrich_world_public_state(ensure_world_crises(ensure_relic_system(self)))
+        from wujiang.strategic.vision import world_map_bounds
+
+        payload["map_bounds"] = world_map_bounds(self)
+        return payload
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> WorldState:
         raw = migrate_world_payload(raw)
+        cities = [City.from_dict(item) for item in raw.get("cities", [])]
+        factions = [Faction.from_dict(item) for item in raw.get("factions", [])]
+        if "known_city_ids_by_faction" in raw:
+            known_city_ids_by_faction = _known_city_ids_by_faction(
+                raw.get("known_city_ids_by_faction"),
+                cities=cities,
+                factions=factions,
+            )
+        else:
+            known_city_ids_by_faction = {
+                faction.faction_id: [city.city_id for city in cities]
+                for faction in factions
+            }
         return cls(
             save_format_version=int(raw.get("save_format_version", CURRENT_STRATEGY_SAVE_VERSION)),
             seed=int(raw.get("seed", 0)),
             current_month=int(raw.get("current_month", 1)),
             nodes=[MapNode.from_dict(item) for item in raw.get("nodes", [])],
-            cities=[City.from_dict(item) for item in raw.get("cities", [])],
-            factions=[Faction.from_dict(item) for item in raw.get("factions", [])],
+            cities=cities,
+            factions=factions,
             event_log=[EventLogEntry.from_dict(item) for item in raw.get("event_log", [])],
             memory_tags=_string_list(raw.get("memory_tags")),
             pending_battles=[PendingBattle.from_dict(item) for item in raw.get("pending_battles", [])],
@@ -2371,4 +2515,10 @@ class WorldState:
                 for item in raw.get("world_crises", [])
                 if isinstance(item, dict)
             ],
+            trade_offers=[
+                TradeOffer.from_dict(item)
+                for item in raw.get("trade_offers", [])
+                if isinstance(item, dict)
+            ],
+            known_city_ids_by_faction=known_city_ids_by_faction,
         )

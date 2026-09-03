@@ -1,0 +1,201 @@
+{
+  "_readme": [
+    "世界目录：改这里就能改真实战役的国家、城数、武将、矿脉和稀有资源。",
+    "路径：wujiang_game/data/world_catalog.json",
+    "改完重启服务即可；已开的旧档不会自动重写，只影响新开的战役。",
+    "roster 里 code 必须是游戏里已实现的武将编号；name 只给人看，可以随便写。",
+    "veins 是该国境内各稀有资源的矿脉条数，会随机撒到该国城里；一城可以有多种矿脉。",
+    "hero_count 是开局仕官人数（含主公），真实战役不会把所有官职填满。",
+    "地图城数 = 各国 city_count 之和 + 独立城邦；填太大也不会超过 128。",
+    "hero_quality: high / mid_high / medium，只影响 roster 不够时从公开池补人的倾向。"
+  ],
+  "rare_resources": [
+    {
+      "id": "grain_dew",
+      "name": "谷露",
+      "building_id": "fields",
+      "building_name": "农业区",
+      "flavor": "田垄清晨凝下的露，带着土腥和谷香。",
+      "base_price": 18,
+      "upgrade_cost": 8,
+      "yield_per_vein": 6
+    },
+    {
+      "id": "dark_iron",
+      "name": "玄铁",
+      "building_id": "barracks",
+      "building_name": "军营",
+      "flavor": "沉甸甸的黑铁，刃口开得又冷又硬。",
+      "base_price": 22,
+      "upgrade_cost": 10,
+      "yield_per_vein": 5
+    },
+    {
+      "id": "rite_marrow",
+      "name": "祭晶",
+      "building_id": "ritual_site",
+      "building_name": "祭坛",
+      "flavor": "祭火里炼出的晶石，摸着发烫。",
+      "base_price": 24,
+      "upgrade_cost": 8,
+      "yield_per_vein": 4
+    },
+    {
+      "id": "star_sand",
+      "name": "星砂",
+      "building_id": "academy",
+      "building_name": "学院",
+      "flavor": "细得像夜空碎屑，研开能映出公式。",
+      "base_price": 22,
+      "upgrade_cost": 8,
+      "yield_per_vein": 5
+    },
+    {
+      "id": "merchant_amber",
+      "name": "商珀",
+      "building_id": "market",
+      "building_name": "商业区",
+      "flavor": "半透明的琥珀，商路上认它当信物。",
+      "base_price": 16,
+      "upgrade_cost": 8,
+      "yield_per_vein": 6
+    },
+    {
+      "id": "furnace_core",
+      "name": "炉心",
+      "building_id": "industrial",
+      "building_name": "工业区",
+      "flavor": "还在跳的热核，工坊离了它就熄火。",
+      "base_price": 20,
+      "upgrade_cost": 10,
+      "yield_per_vein": 5
+    }
+  ],
+  "trade": {
+    "quote_reference_stock": 40,
+    "min_price_factor": 0.45,
+    "max_price_factor": 2.4,
+    "offer_duration_months": 3,
+    "basic_goods": [
+      { "id": "food", "name": "粮食", "base_price": 2 },
+      { "id": "ether", "name": "以太", "base_price": 8 }
+    ]
+  },
+  "random_campaign": {
+    "veins_per_major_faction": { "min": 5, "max": 9 },
+    "veins_per_independent": { "min": 0, "max": 2 },
+    "max_vein_types_per_city": 3
+  },
+  "nations": [
+    {
+      "id": "sixth_heaven",
+      "name": "第六天",
+      "color": "#8b3a4a",
+      "city_count": 6,
+      "hero_count": 5,
+      "hero_quality": "high",
+      "blurb": "城少将精，兵和以太都压在刀刃上。",
+      "starting_resources": { "food": 240, "money": 280, "population": 0, "ether": 90, "troops": 280 },
+      "starting_rare": { "dark_iron": 18, "rite_marrow": 14, "grain_dew": 6, "star_sand": 8, "merchant_amber": 4, "furnace_core": 8 },
+      "veins": { "grain_dew": 0, "dark_iron": 3, "rite_marrow": 3, "star_sand": 1, "merchant_amber": 0, "furnace_core": 1 },
+      "roster": [
+        { "code": "doomlight_dragon", "name": "神龙。末日光" },
+        { "code": "undead_king_lina", "name": "不死王利娜" },
+        { "code": "fire_funeral", "name": "火葬者" },
+        { "code": "erasure_apostle", "name": "抹杀的使徒" },
+        { "code": "soul_wraith", "name": "销魂的死灵" }
+      ]
+    },
+    {
+      "id": "united_nations",
+      "name": "联合国",
+      "color": "#3d7ea6",
+      "city_count": 20,
+      "hero_count": 10,
+      "hero_quality": "medium",
+      "blurb": "城多粮足，人多势众，靠体量把小国压住。",
+      "starting_resources": { "food": 420, "money": 380, "population": 0, "ether": 40, "troops": 220 },
+      "starting_rare": { "grain_dew": 20, "merchant_amber": 16, "dark_iron": 6, "rite_marrow": 4, "star_sand": 6, "furnace_core": 6 },
+      "veins": { "grain_dew": 5, "dark_iron": 1, "rite_marrow": 1, "star_sand": 1, "merchant_amber": 4, "furnace_core": 1 },
+      "roster": [
+        { "code": "elite_soldier", "name": "精兵" },
+        { "code": "bard", "name": "吟游诗人" },
+        { "code": "jade", "name": "翡翠" },
+        { "code": "li", "name": "李" },
+        { "code": "n", "name": "N" },
+        { "code": "chanter", "name": "咏唱者" },
+        { "code": "element_hunter", "name": "元素猎人" },
+        { "code": "blood_eater", "name": "噬血" }
+      ]
+    },
+    {
+      "id": "electron",
+      "name": "电子国",
+      "color": "#5a9aa8",
+      "city_count": 10,
+      "hero_count": 4,
+      "hero_quality": "mid_high",
+      "blurb": "以太和金钱充裕，学院与工坊是长项。",
+      "starting_resources": { "food": 260, "money": 360, "population": 0, "ether": 80, "troops": 180 },
+      "starting_rare": { "star_sand": 16, "furnace_core": 14, "dark_iron": 6, "rite_marrow": 6, "grain_dew": 6, "merchant_amber": 8 },
+      "veins": { "grain_dew": 1, "dark_iron": 1, "rite_marrow": 1, "star_sand": 3, "merchant_amber": 1, "furnace_core": 3 },
+      "roster": [
+        { "code": "dark_human", "name": "E。暗人" },
+        { "code": "masamune", "name": "天位骑士。政宗" },
+        { "code": "rock_god", "name": "岩神" },
+        { "code": "dragon_rider", "name": "龙骑" }
+      ]
+    },
+    {
+      "id": "sea",
+      "name": "海之国",
+      "color": "#2a6f8f",
+      "city_count": 8,
+      "hero_count": 4,
+      "hero_quality": "medium",
+      "blurb": "口岸吃钱粮，商珀比刀剑更听使唤。",
+      "starting_resources": { "food": 340, "money": 400, "population": 0, "ether": 45, "troops": 190 },
+      "starting_rare": { "merchant_amber": 18, "grain_dew": 12, "dark_iron": 5, "rite_marrow": 4, "star_sand": 5, "furnace_core": 5 },
+      "veins": { "grain_dew": 3, "dark_iron": 1, "rite_marrow": 0, "star_sand": 1, "merchant_amber": 4, "furnace_core": 1 },
+      "roster": [
+        { "code": "ellie", "name": "艾莉" },
+        { "code": "excel_r020", "name": "妖精王奥尔贝隆" },
+        { "code": "excel_r021", "name": "过时的完美剑客" },
+        { "code": "excel_r022", "name": "D。黑豹" }
+      ]
+    },
+    {
+      "id": "eu",
+      "name": "EU",
+      "color": "#c48a3a",
+      "city_count": 14,
+      "hero_count": 6,
+      "hero_quality": "medium",
+      "blurb": "城池连片，六种矿脉都不缺，没有短板也没有尖刀。",
+      "starting_resources": { "food": 320, "money": 320, "population": 0, "ether": 55, "troops": 210 },
+      "starting_rare": { "grain_dew": 10, "dark_iron": 10, "rite_marrow": 8, "star_sand": 8, "merchant_amber": 10, "furnace_core": 10 },
+      "veins": { "grain_dew": 2, "dark_iron": 2, "rite_marrow": 2, "star_sand": 2, "merchant_amber": 2, "furnace_core": 2 },
+      "roster": [
+        { "code": "excel_r023", "name": "芙蕾" },
+        { "code": "excel_r024", "name": "不败将军。弗里德" },
+        { "code": "excel_r025", "name": "代行者。暮别" },
+        { "code": "excel_r026", "name": "最后的守护者" },
+        { "code": "excel_r027", "name": "无常" },
+        { "code": "excel_r028", "name": "飞王" }
+      ]
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "true_world_v1",
+      "name": "五国争衡",
+      "mode": "true_campaign",
+      "blurb": "五国连片割据，强弱不对称。小国靠贸易和关系活，大国靠城和矿脉压人。",
+      "default": true,
+      "city_count": 28,
+      "nation_ids": ["sixth_heaven", "united_nations", "electron", "sea", "eu"],
+      "month_limit": 0,
+      "opening_hero_fill": "quota"
+    }
+  ]
+}

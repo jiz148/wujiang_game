@@ -275,7 +275,7 @@ export function renderCampaignMorePanel(host) {
     toolbar.append(createButton({
       label: moreToggleLabel(kind, prefs),
       variant: "subtle",
-      block: true,
+      size: "sm",
       onClick: () => {
         globalThis.WujiangBattleFeedback?.toggle(kind);
         const next = globalThis.WujiangBattleFeedback?.preferences?.() || prefs;
@@ -288,7 +288,7 @@ export function renderCampaignMorePanel(host) {
   toolbar.append(createButton({
     label: "键盘帮助",
     variant: "subtle",
-    block: true,
+    size: "sm",
     onClick: () => $("open-keyboard-help")?.click(),
   }));
   host.append(toolbar);
@@ -318,7 +318,11 @@ function createCampaignDock(modules) {
   state.strategyDockTab = activeId;
 
   const dock = document.createElement("aside");
-  dock.className = `campaign-dock${state.strategyDockOpen ? " is-open" : " is-collapsed"}`;
+  dock.className = [
+    "campaign-dock",
+    state.strategyDockOpen ? "is-open" : "is-collapsed",
+    state.strategyDockOpen && state.strategyDockWide ? "is-wide" : "",
+  ].filter(Boolean).join(" ");
   dock.setAttribute("aria-label", "战役操作面板");
 
   const rail = document.createElement("div");
@@ -357,10 +361,18 @@ function createCampaignDock(modules) {
   collapse.type = "button";
   collapse.className = "campaign-dock__toggle";
   collapse.setAttribute("aria-expanded", state.strategyDockOpen ? "true" : "false");
-  collapse.title = state.strategyDockOpen ? "收起操作面板" : "展开操作面板";
-  collapse.textContent = state.strategyDockOpen ? "›" : "‹";
+  collapse.title = !state.strategyDockOpen ? "展开操作面板" : state.strategyDockWide ? "收起操作面板" : "更宽模式";
+  collapse.textContent = !state.strategyDockOpen ? "‹" : state.strategyDockWide ? "›" : "»";
   collapse.addEventListener("click", () => {
-    state.strategyDockOpen = !state.strategyDockOpen;
+    if (!state.strategyDockOpen) {
+      state.strategyDockOpen = true;
+      state.strategyDockWide = false;
+    } else if (!state.strategyDockWide) {
+      state.strategyDockWide = true;
+    } else {
+      state.strategyDockOpen = false;
+      state.strategyDockWide = false;
+    }
     applyDockState(dock, tabs);
   });
   tabs.append(collapse);
@@ -371,9 +383,21 @@ function createCampaignDock(modules) {
   if (active) {
     const head = document.createElement("div");
     head.className = "campaign-dock__head";
+    const titleRow = document.createElement("div");
+    titleRow.className = "campaign-dock__title-row";
+    if (active.titleTag?.label) {
+      const tag = document.createElement("em");
+      tag.className = "strategy-city-nation-tag";
+      const color = active.titleTag.color || "#9d9681";
+      if (typeof tag.style?.setProperty === "function") tag.style.setProperty("--faction-color", color);
+      else tag.style["--faction-color"] = color;
+      tag.textContent = active.titleTag.label;
+      titleRow.append(tag);
+    }
     const title = document.createElement("h4");
     title.textContent = active.title || active.label;
-    head.append(title);
+    titleRow.append(title);
+    head.append(titleRow);
     if (active.caption) {
       const caption = document.createElement("span");
       caption.className = "campaign-dock__caption";
@@ -403,10 +427,11 @@ function createCampaignDock(modules) {
 function applyDockState(dock, tabs) {
   dock.classList.toggle("is-open", state.strategyDockOpen);
   dock.classList.toggle("is-collapsed", !state.strategyDockOpen);
+  dock.classList.toggle("is-wide", Boolean(state.strategyDockOpen && state.strategyDockWide));
   const toggle = tabs.querySelector(".campaign-dock__toggle");
   if (toggle) {
-    toggle.textContent = state.strategyDockOpen ? "›" : "‹";
-    toggle.title = state.strategyDockOpen ? "收起操作面板" : "展开操作面板";
+    toggle.textContent = !state.strategyDockOpen ? "‹" : state.strategyDockWide ? "›" : "»";
+    toggle.title = !state.strategyDockOpen ? "展开操作面板" : state.strategyDockWide ? "收起操作面板" : "更宽模式";
     toggle.setAttribute("aria-expanded", state.strategyDockOpen ? "true" : "false");
   }
   // 内容随页签变，交给整屏重绘；这里只负责开关立刻有反应。
@@ -421,20 +446,44 @@ function applyDockState(dock, tabs) {
  * renderMap 由战略域提供，modules 是浮层里的分页；外壳本身不知道战役规则。
  */
 export function renderCampaignScreen(host, { campaign, faction, office, renderMap, modules, onDockChange }) {
-  const screen = document.createElement("section");
-  screen.className = "campaign-screen";
+  const campaignId = String(campaign?.id || "");
+  let screen = host.querySelector(":scope > .campaign-screen");
+  const reuse = Boolean(screen && screen.dataset.campaignId === campaignId && screen.querySelector(".campaign-stage"));
+  if (!reuse) {
+    host.replaceChildren();
+    screen = document.createElement("section");
+    screen.className = "campaign-screen";
+    screen.dataset.campaignId = campaignId;
+    const stage = document.createElement("div");
+    stage.className = "campaign-stage";
+    renderMap(stage);
+    stage.append(createCampaignHud(campaign, faction));
+    const toast = createCampaignTurnToast();
+    if (toast) stage.append(toast);
+    const dock = createCampaignDock(modules);
+    stage.append(dock);
+    if (typeof onDockChange === "function") {
+      dock.addEventListener("campaign-dock-change", onDockChange);
+    }
+    screen.append(stage);
+    host.append(screen);
+    return;
+  }
 
-  const stage = document.createElement("div");
-  stage.className = "campaign-stage";
+  const stage = screen.querySelector(".campaign-stage");
   renderMap(stage);
-  stage.append(createCampaignHud(campaign, faction));
+  const hud = createCampaignHud(campaign, faction);
+  const oldHud = stage.querySelector(".campaign-hud");
+  if (oldHud) oldHud.replaceWith(hud);
+  else stage.append(hud);
+  stage.querySelector(".campaign-turn-toast")?.remove();
   const toast = createCampaignTurnToast();
   if (toast) stage.append(toast);
   const dock = createCampaignDock(modules);
-  stage.append(dock);
+  const oldDock = stage.querySelector(".campaign-dock");
+  if (oldDock) oldDock.replaceWith(dock);
+  else stage.append(dock);
   if (typeof onDockChange === "function") {
     dock.addEventListener("campaign-dock-change", onDockChange);
   }
-  screen.append(stage);
-  host.append(screen);
 }

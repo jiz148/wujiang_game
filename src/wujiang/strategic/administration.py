@@ -397,6 +397,15 @@ def city_building_max_level(city, building_id: str) -> int:
     return min(settlement_cap, project_cap)
 
 
+def building_rare_upgrade_cost(building_id: str, next_level: int) -> tuple[str, int]:
+    from wujiang.strategic.catalog import rare_resource_for_building
+
+    spec = rare_resource_for_building(str(building_id))
+    if spec is None:
+        return "", 0
+    return str(spec["id"]), max(0, int(spec["upgrade_cost"]) * max(1, int(next_level)))
+
+
 def construct_city_building(
     world: WorldState,
     *,
@@ -419,12 +428,23 @@ def construct_city_building(
     if current_level >= maximum_level:
         raise StrategyError(f"该建筑当前最高只能达到 {maximum_level} 级。")
     next_level = current_level + 1
+    rare_id, rare_cost = building_rare_upgrade_cost(project_id, next_level)
+    faction = next((item for item in next_world.factions if item.faction_id == faction_id), None)
+    if faction is None:
+        raise StrategyError("势力不存在。")
+    if rare_id and int(faction.rare_resources.get(rare_id, 0)) < rare_cost:
+        from wujiang.strategic.catalog import rare_resource_def
+
+        rare_name = (rare_resource_def(rare_id) or {}).get("name") or rare_id
+        raise StrategyError(f"稀有资源不足：升级需要{rare_name} {rare_cost}。")
     _spend_city_resources(
         city,
         population=0,
         food=int(project["food"]) * next_level,
         money=int(project["money"]) * next_level,
     )
+    if rare_id and rare_cost:
+        faction.rare_resources[rare_id] = int(faction.rare_resources.get(rare_id, 0)) - rare_cost
     city.building_levels[project_id] = next_level
     if project_id not in city.buildings:
         city.buildings.append(project_id)
@@ -764,24 +784,32 @@ def city_building_monthly_bonus(city) -> dict[str, int]:
 
 
 def building_projects_public() -> list[dict[str, Any]]:
-    return [
-        {
-            "id": project_id,
-            "name": project["name"],
-            "money": int(project["money"]),
-            "food": int(project["food"]),
-            "effect": str(project.get("effect") or ""),
-            "defense": int(project.get("defense") or 0),
-            "monthly_food": int(project.get("monthly_food") or 0),
-            "monthly_money": int(project.get("monthly_money") or 0),
-            "monthly_ether": int(project.get("monthly_ether") or 0),
-            "monthly_troops": int(project.get("monthly_troops") or 0),
-            "fortress_only": bool(project.get("fortress_only")),
-            "visible": project.get("visible", True) is not False,
-            "max_level": int(project.get("max_level") or 3),
-        }
-        for project_id, project in BUILDING_PROJECTS.items()
-    ]
+    from wujiang.strategic.catalog import rare_resource_for_building
+
+    payload = []
+    for project_id, project in BUILDING_PROJECTS.items():
+        rare = rare_resource_for_building(project_id)
+        payload.append(
+            {
+                "id": project_id,
+                "name": project["name"],
+                "money": int(project["money"]),
+                "food": int(project["food"]),
+                "effect": str(project.get("effect") or ""),
+                "defense": int(project.get("defense") or 0),
+                "monthly_food": int(project.get("monthly_food") or 0),
+                "monthly_money": int(project.get("monthly_money") or 0),
+                "monthly_ether": int(project.get("monthly_ether") or 0),
+                "monthly_troops": int(project.get("monthly_troops") or 0),
+                "fortress_only": bool(project.get("fortress_only")),
+                "visible": project.get("visible", True) is not False,
+                "max_level": int(project.get("max_level") or 3),
+                "rare_resource": (rare or {}).get("id") or "",
+                "rare_resource_name": (rare or {}).get("name") or "",
+                "rare": int((rare or {}).get("upgrade_cost") or 0),
+            }
+        )
+    return payload
 
 
 def registered_unit_types_public() -> list[dict[str, Any]]:

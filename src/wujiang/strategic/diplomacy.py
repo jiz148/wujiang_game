@@ -367,6 +367,17 @@ def apply_neutral_diplomacy_action(
         message=f"{actor.name}向{neutral.name}提出{action.name}：城主{'接受' if accepted else '拒绝'}。{preview['direct_effect']}",
         related_ids=[actor.faction_id, neutral.faction_id, action_id],
     ))
+    if accepted:
+        from wujiang.strategic.vision import reveal_city_ids, reveal_diplomatic_contact
+
+        reveal_city_ids(next_world, actor.faction_id, [city.city_id])
+        reveal_diplomatic_contact(
+            next_world,
+            actor.faction_id,
+            neutral.faction_id,
+            realm=action_id in {"protection", "non_aggression"},
+            relation_score=int(neutral.relations.get(actor.faction_id, 0)),
+        )
     next_world.validate()
     return next_world
 
@@ -672,6 +683,14 @@ def apply_faction_diplomacy_action(
             message=f"{actor.name}对{target.name}执行{action.name}。",
             related_ids=[actor.faction_id, target.faction_id, action.action_id],
         )
+    )
+    from wujiang.strategic.vision import reveal_diplomatic_contact
+
+    reveal_diplomatic_contact(
+        next_world,
+        actor.faction_id,
+        target.faction_id,
+        relation_score=faction_relation_score(next_world, actor.faction_id, target.faction_id),
     )
     next_world.validate()
     return next_world

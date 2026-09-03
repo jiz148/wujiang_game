@@ -56,6 +56,10 @@ class WujiangHandler(BaseHTTPRequestHandler):
         self._rate_limit_scope = ""
         try:
             super().handle_one_request()
+        except Exception as exc:
+            if runtime.client_disconnected(exc):
+                return
+            raise
         finally:
             if getattr(self, "command", None):
                 runtime.OBSERVABILITY.record_request(

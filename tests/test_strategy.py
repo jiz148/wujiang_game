@@ -106,7 +106,12 @@ from wujiang.strategic import (  # noqa: E402
     transfer_registered_units,
     request_registered_units,
     approve_registered_unit_request,
+    apply_explore_city,
     apply_faction_diplomacy_action,
+    city_is_visible,
+    explore_options,
+    mask_world_public_for_faction,
+    visible_city_ids,
     city_building_max_level,
     city_building_monthly_bonus,
     construct_city_building,
@@ -2426,6 +2431,13 @@ class StrategyStoreTests(unittest.TestCase):
         self.assertEqual(first.members[0].user_id, self.alice.user_id)
         self.assertEqual(second.world.seed, 12)
         self.assertEqual(len(second.world.cities), 5)
+        summary = first.to_list_dict()
+        detail = first.to_public_dict()
+        self.assertEqual(summary["detail"], False)
+        self.assertEqual(detail["detail"], True)
+        self.assertNotIn("nodes", summary["world"])
+        self.assertIn("nodes", detail["world"])
+        self.assertEqual(len(summary["world"]["cities"]), len(first.world.cities))
 
     def test_strategy_save_and_schema_migrations_are_versioned_and_idempotent(self) -> None:
         campaign = self.store.create_campaign(owner=self.alice, name="旧存档迁移", seed=301, city_count=6)
@@ -5430,6 +5442,8 @@ class StrategyHeroTests(unittest.TestCase):
         )
         self.assertTrue(any(office.status == "vacant" for office in founded.offices if office.faction_id == faction.faction_id))
         self.assertTrue(any(event.category == "hero_founded_faction" for event in founded.event_log))
+        expected_name = next(item["name"] for item in list_heroes() if item["code"] == chosen.hero_code)
+        self.assertEqual(faction.name, expected_name)
 
     def test_recruited_hero_can_be_appointed_by_lord(self) -> None:
         world = generate_random_world(seed=735, city_count=6, faction_count=2)
@@ -7497,6 +7511,97 @@ class StrategySimulationTests(unittest.TestCase):
 
         with self.assertRaises(StrategyError):
             advance_month(world)
+
+
+class StrategyVisionTests(unittest.TestCase):
+    def test_new_world_starts_with_owned_and_adjacent_vision(self) -> None:
+        world = generate_random_world(seed=902, city_count=12, faction_count=3)
+        faction_id = world.factions[0].faction_id
+        visible = visible_city_ids(world, faction_id)
+        owned = {city.city_id for city in world.cities if city.owner_faction_id == faction_id}
+        self.assertTrue(owned)
+        self.assertTrue(owned <= visible)
+        self.assertLess(len(visible), len(world.cities))
+        self.assertTrue(explore_options(world, faction_id))
+
+    def test_explore_reveals_one_frontier_city(self) -> None:
+        world = generate_random_world(seed=903, city_count=12, faction_count=3)
+        faction_id = world.factions[0].faction_id
+        option = explore_options(world, faction_id)[0]
+        self.assertFalse(city_is_visible(world, faction_id, option["target_city_id"]))
+        explored = apply_explore_city(
+            world,
+            faction_id=faction_id,
+            target_city_id=option["target_city_id"],
+            from_city_id=option["from_city_id"],
+        )
+        self.assertTrue(city_is_visible(explored, faction_id, option["target_city_id"]))
+        self.assertTrue(any(event.category == "explore" for event in explored.event_log))
+        from wujiang.strategic.vision import world_map_bounds
+
+        before = mask_world_public_for_faction(world.to_public_dict(), world, faction_id)
+        after = mask_world_public_for_faction(explored.to_public_dict(), explored, faction_id)
+        self.assertEqual(before["map_bounds"], after["map_bounds"])
+        self.assertEqual(after["map_bounds"], world_map_bounds(world))
+        with self.assertRaises(StrategyError):
+            apply_explore_city(
+                explored,
+                faction_id=faction_id,
+                target_city_id=option["target_city_id"],
+                from_city_id=option["from_city_id"],
+            )
+
+    def test_public_mask_hides_unknown_cities_and_other_vision(self) -> None:
+        world = generate_random_world(seed=904, city_count=12, faction_count=3)
+        left = world.factions[0].faction_id
+        right = world.factions[1].faction_id
+        left_public = mask_world_public_for_faction(world.to_public_dict(), world, left)
+        right_public = mask_world_public_for_faction(world.to_public_dict(), world, right)
+        left_known = {city["id"] for city in left_public["cities"] if city.get("visibility") != "hidden"}
+        right_known = {city["id"] for city in right_public["cities"] if city.get("visibility") != "hidden"}
+        self.assertNotEqual(left_known, right_known)
+        self.assertEqual(set(left_public["known_city_ids_by_faction"]), {left})
+        hidden = [city for city in left_public["cities"] if city.get("visibility") == "hidden"]
+        self.assertTrue(hidden)
+        self.assertTrue(all(not city.get("name") for city in hidden))
+        self.assertTrue(all(not city.get("owner_faction_id") for city in hidden))
+        self.assertLessEqual(len(left_public["cities"]), len(world.cities))
+        omitted = {city.city_id for city in world.cities} - {city["id"] for city in left_public["cities"]}
+        self.assertTrue(all(city_id not in visible_city_ids(world, left) for city_id in omitted))
+        from wujiang.strategic.vision import world_map_bounds
+
+        bounds = world_map_bounds(world)
+        self.assertEqual(left_public["map_bounds"], bounds)
+        self.assertEqual(world.to_public_dict()["map_bounds"], bounds)
+
+    def test_diplomacy_and_trade_reveal_capitals(self) -> None:
+        world = generate_random_world(seed=905, city_count=12, faction_count=3)
+        left = world.factions[0]
+        right = world.factions[1]
+        left.resources.money = max(left.resources.money, 200)
+        left.resources.food = max(left.resources.food, 200)
+        right.resources.money = max(right.resources.money, 200)
+        right.resources.food = max(right.resources.food, 200)
+        before = visible_city_ids(world, left.faction_id)
+        contacted = apply_faction_diplomacy_action(
+            world,
+            actor_faction_id=left.faction_id,
+            target_faction_id=right.faction_id,
+            action_id="gift_money",
+        )
+        after = visible_city_ids(contacted, left.faction_id)
+        capital = right.capital_city_id
+        self.assertTrue(capital)
+        self.assertIn(capital, after)
+        self.assertGreaterEqual(len(after), len(before))
+
+    def test_legacy_save_without_vision_field_keeps_full_map(self) -> None:
+        world = generate_random_world(seed=906, city_count=8, faction_count=2)
+        raw = world.to_dict()
+        raw.pop("known_city_ids_by_faction", None)
+        restored = WorldState.from_dict(raw)
+        faction_id = restored.factions[0].faction_id
+        self.assertEqual(len(visible_city_ids(restored, faction_id)), len(restored.cities))
 
 
 if __name__ == "__main__":

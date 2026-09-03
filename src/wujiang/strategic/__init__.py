@@ -63,7 +63,19 @@ from wujiang.strategic.exile import (
     faction_is_exiled,
     validate_exile_action,
 )
-from wujiang.strategic.generation import generate_random_world
+from wujiang.strategic.generation import generate_random_world, generate_true_campaign_world
+from wujiang.strategic.catalog import (
+    true_campaign_contract,
+    world_catalog_public,
+)
+from wujiang.strategic.rare_resources import (
+    accept_resource_trade,
+    propose_resource_trade,
+    reject_resource_trade,
+    validate_resource_trade_proposal,
+    validate_resource_trade_response,
+)
+from wujiang.strategic.models import TradeOffer
 from wujiang.strategic.heroes import (
     STRATEGIC_HERO_BATTLE_LIMIT,
     STRATEGIC_HERO_BATTLE_SLEEP_MONTHS,
@@ -224,6 +236,16 @@ from wujiang.strategic.neutral_city_states import (
     validate_neutral_city_state_incitement,
 )
 from wujiang.strategic.neutral_politics import neutral_city_state_profile, neutral_city_state_profiles_public
+from wujiang.strategic.vision import (
+    apply_explore_city,
+    city_is_visible,
+    explore_options,
+    initialize_world_vision,
+    mask_world_public_for_faction,
+    refresh_all_territory_vision,
+    validate_explore_city,
+    visible_city_ids,
+)
 from wujiang.strategic.diplomacy import (
     FACTION_DIPLOMACY_ACTIONS,
     NEUTRAL_DIPLOMACY_ACTIONS,
@@ -546,6 +568,23 @@ __all__ = [
     "exile_action_choices_public",
     "faction_is_exiled",
     "generate_random_world",
+    "generate_true_campaign_world",
+    "apply_explore_city",
+    "city_is_visible",
+    "explore_options",
+    "initialize_world_vision",
+    "mask_world_public_for_faction",
+    "refresh_all_territory_vision",
+    "validate_explore_city",
+    "visible_city_ids",
+    "true_campaign_contract",
+    "world_catalog_public",
+    "accept_resource_trade",
+    "propose_resource_trade",
+    "reject_resource_trade",
+    "validate_resource_trade_proposal",
+    "validate_resource_trade_response",
+    "TradeOffer",
     "grand_general_capacity",
     "general_capacity_per_grand_general",
     "monthly_briefings_public",
