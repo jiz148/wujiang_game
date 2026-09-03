@@ -239,7 +239,14 @@ def _lord_hero_code(world: WorldState, faction_id: str | None) -> str:
         ),
         None,
     )
-    return str(office.holder_id or "") if office is not None else ""
+    holder_id = str(office.holder_id or "") if office is not None else ""
+    if not holder_id:
+        return ""
+    # 主公位可能被占位符占着（例如玩家把原主公带走后留下 ai:faction_1）。
+    # 关系只记在真实战略武将之间，否则整月结算会被校验拦下。
+    if not any(hero.hero_code == holder_id for hero in world.strategic_heroes):
+        return ""
+    return holder_id
 
 
 def _history(hero: StrategicHeroState, world: WorldState, event: str, summary: str, **details: Any) -> None:
@@ -280,6 +287,8 @@ def adjust_hero_relationship(
 ) -> int:
     other_code = str(other_hero_code or "")
     if not other_code or other_code == hero.hero_code:
+        return 0
+    if not any(item.hero_code == other_code for item in world.strategic_heroes):
         return 0
     before = int(hero.relationships.get(other_code, 0))
     after = max(-100, min(100, before + int(delta)))

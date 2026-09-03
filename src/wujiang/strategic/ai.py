@@ -1288,42 +1288,52 @@ def apply_strategy_ai_monthly_actions(
             and hero_ritual_capacity(next_world, faction_id)["remaining"] > 0
             and command_remaining - 1 >= attack_reserve
         ):
-            before_codes = {hero.hero_code for hero in next_world.strategic_heroes if hero.faction_id == faction_id}
-            next_world = perform_hero_ritual(
-                next_world,
-                faction_id=faction_id,
-                city_id=ritual_city.city_id,
-                issuer_office_id=ritual_office.office_id,
-            )
-            summoned = next(
-                hero
-                for hero in next_world.strategic_heroes
-                if hero.faction_id == faction_id and hero.hero_code not in before_codes
-            )
-            action = f"ritual:{ritual_city.city_id}:{summoned.hero_code}"
-            actions.append(action)
-            office_actions.append(f"{ritual_office.office_id}:{action}")
-            command_remaining -= 1
-            vacancy = next(
-                (
-                    office
-                    for office in next_world.offices
-                    if office.faction_id == faction_id and office.office_type != "lord" and office.status == "vacant"
-                ),
-                None,
-            )
-            if vacancy is not None and ritual_office.office_type == "lord" and command_remaining - 1 >= attack_reserve:
-                next_world = appoint_strategic_hero_to_office(
+            try:
+                before_codes = {hero.hero_code for hero in next_world.strategic_heroes if hero.faction_id == faction_id}
+                next_world = perform_hero_ritual(
                     next_world,
                     faction_id=faction_id,
+                    city_id=ritual_city.city_id,
                     issuer_office_id=ritual_office.office_id,
-                    target_office_id=vacancy.office_id,
-                    hero_code=summoned.hero_code,
                 )
-                appointment = f"appoint:{summoned.hero_code}:{vacancy.office_id}"
-                actions.append(appointment)
-                office_actions.append(f"{ritual_office.office_id}:{appointment}")
+                summoned = next(
+                    hero
+                    for hero in next_world.strategic_heroes
+                    if hero.faction_id == faction_id and hero.hero_code not in before_codes
+                )
+                action = f"ritual:{ritual_city.city_id}:{summoned.hero_code}"
+                actions.append(action)
+                office_actions.append(f"{ritual_office.office_id}:{action}")
                 command_remaining -= 1
+                vacancy = next(
+                    (
+                        office
+                        for office in next_world.offices
+                        if office.faction_id == faction_id and office.office_type != "lord" and office.status == "vacant"
+                    ),
+                    None,
+                )
+                if vacancy is not None and ritual_office.office_type == "lord" and command_remaining - 1 >= attack_reserve:
+                    next_world = appoint_strategic_hero_to_office(
+                        next_world,
+                        faction_id=faction_id,
+                        issuer_office_id=ritual_office.office_id,
+                        target_office_id=vacancy.office_id,
+                        hero_code=summoned.hero_code,
+                    )
+                    appointment = f"appoint:{summoned.hero_code}:{vacancy.office_id}"
+                    actions.append(appointment)
+                    office_actions.append(f"{ritual_office.office_id}:{appointment}")
+                    command_remaining -= 1
+            except StrategyError as exc:
+                next_world.event_log.append(
+                    EventLogEntry(
+                        month=next_world.current_month,
+                        category="strategy_ai_plan",
+                        message=f"{faction_id} ritual skipped: {exc}",
+                        related_ids=[faction_id],
+                    )
+                )
             faction = next(faction for faction in next_world.factions if faction.faction_id == faction_id)
 
         active_hero_codes = active_strategic_hero_codes_for_faction(next_world, faction_id)

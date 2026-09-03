@@ -229,6 +229,34 @@ function createCampaignHud(campaign, faction) {
   return hud;
 }
 
+function createCampaignNotice() {
+  const text = String(state.strategyMessage || "").trim();
+  if (!text) return null;
+  const notice = document.createElement("div");
+  notice.className = "campaign-stage-notice";
+  notice.setAttribute("role", "status");
+  const body = document.createElement("p");
+  body.className = "campaign-stage-notice__text";
+  body.textContent = text;
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "campaign-stage-notice__close";
+  close.setAttribute("aria-label", "关闭提示");
+  close.textContent = "×";
+  close.addEventListener("click", () => {
+    state.strategyMessage = "";
+    notice.remove();
+  });
+  notice.append(body, close);
+  return notice;
+}
+
+function syncCampaignNotice(stage) {
+  stage.querySelector(".campaign-stage-notice")?.remove();
+  const notice = createCampaignNotice();
+  if (notice) stage.append(notice);
+}
+
 function createCampaignTurnToast() {
   const toastState = state.strategyTurnToast;
   if (!toastState) return null;
@@ -458,6 +486,7 @@ export function renderCampaignScreen(host, { campaign, faction, office, renderMa
     stage.className = "campaign-stage";
     renderMap(stage);
     stage.append(createCampaignHud(campaign, faction));
+    syncCampaignNotice(stage);
     const toast = createCampaignTurnToast();
     if (toast) stage.append(toast);
     const dock = createCampaignDock(modules);
@@ -476,6 +505,7 @@ export function renderCampaignScreen(host, { campaign, faction, office, renderMa
   const oldHud = stage.querySelector(".campaign-hud");
   if (oldHud) oldHud.replaceWith(hud);
   else stage.append(hud);
+  syncCampaignNotice(stage);
   stage.querySelector(".campaign-turn-toast")?.remove();
   const toast = createCampaignTurnToast();
   if (toast) stage.append(toast);
