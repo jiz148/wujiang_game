@@ -1156,6 +1156,9 @@ function attachStrategyMapView(viewport, canvas, { campaignId, layout, homePosit
   const apply = () => {
     canvas.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale})`;
   };
+  const reveal = () => {
+    canvas.classList.add("is-ready");
+  };
 
   const visibleSize = () => {
     const height = viewport.clientHeight || 0;
@@ -1167,7 +1170,7 @@ function attachStrategyMapView(viewport, canvas, { campaignId, layout, homePosit
 
   const center = () => {
     const { width, height } = visibleSize();
-    if (!width || !height) return;
+    if (!width || !height) return false;
     const unitPx = world.width / Math.max(1, world.spanX + world.pad * 2);
     view.scale = clampMapScale((Math.min(width, height) / 30) / unitPx);
     if (homePosition) {
@@ -1181,13 +1184,32 @@ function attachStrategyMapView(viewport, canvas, { campaignId, layout, homePosit
     }
     view.campaignId = campaignId;
     apply();
+    return true;
   };
 
-  apply();
-  // 换了一局就重新取景，否则新战役会继承上一局的平移量，开局对着一片空地。
+  // 挂上视口时地图往往还不在文档里，clientWidth 是 0。若先按默认 scale=1
+  // 画几千像素的透明画布，Windows 合成器会把未完成的图块闪成黑色方罩。
+  // 新战役等取景成功再露出来；同一局沿用上次平移。
   if (Number(view.campaignId || 0) !== Number(campaignId || 0)) {
-    if (typeof window !== "undefined" && window.requestAnimationFrame) window.requestAnimationFrame(center);
-    else center();
+    canvas.classList.remove("is-ready");
+    let tries = 0;
+    const run = () => {
+      if (center()) {
+        reveal();
+        return;
+      }
+      tries += 1;
+      if (typeof window !== "undefined" && window.requestAnimationFrame && tries < 30) {
+        window.requestAnimationFrame(run);
+        return;
+      }
+      apply();
+      reveal();
+    };
+    run();
+  } else {
+    apply();
+    reveal();
   }
 
   let drag = null;
@@ -1240,7 +1262,7 @@ function attachStrategyMapView(viewport, canvas, { campaignId, layout, homePosit
     apply();
   };
 
-  return { zoomBy, reset: center };
+  return { zoomBy, reset: () => { center(); reveal(); } };
 }
 
 function requestStrategyMapFocus(viewport, positions, cities) {

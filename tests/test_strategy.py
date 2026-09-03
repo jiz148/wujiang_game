@@ -5494,6 +5494,32 @@ class StrategyHeroTests(unittest.TestCase):
         self.assertTrue(any(row.get("event") == "appointed" for row in appointed_hero.personal_history))
         self.assertTrue(any(event.category == "strategic_hero_appointed" for event in appointed.event_log))
 
+    def test_appoint_ignores_placeholder_lord_holder(self) -> None:
+        world = generate_random_world(seed=731, city_count=6, faction_count=2)
+        faction_id = "faction_1"
+        lord = next(item for item in world.offices if item.faction_id == faction_id and item.office_type == "lord")
+        lord.holder_id = f"ai:{faction_id}"
+        lord.holder_type = "officer"
+        recruit = next(
+            hero
+            for hero in world.strategic_heroes
+            if hero.status == "serving" and hero.faction_id == faction_id and hero.hero_code != lord.holder_id
+        )
+        target = next(
+            office
+            for office in world.offices
+            if office.faction_id == faction_id and office.office_type != "lord"
+        )
+        appointed = appoint_strategic_hero_to_office(
+            world,
+            faction_id=faction_id,
+            issuer_office_id=lord.office_id,
+            target_office_id=target.office_id,
+            hero_code=recruit.hero_code,
+        )
+        appointed_hero = next(hero for hero in appointed.strategic_heroes if hero.hero_code == recruit.hero_code)
+        self.assertNotIn(f"ai:{faction_id}", appointed_hero.relationships)
+
     def test_roaming_player_join_request_requires_lord_acceptance(self) -> None:
         world = generate_random_world(seed=732, city_count=6, faction_count=2)
         chosen = next(hero for hero in world.strategic_heroes if hero.status == "roaming")

@@ -1499,13 +1499,13 @@ def appoint_strategic_hero_to_office(
     target.controller_user_id = hero.controller_user_id
     target.status = "active"
     if is_new_appointment:
-        from wujiang.strategic.hero_personal import record_hero_appointment
+        from wujiang.strategic.hero_personal import _lord_hero_code, record_hero_appointment
 
         record_hero_appointment(
             next_world,
             faction_id=faction_id,
             hero_code=hero.hero_code,
-            lord_hero_code=issuer.holder_id or "",
+            lord_hero_code=_lord_hero_code(next_world, faction_id),
         )
     faction = _faction(next_world, faction_id)
     next_world.event_log.append(

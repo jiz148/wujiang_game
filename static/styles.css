@@ -1957,6 +1957,49 @@ button.strategy-wizard__variant.is-active {
   font-size: var(--fs-sm);
 }
 
+.campaign-stage-notice {
+  position: absolute;
+  left: 50%;
+  bottom: var(--s-3);
+  z-index: 4;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  max-width: min(420px, calc(100% - 48px));
+  padding: 8px 8px 8px 12px;
+  transform: translateX(-50%);
+  border: 1px solid rgba(221, 109, 78, 0.45);
+  border-radius: var(--r-2);
+  color: #ffd3c5;
+  background: rgba(48, 18, 14, 0.82);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+}
+
+.campaign-stage-notice__text {
+  margin: 0;
+  min-width: 0;
+}
+
+button.campaign-stage-notice__close {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-2);
+  color: #ffd3c5;
+  background: transparent;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+button.campaign-stage-notice__close:hover {
+  background: rgba(255, 211, 197, 0.12);
+}
+
 button.campaign-end-turn {
   pointer-events: auto;
   display: flex;
@@ -3558,10 +3601,20 @@ button.strategy-tech-row__btn {
   top: 0;
   left: 0;
   transform-origin: 0 0;
-  will-change: transform;
   overflow: visible;
   /* 画布本身不铺色块，否则缩小时会出现一块方板。地形只靠地块和道路。 */
   background: transparent;
+}
+
+/* 新战役第一帧还没取景：默认 scale=1 会把几千像素的透明画布整块送上 GPU。
+   Windows 上这些还未画完的合成图块就是开局闪过的黑色方罩。取景完成再露出来。 */
+.strategy-map-canvas:not(.is-ready) {
+  visibility: hidden;
+}
+
+/* 只在拖拽时提升图层。常驻 will-change 会给整张大地图像开一块不透明黑底。 */
+.strategy-map-viewport.is-dragging .strategy-map-canvas {
+  will-change: transform;
 }
 
 /* 缩放条压在地图角上，而不是另占一行——它服务于地图，不是屏幕上的一块内容。 */
@@ -3686,7 +3739,7 @@ button.strategy-map-tool svg {
 }
 
 .strategy-map-canvas .strategy-map-node.is-hidden .strategy-map-marker {
-  filter: grayscale(0.35) brightness(0.85);
+  opacity: 0.78;
 }
 
 .strategy-map-canvas .strategy-map-node.is-hidden .strategy-map-name {
@@ -3863,7 +3916,7 @@ button.strategy-map-tool svg {
   display: block;
   width: 100%;
   height: 100%;
-  filter: drop-shadow(0 7px 10px rgba(0, 0, 0, 0.4));
+  /* 不用常驻 drop-shadow：每个城点一层 GPU 纹理，联合国这种多城开局会闪黑块。 */
   transition: filter 160ms ease;
 }
 

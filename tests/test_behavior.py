@@ -8179,7 +8179,7 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertNotIn(".campaign-turnbar {", styles)
 
         # 地图可拖拽可缩放：视口负责裁切与手势，画布负责承载世界。
-        self.assertIn("STRATEGY_MAP_WORLD", app_source)
+        self.assertIn("width: 3200, height: 2200", app_source)
         self.assertIn("width: 3200", app_source)
         self.assertIn("function appendStrategyMapLand", app_source)
         self.assertIn("strategy-map-land-layer", app_source)
@@ -8192,6 +8192,8 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertIn(".strategy-map-route-line", styles)
         self.assertIn("touch-action: none", styles)
         self.assertIn("transform-origin: 0 0", styles)
+        self.assertIn(".strategy-map-canvas:not(.is-ready)", styles)
+        self.assertIn('canvas.classList.add("is-ready")', app_source)
 
         # 面板是浮层而不是一栏：收起之后整张图都在。
         self.assertIn('dock.className = `campaign-dock', app_source)

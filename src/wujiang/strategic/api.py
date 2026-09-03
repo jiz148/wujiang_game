@@ -672,7 +672,11 @@ def post_strategy_campaigns_advance_month(ctx: RequestContext) -> None:
     auth_user = ctx.auth_user
     try:
         assert auth_user is not None
-        campaign_id = int(payload.get("campaign_id"))
+        try:
+            campaign_id = int(payload.get("campaign_id"))
+        except (TypeError, ValueError):
+            json_response(handler, HTTPStatus.BAD_REQUEST, {"error": "战役 ID 必须是整数。"})
+            return
         campaign = campaign_runtime.STRATEGY_STORE.get_campaign_for_user(campaign_id, auth_user.user_id)
         require_campaign_owner(campaign, auth_user.user_id)
         require_campaign_orders_open(campaign.world)
@@ -733,9 +737,6 @@ def post_strategy_campaigns_advance_month(ctx: RequestContext) -> None:
         persist_created_strategy_battle_rooms(campaign, battle_rooms)
         resume_status = campaign_runtime.STRATEGY_STORE.resume_status(campaign_id)
         record_strategy_snapshot_safe(campaign, checkpoint="month")
-    except (TypeError, ValueError) as exc:
-        json_response(handler, HTTPStatus.BAD_REQUEST, {"error": "战役 ID 必须是整数。"})
-        return
     except StrategyError as exc:
         strategy_error_response(handler, exc)
         return
