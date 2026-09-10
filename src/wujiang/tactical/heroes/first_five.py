@@ -107,8 +107,13 @@ class ManaPullSkill(Skill):
             battle.log(f"{target.name} 被魔力牵引束缚，下次行动时无法进行常规移动。")
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
-        targets = [unit for unit in battle.all_units() if unit.position and actor.position and actor.position.distance_to(unit.position) <= actor.targeting_range() and unit.unit_id != actor.unit_id]
-        return {"cells": [unit.position.to_dict() for unit in targets if unit.position], "target_unit_ids": [unit.unit_id for unit in targets], "secondary_cells": [], "requires_target": True}
+        targets = [unit for unit in battle.all_units() if unit.position and not unit.banished and actor.position and actor.position.distance_to(unit.position) <= actor.targeting_range() and unit.unit_id != actor.unit_id]
+        destinations = {
+            unit.unit_id: [cell.to_dict() for cell in battle.reachable_positions(unit, max_distance=3, straight_only=True, ignore_units=True)]
+            for unit in targets
+        }
+        targets = [unit for unit in targets if destinations[unit.unit_id]]
+        return {"cells": [unit.position.to_dict() for unit in targets if unit.position], "target_unit_ids": [unit.unit_id for unit in targets], "secondary_cells": [], "requires_target": True, "destinations_by_target": destinations}
 
     def get_target_units_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[HeroUnit]:
         if payload.get("target_unit_id"):
@@ -121,19 +126,26 @@ class ManaPullSkill(Skill):
         target = payload_target_unit(battle, payload)
         if target.position is None:
             return []
-        try:
-            destination = payload_position(payload, "dest_x", "dest_y")
-            direction = straight_direction(target.position, destination)
-        except ActionError:
-            return [target.position]
-        steps = target.position.distance_to(destination)
-        path = [target.position.offset(direction[0] * step, direction[1] * step) for step in range(steps + 1)]
-        return dedupe_positions(path)
+        # Passing through another unit does not apply the pull to that unit.
+        return battle.unit_cells(target)
 
 
 class CurseSkill(Skill):
     def __init__(self) -> None:
-        super().__init__("curse", "诅咒", "自己失去 1/2 生命，并让目标每轮生命减半。", max_uses_per_battle=1, target_mode="enemy")
+        super().__init__("curse", "诅咒", "声明时支付固定0.5生命；目标每个己方回合开始时当前生命减半。", max_uses_per_battle=1, target_mode="enemy")
+
+    def can_use(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok:
+            return ok, reason
+        if actor.current_hp < 0.5:
+            return False, "生命不足以支付诅咒的0.5生命费用。"
+        return True, ""
+
+    def prepay_resources(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any] | None = None) -> None:
+        super().prepay_resources(battle, actor, payload)
+        actor.take_damage_fraction(0.5)
+        battle.log(f"{actor.name} 支付了诅咒的0.5生命费用。")
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         target = payload_target_unit(battle, payload)
@@ -143,7 +155,6 @@ class CurseSkill(Skill):
         if target_ctx.cancelled:
             battle.log(target_ctx.reason)
             return
-        actor.take_damage_fraction(0.5)
         target.add_status(CurseStatus())
         battle.log(f"{actor.name} 施加了诅咒。")
         battle.cleanup_dead_units()
@@ -168,6 +179,7 @@ class ExperimentSkill(Skill):
                 defense_delta=2,
                 speed_delta=2,
                 range_delta=2,
+                mana_delta=2,
                 duration=3,
                 tick_scope="owner_turn_end",
                 description="全能力 +2。",
@@ -267,7 +279,7 @@ class ParalyzingGloveSkill(Skill):
         super().__init__(
             "paralyzing_glove",
             "麻痹手套",
-            "破魔，造成 4 点伤害，并使目标 1.5轮不能普通移动。",
+            "破魔，以攻4结算伤害，并使目标3轮不能普通移动。",
             max_uses_per_battle=1,
             target_mode="enemy",
         )
@@ -414,7 +426,7 @@ class IntoDarknessSkill(Skill):
         super().__init__(
             "into_darkness",
             "遁入黑暗",
-            "持续 1轮：进入隐身且无法回复；若以普攻解除隐身，则那次普攻伤害 +1 且破魔。",
+            "持续2轮：进入隐身且无法回复；若以普攻解除隐身，则那次普攻伤害 +1 且破魔。",
             cooldown_turns=4,
             target_mode="self",
         )
@@ -428,7 +440,7 @@ class IntoDarknessSkill(Skill):
             actor.remove_status(existing_stealth, battle)
         actor.add_status(
             DelayedDarknessStatus(
-                duration=1,
+                duration=2,
                 bonus_attack_on_attack=1,
                 ignore_shield_on_attack=True,
                 attack_buff_name="黑暗突袭",
@@ -437,7 +449,7 @@ class IntoDarknessSkill(Skill):
         )
         actor.add_status(
             InvincibleUntilActionStatus(
-                duration=1,
+                duration=2,
                 tick_scope="owner_turn_start",
             )
         )
@@ -493,7 +505,7 @@ class GreatFireFuneralField(BattleFieldEffect):
         owner = self.get_owner_unit(battle)
         if owner is None or ctx.unit.unit_id == self.owner_unit_id:
             return
-        if any(self.in_area(step) for step in ctx.path[1:-1]):
+        if any(self.in_area(cell) for step in ctx.path[1:-1] for cell in battle.unit_cells_at(ctx.unit, step)):
             damage = round(ctx.unit.current_hp / 2, 4)
             if damage <= 0:
                 return
@@ -520,9 +532,9 @@ class GreatFireFuneralField(BattleFieldEffect):
         for unit in battle.all_units():
             if unit.unit_id == self.owner_unit_id or unit.position is None or unit.banished:
                 continue
-            if unit.player_id != ended_player_id:
+            if not battle.unit_belongs_to_current_turn(unit):
                 continue
-            if self.in_area(unit.position):
+            if any(self.in_area(cell) for cell in battle.unit_cells(unit)):
                 battle.resolve_damage(
                     DamageContext(
                         source=owner,
@@ -538,21 +550,27 @@ class GreatFireFuneralField(BattleFieldEffect):
 
 
 class GreatFireFuneralSkill(Skill):
+    excludes_caster_from_effect = True
+
     def __init__(self) -> None:
         super().__init__("great_funeral", "大火葬", "命中自身所在横竖列，以攻 5 结算伤害并留下烈焰区域，使用后攻击 -1。", cooldown_turns=2, target_mode="self")
+
+    def queued_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
+        return {"great_funeral_cells": [cell.to_dict() for cell in self.get_target_cells_for_payload(battle, actor, {})]}
+
+    def ignores_magic_immunity_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> bool:
+        return True
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         if actor.position is None:
             raise ActionError("单位不在战场上。")
-        affected: set[tuple[int, int]] = set()
-        for x in range(battle.width):
-            affected.add((x, actor.position.y))
-        for y in range(battle.height):
-            affected.add((actor.position.x, y))
+        declared = payload.get("great_funeral_cells")
+        cells = [Position(int(cell["x"]), int(cell["y"])) for cell in declared] if declared is not None else self.get_target_cells_for_payload(battle, actor, {})
+        affected = {(cell.x, cell.y) for cell in cells}
         for unit in battle.all_units():
             if unit.unit_id == actor.unit_id or unit.position is None or unit.banished:
                 continue
-            if (unit.position.x, unit.position.y) in affected:
+            if any((cell.x, cell.y) in affected for cell in battle.unit_cells(unit)):
                 battle.resolve_damage(
                     DamageContext(
                         source=actor,
@@ -573,11 +591,7 @@ class GreatFireFuneralSkill(Skill):
             return {"cells": [], "target_unit_ids": [], "secondary_cells": [], "requires_target": False}
         cells = [Position(x, actor.position.y).to_dict() for x in range(battle.width)]
         cells.extend(Position(actor.position.x, y).to_dict() for y in range(battle.height))
-        targets = [
-            unit.unit_id
-            for unit in battle.enemy_units(actor.player_id)
-            if unit.position and (unit.position.x == actor.position.x or unit.position.y == actor.position.y)
-        ]
+        targets = [unit.unit_id for unit in self.get_target_units_for_payload(battle, actor, {})]
         return {"cells": cells, "target_unit_ids": targets, "secondary_cells": [], "requires_target": False}
 
     def get_target_cells_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
@@ -595,13 +609,14 @@ class GreatFireFuneralSkill(Skill):
             for unit in battle.all_units()
             if unit.position is not None
             and unit.unit_id != actor.unit_id
-            and (unit.position.x == actor.position.x or unit.position.y == actor.position.y)
+            and not unit.banished
+            and any(cell.x == actor.position.x or cell.y == actor.position.y for cell in battle.unit_cells(unit))
         ]
 
 
 class JudgmentFireSkill(Skill):
     def __init__(self) -> None:
-        super().__init__("judgment_fire", "审判日之火", "仅在攻击为 1 时才能使用；对全场除最低能力单位外造成 6 点伤害并禁疗。", max_uses_per_battle=1, target_mode="self")
+        super().__init__("judgment_fire", "审判日之火", "仅在攻击为1时可用；按当前攻守速范及魔力之和豁免所有并列最低者，对其余在场单位以攻6结算并禁疗3轮，无视魔免、不可回避。", max_uses_per_battle=1, target_mode="self")
 
     def can_use(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
         ok, reason = super().can_use(battle, actor, payload)
@@ -614,23 +629,23 @@ class JudgmentFireSkill(Skill):
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         if abs(actor.stat("attack") - 1) > 1e-9:
             raise ActionError("只有攻击为 1 时才能使用审判日之火。")
-        units = [unit for unit in battle.all_units() if unit.position is not None]
-        scores = {
-            unit.unit_id: unit.stat("attack") + unit.stat("defense") + unit.stat("speed") + unit.targeting_range()
-            for unit in units
-        }
-        minimum = min(scores.values())
+        declared = payload.get("judgment_fire_cells")
+        units = battle.effect_units_at_cells([Position(int(cell["x"]), int(cell["y"])) for cell in declared]) if declared is not None else self.get_target_units_for_payload(battle, actor, payload)
         for unit in units:
-            if scores[unit.unit_id] == minimum:
+            target_ctx = battle.validate_target(
+                actor, unit, action_name="审判日之火", is_skill=True, is_hostile=True,
+                ignore_magic_immunity=True, cannot_evade=True, ignore_targeting_restrictions=True,
+            )
+            if target_ctx.cancelled:
+                battle.log(target_ctx.reason)
                 continue
             battle.resolve_damage(
                 DamageContext(
                     source=actor,
                     target=unit,
-                    attack_power=0,
+                    attack_power=6,
                     is_skill=True,
                     action_name="审判日之火",
-                    raw_damage=6,
                     ignore_magic_immunity=True,
                     cannot_evade=True,
                     tags={"judgment_fire"},
@@ -642,25 +657,35 @@ class JudgmentFireSkill(Skill):
                     "cannot_heal",
                     description="无法回复生命。",
                     duration=3,
-                    tick_scope="any_turn_end",
+                    tick_scope="owner_turn_end",
                 )
             )
         battle.log(f"{actor.name} 施放了审判日之火。")
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
-        cells = [unit.position.to_dict() for unit in battle.all_units() if unit.position]
-        targets = [unit.unit_id for unit in battle.enemy_units(actor.player_id) if unit.position]
+        affected = self.get_target_units_for_payload(battle, actor, {})
+        cells = [cell.to_dict() for unit in affected for cell in battle.unit_cells(unit)]
+        targets = [unit.unit_id for unit in affected]
         return {"cells": cells, "target_unit_ids": targets, "secondary_cells": [], "requires_target": False}
 
+    def cannot_evade_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> bool:
+        return True
+
+    def ignores_magic_immunity_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> bool:
+        return True
+
+    def queued_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
+        return {"judgment_fire_cells": [cell.to_dict() for cell in self.get_target_cells_for_payload(battle, actor, {})]}
+
     def get_target_cells_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
-        return [unit.position for unit in self.get_target_units_for_payload(battle, actor, payload) if unit.position is not None]
+        return dedupe_positions([cell for unit in self.get_target_units_for_payload(battle, actor, payload) for cell in battle.unit_cells(unit)])
 
     def get_target_units_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[HeroUnit]:
-        units = [unit for unit in battle.all_units() if unit.position is not None]
+        units = [unit for unit in battle.all_units() if unit.position is not None and not unit.banished]
         if not units:
             return []
         scores = {
-            unit.unit_id: unit.stat("attack") + unit.stat("defense") + unit.stat("speed") + unit.targeting_range()
+            unit.unit_id: unit.stat("attack") + unit.stat("defense") + unit.stat("speed") + unit.stat("attack_range") + unit.current_mana
             for unit in units
         }
         minimum = min(scores.values())
@@ -782,7 +807,7 @@ class Bard(AbstractHero):
     race = "人类"
     level = 3
     base_stats = Stats(attack=2, defense=4, speed=2, attack_range=4, mana=5)
-    raw_skill_text = "守*2（1魔；每回合一次；可对己方单位或自己使用；目标守+1，来自同一武将的不叠加） 【1回血（每回合一次；可对包括自己在内的己方单位使用；目标血+1/4） 保护（被动技能；1魔；只保护自己；获得2层护盾，持续到回合结束） 【2洗礼（仅可对‘人类’使用；被使用的单位获得魔免；2轮） ￥大圣光（持续2.5轮；以自己为中心形成范围会变化的圣光场；敌方单位进行普通移动且移动后仍在范围内时受到4伤害；己方单位在己方回合结束时若仍在范围内则守+1直到下次己方回合开始前） 吟唱（每回合一次；点一个范内目标；目标魔力点+2）"
+    raw_skill_text = "守*2（1魔；每回合一次；己方单位或自己守+1，1轮；同源不叠加） 【1回血（每回合一次；己方单位或自己血+1/4；暗属性或灵体、恶魔改为失去1/4生命） 保护（被动技能；1魔；只保护自己；获得2层护盾，持续到连锁结束） 【2洗礼（仅己方人类；魔免1轮） ￥大圣光（持续至自身第三个己方回合结束，施放回合计入；跟随自己的11*11区域；敌方普通移动结束仍在场内时按攻4结算伤害；己方单位自己的回合结束时若在场内则守+1直到其下次己方回合开始前） 吟唱（每回合一次；点一个范内目标；目标魔力点+2，不回复当前魔）"
     raw_trait_text = "原地回魔 原地回血"
 
     def build_skills(self) -> list[Skill]:

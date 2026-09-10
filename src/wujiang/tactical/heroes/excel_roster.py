@@ -7570,7 +7570,8 @@ class SphinxCannonAreaAttackTrait(Trait):
         all_pattern_cells = {cell for pattern in patterns for cell in pattern}
         target_ids = [
             unit.unit_id
-            for unit in battle.enemy_units(actor.player_id)
+            for unit in battle.all_units()
+            if unit.unit_id != actor.unit_id
             if any(cell in all_pattern_cells for cell in battle.unit_cells(unit))
         ]
         preview.update({"target_unit_ids": target_ids, "secondary_cells": [], "requires_target": True})
@@ -7890,7 +7891,7 @@ def _straight_destination_around(battle: Battle, mover: HeroUnit, anchor: HeroUn
 class CatRetaliationTrait(Trait):
     def __init__(self) -> None:
         super().__init__("猫叔反制", "任何单位攻击或技能影响猫叔时魔-1，并沿直线尽量被拉近，本回合不能移动或使用主动技能。")
-        self.last_trigger_key: tuple[int, str, str, int] | None = None
+        self.last_trigger_key: tuple[Any, ...] | None = None
 
     def _trigger(
         self,
@@ -7912,7 +7913,12 @@ class CatRetaliationTrait(Trait):
             or (not is_skill and "attack" not in tags)
         ):
             return
-        key = (battle.turn_number, actor.unit_id, action_name, len(actor.actions_taken_this_turn))
+        resolution_token = battle.current_action_resolution_token
+        key = (
+            ("queued_action", resolution_token)
+            if resolution_token is not None
+            else ("direct_effect", battle.turn_number, actor.unit_id, action_name, len(actor.actions_taken_this_turn))
+        )
         if key == self.last_trigger_key:
             return
         self.last_trigger_key = key
@@ -7945,6 +7951,7 @@ class CatRetaliationTrait(Trait):
         else:
             movement_text = "，但没有合法直线路径"
         battle.log(f"{actor.name} 因攻击或技能猫叔失去 {lost:g} 魔{movement_text}，本回合不能移动或使用主动技能。")
+        battle.record_rule_trigger_summary("cat_retaliation", actor=actor, target=owner)
 
     def on_targeted(self, battle: Battle, ctx: TargetContext) -> None:
         self._trigger(
@@ -8271,12 +8278,70 @@ class IronChainPathSkill(H1LineDamageSkill):
         self.sync_turn_scope(battle)
         return 0.0 if self.uses_this_turn == 0 else super().mana_cost_for_payload(battle, actor, payload)
 
-    def anchor_for_cells(self, battle: Battle, actor: HeroUnit, cells: list[Position]) -> HeroUnit | None:
+    def _stable_unit_key(self, battle: Battle, unit: HeroUnit) -> tuple[int, str]:
+        try:
+            turn_slot = battle.turn_order_unit_ids.index(unit.unit_id)
+        except ValueError:
+            turn_slot = len(battle.turn_order_unit_ids)
+        return turn_slot, unit.unit_id
+
+    def anchor_for_cells(
+        self,
+        battle: Battle,
+        actor: HeroUnit,
+        cells: list[Position],
+    ) -> tuple[str, HeroUnit | None, list[Position], str] | None:
+        """Return the mandatory nearest anchor in declared near-to-far line order.
+
+        The first tuple item is ``unit`` or ``terrain``.  Terrain-shaped units
+        remain terrain anchors, so they provide movement but never the +1
+        follow-up intended for a unit anchor.
+        """
         for cell in cells:
-            for unit in battle.units_at(cell):
-                if unit.unit_id != actor.unit_id and (_terrain_unit(unit) or unit.alive):
-                    return unit  # type: ignore[return-value]
+            units = sorted(
+                [unit for unit in battle.units_at(cell) if unit.unit_id != actor.unit_id and unit.alive],
+                key=lambda unit: self._stable_unit_key(battle, unit),
+            )
+            if units:
+                unit = units[0]
+                anchor_kind = "terrain" if _terrain_unit(unit) else "unit"
+                return anchor_kind, unit, list(battle.unit_cells(unit)), unit.name  # type: ignore[arg-type]
+            if (cell.x, cell.y) in battle.blocked_cells:
+                return "terrain", None, [cell], f"墙体({cell.x},{cell.y})"
+            terrain_effects = sorted(
+                [
+                    effect
+                    for effect in battle.field_effects
+                    if getattr(effect, "is_terrain", False) and cell in effect.affected_cells(battle)
+                ],
+                key=lambda effect: effect.component_id,
+            )
+            if terrain_effects:
+                effect = terrain_effects[0]
+                return "terrain", None, list(effect.affected_cells(battle)), effect.name
         return None
+
+    def destination_for_anchor(
+        self,
+        battle: Battle,
+        actor: HeroUnit,
+        anchor_cells: list[Position],
+    ) -> Position | None:
+        if actor.position is None or not anchor_cells:
+            return None
+        start = actor.position
+        candidates = [
+            start,
+            *battle.reachable_positions(actor, max_distance=5, straight_only=True),
+        ]
+        adjacent = [
+            cell
+            for cell in candidates
+            if min((cell.distance_to(anchor_cell) for anchor_cell in anchor_cells), default=10**9) == 1
+        ]
+        if not adjacent:
+            return None
+        return min(adjacent, key=lambda cell: (start.distance_to(cell), cell.y, cell.x))
 
     def affected_units(self, battle: Battle, actor: HeroUnit, cells: list[Position]) -> list[HeroUnit]:
         return [unit for unit in battle.units_at_cells(cells) if unit.player_id != actor.player_id]  # type: ignore[return-value]
@@ -8297,12 +8362,13 @@ class IronChainPathSkill(H1LineDamageSkill):
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         cells = self.chosen_cells(battle, actor, payload)
-        anchor = self.anchor_for_cells(battle, actor, cells)
+        anchor_info = self.anchor_for_cells(battle, actor, cells)
         for target in list(self.affected_units(battle, actor, cells)):
             self.resolve_hit(battle, actor, target, cells)
-        if anchor is None or not anchor.alive or anchor.position is None or actor.position is None:
+        if anchor_info is None or actor.position is None:
             return
-        destination = _straight_destination_around(battle, actor, anchor)
+        anchor_kind, anchor_unit, anchor_cells, anchor_name = anchor_info
+        destination = self.destination_for_anchor(battle, actor, anchor_cells)
         if destination is not None and destination != actor.position:
             try:
                 battle.move_unit(
@@ -8316,9 +8382,15 @@ class IronChainPathSkill(H1LineDamageSkill):
                 )
             except ActionError:
                 destination = None
-        actor.add_status(RedNextDamageStatus(anchor.unit_id))
         movement_text = "并移动到其周围" if destination is not None else "但没有合法直线落点"
-        battle.log(f"{actor.name} 以 {anchor.name} 为铁锁锚点{movement_text}，本回合对其下一次直接伤害值 +1。")
+        if anchor_kind == "unit" and anchor_unit is not None:
+            actor.add_status(RedNextDamageStatus(anchor_unit.unit_id))
+            battle.log(
+                f"{actor.name} 以 {anchor_name} 为铁锁锚点{movement_text}，"
+                "本回合对其下一次直接伤害值 +1。"
+            )
+        else:
+            battle.log(f"{actor.name} 以地形【{anchor_name}】为铁锁锚点{movement_text}；地形锚点不获得追击加伤。")
 
     def ignores_shield_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> bool:
         return True
@@ -8363,22 +8435,13 @@ class RedRandomPierceTrait(Trait):
         if owner is None or action_type not in {"attack", "skill"}:
             return
         success = random.random() < 0.5
-        setattr(owner, "_red_random_pierce_active", success)
         payload["red_random_pierce"] = success
         if success:
             payload["ignore_shield"] = True
         result = "成功，本次动作破魔" if success else "未触发"
-        battle.log(f"{owner.name} 的【赤之随机破魔】{result}。")
-
-    def on_targeted(self, battle: Battle, ctx: TargetContext) -> None:
-        owner = self.owner
-        if owner is not None and ctx.actor.unit_id == owner.unit_id and bool(getattr(owner, "_red_random_pierce_active", False)):
-            ctx.ignore_shield = True
-
-    def on_before_damage(self, battle: Battle, ctx: DamageContext) -> None:
-        owner = self.owner
-        if owner is not None and ctx.source is not None and ctx.source.unit_id == owner.unit_id and bool(getattr(owner, "_red_random_pierce_active", False)):
-            ctx.ignore_shield = True
+        # This result is explicitly public even when the declared area contains
+        # a stealthed target and ordinary action logs are suppressed.
+        battle.log_public_event(f"{owner.name} 的【赤之随机破魔】{result}。", source=owner)
 
 
 class RhinoLegacyStatus(StatModifierStatus):
@@ -8402,7 +8465,11 @@ class RhinoReturnEffect(BattleFieldEffect):
             for unit in battle.player_units(rhino.player_id)
             if not unit.is_summon and not unit.is_clone and unit.race == "兽人" and unit.position is not None and unit.alive
         ]
-        for orc in sorted(orc_heroes, key=lambda unit: (-unit.level, unit.unit_id)):
+        turn_slots = {unit_id: index for index, unit_id in enumerate(battle.turn_order_unit_ids)}
+        for orc in sorted(
+            orc_heroes,
+            key=lambda unit: (turn_slots.get(unit.unit_id, len(turn_slots)), unit.unit_id),
+        ):
             for cell in sorted(square_around_cells(battle, battle.unit_cells(orc), radius=1), key=lambda item: (item.y, item.x)):
                 if battle.can_place_unit(rhino, cell, ignore=rhino):
                     candidates.append((orc, cell))
@@ -8413,10 +8480,13 @@ class RhinoReturnEffect(BattleFieldEffect):
             return
         candidates = self._candidate_destinations(battle)
         if not candidates:
+            battle.log(f"{self.rhino.name} 暂无可用的己方兽人武将或合法邻接格，继续等待回归。")
             return
         anchor, destination = candidates[0]
         rhino = self.rhino
         for status in list(rhino.statuses):
+            if isinstance(status, StatModifierStatus) and status.duration is None:
+                continue
             rhino.remove_status(status, battle)
         rhino.alive = True
         rhino.banished = False
@@ -8433,6 +8503,9 @@ class RhinoReturnEffect(BattleFieldEffect):
         rhino.moved_this_turn = False
         rhino.actions_taken_this_turn = []
         rhino.clear_end_of_turn_shields()
+        for trait in rhino.traits:
+            if isinstance(trait, RhinoDeathTrait):
+                trait.triggered = False
         battle.add_unit(rhino, destination)
         battle.destroyed_units = [unit for unit in battle.destroyed_units if unit.unit_id != rhino.unit_id]
         battle.remove_field_effect(self)

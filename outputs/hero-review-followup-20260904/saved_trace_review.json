@@ -1,0 +1,794 @@
+{
+  "source": "reports\\current-hero-deep-audit\\excel_r126--excel_r291--excel_r356",
+  "matches": [
+    {
+      "hero": "excel_r126",
+      "match": "01",
+      "steps": 25,
+      "winner": 2,
+      "actions": {
+        "chain_skip": 2,
+        "stone_wall": 1
+      },
+      "judgment_casts": []
+    },
+    {
+      "hero": "excel_r126",
+      "match": "02",
+      "steps": 500,
+      "winner": null,
+      "actions": {
+        "solar_judgment": 1,
+        "sphinx_cannon": 4,
+        "move": 4,
+        "end_turn": 4,
+        "attack": 3,
+        "stone_wall": 4
+      },
+      "judgment_casts": [
+        {
+          "step": 10,
+          "deaths": [
+            {
+              "code": "excel_r158",
+              "player": 2
+            }
+          ],
+          "logs": [
+            "等待玩家 2 的连锁响应。",
+            "魔战士 可以进行连锁。",
+            "魔战士 获得了 2 层护盾，持续到回合结束。",
+            "魔战士 连锁使用【保护】。",
+            "李 受到 0.25 点伤害。",
+            "红莲魔。盖泽尔 免疫了技能伤害。",
+            "魔战士 的 1 层护盾被【审判】半破魔打碎。",
+            "魔战士 受到 1.0 点伤害。",
+            "魔战士 被击破。"
+          ]
+        }
+      ],
+      "tail": [
+        {
+          "step": 494,
+          "actor": {
+            "id": "excel_r327-153",
+            "hero_code": "excel_r327",
+            "name": "红莲魔。盖泽尔",
+            "player_id": 1,
+            "is_summon": false,
+            "is_clone": false
+          },
+          "payload": {
+            "type": "attack",
+            "unit_id": "excel_r327-153",
+            "attack_variant": "default",
+            "target_unit_id": "li-155",
+            "x": 0,
+            "y": 1
+          },
+          "logs": [
+            "等待玩家 2 的连锁响应。",
+            "李 可以进行连锁。"
+          ]
+        },
+        {
+          "step": 495,
+          "actor": {
+            "id": "li-155",
+            "hero_code": "li",
+            "name": "李",
+            "player_id": 2,
+            "is_summon": false,
+            "is_clone": false
+          },
+          "payload": {
+            "type": "chain_skip"
+          },
+          "logs": [
+            "李 放弃了连锁。",
+            "李 受到 0.25 点伤害。"
+          ]
+        },
+        {
+          "step": 496,
+          "actor": {
+            "id": "excel_r327-153",
+            "hero_code": "excel_r327",
+            "name": "红莲魔。盖泽尔",
+            "player_id": 1,
+            "is_summon": false,
+            "is_clone": false
+          },
+          "payload": {
+            "type": "move",
+            "unit_id": "excel_r327-153",
+            "x": 1,
+            "y": 0
+          },
+          "logs": [
+            "红莲魔。盖泽尔 移动了。"
+          ]
+        },
+        {
+          "step": 497,
+          "actor": {
+            "id": "excel_r327-153",
+            "hero_code": "excel_r327",
+            "name": "红莲魔。盖泽尔",
+            "player_id": 1,
+            "is_summon": false,
+            "is_clone": false
+          },
+          "payload": {
+            "type": "end_turn"
+          },
+          "logs": [
+            "红莲魔。盖泽尔 结束了自己的回合。",
+            "李 的状态【变硬】结束。",
+            "第 43 轮，玩家 2 的【李】回合开始。"
+          ]
+        },
+        {
+          "step": 498,
+          "actor": {
+            "id": "li-155",
+            "hero_code": "li",
+            "name": "李",
+            "player_id": 2,
+            "is_summon": false,
+            "is_clone": false
+          },
+          "payload": {
+            "type": "attack",
+            "unit_id": "li-155",
+            "attack_variant": "default",
+            "target_unit_id": "excel_r327-153",
+            "x": 1,
+            "y": 0
+          },
+          "logs": [
+            "红莲魔。盖泽尔 没有可用的更快连锁，【普攻】直接结算。",
+            "红莲魔。盖泽尔 受到 0.125 点伤害。",
+            "李 回复了 0.25 点生命。"
+          ]
+        },
+        {
+          "step": 499,
+          "actor": {
+            "id": "li-155",
+            "hero_code": "li",
+            "name": "李",
+            "player_id": 2,
+            "is_summon": false,
+            "is_clone": false
+          },
+          "payload": {
+            "type": "skill",
+            "unit_id": "li-155",
+            "skill_code": "chain_pull",
+            "cells": [
+              {
+                "x": 1,
+                "y": 0
+              }
+            ]
+          },
+          "logs": [
+            "红莲魔。盖泽尔 没有可用的更快连锁，【链条】直接结算。",
+            "红莲魔。盖泽尔 已经在 李 周围。"
+          ]
+        }
+      ]
+    },
+    {
+      "hero": "excel_r126",
+      "match": "03",
+      "steps": 39,
+      "winner": 1,
+      "actions": {
+        "solar_judgment": 1,
+        "sphinx_cannon": 2,
+        "move": 1,
+        "end_turn": 1,
+        "stone_wall": 1,
+        "attack": 1,
+        "solar_flame": 2
+      },
+      "judgment_casts": [
+        {
+          "step": 24,
+          "deaths": [
+            {
+              "code": "excel_r029",
+              "player": 2
+            }
+          ],
+          "logs": [
+            "等待玩家 2 的连锁响应。",
+            "不死小子 可以进行连锁。",
+            "不死小子 获得了 2 层护盾，持续到回合结束。",
+            "不死小子 连锁使用【保护】。",
+            "红衣 受到 1.0 点伤害。",
+            "红衣 被击破。",
+            "不死小子 的 1 层护盾被【审判】半破魔打碎。",
+            "不死小子 受到 1.0 点伤害。",
+            "不死小子 触发【不死保留】，以 0.25 点生命留在场上。"
+          ]
+        }
+      ]
+    },
+    {
+      "hero": "excel_r126",
+      "match": "04",
+      "steps": 26,
+      "winner": 2,
+      "actions": {
+        "stone_wall": 5
+      },
+      "judgment_casts": []
+    },
+    {
+      "hero": "excel_r126",
+      "match": "05",
+      "steps": 25,
+      "winner": 1,
+      "actions": {
+        "solar_flame": 1,
+        "solar_judgment": 1
+      },
+      "judgment_casts": [
+        {
+          "step": 22,
+          "deaths": [
+            {
+              "code": "chanter",
+              "player": 2
+            },
+            {
+              "code": "excel_r056",
+              "player": 1
+            },
+            {
+              "code": "excel_r326",
+              "player": 2
+            },
+            {
+              "code": "remi_bat",
+              "player": 1
+            }
+          ],
+          "logs": [
+            "等待玩家 2 的连锁响应。",
+            "蝴蝶刺客。弗伦萨 可以进行连锁。",
+            "蝴蝶刺客。弗伦萨 放弃了连锁。",
+            "咏唱者 获得了 1 层临时护盾。",
+            "咏唱者 连锁使用【光墙】。",
+            "蝴蝶刺客。弗伦萨 受到 1.0 点伤害。",
+            "蝴蝶刺客。弗伦萨 被击破。",
+            "蕾米 受到 1.0 点伤害。",
+            "蕾米 的【蕾米不灭】扣除了 1.0 点魔，魔为 0，仍被破坏。",
+            "蝙蝠 的召唤者已被击破，因此一并消散。",
+            "蕾米 被击破。",
+            "蝙蝠 被击破。",
+            "咏唱者 的 1 层护盾被【审判】半破魔打碎。",
+            "咏唱者 受到 1.0 点伤害。",
+            "咏唱者 被击破。",
+            "玩家 1 获胜。"
+          ]
+        }
+      ]
+    },
+    {
+      "hero": "excel_r126",
+      "match": "06",
+      "steps": 20,
+      "winner": 1,
+      "actions": {
+        "solar_judgment": 1
+      },
+      "judgment_casts": [
+        {
+          "step": 17,
+          "deaths": [
+            {
+              "code": "bard",
+              "player": 2
+            },
+            {
+              "code": "masamune",
+              "player": 2
+            },
+            {
+              "code": "motor_horse",
+              "player": 2
+            }
+          ],
+          "logs": [
+            "等待玩家 2 的连锁响应。",
+            "天位骑士。政宗 可以进行连锁。",
+            "吟游诗人 获得了 2 层护盾，持续到回合结束。",
+            "吟游诗人 连锁使用【保护】。",
+            "天位骑士。政宗 获得了 2 层护盾，持续到回合结束。",
+            "天位骑士。政宗 连锁使用【保护】。",
+            "天位骑士。政宗 的 1 层护盾被【审判】半破魔打碎。",
+            "天位骑士。政宗 受到 1.0 点伤害。",
+            "摩托马 的召唤者已被击破，因此一并消散。",
+            "天位骑士。政宗 被击破。",
+            "摩托马 被击破。",
+            "摩托马 受到 1.0 点伤害。",
+            "吟游诗人 的 1 层护盾被【审判】半破魔打碎。",
+            "吟游诗人 受到 1.0 点伤害。",
+            "吟游诗人 被击破。",
+            "玩家 1 获胜。"
+          ]
+        }
+      ]
+    },
+    {
+      "hero": "excel_r126",
+      "match": "07",
+      "steps": 21,
+      "winner": 2,
+      "actions": {
+        "stone_wall": 3,
+        "chain_skip": 1,
+        "solar_flame": 1,
+        "attack": 1
+      },
+      "judgment_casts": []
+    },
+    {
+      "hero": "excel_r126",
+      "match": "08",
+      "steps": 36,
+      "winner": 1,
+      "actions": {
+        "chain_skip": 5,
+        "solar_judgment": 1,
+        "attack": 1,
+        "solar_flame": 1
+      },
+      "judgment_casts": [
+        {
+          "step": 32,
+          "deaths": [
+            {
+              "code": "excel_r379",
+              "player": 2
+            }
+          ],
+          "logs": [
+            "等待玩家 2 的连锁响应。",
+            "飞王 可以进行连锁。",
+            "飞王 通过震开获得了 1 层护盾。",
+            "妖仙。菊 移动了。",
+            "飞王 连锁使用【震开】。",
+            "妖仙。菊 受到 1.0 点伤害。",
+            "妖仙。菊 被击破。",
+            "飞王 获得【菊之遗击】。",
+            "飞王 的护盾挡下了伤害。"
+          ]
+        }
+      ]
+    },
+    {
+      "hero": "excel_r126",
+      "match": "09",
+      "steps": 12,
+      "winner": 2,
+      "actions": {
+        "stone_wall": 1,
+        "chain_skip": 1
+      },
+      "judgment_casts": []
+    },
+    {
+      "hero": "excel_r126",
+      "match": "10",
+      "steps": 23,
+      "winner": 2,
+      "actions": {
+        "stone_wall": 4,
+        "solar_judgment": 1,
+        "sphinx_cannon": 1,
+        "attack": 1,
+        "move": 1,
+        "end_turn": 1
+      },
+      "judgment_casts": [
+        {
+          "step": 14,
+          "deaths": [],
+          "logs": [
+            "等待玩家 2 的连锁响应。",
+            "N 可以进行连锁。",
+            "N 获得了 2 层护盾，持续到回合结束。",
+            "N 连锁使用【保护】。",
+            "龙 受到 0.5 点伤害。",
+            "N 的魔抵消了这次伤害，并失去 1 点魔。"
+          ]
+        }
+      ]
+    },
+    {
+      "hero": "excel_r291",
+      "match": "01",
+      "steps": 35,
+      "winner": 1,
+      "actions": {
+        "evasion": 2
+      },
+      "declarations_and_rolls": [
+        2,
+        2
+      ],
+      "missing_roll_steps": []
+    },
+    {
+      "hero": "excel_r291",
+      "match": "02",
+      "steps": 21,
+      "winner": 2,
+      "actions": {
+        "attack": 2,
+        "iron_chain_path": 2,
+        "drain_mana": 1,
+        "move": 2,
+        "end_turn": 2,
+        "evasion": 1
+      },
+      "declarations_and_rolls": [
+        6,
+        6
+      ],
+      "missing_roll_steps": []
+    },
+    {
+      "hero": "excel_r291",
+      "match": "03",
+      "steps": 50,
+      "winner": 2,
+      "actions": {
+        "evasion": 4,
+        "iron_chain_path": 1,
+        "attack": 1,
+        "drain_mana": 1,
+        "move": 1,
+        "end_turn": 1
+      },
+      "declarations_and_rolls": [
+        7,
+        7
+      ],
+      "missing_roll_steps": []
+    },
+    {
+      "hero": "excel_r291",
+      "match": "04",
+      "steps": 15,
+      "winner": 2,
+      "actions": {
+        "move": 1,
+        "iron_chain_path": 1,
+        "attack": 1,
+        "end_turn": 1
+      },
+      "declarations_and_rolls": [
+        2,
+        2
+      ],
+      "missing_roll_steps": []
+    },
+    {
+      "hero": "excel_r291",
+      "match": "05",
+      "steps": 18,
+      "winner": 2,
+      "actions": {
+        "evasion": 2
+      },
+      "declarations_and_rolls": [
+        2,
+        2
+      ],
+      "missing_roll_steps": []
+    },
+    {
+      "hero": "excel_r291",
+      "match": "06",
+      "steps": 153,
+      "winner": 1,
+      "actions": {
+        "chain_skip": 1,
+        "evasion": 3,
+        "iron_chain_path": 1,
+        "attack": 1,
+        "drain_mana": 1,
+        "move": 1,
+        "end_turn": 1
+      },
+      "declarations_and_rolls": [
+        6,
+        6
+      ],
+      "missing_roll_steps": []
+    },
+    {
+      "hero": "excel_r291",
+      "match": "07",
+      "steps": 17,
+      "winner": 2,
+      "actions": {
+        "evasion": 2
+      },
+      "declarations_and_rolls": [
+        2,
+        2
+      ],
+      "missing_roll_steps": []
+    },
+    {
+      "hero": "excel_r291",
+      "match": "08",
+      "steps": 46,
+      "winner": 2,
+      "actions": {
+        "evasion": 5,
+        "attack": 1,
+        "move": 1,
+        "end_turn": 1
+      },
+      "declarations_and_rolls": [
+        6,
+        6
+      ],
+      "missing_roll_steps": []
+    },
+    {
+      "hero": "excel_r291",
+      "match": "09",
+      "steps": 52,
+      "winner": 1,
+      "actions": {
+        "move": 2,
+        "end_turn": 2,
+        "evasion": 6,
+        "iron_chain_path": 2,
+        "attack": 2
+      },
+      "declarations_and_rolls": [
+        10,
+        10
+      ],
+      "missing_roll_steps": []
+    },
+    {
+      "hero": "excel_r291",
+      "match": "10",
+      "steps": 7,
+      "winner": 2,
+      "actions": {
+        "evasion": 2
+      },
+      "declarations_and_rolls": [
+        2,
+        2
+      ],
+      "missing_roll_steps": []
+    },
+    {
+      "hero": "excel_r356",
+      "match": "01",
+      "steps": 32,
+      "winner": 1,
+      "actions": {
+        "knockback": 1,
+        "chain_skip": 1
+      },
+      "attacks_per_own_turn": {},
+      "lifecycle_logs": []
+    },
+    {
+      "hero": "excel_r356",
+      "match": "02",
+      "steps": 53,
+      "winner": 1,
+      "actions": {
+        "shensu": 1,
+        "move": 1,
+        "attack": 3,
+        "harden": 1,
+        "end_turn": 1
+      },
+      "attacks_per_own_turn": {
+        "1": 3
+      },
+      "lifecycle_logs": []
+    },
+    {
+      "hero": "excel_r356",
+      "match": "03",
+      "steps": 89,
+      "winner": 1,
+      "actions": {
+        "shensu": 1,
+        "move": 5,
+        "attack": 5,
+        "harden": 1,
+        "end_turn": 5
+      },
+      "attacks_per_own_turn": {
+        "1": 3,
+        "21": 2
+      },
+      "lifecycle_logs": []
+    },
+    {
+      "hero": "excel_r356",
+      "match": "04",
+      "steps": 7,
+      "winner": 2,
+      "actions": {
+        "shensu": 1,
+        "move": 1,
+        "attack": 1
+      },
+      "attacks_per_own_turn": {
+        "1": 1
+      },
+      "lifecycle_logs": []
+    },
+    {
+      "hero": "excel_r356",
+      "match": "05",
+      "steps": 66,
+      "winner": 1,
+      "actions": {
+        "shensu": 1,
+        "move": 1,
+        "attack": 3,
+        "harden": 1,
+        "end_turn": 1
+      },
+      "attacks_per_own_turn": {
+        "3": 3
+      },
+      "lifecycle_logs": []
+    },
+    {
+      "hero": "excel_r356",
+      "match": "06",
+      "steps": 11,
+      "winner": 2,
+      "actions": {
+        "shensu": 1,
+        "move": 1,
+        "attack": 3
+      },
+      "attacks_per_own_turn": {
+        "1": 3
+      },
+      "lifecycle_logs": []
+    },
+    {
+      "hero": "excel_r356",
+      "match": "07",
+      "steps": 78,
+      "winner": 2,
+      "actions": {
+        "shensu": 1,
+        "move": 1,
+        "attack": 3,
+        "harden": 1,
+        "end_turn": 1
+      },
+      "attacks_per_own_turn": {
+        "1": 3
+      },
+      "lifecycle_logs": [
+        {
+          "step": 67,
+          "log": "幻象鸟 的状态【强袭犀牛遗志】结束。"
+        },
+        {
+          "step": 67,
+          "log": "强袭犀牛 暂无可用的己方兽人武将或合法邻接格，继续等待回归。"
+        },
+        {
+          "step": 72,
+          "log": "强袭犀牛 暂无可用的己方兽人武将或合法邻接格，继续等待回归。"
+        },
+        {
+          "step": 74,
+          "log": "强袭犀牛 暂无可用的己方兽人武将或合法邻接格，继续等待回归。"
+        },
+        {
+          "step": 76,
+          "log": "强袭犀牛 暂无可用的己方兽人武将或合法邻接格，继续等待回归。"
+        }
+      ]
+    },
+    {
+      "hero": "excel_r356",
+      "match": "08",
+      "steps": 63,
+      "winner": 2,
+      "actions": {
+        "knockback": 2,
+        "chain_skip": 6,
+        "move": 3,
+        "end_turn": 3
+      },
+      "attacks_per_own_turn": {},
+      "lifecycle_logs": []
+    },
+    {
+      "hero": "excel_r356",
+      "match": "09",
+      "steps": 18,
+      "winner": 2,
+      "actions": {
+        "shensu": 1,
+        "move": 1,
+        "attack": 3,
+        "harden": 1,
+        "end_turn": 1
+      },
+      "attacks_per_own_turn": {
+        "1": 3
+      },
+      "lifecycle_logs": []
+    },
+    {
+      "hero": "excel_r356",
+      "match": "10",
+      "steps": 35,
+      "winner": 1,
+      "actions": {
+        "shensu": 1,
+        "move": 1,
+        "attack": 3,
+        "harden": 1,
+        "end_turn": 1
+      },
+      "attacks_per_own_turn": {
+        "1": 3
+      },
+      "lifecycle_logs": []
+    }
+  ],
+  "regression_failures": [
+    "ERROR: test_scenario_replay_toolbar_reflects_live_and_replay_state (test_behavior.FrontendBehaviorTests.test_scenario_replay_toolbar_reflects_live_and_replay_state)",
+    "ERROR: test_scenario_account_recovery_overview_survives_restart_and_archive_is_read_only (test_behavior.RoomBehaviorTests.test_scenario_account_recovery_overview_survives_restart_and_archive_is_read_only)",
+    "ERROR: test_scenario_corrupt_strategy_checkpoint_offers_explicit_safe_prebattle_restart (test_behavior.RoomBehaviorTests.test_scenario_corrupt_strategy_checkpoint_offers_explicit_safe_prebattle_restart)",
+    "ERROR: test_scenario_custom_room_confirms_readiness_times_out_and_restores_the_same_seat (test_behavior.RoomBehaviorTests.test_scenario_custom_room_confirms_readiness_times_out_and_restores_the_same_seat)",
+    "ERROR: test_scenario_serving_strategic_hero_enters_manual_city_battle_room (test_behavior.RoomBehaviorTests.test_scenario_serving_strategic_hero_enters_manual_city_battle_room)",
+    "ERROR: test_scenario_strategy_campaign_declares_and_resolves_city_attack_choice (test_behavior.RoomBehaviorTests.test_scenario_strategy_campaign_declares_and_resolves_city_attack_choice)",
+    "ERROR: test_scenario_strategy_manual_battle_recovers_exact_checkpoint_after_service_restart (test_behavior.RoomBehaviorTests.test_scenario_strategy_manual_battle_recovers_exact_checkpoint_after_service_restart)",
+    "ERROR: test_scenario_strategy_manual_city_attack_creates_real_battle_room (test_behavior.RoomBehaviorTests.test_scenario_strategy_manual_city_attack_creates_real_battle_room)",
+    "ERROR: test_scenario_strategy_manual_city_attack_writes_finished_real_battle_back (test_behavior.RoomBehaviorTests.test_scenario_strategy_manual_city_attack_writes_finished_real_battle_back)",
+    "ERROR: test_scenario_strategy_two_to_four_humans_complete_absence_recovery_campaign (test_behavior.RoomBehaviorTests.test_scenario_strategy_two_to_four_humans_complete_absence_recovery_campaign) (human_count=4)",
+    "ERROR: test_scenario_strategy_watch_ai_city_attack_creates_spectator_battle_room (test_behavior.RoomBehaviorTests.test_scenario_strategy_watch_ai_city_attack_creates_spectator_battle_room)",
+    "ERROR: test_city_attack_uses_explicit_committed_troops_and_rejects_busy_heroes (test_strategy.StrategyBattleTests.test_city_attack_uses_explicit_committed_troops_and_rejects_busy_heroes)",
+    "FAIL: test_cannon_cannot_fire_at_range_one (test_army.ArmyTurnTests.test_cannon_cannot_fire_at_range_one)",
+    "FAIL: test_time_stop_inserts_one_temporary_turn_and_restores_order (test_battle.BattleSmokeTests.test_time_stop_inserts_one_temporary_turn_and_restores_order)",
+    "FAIL: test_scenario_board_stage_drag_and_wheel_zoom_are_bound_to_battlefield (test_behavior.FrontendBehaviorTests.test_scenario_board_stage_drag_and_wheel_zoom_are_bound_to_battlefield)",
+    "FAIL: test_scenario_clicking_enemy_unit_still_opens_info_when_viewer_cannot_act (test_behavior.FrontendBehaviorTests.test_scenario_clicking_enemy_unit_still_opens_info_when_viewer_cannot_act)",
+    "FAIL: test_scenario_home_entry_prioritizes_game_modes_and_hides_reference_roster (test_behavior.FrontendBehaviorTests.test_scenario_home_entry_prioritizes_game_modes_and_hides_reference_roster)",
+    "FAIL: test_scenario_new_visual_events_create_board_vfx_nodes (test_behavior.FrontendBehaviorTests.test_scenario_new_visual_events_create_board_vfx_nodes)",
+    "FAIL: test_scenario_r2_city_context_command_rail_is_wired (test_behavior.FrontendBehaviorTests.test_scenario_r2_city_context_command_rail_is_wired)",
+    "FAIL: test_scenario_room_setup_dialog_holds_a_draft_until_it_is_confirmed (test_behavior.FrontendBehaviorTests.test_scenario_room_setup_dialog_holds_a_draft_until_it_is_confirmed)",
+    "FAIL: test_scenario_strategy_panel_renders_campaign_city_policy_and_tactic_tech (test_behavior.FrontendBehaviorTests.test_scenario_strategy_panel_renders_campaign_city_policy_and_tactic_tech)",
+    "FAIL: test_solar_ai_keeps_judgment_when_enemy_escape_makes_projected_casualties_even (test_behavior.HeroBatchH12AIDecisionTests.test_solar_ai_keeps_judgment_when_enemy_escape_makes_projected_casualties_even)",
+    "FAIL: test_scenario_general_orders_cross_month_route_movement_and_halts_through_http (test_behavior.RoomBehaviorTests.test_scenario_general_orders_cross_month_route_movement_and_halts_through_http)",
+    "FAIL: test_scenario_lord_governs_one_occupation_and_funds_resistance_in_an_enemy_occupation (test_behavior.RoomBehaviorTests.test_scenario_lord_governs_one_occupation_and_funds_resistance_in_an_enemy_occupation)",
+    "FAIL: test_scenario_neutral_city_states_hold_until_a_lord_incites_them (test_behavior.RoomBehaviorTests.test_scenario_neutral_city_states_hold_until_a_lord_incites_them)",
+    "FAIL: test_scenario_phase3_full_campaign_compares_peaceful_integration_and_conquest (test_behavior.RoomBehaviorTests.test_scenario_phase3_full_campaign_compares_peaceful_integration_and_conquest)",
+    "FAIL: test_scenario_player_selects_hero_and_founds_persistent_faction (test_behavior.RoomBehaviorTests.test_scenario_player_selects_hero_and_founds_persistent_faction)",
+    "FAIL: test_scenario_random_room_assigns_n_heroes_per_side_with_classic_turn_rules (test_behavior.RoomBehaviorTests.test_scenario_random_room_assigns_n_heroes_per_side_with_classic_turn_rules)",
+    "FAIL: test_strategy_ai_can_launch_resolved_quick_attack (test_strategy.StrategySimulationTests.test_strategy_ai_can_launch_resolved_quick_attack)",
+    "FAIL: test_ai_led_showdown_quick_resolves_and_full_campaign_survives_reload_to_month_twelve (test_strategy.StrategyWorldCrisisTests.test_ai_led_showdown_quick_resolves_and_full_campaign_survives_reload_to_month_twelve)",
+    "FAIL: test_existing_march_crosses_new_cold_route_with_shortage_penalty (test_strategy.StrategyWorldCrisisTests.test_existing_march_crosses_new_cold_route_with_shortage_penalty)",
+    "FAIL: test_low_supply_detours_or_rejects_and_supplied_army_pays_cold_cost (test_strategy.StrategyWorldCrisisTests.test_low_supply_detours_or_rejects_and_supplied_army_pays_cold_cost)"
+  ]
+}

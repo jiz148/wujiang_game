@@ -11,6 +11,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from wujiang.tools.audit_review_packet import write_review_packet
+
 from wujiang.tactical.heroes.registry import create_hero
 from wujiang.tactical.rooms import ai as ai_policy
 from wujiang.tools.match_audit import DEFAULT_MAX_STEPS, parse_roster, sanitize_label, write_json
@@ -219,6 +221,38 @@ def new_metrics() -> dict[str, Any]:
     }
 
 
+def event_source_is_related(
+    event: dict[str, Any],
+    related_codes: set[str],
+) -> bool:
+    actor = event.get("actor") if isinstance(event.get("actor"), dict) else {}
+    if str(actor.get("hero_code") or "") in related_codes:
+        return True
+    before = event.get("before") if isinstance(event.get("before"), dict) else {}
+    pending = before.get("pending_chain") if isinstance(before.get("pending_chain"), dict) else {}
+    pending_actor = pending.get("actor") if isinstance(pending.get("actor"), dict) else {}
+    if str(pending_actor.get("hero_code") or "") in related_codes:
+        return True
+    return False
+
+
+def event_is_related(
+    event: dict[str, Any],
+    related_codes: set[str],
+    related_names: set[str],
+) -> bool:
+    if event_source_is_related(event, related_codes):
+        return True
+    for summary_event in event.get("new_summary_events", []) or []:
+        if not isinstance(summary_event, dict):
+            continue
+        for key in ("actor_unit_id", "target_unit_id"):
+            unit_id = str(summary_event.get(key) or "")
+            if any(unit_id == code or unit_id.startswith(f"{code}-") for code in related_codes):
+                return True
+    return any(name and any(name in str(line) for line in event.get("new_logs", []) or []) for name in related_names)
+
+
 def analyze_target(
     target: str,
     hero: dict[str, Any],
@@ -229,6 +263,7 @@ def analyze_target(
     expectations = dict((design or {}).get("audit_expectations") or {})
     related_codes = set(str(code) for code in expectations.get("related_actor_codes", []) if code)
     related_codes.add(target)
+    related_names = {str(hero.get("name") or "")}
     metrics = new_metrics()
     match_rows: list[dict[str, Any]] = []
 
@@ -239,6 +274,8 @@ def analyze_target(
             actor = event.get("actor") if isinstance(event.get("actor"), dict) else {}
             actor_code = str(actor.get("hero_code") or "")
             if actor_code in related_codes:
+                if actor.get("name"):
+                    related_names.add(str(actor["name"]))
                 payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
                 action_type = str(payload.get("type") or "unknown")
                 metrics["action_type_counts"][action_type] += 1
@@ -262,8 +299,14 @@ def analyze_target(
                 *expectations.get("log_terms_to_observe", []),
                 *expectations.get("conditional_log_terms_to_track", []),
             ]
-            for term in dict.fromkeys(str(term) for term in tracked_log_terms):
-                metrics["log_term_counts"][str(term)] += sum(str(term) in line for line in logs)
+            source_related = event_source_is_related(event, related_codes)
+            if event_is_related(event, related_codes, related_names):
+                for term in dict.fromkeys(str(term) for term in tracked_log_terms):
+                    metrics["log_term_counts"][str(term)] += sum(
+                        str(term) in line
+                        and (source_related or any(name and name in line for name in related_names))
+                        for line in logs
+                    )
             accumulate_state_delta(metrics, event, related_codes)
         match_rows.append(
             {
@@ -300,11 +343,22 @@ def analyze_target(
     unresolved = len(match_rows) - wins - losses
     active_codes = active_skill_codes(target)
     never_used_skills = [code for code in active_codes if metrics["action_code_counts"][code] == 0]
+    effective_codes = {
+        key.split(":", 1)[1]
+        for key, count in metrics["effective_action_decision_points"].items()
+        if count > 0 and ":" in key
+    }
     expected_action_gaps = [
         str(code)
         for code in expectations.get("action_codes_to_observe", [])
         if metrics["action_code_counts"][str(code)] == 0
     ]
+    expected_action_missed_opportunities = [code for code in expected_action_gaps if code in effective_codes]
+    expected_action_coverage_gaps = [code for code in expected_action_gaps if code not in effective_codes]
+    expected_action_codes = {str(code) for code in expectations.get("action_codes_to_observe", [])}
+    unlisted_never_used = [code for code in never_used_skills if code not in expected_action_codes]
+    never_used_with_effective_opportunity = [code for code in unlisted_never_used if code in effective_codes]
+    never_used_without_effective_opportunity = [code for code in unlisted_never_used if code not in effective_codes]
     expected_log_gaps = [
         str(term)
         for term in expectations.get("log_terms_to_observe", [])
@@ -317,10 +371,14 @@ def analyze_target(
         observation_notes.append(f"目标武将家族出现 {metrics['failed_actions']} 次动作执行失败。")
     if unresolved:
         observation_notes.append(f"有 {unresolved} 场在步数上限前未决出胜负。")
-    if never_used_skills:
-        observation_notes.append(f"主动/随时技能未观察到使用：{', '.join(never_used_skills)}。")
-    if expected_action_gaps:
-        observation_notes.append(f"设计基线要求观察但未出现的动作：{', '.join(expected_action_gaps)}。")
+    if expected_action_missed_opportunities:
+        observation_notes.append(f"设计关键动作有有效候选但未使用：{', '.join(expected_action_missed_opportunities)}。")
+    if expected_action_coverage_gaps:
+        observation_notes.append(f"设计关键动作未出现，且本批没有产生有效候选：{', '.join(expected_action_coverage_gaps)}。")
+    if never_used_with_effective_opportunity:
+        observation_notes.append(f"其他主动/随时技能有有效候选但未使用：{', '.join(never_used_with_effective_opportunity)}。")
+    if never_used_without_effective_opportunity:
+        observation_notes.append(f"其他主动/随时技能未使用，且本批没有产生有效候选：{', '.join(never_used_without_effective_opportunity)}。")
     if expected_log_gaps:
         observation_notes.append(f"设计基线关键日志未出现：{', '.join(expected_log_gaps)}。")
     if design is None:
@@ -332,9 +390,9 @@ def analyze_target(
         "P0"
         if high_signal_count or metrics["failed_actions"]
         else "P1"
-        if expected_action_gaps
+        if expected_action_missed_opportunities or never_used_with_effective_opportunity
         else "P2"
-        if never_used_skills or unresolved or expected_log_gaps or design is None
+        if expected_action_coverage_gaps or never_used_without_effective_opportunity or unresolved or expected_log_gaps or design is None
         else "P3"
     )
     return {
@@ -354,7 +412,11 @@ def analyze_target(
         "finding_categories": dict(sorted(finding_categories.items())),
         "active_skill_codes": active_codes,
         "never_used_active_skills": never_used_skills,
+        "never_used_active_skills_with_effective_opportunity": never_used_with_effective_opportunity,
+        "never_used_active_skills_without_effective_opportunity": never_used_without_effective_opportunity,
         "expected_action_gaps": expected_action_gaps,
+        "expected_action_missed_opportunities": expected_action_missed_opportunities,
+        "expected_action_coverage_gaps": expected_action_coverage_gaps,
         "expected_log_gaps": expected_log_gaps,
         "metrics": {
             key: dict(sorted(value.items())) if isinstance(value, Counter) else round(value, 4) if isinstance(value, float) else value
@@ -429,7 +491,7 @@ def render_review_queue(reviews: list[dict[str, Any]]) -> str:
     lines = [
         "# 全武将人工复核队列",
         "",
-        "优先级说明：P0=动作错误/高信号缺陷；P1=设计关键动作未观察到；P2=覆盖、设计基线缺失或对局未决问题；P3=自动观察无明显缺口。",
+        "优先级说明：P0=动作错误/高信号缺陷；P1=有有效候选却未采用的动作；P2=没有形成有效候选的覆盖缺口、设计基线缺失或对局未决问题；P3=自动观察无明显缺口。",
         "",
     ]
     for review in sorted(reviews, key=lambda item: (item["priority"], -item["high_signal_count"], str(item["code"]))):
@@ -515,6 +577,7 @@ def run_all_hero_deep_audit(
         },
     }
     write_json(run_dir / "deep_audit_overview.json", overview)
+    write_review_packet(run_dir, root=Path.cwd())
     return run_dir
 
 
@@ -537,6 +600,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--design", type=Path, default=DEFAULT_DESIGN_PATH)
     parser.add_argument("--review-state", type=Path, default=DEFAULT_REVIEW_STATE_PATH)
     parser.add_argument("--resume", action="store_true", help="Reuse completed match folders under --out after interruption.")
+    parser.add_argument("--summarize-only", action="store_true", help="Index saved results and current Git changes without running tests or matches.")
     args = parser.parse_args(argv)
 
     if args.current and args.targets:
@@ -552,6 +616,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     output_dir = args.out or (
         current_batch_output_dir(targets) if args.current else DEFAULT_OUTPUT_ROOT / "current"
     )
+    if args.summarize_only:
+        try:
+            packet = write_review_packet(output_dir, root=Path.cwd(), existing_results=True)
+        except (OSError, ValueError, KeyError) as exc:
+            parser.error(f"Cannot summarize saved results: {exc}")
+        print(f"saved results indexed (no tests run): {packet}")
+        return 0
     run_dir = run_all_hero_deep_audit(
         targets,
         seed=args.seed,
@@ -566,7 +637,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"current review batch only: {', '.join(targets)}")
     print(f"deep audit complete: {run_dir}")
     print(f"open {run_dir / 'regression_tests.log'} for the complete ordinary test output")
-    print(f"open {run_dir / 'review_queue.md'} first")
+    print(f"open {run_dir / 'review_packet.md'} first")
     return 0
 
 

@@ -305,6 +305,7 @@ class StatModifierStatus(StatusEffect):
         defense_delta: float = 0.0,
         speed_delta: float = 0.0,
         range_delta: float = 0.0,
+        mana_delta: float = 0.0,
         description: str = "",
         duration: Optional[int] = None,
         tick_scope: str = "owner_turn_end",
@@ -314,6 +315,7 @@ class StatModifierStatus(StatusEffect):
         self.defense_delta = defense_delta
         self.speed_delta = speed_delta
         self.range_delta = range_delta
+        self.mana_delta = mana_delta
 
     def modify_stat(self, stat_name: str, value: float) -> float:
         if stat_name == "attack":
@@ -327,6 +329,8 @@ class StatModifierStatus(StatusEffect):
             return value + self.speed_delta
         if stat_name == "attack_range":
             return value + self.range_delta
+        if stat_name == "mana":
+            return value + self.mana_delta
         return value
 
 
@@ -553,32 +557,7 @@ class CurseStatus(StatusEffect):
         )
 
     def __init__(self) -> None:
-        super().__init__("诅咒", "每轮结束时生命减半。", duration=None, tick_scope="any_turn_end")
-
-    def on_any_turn_end(self, battle: Battle, ended_player_id: int) -> None:
-        return None
-        if self.owner is None:
-            return
-        if ended_player_id != 2:
-            return
-        damage = round(self.owner.current_hp / 2, 4)
-        if damage <= 0:
-            return
-        battle.log(f"{self.owner.name} 的诅咒发作。")
-        battle.resolve_damage(
-            DamageContext(
-                source=None,
-                target=self.owner,
-                attack_power=0,
-                is_skill=True,
-                action_name="诅咒",
-                raw_damage=damage,
-                ignore_shield=True,
-                ignore_magic_immunity=False,
-                cannot_evade=True,
-                tags={"curse"},
-            )
-        )
+        super().__init__("诅咒", "每个己方回合开始时当前生命减半。", duration=None, tick_scope="owner_turn_start")
 
 
 class DelayedDarknessStatus(StatusEffect):
@@ -745,6 +724,7 @@ class PrecisionTrainingTrait(Trait):
             and ctx.source is not None
             and ctx.source.unit_id == self.owner.unit_id
             and "attack" in ctx.tags
+            and not ctx.is_skill
             and ctx.target.unit_id != self.owner.unit_id
         )
 
@@ -761,6 +741,8 @@ class PrecisionTrainingTrait(Trait):
 
     def on_before_damage(self, battle: Battle, ctx: DamageContext) -> None:
         if not self._is_owners_attack(ctx):
+            return
+        if getattr(battle, "_ai_probe_active", False):
             return
         self._roll_proc(ctx.tags)
 
@@ -804,6 +786,7 @@ class EllieWardTrait(Trait):
             return
         if ctx.source.performed_active_skill:
             ctx.cancelled = True
+            ctx.preserve_followup_effects = True
             ctx.reason = f"{ctx.source.name} 已使用过主动技能，本回合无法伤害 {self.owner.name}。"
 
 
@@ -1565,6 +1548,8 @@ class KnockbackSkill(Skill):
 
 
 class MachineGunSkill(Skill):
+    excludes_allies_from_effect = True
+
     def __init__(self) -> None:
         super().__init__(
             "machine_gun",
@@ -1682,6 +1667,16 @@ class DefendTwiceSkill(Skill):
             target_mode="ally",
         )
 
+    def can_use(self, battle: Battle, actor: HeroUnit, payload: Optional[dict[str, Any]] = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok:
+            return ok, reason
+        if payload and payload.get("target_unit_id"):
+            target = payload_target_unit(battle, payload)
+            if any(status.name == "守*2" and getattr(status, "source_unit_id", None) == actor.unit_id for status in target.statuses):
+                return False, "来自同一武将的守*2效果不能叠加。"
+        return True, ""
+
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         target = payload_target_unit(battle, payload)
         ensure_ally(actor, target)
@@ -1726,7 +1721,7 @@ class HealSkill(Skill):
         super().__init__(
             "heal",
             "回血",
-            "普通技能：费 1 魔，每回合最多 1 次，可对包括自己在内的己方单位使用；目标回复 1/4 生命。",
+            "普通技能：费1魔，每回合一次，己方目标回复1/4生命；暗属性、灵体或恶魔目标改为失去1/4生命。",
             mana_cost=1,
             max_uses_per_turn=1,
             target_mode="ally",
@@ -1736,6 +1731,10 @@ class HealSkill(Skill):
         target = payload_target_unit(battle, payload)
         ensure_ally(actor, target)
         ensure_distance(actor, target, actor.targeting_range())
+        if target.attribute == "暗" or target.race in {"灵体", "恶魔"}:
+            target.take_damage_fraction(0.25)
+            battle.log(f"{target.name} 因回血效果反转而失去1/4生命。")
+            return
         battle.heal(HealContext(source=actor, target=target, amount=0.25, action_name="回血"))
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
@@ -1792,6 +1791,7 @@ class GreatHolyLightField(BattleFieldEffect):
     def __init__(self, owner_unit_id: str, *, duration: int = 5) -> None:
         super().__init__("大圣光", "以吟游诗人为中心的持续圣光场。", duration=duration)
         self.owner_unit_id = owner_unit_id
+        self.first_owner_end = True
 
     def get_owner_unit(self, battle: Battle) -> Optional[HeroUnit]:
         unit = battle.units.get(self.owner_unit_id)
@@ -1801,7 +1801,7 @@ class GreatHolyLightField(BattleFieldEffect):
 
     def affected_cells(self, battle: Battle) -> list[Position]:
         owner = self.get_owner_unit(battle)
-        if owner is None or owner.position is None:
+        if owner is None or owner.position is None or owner.banished:
             return []
         return [
             Position(x, y)
@@ -1815,24 +1815,23 @@ class GreatHolyLightField(BattleFieldEffect):
 
     def on_unit_moved(self, battle: Battle, ctx: MoveContext) -> None:
         owner = self.get_owner_unit(battle)
-        if owner is None or owner.position is None:
+        if owner is None or owner.position is None or owner.banished:
             return
         if ctx.unit.player_id == owner.player_id:
             return
-        if ctx.via_skill:
+        if ctx.via_skill or ctx.triggered_by_reaction:
             return
-        if ctx.end.distance_to(owner.position) > 5:
+        if not any(cell.distance_to(owner.position) <= 5 for cell in battle.unit_cells_at(ctx.unit, ctx.end)):
             return
         battle.log(f"{ctx.unit.name} 触发了大圣光。")
         battle.resolve_damage(
             DamageContext(
                 source=owner,
                 target=ctx.unit,
-                attack_power=0,
+                attack_power=4,
                 is_skill=True,
                 from_field_effect=True,
                 action_name="大圣光",
-                raw_damage=4,
                 cannot_evade=True,
                 tags={"holy_light"},
             )
@@ -1840,9 +1839,15 @@ class GreatHolyLightField(BattleFieldEffect):
 
     def on_any_turn_end(self, battle: Battle, ended_player_id: int) -> None:
         owner = self.get_owner_unit(battle)
-        if owner is not None and owner.position is not None and ended_player_id == owner.player_id:
+        if owner is None or not owner.alive:
+            battle.remove_field_effect(self)
+            return
+        if owner.position is not None and not owner.banished:
             for unit in battle.player_units(owner.player_id):
-                if unit.position is not None and unit.position.distance_to(owner.position) <= 5:
+                if unit.position is not None and not unit.banished and battle.unit_belongs_to_current_turn(unit) and any(cell.distance_to(owner.position) <= 5 for cell in battle.unit_cells(unit)):
+                    existing = unit.get_status("大圣光守备")
+                    if existing is not None:
+                        unit.remove_status(existing, battle)
                     unit.add_status(
                         StatModifierStatus(
                             "大圣光守备",
@@ -1853,7 +1858,12 @@ class GreatHolyLightField(BattleFieldEffect):
                         )
                     )
                     battle.log(f"{unit.name} 获得了大圣光的守备加成。")
-        super().on_any_turn_end(battle, ended_player_id)
+        if battle.unit_belongs_to_current_turn(owner) and self.duration is not None:
+            # Five half-rounds: cast-turn end, then two further own turn ends.
+            self.duration -= 1 if self.first_owner_end else 2
+            self.first_owner_end = False
+            if self.duration <= 0:
+                battle.remove_field_effect(self)
 
 
 class GreatHolyLightSkill(SelfBuffSkill):
@@ -2025,23 +2035,7 @@ class BackstepShotSkill(Skill):
     def retreat_cells(self, battle: Battle, actor: HeroUnit) -> list[Position]:
         if actor.position is None or actor.cannot_move:
             return []
-        cells: list[Position] = []
-        for dx, dy in (
-            (-1, -1),
-            (-1, 0),
-            (-1, 1),
-            (0, -1),
-            (0, 1),
-            (1, -1),
-            (1, 0),
-            (1, 1),
-        ):
-            destination = actor.position.offset(dx * 2, dy * 2)
-            if not battle.in_bounds(destination):
-                continue
-            if battle.is_occupied(destination, ignore=actor, mover=actor):
-                continue
-            cells.append(destination)
+        cells = battle.reachable_positions(actor, max_distance=2, exact_distance=2, straight_only=True, ignore_units=True)
         return sorted(cells, key=lambda cell: (cell.y, cell.x))
 
     def counter_target_after_retreat(

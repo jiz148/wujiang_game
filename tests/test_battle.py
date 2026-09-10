@@ -13,7 +13,7 @@ if str(SRC) not in sys.path:
 
 from wujiang.tactical.engine.core import ActionError, DamageContext, HealContext, Position, StatusEffect  # noqa: E402
 from wujiang.tactical.heroes.first_five import GreatFireFuneralField, MedusaSummon  # noqa: E402
-from wujiang.tactical.heroes.common import SlowStatus  # noqa: E402
+from wujiang.tactical.heroes.common import SlowStatus, StatModifierStatus  # noqa: E402
 from wujiang.tactical.heroes.next_five import BloodDanceLockStatus, ErasureCounterStatus, RockAbsorbFootprintStatus, SandstormWeatherEffect, StandardCloneSummon  # noqa: E402
 from wujiang.tactical.heroes.excel_roster import EXCEL_HERO_REGISTRY, MountainGodCounterStatus, WorldRootSummon  # noqa: E402
 from wujiang.tactical.heroes.registry import HERO_REGISTRY, RANDOM_HERO_BATTLE_MODE, RoomBattleEntry, create_battle, create_classic_battle, create_hero, create_room_battle, list_heroes  # noqa: E402
@@ -3045,7 +3045,7 @@ class BattleSmokeTests(unittest.TestCase):
         battle.configure_turn_order([bard.unit_id, dark.unit_id, survivor.unit_id])
         battle.start_current_turn()
         dark.max_health = 4.0
-        dark.current_hp = 4.0
+        dark.current_hp = 0.5
 
         battle.perform_action({"type": "skill", "unit_id": bard.unit_id, "skill_code": "great_holy_light"})
         battle.perform_action({"type": "end_turn"})
@@ -5027,10 +5027,11 @@ class BattleSmokeTests(unittest.TestCase):
         bard = battle.player_units(2)[0]
         original_position = hunter.position
 
-        battle.perform_action({"type": "skill", "unit_id": hunter.unit_id, "skill_code": "earth_walker", "x": 2, "y": 4})
+        with mock.patch("wujiang.tactical.heroes.next_five.random.choice", side_effect=lambda values: values[0]):
+            battle.perform_action({"type": "skill", "unit_id": hunter.unit_id, "skill_code": "earth_walker", "cells": [{"x": 2, "y": 4}, {"x": 2, "y": 3}, {"x": 2, "y": 5}]})
 
         clones = [unit for unit in battle.all_units() if unit.is_clone]
-        self.assertEqual(len(clones), 1)
+        self.assertEqual(len(clones), 3)
         clone = clones[0]
         self.assertEqual(hunter.position, Position(2, 4))
         self.assertEqual(clone.position, original_position)
@@ -5050,7 +5051,7 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertTrue(any(unit.unit_id == clone.unit_id for unit in battle.all_units()))
         battle.perform_action({"type": "end_turn"})
 
-        self.assertTrue(all(unit.unit_id != clone.unit_id for unit in battle.all_units()))
+        self.assertFalse(any(unit.is_clone for unit in battle.all_units()))
 
     def test_water_wave_raises_max_mana_without_refilling_current_mana(self) -> None:
         battle = create_battle("element_hunter", "bard")
@@ -5312,6 +5313,8 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertEqual(len(local_sandstorms), 1)
 
         battle.add_field_effect(SandstormWeatherEffect(duration=3))
+        battle.perform_action({"type": "end_turn"})
+        self.assertAlmostEqual(bard.current_hp, 2)
         battle.perform_action({"type": "end_turn"})
 
         self.assertAlmostEqual(bard.current_hp, 2 - 0.0625)
@@ -7414,6 +7417,22 @@ class HeroBatchH12Tests(unittest.TestCase):
         self.assertNotIn((wall_cell.x, wall_cell.y), battle.blocked_cells)
         self.assertTrue(any("斯芬克斯炮击" in line and "破坏了地形" in line for line in battle.logs))
 
+    def test_sphinx_cannon_preview_reports_friendly_fire_targets(self) -> None:
+        battle = create_battle(["excel_r126", "fire_funeral"], "bard")
+        solar = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r126")
+        ally = next(unit for unit in battle.hero_units(1) if unit.hero_code == "fire_funeral")
+        bard = primary_hero(battle, 2)
+        solar.position = Position(1, 1)
+        ally.position = Position(5, 4)
+        bard.position = Position(5, 5)
+        skill_by_code(solar, "sphinx_cannon").execute(battle, solar, {"x": 2, "y": 1})
+        cannon = summon_by_code(battle, 1, "sphinx_cannon")
+
+        preview = cannon.traits[0].basic_attack_preview(battle, cannon, {})
+
+        self.assertIn(ally.unit_id, preview["target_unit_ids"])
+        self.assertIn(bard.unit_id, preview["target_unit_ids"])
+
     def test_cat_taunt_contract_and_retaliation_pull_are_enforced(self) -> None:
         battle = create_battle(["excel_r142", "fire_funeral"], "bard")
         cat = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r142")
@@ -7496,8 +7515,32 @@ class HeroBatchH12Tests(unittest.TestCase):
         )
 
         self.assertLess(battle.distance_between_units(bard, cat), old_distance)
-        self.assertEqual(bard.position, Position(3, 3))
+        self.assertEqual(battle.distance_between_units(bard, cat), 2)
+        self.assertTrue(battle.cells_are_straight_aligned(Position(0, 0), bard.position))
         self.assertEqual(bard.current_mana, 2)
+
+    def test_cat_retaliation_triggers_once_for_one_area_attack_with_followup_effect(self) -> None:
+        battle = create_battle("dragon_rider", "excel_r142")
+        rider = primary_hero(battle, 1)
+        dragon = summon_by_code(battle, 1, "dragon_mount")
+        cat = primary_hero(battle, 2)
+        rider.position = Position(3, 3)
+        dragon.position = Position(3, 3)
+        cat.position = Position(6, 4)
+        cat.max_health = cat.current_hp = 10
+        action = next(action for action in battle.action_snapshot_for(dragon)["actions"] if action["kind"] == "attack")
+        pattern = next(
+            pattern
+            for pattern in action["preview"]["selection"]["patterns"]
+            if any(cell["x"] == cat.position.x and cell["y"] == cat.position.y for cell in pattern)
+        )
+
+        battle.perform_action({"type": "attack", "unit_id": dragon.unit_id, "cells": pattern})
+        resolve_pending_chain(battle)
+
+        retaliation_logs = [message for message in battle.logs if "龙 因攻击或技能猫叔" in message]
+        self.assertEqual(len(retaliation_logs), 1)
+        self.assertIsNotNone(dragon.get_status("猫叔反制"))
 
     def test_tricycle_summon_chain_and_attack_movement_economy(self) -> None:
         battle = create_battle("excel_r198", "bard")
@@ -7638,6 +7681,31 @@ class HeroBatchH12Tests(unittest.TestCase):
         self.assertEqual(bard.shields, 0)
         self.assertLess(bard.current_hp, 10)
         self.assertTrue(any("赤之随机破魔" in line and "成功" in line for line in battle.logs))
+        self.assertFalse(hasattr(red, "_red_random_pierce_active"))
+
+    def test_red_random_pierce_result_remains_public_when_area_contains_stealthed_target(self) -> None:
+        battle = create_battle("excel_r291", "dark_human")
+        red = primary_hero(battle, 1)
+        dark = primary_hero(battle, 2)
+        while battle.current_turn_unit().unit_id != dark.unit_id:
+            battle.perform_action({"type": "end_turn"})
+        battle.perform_action({"type": "skill", "unit_id": dark.unit_id, "skill_code": "stealth"})
+        battle.perform_action({"type": "end_turn"})
+        while battle.current_turn_unit().unit_id != red.unit_id:
+            battle.perform_action({"type": "end_turn"})
+        red.position = Position(2, 2)
+        dark.position = Position(4, 2)
+        path = skill_by_code(red, "iron_chain_path")
+        pattern = next(cells for cells in path.patterns(battle, red) if dark.position in cells)
+        before = sum("赤之随机破魔" in line for line in battle.logs)
+
+        with mock.patch("wujiang.tactical.heroes.excel_roster.random.random", return_value=0.0):
+            battle.perform_action(
+                {"type": "skill", "unit_id": red.unit_id, "skill_code": "iron_chain_path", "cells": [cell.to_dict() for cell in pattern]}
+            )
+
+        self.assertEqual(sum("赤之随机破魔" in line for line in battle.logs), before + 1)
+        self.assertTrue(any("赤之随机破魔" in line and "成功" in line for line in battle.logs))
 
     def test_iron_chain_path_is_free_once_moves_to_anchor_and_buffs_next_damage(self) -> None:
         battle = create_battle("excel_r291", "bard")
@@ -7663,6 +7731,50 @@ class HeroBatchH12Tests(unittest.TestCase):
         )
         self.assertEqual(ctx.attack_power, 3)
         self.assertIsNone(red.get_status("铁锁追击"))
+
+    def test_iron_chain_path_uses_nearest_wall_as_terrain_anchor_without_followup(self) -> None:
+        battle = create_battle("excel_r291", "bard")
+        red = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        red.position = Position(2, 2)
+        bard.position = Position(6, 2)
+        bard.max_health = bard.current_hp = 10
+        battle.blocked_cells.add((4, 2))
+        path = skill_by_code(red, "iron_chain_path")
+        pattern = next(cells for cells in path.patterns(battle, red) if bard.position in cells)
+
+        path.execute(battle, red, {"cells": [cell.to_dict() for cell in pattern]})
+
+        self.assertLess(bard.current_hp, 10)
+        self.assertNotEqual(red.position, Position(2, 2))
+        self.assertEqual(red.position.distance_to(Position(4, 2)), 1)
+        dx = abs(red.position.x - 2)
+        dy = abs(red.position.y - 2)
+        self.assertTrue(dx == 0 or dy == 0 or dx == dy)
+        self.assertLessEqual(max(dx, dy), 5)
+        self.assertIsNone(red.get_status("铁锁追击"))
+        self.assertTrue(any("墙体(4,2)" in line and "地形锚点不获得追击加伤" in line for line in battle.logs))
+
+    def test_iron_chain_path_anchor_is_fixed_before_damage_and_paid_uses_remain_available(self) -> None:
+        battle = create_battle("excel_r291", "bard")
+        red = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        red.position = Position(2, 2)
+        bard.position = Position(4, 2)
+        bard.current_hp = 0.125
+        path = skill_by_code(red, "iron_chain_path")
+        pattern = next(cells for cells in path.patterns(battle, red) if bard.position in cells)
+
+        path.execute(battle, red, {"cells": [cell.to_dict() for cell in pattern]})
+
+        self.assertFalse(bard.alive)
+        followup = red.get_status("铁锁追击")
+        self.assertIsNotNone(followup)
+        self.assertEqual(followup.target_unit_id, bard.unit_id)
+        path.uses_this_turn = 1
+        red.current_mana = 1
+        self.assertIsNone(path.max_uses_per_turn)
+        self.assertEqual(path.mana_cost_for_payload(battle, red, {}), 0.5)
 
     def test_rhino_death_buffs_allies_and_returns_after_three_rounds_near_orc(self) -> None:
         battle = create_battle(["excel_r356", "excel_r291"], "bard")
@@ -7721,6 +7833,84 @@ class HeroBatchH12Tests(unittest.TestCase):
 
         self.assertEqual(orc.stat("attack"), before_attack + 1)
         self.assertTrue(any(effect.name == "强袭犀牛回归" for effect in battle.field_effects))
+
+    def test_rhino_return_clears_temporary_status_preserves_permanent_growth_and_can_trigger_again(self) -> None:
+        battle = create_battle(["excel_r356", "excel_r291"], "bard")
+        rhino = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r356")
+        orc = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r291")
+        bard = primary_hero(battle, 2)
+        permanent = StatModifierStatus("永久成长测试", attack_delta=2, duration=None)
+        temporary = StatModifierStatus("上一条生命临时状态", attack_delta=3, duration=2)
+        rhino.add_status(permanent)
+        rhino.add_status(temporary)
+        dragon_breath = skill_by_code(rhino, "dragon_breath")
+        dragon_breath.uses_this_battle = 1
+        dragon_breath.cooldown_remaining = 1
+        original_slot = battle.turn_order_unit_ids.index(rhino.unit_id)
+
+        rhino.current_hp = 0.25
+        battle.resolve_damage(
+            DamageContext(source=bard, target=rhino, attack_power=0, is_skill=False, raw_damage=1, action_name="第一条生命破坏")
+        )
+        effect = next(effect for effect in battle.field_effects if effect.name == "强袭犀牛回归")
+        battle.turn_number = effect.return_turn_number
+        effect.on_turn_start(battle, orc)
+
+        returned = battle.get_unit(rhino.unit_id)
+        self.assertIs(returned.get_status("永久成长测试"), permanent)
+        self.assertIsNone(returned.get_status("上一条生命临时状态"))
+        self.assertEqual(returned.stat("attack"), returned.base_stats.attack + 2)
+        self.assertEqual(dragon_breath.uses_this_battle, 1)
+        self.assertEqual(dragon_breath.cooldown_remaining, 1)
+        self.assertEqual(battle.turn_order_unit_ids.index(returned.unit_id), original_slot)
+        self.assertFalse(returned.turn_ready)
+
+        returned.current_hp = 0.25
+        battle.resolve_damage(
+            DamageContext(source=bard, target=returned, attack_power=0, is_skill=False, raw_damage=1, action_name="第二条生命破坏")
+        )
+
+        self.assertNotIn(returned.unit_id, battle.units)
+        self.assertEqual(len([effect for effect in battle.field_effects if effect.name == "强袭犀牛回归"]), 1)
+        legacy_statuses = [status for status in orc.statuses if status.name == "强袭犀牛遗志"]
+        self.assertEqual(len(legacy_statuses), 1)
+        self.assertEqual(legacy_statuses[0].duration, 3)
+
+    def test_rhino_return_uses_fixed_turn_slot_anchor_and_retries_blocked_landing(self) -> None:
+        battle = create_battle(["excel_r356", "excel_r291", "excel_r022"], "bard")
+        rhino = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r356")
+        red = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r291")
+        panther = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r022")
+        bard = primary_hero(battle, 2)
+        red.position = Position(2, 2)
+        panther.position = Position(7, 7)
+        battle.configure_turn_order([red.unit_id, panther.unit_id, bard.unit_id, rhino.unit_id])
+        rhino.current_hp = 0.25
+        battle.resolve_damage(
+            DamageContext(source=bard, target=rhino, attack_power=0, is_skill=False, raw_damage=1, action_name="测试破坏")
+        )
+        effect = next(effect for effect in battle.field_effects if effect.name == "强袭犀牛回归")
+        battle.turn_number = effect.return_turn_number
+        blocked = {
+            (x, y)
+            for center in (red.position, panther.position)
+            for y in range(center.y - 1, center.y + 2)
+            for x in range(center.x - 1, center.x + 2)
+            if battle.in_bounds(Position(x, y)) and (x, y) != (center.x, center.y)
+        }
+        battle.blocked_cells.update(blocked)
+
+        effect.on_turn_start(battle, red)
+        self.assertNotIn(rhino.unit_id, battle.units)
+        self.assertIn(effect, battle.field_effects)
+        self.assertTrue(any("强袭犀牛" in line and "继续等待回归" in line for line in battle.logs))
+
+        battle.blocked_cells.remove((1, 1))
+        effect.on_turn_start(battle, panther)
+
+        returned = battle.get_unit(rhino.unit_id)
+        self.assertEqual(returned.position, Position(1, 1))
+        self.assertLessEqual(battle.distance_between_units(returned, red), 1)
 
 
 class ClassicMultiHeroBattleTests(unittest.TestCase):

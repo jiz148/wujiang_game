@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import combinations
@@ -10,6 +11,7 @@ from wujiang.tactical.engine.core import (
     ActionError,
     Battle,
     DamageContext,
+    HealContext,
     Position,
     QueuedAction,
     TemporaryDefenseStatus,
@@ -74,6 +76,7 @@ SELF_BUFF_SKILL_CODES = {
 MOVE_SKILL_CODES = {"fly_leap", "fate_kick", "crazy_sand", "plasma_thruster", "mounted_leap", "jirobo_follow_step"}
 MOVE_SKILL_CODES |= {"zero_dash", "fuma_pursuit", "true_blade_air_slash"}
 MOVE_SKILL_CODES.add("iron_chain_path")
+AREA_ESCAPE_REACTION_CODES = {"evasion", "backstep_shot", "card_transposition", "shadow_counter"}
 DAMAGING_SKILL_CODES = {
     "paralyzing_glove",
     "machine_gun",
@@ -722,9 +725,13 @@ def skill_payloads_for_action(battle: Battle, actor: Unit, action: dict[str, Any
         return rock_absorb_payloads(battle, actor, action)
     if code == "rock_cannon":
         return rock_cannon_payloads(battle, actor)
-    if code == "split":
+    if code == "crazy_sand":
+        skill = actor.get_skill(code)
+        return [{**base_payload, "cells": positions_to_payload(line), "x": destination.x, "y": destination.y}
+                for line, destination in skill._patterns_with_destinations(battle, actor)]
+    if code in {"split", "earth_walker"}:
         return split_payloads(battle, actor, action)
-    if code == "descent_moment":
+    if code in {"descent_moment", "mana_pull"}:
         payloads: list[dict[str, Any]] = []
         destinations_by_target = preview.get("destinations_by_target", {}) or {}
         for target_id in preview.get("target_unit_ids", []):
@@ -1104,14 +1111,18 @@ def direction_payload_for_cell_skill(actor: Unit, action: dict[str, Any], cell: 
 
 
 def split_payloads(battle: Battle, actor: Unit, action: dict[str, Any]) -> list[dict[str, Any]]:
-    skill = actor.get_skill("split")
+    code = str(action.get("code") or "split")
+    skill = actor.get_skill(code)
     preview = action.get("preview", {}) or {}
     candidate_cells = preview_positions(preview.get("cells"))
     required = int((preview.get("selection") or {}).get("required_cells") or getattr(skill, "clone_count", 3))
     probe = skill._clone_probe(actor)  # type: ignore[attr-defined]
     selected: list[Position] = []
     occupied: set[tuple[int, int]] = set()
-    for cell in sorted(candidate_cells, key=lambda item: distance_to_position(battle, actor, item)):
+    enemies = living_hostile_combatants(battle, actor.player_id) if code == "earth_walker" else []
+    def placement_key(cell: Position) -> float:
+        return -min(distance_to_position(battle, enemy, cell) for enemy in enemies) if enemies else distance_to_position(battle, actor, cell)
+    for cell in sorted(candidate_cells, key=placement_key):
         footprint_keys = {(footprint.x, footprint.y) for footprint in battle.unit_cells_at(probe, cell)}
         if occupied & footprint_keys:
             continue
@@ -1124,7 +1135,7 @@ def split_payloads(battle: Battle, actor: Unit, action: dict[str, Any]) -> list[
     payload = {
         "type": "skill",
         "unit_id": actor.unit_id,
-        "skill_code": "split",
+        "skill_code": code,
         "cells": positions_to_payload(selected),
     }
     try:
@@ -1142,14 +1153,16 @@ def rock_absorb_payloads(battle: Battle, actor: Unit, action: dict[str, Any]) ->
     candidate_cells = preview_positions(preview.get("cells"))
     selected_cells: list[Position] = []
     if required:
-        for group in combinations(candidate_cells[:24], required):
-            payload = {"cells": positions_to_payload(group)}
-            try:
-                skill.selected_growth_cells(battle, actor, payload, required)
-            except Exception:
-                continue
-            selected_cells = list(group)
-            break
+        connected = {(cell.x, cell.y) for cell in battle.unit_cells(actor)}
+        enemies = living_hostile_combatants(battle, actor.player_id)
+        while len(selected_cells) < required:
+            frontier = [cell for cell in candidate_cells if (cell.x, cell.y) not in connected
+                        and any((cell.x + dx, cell.y + dy) in connected for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)))]
+            if not frontier:
+                break
+            cell = min(frontier, key=lambda cell: min((battle.unit_distance_to_cell(enemy, cell) for enemy in enemies), default=0))
+            selected_cells.append(cell)
+            connected.add((cell.x, cell.y))
         if len(selected_cells) != required:
             return []
     payloads: list[dict[str, Any]] = []
@@ -1178,6 +1191,8 @@ def rock_cannon_payloads(battle: Battle, actor: Unit) -> list[dict[str, Any]]:
         return []
     payloads: list[dict[str, Any]] = []
     candidate_groups: list[list[Position]] = [[cell] for cell in body]
+    candidate_groups.extend([list(group) for group in combinations(body[:12], 2)
+                             if len(body) > 2 and abs(group[0].x - group[1].x) + abs(group[0].y - group[1].y) == 1])
     if len(body) > 2:
         for keep_cell in body:
             group = [cell for cell in body if cell != keep_cell]
@@ -1596,6 +1611,10 @@ def score_move_destination(
         score += max(0.0, nearest_enemy - 1.0) * profile.support_bonus
     elif role != "support":
         score += max(0.0, 4.0 - nearest_enemy) * (4.0 + profile.aggressive_bonus / 6.0)
+    if destination != actor.position and not actor.moved_this_turn and any(trait.name == "原地回复" for trait in actor.traits):
+        score -= min(1.0, max(0.0, actor.max_mana() - actor.current_mana)) * 18.0
+        if not actor.cannot_heal:
+            score -= min(0.25, max(0.0, actor.max_health - actor.current_hp)) * 120.0
     return score
 
 
@@ -1722,6 +1741,7 @@ def score_attack_payload(
     forced_target = required_attack_target(battle, actor)
     if forced_target is not None and target.unit_id == forced_target.unit_id:
         score += 500.0
+    score += reviewed_attack_synergy(battle, actor, target, expected_damage)
     return score
 
 
@@ -1756,6 +1776,8 @@ def score_skill_payload(
     if code == "migratory_bird_mark":
         return migratory_bird_mark_score(battle, actor, action, payload, profile)
     skill = skill_from_ai_action(actor, action, code)
+    if code in {"rock_absorb", "rock_cannon", "doom_light", "apocalypse"}:
+        return resource_effect_score(battle, actor, skill, payload, profile)
     targets = skill_effect_units(battle, actor, skill, payload)
     role = hero_style(actor)
     if code == "iron_chain_path":
@@ -1764,6 +1786,20 @@ def score_skill_payload(
         return sphinx_cannon_score(battle, actor, payload)
     if code == "solar_judgment":
         return solar_judgment_score(battle, actor, skill, payload, profile)
+    if code == "curse":
+        eligible = [unit for unit in targets if unit.player_id != actor.player_id and not unit.has_status("诅咒")]
+        if actor.current_hp <= 0.5 or not eligible:
+            return -1000.0
+        # A curse is delayed attrition, not an immediate attack using Ellie's attack stat.
+        return sum(unit.current_hp * 80.0 for unit in eligible) - 60.0 - (35.0 if actor.current_hp <= 0.75 else 0.0)
+    if code == "mana_pull":
+        target = primary_target_unit(battle, payload, targets)
+        if target is None or target.position is None or payload.get("dest_x") is None or payload.get("dest_y") is None:
+            return -1000.0
+        destination = Position(int(payload["dest_x"]), int(payload["dest_y"]))
+        style = hero_style(target)
+        change = score_move_destination(battle, target, destination, style, profile) - score_move_destination(battle, target, target.position, style, profile)
+        return change - 12.0 if target.player_id == actor.player_id else -change + (20.0 if not target.cannot_normal_move else 0.0) - 12.0
     if code in {"cat_taunt_roar", "ring_taunt"}:
         return taunt_control_score(battle, actor, skill, payload, code, targets, profile)
     if code in MOVE_SKILL_CODES:
@@ -1771,12 +1807,21 @@ def score_skill_payload(
         if destination is None:
             return -5.0
         score = score_move_destination(battle, actor, destination, role, profile) + 10.0
+        if code == "fate_kick" and actor.position is not None:
+            dx, dy = destination.x - actor.position.x, destination.y - actor.position.y
+            if dx or dy:
+                impact = destination.offset(0 if dx == 0 else (1 if dx > 0 else -1), 0 if dy == 0 else (1 if dy > 0 else -1))
+                target = battle.unit_at(impact) if battle.in_bounds(impact) else None
+                if target is not None and target.player_id != actor.player_id:
+                    score += 0.5 * (hostile_unit_value(target) - ally_unit_value(actor))
+                    score -= max(0, actor.attack_actions_per_turn() - actor.attacks_used) * 22.0
         if code == "zero_dash":
             score += zero_dash_score(battle, actor, skill, payload)
         if code == "fuma_pursuit":
             score += fuma_pursuit_score(battle, actor, skill, payload, profile)
         if code == "crazy_sand":
-            score += skill_damage_score(battle, actor, skill, payload, profile)
+            score -= score_move_destination(battle, actor, actor.position, role, profile) if actor.position is not None else 0.0
+            score += skill_damage_score(battle, actor, skill, payload, profile) - 15.0
         if code == "true_blade_air_slash":
             score += true_blade_air_slash_score(battle, actor, skill, payload, profile)
         return score
@@ -1786,6 +1831,13 @@ def score_skill_payload(
         return world_seed_score(battle, actor, payload, profile)
     if code in SUMMON_SKILL_CODES:
         destination = payload_destination(payload)
+        if code == "earth_walker":
+            if actor.has_status("土行者") or not living_hostile_combatants(battle, actor.player_id):
+                return -1000.0
+            if best_available_attack_score(battle, actor, profile) > 0:
+                return -1000.0
+            nearby = any(distance_between_units(battle, actor, enemy) <= enemy.normal_move_distance() + enemy.targeting_range() for enemy in living_hostile_combatants(battle, actor.player_id))
+            return 24.0 + max(0.0, actor.max_health - actor.current_hp) * 45.0 if nearby else -8.0
         if code in {"summon_bicycle", "summon_unicycle"}:
             return cycle_summon_score(battle, actor, code, destination, profile)
         score = 42.0
@@ -1810,6 +1862,12 @@ def score_skill_payload(
         healed = primary_target_unit(battle, payload, targets)
         if healed is None:
             healed = actor
+        if code == "heal":
+            with ai_probe_rollback(battle):
+                before_hp = healed.current_hp
+                skill.execute(battle, actor, payload)
+                gain = healed.current_hp - before_hp
+            return gain * 200.0 + (50.0 if healed.current_hp <= 0.5 else 0.0) if gain > 0 else -1000.0
         missing = max(0.0, healed.max_health - healed.current_hp)
         score = missing * 120.0
         if code == "mech_enhancement":
@@ -1827,6 +1885,10 @@ def score_skill_payload(
         return self_buff_score(battle, actor, code, profile) + follow_catch_up_skill_penalty(battle, actor)
     if code == "great_funeral":
         return great_fire_funeral_score(battle, actor, skill, payload, profile)
+    if code == "wind_sand":
+        if not targets:
+            return -1000.0
+        return skill_damage_score(battle, actor, skill, payload, profile) + sandstorm_value(battle, actor)
     if code in {"stance", "great_holy_light", "plant_growth", "smoke_spray"}:
         return field_skill_score(battle, actor, code, targets, profile)
     if code in {"drain_mana", "large_drain_mana"}:
@@ -1937,6 +1999,8 @@ def score_reaction_payload(
         if destination is None:
             return -5.0
         score = threat + score_move_destination(battle, reactor, destination, hero_style(reactor), profile) / 2.0 + 12.0
+        if destination_still_in_queued_target_area(battle, reactor, destination, queued_action):
+            score -= threat + 30.0
         if payload.get("target_unit_id"):
             expected = estimate_damage(battle, attacker, battle.basic_attack_preview_power(reactor))
             score += expected * 85.0 + profile.aggressive_bonus
@@ -2197,6 +2261,59 @@ def ai_terrain_unit(unit: Unit) -> bool:
     )
 
 
+def area_escape_reaction_available(
+    battle: Battle,
+    actor: Unit,
+    skill: Any,
+    payload: dict[str, Any],
+    target: Unit,
+    cells: list[Position],
+) -> bool:
+    """Whether a target can currently leave an entire declared area by reaction.
+
+    This is intentionally based on public, legal reaction options.  It does not
+    predict which option the opponent will choose, but lets irreversible area
+    actions discount a defeat that the opponent can already avoid.
+    """
+    if not cells:
+        return False
+    try:
+        queued_action = battle.build_queued_action(payload)
+    except (ActionError, KeyError, TypeError, ValueError):
+        return False
+    cell_keys = {(cell.x, cell.y) for cell in cells}
+    for option in battle.available_reaction_options(target, queued_action):
+        if str(option.action_code) not in AREA_ESCAPE_REACTION_CODES:
+            continue
+        preview = option.preview if isinstance(option.preview, dict) else {}
+        for destination in preview_positions(preview.get("cells")):
+            footprint = target.footprint_cells_at(destination)
+            if footprint and all((cell.x, cell.y) not in cell_keys for cell in footprint):
+                return True
+    return False
+
+
+def lethal_counter_reaction_available(battle: Battle, actor: Unit, payload: dict[str, Any]) -> bool:
+    """A currently legal counter can defeat the caster before the action resolves.
+
+    Probe the real counter resolution so existing shields, immunity and survival
+    effects matter. A speed-2 shield the caster could otherwise cast cannot be
+    assumed to answer a speed-2 counter. The probe leaves no state or log behind.
+    """
+    try:
+        queued_action = battle.build_queued_action(payload)
+    except (ActionError, KeyError, TypeError, ValueError):
+        return False
+    for enemy in battle.enemy_units(actor.player_id):
+        if not any(option.action_code == "counter" for option in battle.available_reaction_options(enemy, queued_action)):
+            continue
+        with ai_probe_rollback(battle):
+            battle.resolve_reaction_action(enemy, "counter", queued_action)
+            if not actor.alive:
+                return True
+    return False
+
+
 def solar_judgment_score(
     battle: Battle,
     actor: Unit,
@@ -2204,10 +2321,50 @@ def solar_judgment_score(
     payload: dict[str, Any],
     profile: DifficultyProfile,
 ) -> float:
+    if lethal_counter_reaction_available(battle, actor, payload):
+        return -1000.0
     cells = skill_effect_cells(battle, actor, skill, payload)
     affected = skill_effect_units(battle, actor, skill, payload)
     enemies = [unit for unit in affected if unit.player_id != actor.player_id]
+    allies = [unit for unit in affected if unit.player_id == actor.player_id]
     score = skill_damage_score(battle, actor, skill, payload, profile)
+
+    def projected_damage(target: Unit) -> float:
+        attack_power = skill_attack_power(battle, actor, skill, payload, target, cells)
+        return estimate_skill_damage(
+            battle,
+            actor,
+            skill,
+            payload,
+            target,
+            attack_power,
+            cells=cells,
+            ignore_shield=bool(skill.ignores_shield_for_payload(battle, actor, payload)),
+            half_ignore_shield=bool(skill.half_ignores_shield_for_payload(battle, actor, payload)),
+        )
+
+    escapable_enemies = [
+        target
+        for target in enemies
+        if area_escape_reaction_available(battle, actor, skill, payload, target, cells)
+    ]
+    for target in escapable_enemies:
+        damage = projected_damage(target)
+        score -= damage * 85.0 + hostile_unit_value(target) * 0.25
+        if damage >= target.current_hp - 1e-9:
+            score -= 70.0
+
+    reliable_enemy_defeats = [
+        target
+        for target in enemies
+        if target not in escapable_enemies and projected_damage(target) >= target.current_hp - 1e-9
+    ]
+    allied_defeats = [target for target in allies if projected_damage(target) >= target.current_hp - 1e-9]
+    if allied_defeats:
+        enemy_loss_value = sum(hostile_unit_value(target) for target in reliable_enemy_defeats)
+        ally_loss_value = sum(ally_unit_value(target) for target in allied_defeats)
+        if len(allied_defeats) >= len(reliable_enemy_defeats) or ally_loss_value >= enemy_loss_value:
+            return -1000.0
 
     defended_targets = [unit for unit in enemies if unit.total_shields() > 0 or bool(getattr(unit, "magic_immunity", False))]
     score += len(defended_targets) * 58.0
@@ -2274,11 +2431,148 @@ def iron_chain_path_score(
     targets = [unit for unit in skill_effect_units(battle, actor, skill, payload) if unit.player_id != actor.player_id]
     if not targets:
         return -15.0
+    try:
+        cells = list(skill.chosen_cells(battle, actor, payload))
+        anchor_info = skill.anchor_for_cells(battle, actor, cells)
+    except (ActionError, AttributeError, TypeError, ValueError):
+        anchor_info = None
+    if anchor_info is None:
+        return score - 45.0
+
+    anchor_kind, anchor_unit, anchor_cells, _ = anchor_info
+    try:
+        destination = skill.destination_for_anchor(battle, actor, anchor_cells)
+    except (ActionError, AttributeError, TypeError, ValueError):
+        destination = None
+    if destination is None:
+        score -= 55.0
+    else:
+        score += score_move_destination(battle, actor, destination, hero_style(actor), profile) * 0.45
+        exposure = 0.0
+        for enemy in living_hostile_combatants(battle, actor.player_id):
+            if distance_to_position(battle, enemy, destination) > enemy.normal_move_distance() + enemy.targeting_range():
+                continue
+            expected_hit = battle.damage_rule.calculate_damage(enemy.stat("attack"), actor.stat("defense"))
+            exposure += expected_hit * 75.0 + hostile_unit_value(enemy) * 0.06
+            exposure += max(0, enemy.attack_actions_per_turn() - 1) * 12.0
+        score -= exposure
+
+    if anchor_kind == "unit" and anchor_unit is not None:
+        if anchor_unit.player_id != actor.player_id:
+            score += 32.0
+            if destination is not None and actor.attacks_used < actor.attack_actions_per_turn():
+                score += 24.0
+        else:
+            score -= 18.0
+    else:
+        score -= 10.0
     score += 24.0
     score += max((hostile_unit_value(unit) for unit in targets), default=0.0) * 0.2
     if getattr(skill, "uses_this_turn", 0) == 0:
         score += 12.0
     return score
+
+
+def reviewed_attack_synergy(battle: Battle, actor: Unit, target: Unit, damage: float) -> float:
+    score = 0.0
+    if actor.hero_code == "undead_king_lina":
+        reward = next((trait for trait in actor.traits if trait.name == "击破重置"), None)
+        if reward is not None and not reward.used_this_turn and reward._eligible_target(target) and damage >= target.current_hp:
+            score += 55.0 + min(target.current_mana, max(0.0, actor.max_mana() - actor.current_mana)) * 18.0
+        lock = next((trait for trait in actor.traits if trait.name == "执念目标"), None)
+        remaining = max(1, actor.attack_actions_per_turn() - actor.attacks_used)
+        if lock is not None and not lock.locked_target_id and damage * remaining < target.current_hp:
+            score -= 28.0
+    if actor.hero_code == "doomlight_dragon" and damage > 0 and not target.has_status("末日光"):
+        score += min(target.current_hp, 1.0) * 32.0
+    if target.hero_code == "doomlight_dragon" and not actor.has_status("末日光"):
+        score -= min(actor.current_hp, 1.0) * 55.0
+    return score
+
+
+def sandstorm_value(battle: Battle, actor: Unit) -> float:
+    score = 0.0
+    for unit in battle.all_units():
+        if not unit.alive or unit.banished or battle.unit_in_weather("沙尘", unit):
+            continue
+        value = (0.0 if unit.attribute == "土" else (0.125 if unit.has_flying else 0.0625) * 100.0)
+        if unit.is_stealthed():
+            value += 22.0
+        score += value if unit.player_id != actor.player_id else -value
+    if actor.hero_code == "undead_king_lina" and not battle.unit_in_weather("沙尘", actor):
+        score += min(0.25, max(0.0, actor.max_health - actor.current_hp)) * 80.0
+        score += min(1.0, max(0.0, actor.max_mana() - actor.current_mana)) * 16.0
+    return score
+
+
+def resource_effect_score(battle: Battle, actor: Unit, skill: Any, payload: dict[str, Any], profile: DifficultyProfile) -> float:
+    """Price actual effect outcomes, paid HP and consumed body cells without running reactions."""
+    code = skill.code
+    units = list(battle.all_units())
+    if code == "rock_cannon":
+        try:
+            selected, direction, _ = skill.validate_selection(battle, actor, payload)
+            impact_cells = [cell for center in skill.impact_positions(battle, actor, selected, direction)
+                            for cell in (Position(center.x + dx, center.y + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1))]
+            if not any(unit.player_id != actor.player_id for unit in battle.units_at_cells(impact_cells)):
+                return -1000.0
+        except ActionError:
+            return -1000.0
+    weights = {"attack": 18.0, "defense": 17.0, "speed": 10.0, "attack_range": 10.0, "mana": 14.0}
+    before = {unit.unit_id: (unit.current_hp, unit.alive, unit.total_shields(), unit.has_status("末日光"),
+                            {stat: unit.stat(stat) for stat in weights}, unit.current_mana) for unit in units}
+    with ai_probe_rollback(battle):
+        try:
+            probe = dict(payload)
+            probe.update(skill.queued_payload_metadata(battle, actor, probe))
+            if code == "apocalypse":
+                skill.prepay_resources(battle, actor, probe)
+            if code == "rock_cannon":
+                battle.pending_followup_actions = deque()
+            skill.execute(battle, actor, probe)
+            if code == "rock_cannon":
+                while battle.pending_followup_actions:
+                    battle.resolve_skill_effect(actor, battle.pending_followup_actions.popleft())
+        except (ActionError, ValueError, KeyError):
+            return -1000.0
+        if not actor.alive:
+            return -1000.0
+        score = -8.0
+        new_doom_damage = 0.0
+        for unit in units:
+            hp, alive, shields, had_doom, stats, mana = before[unit.unit_id]
+            friendly = unit.player_id == actor.player_id
+            sign = 1.0 if friendly else -1.0
+            score += (unit.current_hp - hp) * sign * (135.0 if friendly else 110.0)
+            if alive and not unit.alive:
+                score += -240.0 if friendly else 160.0
+            score += (unit.total_shields() - shields) * sign * 8.0
+            if code == "rock_absorb":
+                score += sum((unit.stat(stat) - stats[stat]) * weight * sign for stat, weight in weights.items())
+                score += (unit.current_mana - mana) * sign * 14.0
+            if unit.alive and not had_doom and unit.has_status("末日光"):
+                expected_loss = unit.current_hp * (1.0 - 0.5 ** 4)
+                score += expected_loss * (-120.0 if friendly else 85.0)
+                if not friendly:
+                    new_doom_damage += expected_loss
+        if code == "doom_light" and new_doom_damage == 0:
+            return -1000.0
+        if actor.hero_code == "doomlight_dragon" and new_doom_damage > 0:
+            hp = actor.current_hp
+            battle.heal(HealContext(source=actor, target=actor, amount=0.25, action_name="AI吸收估值"))
+            if actor.current_hp > hp:
+                score += new_doom_damage * 35.0
+            actor.current_hp = hp
+        if code == "rock_cannon":
+            score -= len(payload.get("cells", [])) * 12.0
+            if len(battle.unit_cells(actor)) == 1:
+                score -= 12.0
+        enemies = living_hostile_combatants(battle, actor.player_id)
+        if code == "apocalypse" and enemies and actor.current_hp <= 0.5:
+            score -= 85.0
+        if skill.max_uses_per_battle == 1 and score < profile.once_per_battle_threshold:
+            score -= 24.0
+        return score
 
 
 def skill_damage_score(
@@ -2347,7 +2641,8 @@ def skill_control_bonus(
     if code == "doom_light":
         return len(enemies) * 32.0 + sum(unit.current_hp * 40.0 for unit in enemies)
     if code in {"complete_burn", "blizzard"}:
-        return len(enemies) * 24.0
+        status_name = "完全燃烧" if code == "complete_burn" else "暴风雪"
+        return sum(24.0 if not unit.has_status(status_name) else 0.0 for unit in enemies)
     if code == "morning_holy_light":
         return len(enemies) * 30.0 + sum(40.0 for unit in enemies if unit.attribute == "暗")
     if code == "eagle_eye":
@@ -2798,15 +3093,35 @@ def ally_buff_score(battle: Battle, actor: Unit, code: str, target: Unit, profil
     target_value = ally_unit_value(target)
     missing_hp = max(0.0, target.max_health - target.current_hp)
     if code == "experiment":
-        return target_value * 0.9 + 48.0 + missing_hp * 50.0
+        if target.has_status("实验倒计时") or target.position is None:
+            return -1000.0
+        enemies = living_hostile_combatants(battle, actor.player_id)
+        reachable = [unit for unit in enemies if distance_between_units(battle, target, unit) <= target.normal_move_distance() + target.targeting_range() + 4]
+        decisive = False
+        if len(enemies) == 1 and battle.unit_belongs_to_current_turn(target) and not target.cannot_attack and target.attacks_used < target.attack_actions_per_turn():
+            enemy = enemies[0]
+            if distance_between_units(battle, target, enemy) <= target.targeting_range() + 2:
+                attack = {"type": "attack", "unit_id": target.unit_id, "target_unit_id": enemy.unit_id}
+                ordinary = estimate_attack_damage(battle, target, enemy, attack, attack_power=target.stat("attack"))
+                boosted = estimate_attack_damage(battle, target, enemy, attack, attack_power=target.stat("attack") + 2)
+                decisive = ordinary < enemy.current_hp <= boosted
+        if not reachable or (not target.is_summon and target.current_hp > 0.5 and not decisive):
+            return -1000.0
+        # A healthy core hero's forced death is not a free positive buff.
+        return 45.0 + missing_hp * 55.0 + min(3, len(reachable)) * 16.0 + (180.0 if decisive else 0.0) - (0.0 if target.is_summon else target_value * 0.25)
     if code == "defend_twice":
+        if any(status.name == "守*2" and getattr(status, "source_unit_id", None) == actor.unit_id for status in target.statuses):
+            return -1000.0
         return target_value * 0.4 + 18.0
     if code == "baptism":
+        if target.magic_immunity or target.race != "人类":
+            return -1000.0
         return target_value * 0.35 + 10.0
     if code == "chant":
-        if has_mana_point_skill(target):
+        reserve = max(4.0, max((float(getattr(skill, "mana_point_cost", 0) or 0) for skill in target.skills), default=0.0))
+        if target.player_id == actor.player_id and has_mana_point_skill(target) and target.mana_points < reserve:
             return 55.0 + target_value * 0.25
-        return 8.0
+        return -1000.0
     if code == "fried_inspire":
         if target.has_status("鼓舞"):
             return -6.0
@@ -2983,18 +3298,35 @@ def self_buff_score(battle: Battle, actor: Unit, code: str, profile: DifficultyP
         unmarked = sum(1 for enemy in enemies if not enemy.has_status("侯鸟标记"))
         return 320.0 + unmarked * 50.0 if enemies else -4.0
     if code == "crystal_ball":
-        return 62.0 if enemies else -4.0
+        if actor.has_status("水晶球"):
+            return -1000.0
+        return 62.0 if any(distance_between_units(battle, actor, enemy) > actor.targeting_range() for enemy in enemies) else -8.0
     if code == "water_wave":
-        return 46.0
+        if actor.has_status("水之波动"):
+            return -1000.0
+        return 120.0 if any(distance_between_units(battle, actor, enemy) <= actor.targeting_range() + 4 for enemy in enemies) else -8.0
     if code == "headshot":
-        return 60.0 if battle.action_snapshot_for(actor).get("attack_targets") else 18.0
+        if actor.attacks_used >= actor.attack_actions_per_turn() or actor.has_status("爆头强化"):
+            return -1000.0
+        before = best_available_attack_score(battle, actor, profile)
+        with ai_probe_rollback(battle):
+            actor.get_skill("headshot").apply_to_self(battle, actor)
+            actor.performed_active_skill = True
+            after = best_available_attack_score(battle, actor, profile)
+        return after + 20.0 if after > before + 1.0 else -1000.0
     if code == "six_blade_style":
         return 54.0 if battle.action_snapshot_for(actor).get("attack_targets") else 12.0
     if code == "form_shift":
         return 58.0
     if code == "into_darkness":
-        return 52.0
+        if actor.has_status("遁入黑暗"):
+            return -1000.0
+        targets = battle.action_snapshot_for(actor).get("attack_targets") or []
+        return 180.0 if targets and actor.attacks_used < actor.attack_actions_per_turn() else (38.0 if enemies else -8.0)
     if code == "stealth":
+        glove = next((skill for skill in actor.skills if skill.code == "paralyzing_glove"), None)
+        if glove is not None and glove.uses_this_battle > 0 and actor.current_mana >= 2.0 and any(distance_between_units(battle, actor, enemy) <= actor.targeting_range() for enemy in enemies):
+            return 170.0
         return 34.0 if actor.current_hp <= 0.75 else 18.0
     if code == "harden":
         return 28.0 if actor.current_hp <= 0.75 else 12.0
@@ -3029,6 +3361,10 @@ def self_buff_score(battle: Battle, actor: Unit, code: str, profile: DifficultyP
     return 10.0
 
 
+def best_available_attack_score(battle: Battle, actor: Unit, profile: DifficultyProfile) -> float:
+    return max((candidate.score for action in battle.action_snapshot_for(actor).get("actions", []) if action.get("kind") == "attack" and action.get("available") for candidate in build_attack_candidates(battle, actor, action, profile)), default=0.0)
+
+
 def field_skill_score(
     battle: Battle,
     actor: Unit,
@@ -3043,11 +3379,15 @@ def field_skill_score(
         nearby_enemies = sum(1 for unit in enemies if distance_between_units(battle, actor, unit) <= 4)
         return nearby_allies * 24.0 + nearby_enemies * 10.0
     if code == "great_holy_light":
-        nearby_enemies = sum(1 for unit in enemies if distance_between_units(battle, actor, unit) <= 3)
-        nearby_allies = sum(1 for unit in allies if distance_between_units(battle, actor, unit) <= 3)
+        nearby_enemies = sum(1 for unit in enemies if not unit.cannot_normal_move and distance_between_units(battle, actor, unit) <= 5)
+        if not nearby_enemies:
+            return -8.0
+        nearby_allies = sum(1 for unit in allies if distance_between_units(battle, actor, unit) <= 5)
         return nearby_enemies * 16.0 + nearby_allies * 10.0
     if code == "plant_growth":
-        return len([unit for unit in targets if unit.player_id != actor.player_id]) * 12.0 + 10.0
+        enemy_hits = sum(1 for unit in targets if unit.player_id != actor.player_id and not unit.cannot_normal_move)
+        ally_hits = sum(1 for unit in targets if unit.player_id == actor.player_id and not unit.cannot_normal_move)
+        return enemy_hits * 24.0 - ally_hits * 28.0 - 8.0
     if code == "smoke_spray":
         enemy_hits = len([unit for unit in targets if unit.player_id != actor.player_id])
         ally_hits = len([unit for unit in targets if unit.player_id == actor.player_id])
@@ -3179,13 +3519,15 @@ def great_fire_funeral_score(
     ]
     score = skill_damage_score(battle, actor, skill, payload, profile)
     direct_enemy_hits = 0
+    existing_fire = set().union(*(set(getattr(effect, "cells", set())) for effect in battle.field_effects if getattr(effect, "name", "") == "大火葬余烬"))
+    new_fire = cell_keys - existing_fire
     for enemy in enemies:
         occupied = {(cell.x, cell.y) for cell in battle.unit_cells(enemy)}
         if occupied & cell_keys:
             direct_enemy_hits += 1
             score += hostile_unit_value(enemy) * 0.25 + 34.0
-        else:
-            nearest_to_fire = min((min(abs(cell.x - fire.x) + abs(cell.y - fire.y) for fire in cells) for cell in battle.unit_cells(enemy)), default=99)
+        elif new_fire:
+            nearest_to_fire = min((min(abs(cell.x - x) + abs(cell.y - y) for x, y in new_fire) for cell in battle.unit_cells(enemy)), default=99)
             if nearest_to_fire <= max(1, int(enemy.stat("speed"))):
                 score += max(0.0, 4.0 - nearest_to_fire) * 10.0
     for ally in allies:
@@ -3194,6 +3536,12 @@ def great_fire_funeral_score(
             score -= friendly_fire_penalty(ally) * 0.8
     if direct_enemy_hits == 0 and score < profile.action_threshold:
         return -12.0
+    if direct_enemy_hits == 0 and not new_fire:
+        return -1000.0
+    if actor.stat("attack") > 1:
+        score -= 20.0 * max(1, actor.attack_actions_per_turn())
+        if actor.stat("attack") == 2 and any(any(candidate.timing == "active" for candidate in enemy.skills) for enemy in enemies):
+            score += 24.0
     return score + profile.aggressive_bonus
 
 
@@ -3604,6 +3952,9 @@ def probe_skill_damage_impact(
     hit_count = max(1, battle.unit_hit_count_for_cells(target, cells) if cells else 1)
     adjusted_attack_power = max(0.0, float(attack_power) - max(0, hit_count - 1))
     resolves_as_attack = str(skill.code) == "whirlwind_attack"
+    if str(skill.code) in {"complete_burn", "blizzard"}:
+        # Only the attached control pierces; the damage still stops at shields.
+        ignore_shield = False
     target_tags = {"attack", "whirlwind"} if resolves_as_attack else {"skill", str(skill.code)}
     with ai_probe_rollback(battle):
         probe_actor = battle.get_unit(actor.unit_id)
@@ -3617,6 +3968,9 @@ def probe_skill_damage_impact(
             is_hostile=True,
             ignore_shield=ignore_shield,
             half_ignore_shield=half_ignore_shield,
+            ignore_magic_immunity=skill.ignores_magic_immunity_for_payload(battle, probe_actor, payload),
+            cannot_evade=skill.cannot_evade_for_payload(battle, probe_actor, payload),
+            ignore_targeting_restrictions=str(skill.code) in {"great_funeral", "judgment_fire"},
             resolve_defenses=False,
             tags=set(target_tags),
         )
@@ -3636,6 +3990,8 @@ def probe_skill_damage_impact(
             area_cell_hits=hit_count,
         )
         battle.resolve_damage(damage_ctx)
+        if str(skill.code) in {"complete_burn", "blizzard"}:
+            skill.apply_followup_effect(battle, probe_target, damage_ctx)
         return DamageImpact(damage_ctx.damage, unit_impact_signature(probe_target) != before)
 
 
@@ -3726,6 +4082,7 @@ def ai_probe_rollback(battle: Battle) -> Iterable[None]:
     components.extend(list(getattr(battle, "field_effects", [])))
     component_states = [(component, shallow_object_state(component)) for component in components]
     try:
+        battle._ai_probe_active = True
         yield
     finally:
         for component, state in component_states:
@@ -3835,10 +4192,13 @@ def reaction_payload_is_legal(
 
 def skill_effect_units(battle: Battle, actor: Unit, skill: Any, payload: dict[str, Any]) -> list[Unit]:
     units: list[Unit] = []
+    ignored = actor if skill.excludes_caster_from_effect else None
+    def filter_units() -> list[Unit]:
+        return [unit for unit in battle.effect_units(units, ignore=ignored) if not skill.excludes_allies_from_effect or unit.player_id != actor.player_id]
     payload_cells = preview_positions(payload.get("cells"))
     if payload_cells:
         units.extend(battle.units_at_cells(payload_cells))
-        return battle.effect_units(units, ignore=None)
+        return filter_units()
     try:
         units.extend(skill.get_target_units_for_payload(battle, actor, payload))
     except Exception:
@@ -3847,7 +4207,7 @@ def skill_effect_units(battle: Battle, actor: Unit, skill: Any, payload: dict[st
         units.extend(battle.units_at_cells(skill.get_target_cells_for_payload(battle, actor, payload)))
     except Exception:
         pass
-    return battle.effect_units(units, ignore=None)
+    return filter_units()
 
 
 def skill_effect_cells(battle: Battle, actor: Unit, skill: Any, payload: dict[str, Any]) -> list[Position]:
@@ -3971,7 +4331,7 @@ def hero_style(unit: Unit) -> str:
 
 
 def has_mana_point_skill(unit: Unit) -> bool:
-    return any(getattr(skill, "code", "") in {"magnetic_wave", "n_skill"} for skill in unit.skills)
+    return any(float(getattr(skill, "mana_point_cost", 0) or 0) > 0 or getattr(skill, "code", "") in {"magnetic_wave", "n_skill"} for skill in unit.skills)
 
 
 def hostile_unit_value(unit: Unit) -> float:

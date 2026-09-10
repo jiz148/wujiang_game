@@ -189,6 +189,9 @@ class BattleComponent(ABC):
     ) -> None:
         return None
 
+    def on_target_action_declared(self, battle: "Battle", actor: "Unit", action_type: str, payload: dict[str, Any]) -> None:
+        return None
+
     def on_unit_moved(self, battle: "Battle", ctx: "MoveContext") -> None:
         return None
 
@@ -416,6 +419,9 @@ class TemporaryDefenseStatus(StatusEffect):
 
 
 class Skill(BattleComponent, ABC):
+    excludes_caster_from_effect = False
+    excludes_allies_from_effect = False
+
     kind = "skill"
     requires_direct_unit_target_line = True
 
@@ -494,7 +500,7 @@ class Skill(BattleComponent, ABC):
             if blocked:
                 return False, reason
         if self.cooldown_remaining > 0:
-            return False, f"还需冷却 {self.cooldown_remaining} 个回合。"
+            return False, f"还需冷却 {self.cooldown_remaining} 个己方回合。"
         if self.max_uses_per_turn is not None and self.uses_this_turn >= self.max_uses_per_turn:
             return False, "本回合使用次数已满。"
         if self.max_uses_per_battle is not None and self.uses_this_battle >= self.max_uses_per_battle:
@@ -510,7 +516,8 @@ class Skill(BattleComponent, ABC):
         self.sync_turn_scope(battle)
 
     def on_any_turn_end(self, battle: "Battle", ended_player_id: int) -> None:
-        if self.cooldown_remaining > 0:
+        # Cooldowns are rounds of the owning hero, not turns of every ally/enemy.
+        if self.cooldown_remaining > 0 and battle.unit_belongs_to_current_turn(self.owner):
             self.cooldown_remaining -= 1
 
     def sync_turn_scope(self, battle: "Battle") -> None:
@@ -710,6 +717,11 @@ class Skill(BattleComponent, ABC):
     ) -> bool:
         return False
 
+    def ignores_magic_immunity_for_payload(
+        self, battle: "Battle", actor: "Unit", payload: dict[str, Any]
+    ) -> bool:
+        return False
+
     def cannot_evade_for_payload(
         self,
         battle: "Battle",
@@ -809,6 +821,7 @@ class DamageContext:
     lethal: bool = False
     destroyed_as_clone: bool = False
     tags: set[str] = field(default_factory=set)
+    actual_damage: float = 0.0
 
     @property
     def damage(self) -> float:
@@ -1455,6 +1468,8 @@ class Battle:
         self.visual_events: list[VisualEvent] = []
         self._next_visual_event_id = 1
         self.stale_queued_action_count = 0
+        self._next_action_resolution_token = 1
+        self._current_action_resolution_token: Optional[int] = None
         self.combat_stats: dict[str, dict[str, Any]] = {}
         self.summary_events: list[dict[str, Any]] = []
         self._next_summary_event_id = 1
@@ -1468,6 +1483,11 @@ class Battle:
         self.fast_ai_simulation = False
         self.on_replay_checkpoint = None
         self._replay_match_end_emitted = False
+
+    @property
+    def current_action_resolution_token(self) -> Optional[int]:
+        """Stable only while one declared queued action is resolving."""
+        return self._current_action_resolution_token
 
     def _emit_replay_checkpoint(self, reason: str) -> None:
         if not bool(getattr(self, "fast_ai_simulation", False)):
@@ -1610,6 +1630,24 @@ class Battle:
         self.summary_events.append(event)
         self.summary_events = self.summary_events[-300:]
         return event
+
+    def record_rule_trigger_summary(
+        self,
+        rule_code: str,
+        *,
+        actor: Unit,
+        target: Unit | None = None,
+    ) -> dict[str, Any]:
+        """Record a rule trigger with the enclosing declared-action identity."""
+        return self._append_summary_event(
+            "rule_trigger",
+            rule_code=rule_code,
+            action_resolution_token=self.current_action_resolution_token,
+            actor_unit_id=actor.unit_id,
+            actor_name=actor.name,
+            target_unit_id=target.unit_id if target is not None else None,
+            target_name=target.name if target is not None else None,
+        )
 
     def record_damage_summary(self, ctx: DamageContext, actual_damage: float) -> None:
         amount = round(max(0.0, float(actual_damage)), 4)
@@ -2971,8 +3009,8 @@ class Battle:
             carried_rider.moved_this_turn = True
         if mounted_on is not None and unit.position not in self.unit_cells(mounted_on):
             self.clear_mounted_state(unit)
+        unit.moved_this_turn = unit.moved_this_turn or ctx.start != ctx.end
         if not triggered_by_reaction:
-            unit.moved_this_turn = True
             if not via_skill:
                 unit.normal_move_steps_used += max(0, len(path) - 1)
                 unit.normal_move_actions_used += 1
@@ -3250,6 +3288,7 @@ class Battle:
             old_hp = ctx.target.current_hp
             ctx.target.take_damage_fraction(ctx.raw_damage)
             actual_damage = round(max(0.0, old_hp - ctx.target.current_hp), 4)
+            ctx.actual_damage = actual_damage
             self.record_damage_summary(ctx, actual_damage)
             self.log_public_event(
                 f"{ctx.target.name} 受到 {ctx.raw_damage} 点伤害。",
@@ -4048,6 +4087,8 @@ class Battle:
             queued_payload["half_ignore_shield"] = skill.half_ignores_shield_for_payload(self, actor, payload)
             queued_payload["ignore_stealth"] = skill.ignores_stealth_for_payload(self, actor, payload)
             queued_payload["cannot_evade"] = skill.cannot_evade_for_payload(self, actor, payload)
+            if skill.ignores_magic_immunity_for_payload(self, actor, payload):
+                queued_payload["ignore_magic_immunity"] = True
             declared_targets = self.payload_target_unit_ids(payload)
             if skill.target_mode in {"ally", "enemy", "unit"} and skill.requires_direct_unit_target_line:
                 for target_id in declared_targets:
@@ -4079,7 +4120,12 @@ class Battle:
             ]
             target_cells = list(skill.get_target_cells_for_payload(self, actor, payload))
             targets: list[str] = []
-            for unit in self.effect_units([*target_units, *self.units_at_cells(target_cells)]):
+            for unit in self.effect_units(
+                [*target_units, *self.units_at_cells(target_cells)],
+                ignore=actor if skill.excludes_caster_from_effect else None,
+            ):
+                if skill.excludes_allies_from_effect and unit.player_id == actor.player_id:
+                    continue
                 if unit.unit_id not in targets:
                     targets.append(unit.unit_id)
             if declared_targets:
@@ -4594,6 +4640,16 @@ class Battle:
         raise ActionError("未知技能后续效果。")
 
     def resolve_queued_action(self, queued_action: QueuedAction) -> None:
+        previous_token = self._current_action_resolution_token
+        resolution_token = self._next_action_resolution_token
+        self._next_action_resolution_token += 1
+        self._current_action_resolution_token = resolution_token
+        try:
+            self._resolve_queued_action(queued_action)
+        finally:
+            self._current_action_resolution_token = previous_token
+
+    def _resolve_queued_action(self, queued_action: QueuedAction) -> None:
         with self.suppress_logs() if self.queued_action_hides_logs(queued_action) else nullcontext():
             actor = self.units.get(queued_action.actor_id)
             if actor is None or not actor.alive or actor.banished:
@@ -4728,6 +4784,11 @@ class Battle:
                 reaction_window_timing = skill.reaction_window_timing(self, actor, queued_action.payload)
             if queued_action.action_type in {"attack", "skill"}:
                 actor.notify_action_declared(self, queued_action.action_type, queued_action.payload)
+                for target_id in queued_action.target_unit_ids:
+                    target = self.units.get(target_id)
+                    if target is not None:
+                        for component in list(target.iter_components()):
+                            component.on_target_action_declared(self, actor, queued_action.action_type, queued_action.payload)
             if queued_action.action_type == "skill" and reaction_window_timing == "after":
                 self.resolve_queued_action(queued_action)
                 self.advance_followup_actions()
