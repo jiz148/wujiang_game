@@ -831,6 +831,7 @@ def apply_decision(
 ) -> dict[str, Any]:
     before = battle_state_digest(battle)
     before_logs = list(battle.logs)
+    before_summary_event_id = battle.summary_events[-1]["event_id"] if battle.summary_events else 0
     event: dict[str, Any] = {
         "step": step,
         "reason": decision.get("reason"),
@@ -878,8 +879,52 @@ def apply_decision(
     event["after"] = after["meta"]
     event["state_delta"] = state_delta(before["units"], after["units"])
     event["new_logs"] = new_log_entries(before_logs, battle.logs)
+    event["new_summary_events"] = [
+        summary_event
+        for summary_event in battle.summary_events
+        if int(summary_event.get("event_id") or 0) > before_summary_event_id
+    ]
+    record_step_invariants(battle, event, findings, step=step)
     event["winner"] = battle.winner
     return event
+
+
+def record_step_invariants(
+    battle: Battle,
+    event: dict[str, Any],
+    findings: FindingRecorder,
+    *,
+    step: int,
+) -> None:
+    cat_events_by_token: dict[int, list[dict[str, Any]]] = {}
+    for summary_event in event.get("new_summary_events") or []:
+        if summary_event.get("kind") != "rule_trigger" or summary_event.get("rule_code") != "cat_retaliation":
+            continue
+        token = summary_event.get("action_resolution_token")
+        if token is None:
+            continue
+        cat_events_by_token.setdefault(int(token), []).append(summary_event)
+    cat = next(
+        (
+            unit
+            for unit in [*battle.units.values(), *battle.destroyed_units]
+            if getattr(unit, "hero_code", None) == "excel_r142"
+        ),
+        None,
+    )
+    for token, matching_events in cat_events_by_token.items():
+        if len(matching_events) <= 1:
+            continue
+        findings.add(
+            severity="error",
+            category="duplicate_once_per_action_trigger",
+            source="battle_rule_invariant",
+            message="One declared action triggered Cat Uncle retaliation more than once.",
+            step=step,
+            actor=cat,
+            payload=event.get("payload"),
+            evidence={"action_resolution_token": token, "matching_events": matching_events},
+        )
 
 
 def current_phase(battle: Battle) -> str:
@@ -951,6 +996,13 @@ def unit_state(battle: Battle, unit: Unit) -> dict[str, Any]:
             "performed_active_skill": unit.performed_active_skill,
             "turn_ready": unit.turn_ready,
         },
+        "restrictions": {
+            "cannot_move": bool(getattr(unit, "cannot_move", False)),
+            "cannot_normal_move": bool(getattr(unit, "cannot_normal_move", False)),
+            "cannot_attack": bool(getattr(unit, "cannot_attack", False)),
+            "cannot_use_skills": bool(getattr(unit, "cannot_use_skills", False)),
+            "cannot_act": bool(getattr(unit, "cannot_act", False)),
+        },
         "statuses": [component_ref(status) for status in unit.statuses],
         "skills": [skill_ref(skill) for skill in unit.skills],
     }
@@ -1008,6 +1060,14 @@ def component_ref(component: Any) -> dict[str, Any]:
     duration = getattr(component, "duration", None)
     if duration is not None:
         data["duration"] = duration
+    for field in (
+        "required_attack_target_id",
+        "requirement_active",
+        "requirement_satisfied",
+        "target_unit_id",
+    ):
+        if hasattr(component, field):
+            data[field] = getattr(component, field)
     return data
 
 

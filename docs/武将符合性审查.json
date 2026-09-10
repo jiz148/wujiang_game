@@ -1,0 +1,932 @@
+{
+  "schema_version": 2,
+  "review_process": "2026-09-06用户调整：连续分批完成全部已开发武将及AI的设计优先检查修改；保留测试用例和静态检查，中途不运行测试、不等待逐批签收，全部完成后统一测试。",
+  "validation_policy": {
+    "mode": "deferred_until_all_developed_heroes_reviewed",
+    "scope": "当前73名已开发公开武将及其AI；不扩展未开发武将",
+    "per_batch_test_gate": false,
+    "final_command": "python detail_test_all_wujiangs.py",
+    "user_override_date": "2026-09-06"
+  },
+  "current_hero_codes": [
+    "elite_soldier",
+    "bard",
+    "element_hunter"
+  ],
+  "developed_hero_inspection_progress": {
+    "definition": "完成新设计优先流程：独立记录并锁定设计初衷，随后对照审查战斗实现、武将专属与通用AI、测试，并完成所有必要修改；用户复测签收单独统计",
+    "developed_public_total": 73,
+    "inspected_and_modified": 12,
+    "remaining_to_inspect_and_modify": 61,
+    "inspected_and_modified_codes": [
+      "elite_soldier",
+      "bard",
+      "element_hunter",
+      "ellie",
+      "dark_human",
+      "fire_funeral",
+      "excel_r126",
+      "excel_r142",
+      "excel_r198",
+      "excel_r206",
+      "excel_r291",
+      "excel_r356"
+    ],
+    "remaining_set_rule": "每次从当前 list_heroes() 中排除 inspected_and_modified_codes；具体61名名单同步在 docs/武将补全实施计划.md",
+    "focused_retest_accepted": 3,
+    "awaiting_consolidated_test": 12
+  },
+  "heroes": [
+    {
+      "code": "elite_soldier",
+      "name": "精兵",
+      "items": [
+        {
+          "layer": "战斗实现",
+          "requirement": "基础面板、方形普攻、机枪三格/贴边敌方限定、神速、爆头下一普攻与撤步逐项映射。",
+          "evidence": "first_five.py::EliteSoldier；common.py::PrecisionTrainingTrait/MachineGunSkill/HeadshotSkill/BackstepShotSkill/NextAttackBuffStatus。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "概率减速限定普攻（含反击），机枪不抽签；减速独立破魔而非伤害破魔。撤步复用共享直线穿人两格可达路径，保留仅来源反击与每对方回合两次。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "AI",
+          "requirement": "爆头失去方形射程的代价、可兑现射击收益、随机公平性和撤步脱离原选区。",
+          "evidence": "ai.py::self_buff_score/best_available_attack_score/score_reaction_payload/ai_probe_rollback。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "爆头前后探测实际合法普攻并比较收益，探测期间不抽取概率减速；撤步降低仍留在原作用区的落点评分。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "前端/连锁",
+          "requirement": "机枪不能为友军开启反应，前端预览与AI均使用同一效果单位集合；撤步合法路径一致。",
+          "evidence": "core.py::Skill.excludes_allies_from_effect/build_queued_action；ai.py::skill_effect_units；BackstepShotSkill.preview/retreat_cells。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "新增共享友军排除标志并接入机枪；保留已有连续直线选格和后续仅来源反击流程。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "测试",
+          "requirement": "方形射程、强化只消费一次、技能不触发减速、有盾减速及被动边界有确定性覆盖。",
+          "evidence": "tests/test_behavior.py::DevelopedHeroReviewR02BehaviorTests前两项；test_battle.py既有headshot/precision/backstep边界用例。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P2",
+          "planned_change": "新增机枪无随机、无友军目标，以及爆头射程退化/有盾正向机会与探测状态回滚用例。只写用例，未运行动态测试。",
+          "status": "代码与用例已更新；未运行动态测试"
+        }
+      ],
+      "review_status": "2026-09-09完成战斗、AI、预览与测试代码检查修改；静态检查通过，动态验证等待全部73名已开发武将完成后统一进行。",
+      "design_baseline": "docs/武将设计思想.json#elite_soldier",
+      "baseline_locked_at": "2026-09-08",
+      "audit_evidence": "先完成2026-09-08源规则独立基线并同步工作簿，随后逐个读取战斗、AI和测试；2026-09-09完成修正及静态检查，没有本轮动态运行结果。"
+    },
+    {
+      "code": "bard",
+      "name": "吟游诗人",
+      "items": [
+        {
+          "layer": "战斗实现",
+          "requirement": "守*2同源不叠加；回血反转；洗礼1轮人类目标；吟唱只加魔力点；原地回复检查所有位移。",
+          "evidence": "first_five.py::Bard；common.py::DefendTwiceSkill/HealSkill/BaptismSkill/ChantSkill/StationaryRecoveryTrait；core.py::move_unit。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "补齐暗属性/灵体/恶魔回血反转；拒绝同源守*2重复施放；强制或连锁移动也取消原地回复而不消耗普通移动次数。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "场地/时序",
+          "requirement": "圣光跟随施法者11×11，只有敌方普通移动结束在场内受攻4伤害；友方仅自己的回合末加防；2.5轮不被多人回合缩短。",
+          "evidence": "common.py::GreatHolyLightField/GreatHolyLightSkill；unit_belongs_to_current_turn及全占格判断。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "将固定4生命扣减改为攻4公式；按施放者第三个己方回合末到期，守+1按受益者自己的回合结束授予且不叠加，放逐期间不生成场内效果。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "AI",
+          "requirement": "真实治疗收益、不可治疗/满血/反转、魔力点接收者、重复防御与保留站位收益。",
+          "evidence": "ai.py::score_skill_payload/ally_buff_score/field_skill_score/score_move_destination。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "用回滚执行探测实际回血；吟唱只奖励有魔力点用途的友军并按资源需求保留；圣光判断普通移动机会，移动评分计入放弃原地回复的代价。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "测试",
+          "requirement": "多人圣光时长、友军回合加防、普通/技能/强制移动、回血反转和魔力点用途。",
+          "evidence": "tests/test_behavior.py::DevelopedHeroReviewR02BehaviorTests；test_battle.py既有圣光边界。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P2",
+          "planned_change": "新增圣光公式/多人计时、强制移动取消回复、回血反转与禁疗、吟唱用途用例；死亡自动推进旧场景改为0.5生命，保持测试意图与正确公式一致。未运行动态测试。",
+          "status": "代码与用例已更新；未运行动态测试"
+        }
+      ],
+      "review_status": "2026-09-09完成战斗、AI、预览与测试代码检查修改；静态检查通过，动态验证等待全部73名已开发武将完成后统一进行。",
+      "design_baseline": "docs/武将设计思想.json#bard",
+      "baseline_locked_at": "2026-09-08",
+      "audit_evidence": "先完成2026-09-08源规则独立基线并同步工作簿，随后逐个读取战斗、AI和测试；2026-09-09完成修正及静态检查，没有本轮动态运行结果。"
+    },
+    {
+      "code": "element_hunter",
+      "name": "元素猎人",
+      "items": [
+        {
+          "layer": "战斗实现/控制",
+          "requirement": "燃烧5次目标己方回合扣魔，暴风雪3轮仅禁普通移动；伤害与非伤害破魔分离；选区固定。",
+          "evidence": "next_five.py::RemoteAreaDamageSkill/BurningManaStatus/blizzard_status_factory/PlantGrowthSkill；common.py::EllieWardTrait。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "声明时锁定选区；附加控制穿盾只打掉一盾，免伤仍允许非伤害控制，魔免仍阻止技能效果。燃烧/冰雪不叠同名状态；沿用目标自身计时。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "召唤/增益/场地",
+          "requirement": "雷神面板、5轮寿命和敌方直接伤害死亡重置；水波4轮冷却与全五项+1；土行者3分身/随机换位/入场移动/下轮清理；植物双边起点耗点。",
+          "evidence": "next_five.py::ThunderGodSummon/ThunderGodSkill/WaterWaveSkill/AllStatsPlusStatus/EarthWalkerSkill/SplitSkill/EarthWalkerCleanupStatus/PlantGrowthField。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "雷神生命周期沿用已读实现；水波改4个己方回合冷却且到期收回魔容量；土行者复用通用3分身选择、显示与换位，覆盖入场权限和清理；植物按大型单位起点全占格判断。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "AI/预览",
+          "requirement": "三落点载荷、先兑现有效普攻再结束本体行动；控制不重复计新状态收益；场地敌友代价；水波增益不重复。",
+          "evidence": "ai.py::split_payloads/score_skill_payload/field_skill_score/self_buff_score/probe_skill_damage_impact；targeting.js::patternSelection/required_cells通用入口。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "土行者生成3个合法落点并保留有效普攻；只奖励新增控制，燃烧/冰雪伤害探测不错误破盾且包含附加效果；植物考虑友军拖累，水波检查现有状态与交战距离。前端复用三格选择协议。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "测试",
+          "requirement": "控制穿盾/艾莉免伤、冷却与魔容量、雷神死亡来源和三分身生命周期。",
+          "evidence": "tests/test_behavior.py::DevelopedHeroReviewR02BehaviorTests后四项；test_battle.py及既有行为场景的土行者、植物、燃烧、冰雪生命周期用例。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P2",
+          "planned_change": "新增免伤但控制生效/一盾消费与AI回滚、水波自己回合计时、土行者3落点和先攻击、雷神敌方/己方/场地/无来源死亡矩阵；更新旧单分身场景。未运行动态测试。",
+          "status": "代码与用例已更新；未运行动态测试"
+        }
+      ],
+      "review_status": "2026-09-09完成战斗、AI、预览与测试代码检查修改；静态检查通过，动态验证等待全部73名已开发武将完成后统一进行。",
+      "design_baseline": "docs/武将设计思想.json#element_hunter",
+      "baseline_locked_at": "2026-09-08",
+      "audit_evidence": "先完成2026-09-08源规则独立基线并同步工作簿，随后逐个读取战斗、AI和测试；2026-09-09完成修正及静态检查，没有本轮动态运行结果。"
+    },
+    {
+      "code": "ellie",
+      "name": "艾莉",
+      "review_status": "2026-09-08完成规则、战斗、AI、预览及测试代码检查和修改；动态验证等待全部已开发武将完成后统一运行。",
+      "items": [
+        {
+          "layer": "战斗实现",
+          "requirement": "面板、魔墙、吸魔、牵引、诅咒、实验、水晶球、美杜莎及特性逐项映射。",
+          "evidence": "first_five.py::Ellie/ManaPullSkill/CurseSkill/ExperimentSkill/CrystalBallSkill/MedusaSkill；common.py::EllieWardTrait/ExperimentCountdownStatus；core.py::summon_unit/cleanup_dead_units。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "牵引按目标原占格收集反应；诅咒固定0.5生命在声明时支付；实验增加魔力上限并补2魔。魔墙、吸魔、四轮水晶球、四攻召唤物及召唤者死亡级联沿用已读共用实现。 2026-09-09交互补查：EllieWardTrait只取消伤害，保留非伤害后续效果；元素控制用例覆盖此边界。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "AI",
+          "requirement": "自损、延迟死亡、真实射程与友敌位移收益必须进入判断。",
+          "evidence": "ai.py::skill_payloads_for_action/score_skill_payload/ally_buff_score/self_buff_score；原牵引缺少落点参数，诅咒和实验按廉价伤害/增益评分。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "牵引枚举后端落点并比较目标站位净收益；诅咒拒绝致命支付/重复诅咒；实验保留能立即结束战斗的正向边界；水晶球只为新增射程计分。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "前端/连锁",
+          "requirement": "预览与AI落点相同，只影响牵引目标，穿越其他单位不为旁观者开反应。",
+          "evidence": "targeting.js::computeHighlights/descentMomentDestinations；ManaPullSkill.preview/get_target_cells_for_payload。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "前端复用destinations_by_target，避免客户端自行挡住可穿人路径；移除原路径单位错误收集。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "测试",
+          "requirement": "费用不可退款、增益魔力容量、三轮倒计时、全图选择与召唤生命周期。",
+          "evidence": "tests/test_behavior.py::DevelopedHeroReviewR01BehaviorTests；test_battle.py::test_ellie_experiment_counts_target_own_rounds_not_global_turns/test_ellie_crystal_ball_counts_own_rounds_not_global_turns/test_ellie_crystal_ball_enables_long_range_pull；既有美杜莎与主动技能后免伤用例。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P2",
+          "planned_change": "新增费用被盾挡仍支付、牵引载荷/穿人、实验满魔+2、AI风险与正向使用边界；旧生命周期用例保留。未执行动态测试。",
+          "status": "代码与用例已更新；未运行动态测试"
+        }
+      ],
+      "design_baseline": "docs/武将设计思想.json#ellie",
+      "baseline_locked_at": "2026-09-06",
+      "audit_evidence": "本轮依据源码和既有测试代码逐项检查；2026-09-08静态语法/格式检查，尚无本轮动态对局或回归结果。"
+    },
+    {
+      "code": "dark_human",
+      "name": "E。暗人",
+      "review_status": "2026-09-08完成规则、战斗、AI、预览及测试代码检查和修改；动态验证等待全部已开发武将完成后统一运行。",
+      "items": [
+        {
+          "layer": "规则/战斗实现",
+          "requirement": "飞跃3格、回避1格、保护、隐身重置手套、三攻飞行；手套攻4破魔仅禁普通移动3轮；飞踢2轮冷却；遁入黑暗4轮冷却/持续2轮。",
+          "evidence": "持久hero-rule-index中dark_human条目；first_five.py::DarkHuman/ParalyzingGloveSkill/FateKickSkill/IntoDarknessSkill；common.py::DelayedDarknessStatus/InvincibleUntilActionStatus/StealthSkill。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "按已保存规则修订旧说明半轮换算残留；黑暗持续2个己方轮次，独立保留禁疗和首击增幅。飞踢保持公开50%结果及只对目标消失段开启反应，回场沿用原格/最近合法格。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "通用引擎",
+          "requirement": "冷却不可随每名其他武将的回合加速。",
+          "evidence": "core.py::Skill.on_any_turn_end此前每个全局回合末减1；unit_belongs_to_current_turn按控制武将及召唤物行动组判定。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "只在技能持有者自己的回合末减冷却；使用当回合计入。共享修正须在最终全73名回归中验证。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "AI",
+          "requirement": "三攻接敌、手套重置、黑暗强化普攻和飞踢自我消失风险。",
+          "evidence": "ai.py::score_skill_payload/self_buff_score；原飞踢与普通位移同价、隐身未判断已用手套。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "飞踢按50%敌我价值差并扣未兑现攻击机会；手套已用且资源/目标允许时提高隐身价值；黑暗有即刻普攻机会时优先，避免重复增益。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "测试",
+          "requirement": "分段反应、隐身攻/技能解除、沙尘只除隐身、破魔单effect及消失回场。",
+          "evidence": "test_battle.py既有fate_kick/paralyzing_glove/into_darkness与banished_unit_reappears系列；test_behavior.py::DevelopedHeroReviewR01BehaviorTests。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P2",
+          "planned_change": "补多人冷却/黑暗计时与飞踢AI不抽随机数、风险比较；保留既有技能移动不受麻痹、沙尘保留增幅和回场选择用例。未执行动态测试。",
+          "status": "代码与用例已更新；未运行动态测试"
+        }
+      ],
+      "design_baseline": "docs/武将设计思想.json#dark_human",
+      "baseline_locked_at": "2026-09-06",
+      "audit_evidence": "本轮依据源码和既有测试代码逐项检查；2026-09-08静态语法/格式检查，尚无本轮动态对局或回归结果。"
+    },
+    {
+      "code": "fire_funeral",
+      "name": "火葬者",
+      "review_status": "2026-09-08完成规则、战斗、AI、预览及测试代码检查和修改；动态验证等待全部已开发武将完成后统一运行。",
+      "items": [
+        {
+          "layer": "战斗实现",
+          "requirement": "大火葬十字双方攻5、声明格锁定、自身免伤、减攻最低1、余烬不叠加且只按受影响者自己的回合末触发。",
+          "evidence": "first_five.py::GreatFireFuneralSkill/GreatFireFuneralField；原执行重算施法者当前位置、只查单位锚点，余烬按玩家阵营触发。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "锁定声明十字；目标与穿越判断覆盖完整占格；自身排除作为共用声明/AI契约；余烬按控制武将行动组计时，保留穿越半血与同格不叠加。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "战斗实现/前端",
+          "requirement": "审判日攻1解锁、攻6公式、最低能力并列豁免、无视魔免/不可回避/禁疗3轮，护盾取消整个effect。",
+          "evidence": "JudgmentFireSkill及Skill.ignores_magic_immunity_for_payload/cannot_evade_for_payload；原raw_damage=6、能力总和漏魔、禁疗按全局回合减且护盾后仍附加。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "按当前攻守速普通范与魔力计算在场最低集合，锁定声明格；双方预览与AI一致；以攻6结算并按目标自己的3轮禁疗；护盾挡伤害同时挡禁疗。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "AI",
+          "requirement": "十字与终局须计算真实敌友影响、自身豁免、重复火区、降攻机会成本及无视魔免。",
+          "evidence": "ai.py::great_fire_funeral_score/skill_effect_units/probe_skill_damage_impact；原对已覆盖火区重复计分、自身算友伤，伤害探查遗漏无视魔免。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "新增火区才计算场地增益；降攻扣普攻机会成本并评价攻1阶段；排除自身虚假友伤；伤害探查共享无视魔免/不可回避钩子。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "测试",
+          "requirement": "公式、并列豁免、护盾、声明后资源/位置变化、独立武将回合、伤害探查不改变真实状态。",
+          "evidence": "test_behavior.py::DevelopedHeroReviewR01BehaviorTests；test_battle.py既有great_fire_funeral/judgment_fire/knockback/pierce用例。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P2",
+          "planned_change": "新增高防公式、并列最低、声明后能力变化仍打原格、护盾禁疗边界、施法者位移不改变十字、多人余烬和魔免探查回滚。未执行动态测试。",
+          "status": "代码与用例已更新；未运行动态测试"
+        }
+      ],
+      "design_baseline": "docs/武将设计思想.json#fire_funeral",
+      "baseline_locked_at": "2026-09-06",
+      "audit_evidence": "本轮依据源码和既有测试代码逐项检查；2026-09-08静态语法/格式检查，尚无本轮动态对局或回归结果。"
+    },
+    {
+      "code": "excel_r126",
+      "name": "太阳神",
+      "latest_review": {
+        "date": "2026-09-06",
+        "classification": "测试场景采用过期回避距离；通用规则说明未同步",
+        "evidence": "用户新回归933项，20失败、12错误、9跳过。本批唯一失败在test_behavior.py原1612行：从(4,1)回避到(2,1)不在合法预览。技能索引已明确回避恰好1格、沙尘禁用，旧规则说明仍写2格，导致测试沿用过期口径。新第7场已不再向可致命反击的托尔交审判；致命反击相关新增测试未列入失败。",
+        "planned_change": "保留既定一格回避规则，同步三份通用/游戏说明；可逃出场景改为x=4..9、y=0..5，明确断言(3,1)合法且在区外、(2,1)不合法；封出口用x=3..9，无回避魔用x=4..9。保留实际连锁后等量交换断言。",
+        "status": "说明及一格回避边界测试已修；静态检查后待用户当前批次复测"
+      },
+      "design_baseline": "docs/武将设计思想.json#excel_r126",
+      "baseline_locked_at": "2026-08-31",
+      "review_status": "2026-09-06复核新10场：第7场已避开托尔致命反击陷阱，第5场审判击破两敌；933项回归本批仅剩一项测试沿用过期两格回避口径，现按技能索引一格规则修正测试与说明，待复跑。",
+      "design_inferences": [
+        "斯芬克斯炮只能召唤在太阳神周围合法格：保留低速脆弱本体的布阵风险，避免零魔炮台远程投放过强。",
+        "炮台按范7自由声明边界可截断3×3：遵循未写身前的远程区域规则，不强制围绕单位居中。",
+        "先结算单位伤害，再独立破坏声明区地形：个体防御取消伤害不保护地形，只有整个动作取消/失效才一并不结算。"
+      ],
+      "audit_evidence": "9月4日新10场4胜5负、1场500步未决，自动高信号0；炮台7次、爆炎4次、审判7次、石墙19次。第5场步骤19爆炎、22审判，击破咏唱者与蝴蝶刺客；蕾米阵亡带走蝙蝠。第7场17审判、18托尔反击、19太阳神先阵亡，审判未结算。第2场末尾为盖泽尔与李持续交战，不能归为太阳神卡死。929项回归32条失败/错误，本批1条为审判选区测试缺陷，其余31条为既有战略/房间/前端/军团炮/时间停止范围。",
+      "items": [
+        {
+          "layer": "战斗实现",
+          "requirement": "基础面板、石墙、爆炎、斯芬克斯炮和审判必须完整映射源表。",
+          "evidence": "src/wujiang/tactical/heroes/excel_roster.py::_special_skill_factory、SolarFlameSkill、SphinxCannonSkill、SolarJudgmentSkill；通用石墙由技能映射生成。",
+          "verdict": "符合",
+          "severity": "P3",
+          "planned_change": "不改规则数值；补足分层测试。",
+          "status": "已审查"
+        },
+        {
+          "layer": "AI",
+          "requirement": "审判应先判断当前合法反击能否在原动作结算前击破施法者；不能把无法兑现的范围伤害当作收益。",
+          "evidence": "9月4日第7场曾向托尔交出审判后被反击先击破；9月6日新第7场不再使用审判，改用爆炎和普攻。933项用户回归中，致命反击、护盾/物免、射程/目标和探查回滚相关新增测试未列入失败。",
+          "verdict": "修复获用户复测支持",
+          "severity": "P1",
+          "planned_change": "9月5日已加入公开合法反击的可回滚探查；已有护盾、物免、射程之外或未被选区影响的敌人不会导致错误禁用。补致命反击、反向边界及探查不改状态的行为测试。",
+          "status": "本项复测未见原缺陷；本批仍待太阳神回避边界测试复跑后签收"
+        },
+        {
+          "layer": "战斗实现",
+          "requirement": "爆炎按远程龙息：2魔、每回合2次、远程边界裁切2×2、当前攻、未指定阵营时可伤双方。",
+          "evidence": "SolarFlameSkill继承RemoteDragonBreathSkill；DragonBreathSkill按所选格逐单位结算且仅排除施法者。",
+          "verdict": "符合",
+          "severity": "P3",
+          "planned_change": "新增太阳神专属回归断言，避免只依赖通用技能测试。",
+          "status": "专属测试已加入统一总测试，待用户运行"
+        },
+        {
+          "layer": "战斗实现",
+          "requirement": "斯芬克斯炮2轮一次，攻4守5速1范7；召唤物默认入场回合不能行动、随召唤者离场。",
+          "evidence": "SphinxCannonSkill cooldown_turns=2；SphinxCannonSummon面板正确；Battle.summon_unit令turn_ready=false；下一次所属回合refresh后可行动；cleanup_dead_units清除召唤者遗留召唤物。实测4次召唤中3次随太阳神提前阵亡，1次下回合正常行动。",
+          "verdict": "符合",
+          "severity": "P3",
+          "planned_change": "新增入场禁动、下回合可动及随召唤者消散测试；审计中把‘召唤后未行动’与‘存活到行动机会仍未行动’分开。",
+          "status": "测试与审计决策点指标已加入，待用户统一测试"
+        },
+        {
+          "layer": "战斗实现",
+          "requirement": "炮台的3×3区域普攻未写敌方限定，按通用对象规则必须同时影响敌我；AI仍应强烈规避友伤。",
+          "evidence": "原Battle.basic_area_attack_with_payload统一过滤己方，导致太阳神的炮击不会伤到己方。现增加按武将组件声明的basic_attack_area_affects_allies钩子，并只为SphinxCannonAreaAttackTrait启用；AI区域评分原本已包含己方惩罚。",
+          "verdict": "已修复待验证",
+          "severity": "P1",
+          "planned_change": "已加入炮台同一区域同时伤敌我、同时破坏墙体的定向回归测试。",
+          "status": "待用户统一测试"
+        },
+        {
+          "layer": "规则歧义",
+          "requirement": "斯芬克斯炮只能在太阳神周围合法格部署；其普攻按范7自由声明边界可截断3×3，不要求以单位为中心。",
+          "evidence": "源文没有远程部署词语，炮台自身已有范7；周围部署保留低速脆弱本体的布阵风险。通用远程区域规则规定未写‘身前’的3×3按范点格，且源文没有‘目标周围/以目标为中心’。当前实现与该设计推断一致。",
+          "verdict": "设计推断已锁定，符合",
+          "severity": "P2",
+          "planned_change": "保留当前实现；补充邻接部署拒绝远格、自由区域不以目标居中的定向断言。",
+          "status": "已裁定并补测试，待用户当前批次复测"
+        },
+        {
+          "layer": "战斗实现",
+          "requirement": "炮击和审判应破坏范围内一切非单位地形，以及被定义为地形的单位。",
+          "evidence": "审查时发现_destroy_terrain_in_cells只能清除地形单位与is_terrain场地效果，漏掉Battle.blocked_cells墙体；现已统一移除范围内墙体并记录具体坐标。",
+          "verdict": "已修复待验证",
+          "severity": "P1",
+          "planned_change": "让统一地形破坏函数同时移除范围内blocked_cells，并输出具体墙体坐标日志。",
+          "status": "已修复待用户统一测试"
+        },
+        {
+          "layer": "规则歧义",
+          "requirement": "炮击与审判先结算单位伤害，再独立破坏声明区地形；个体伤害被防御取消仍破坏地形，整个动作取消/失效才不结算两者。",
+          "evidence": "‘破坏地形’与伤害并列而非写成‘造成伤害后’条件；审判文字先列威力/穿透、后列破坏地形。先伤害后拆地形避免同一effect中途改变本次伤害环境。当前炮台结束回调与审判逐单位伤害后的地形清理符合。",
+          "verdict": "设计推断已锁定，符合",
+          "severity": "P2",
+          "planned_change": "保留当前实现；补充伤害日志先于地形日志、无单位受伤仍能清地形的定向断言。",
+          "status": "已裁定并补测试，待用户当前批次复测"
+        },
+        {
+          "layer": "战斗实现",
+          "requirement": "审判每场一次、远程边界裁切10×10、威力6、半破魔、无视魔免、同时影响敌我。",
+          "evidence": "SolarJudgmentSkill max_uses_per_battle=1；patterns使用remote_rectangle_patterns；DamageContext固定6、half_ignore_shield与ignore_magic_immunity；units_at_cells不按阵营过滤。",
+          "verdict": "符合",
+          "severity": "P3",
+          "planned_change": "保留实现；把一次/场、友伤、边界裁切与防御交互拆成明确测试。",
+          "status": "防御交互、墙体与每场一次断言已加入，待用户统一测试"
+        },
+        {
+          "layer": "AI",
+          "requirement": "太阳神应管理石墙与爆炎共享的魔力，优先保住自身关键生存资源，避免对已有防御链的非致命盟友伤害重复投入。",
+          "evidence": "用户实测10场石墙30次；多次与格挡、保护、光墙或震开叠加。审查时score_reaction_payload只看原始威胁且shield_targets_for_reaction按威胁升序截断；现已按致命性/威胁降序生成逐级目标组合，并在评分中计算已排队保护和主动伤害技能魔力储备。",
+          "verdict": "已修复待验证",
+          "severity": "P1",
+          "planned_change": "改进通用护盾反应AI：按致命性/威胁降序选目标、识别已排队护盾保护、为可用主动技能保留资源，致命自保可突破保留线。",
+          "status": "已修复待用户统一测试"
+        },
+        {
+          "layer": "AI",
+          "requirement": "审判只在多目标、关键击杀、护盾/魔免突破或地形破局等高价值机会使用。",
+          "evidence": "旧实测曾暴露低价值单体审判并加入破局评分；2026-09-03新批次进一步发现评分仍把声明时命中的敌人当作可靠收益，没有扣除其合法范围脱离反应。现从真实公开反应选项与预览落点识别回避、后撤射击、卡片移形、影反等区域脱离，并按可靠敌方击破与己方击破比较；己方阵亡数不少于可靠敌方阵亡数或价值不低于可靠敌损时拒绝审判。",
+          "verdict": "已修复待验证",
+          "severity": "P1",
+          "planned_change": "保留一次性大范围破局评分，并复用通用区域脱离反应识别，以反应后的可靠收益决定是否交出审判。",
+          "status": "9月6日新第5场继续兑现两敌击破；按一格回避修正可逃出/封出口/无魔边界，待复测"
+        },
+        {
+          "layer": "AI",
+          "requirement": "炮台落点要评估安全、下回合生存、未来3×3火力覆盖和友伤，而不是只看敌人是否在7格。",
+          "evidence": "审查时sphinx_cannon_score只统计敌人与落点距离和简单安全分；现已枚举落点未来可声明的3×3，计入敌方价值、多格命中、己方友伤、地形收益、近敌危险和已有炮位间距。",
+          "verdict": "已改进待验证",
+          "severity": "P2",
+          "planned_change": "加入未来3×3覆盖价值、友伤和敌方地形价值；继续保留近敌危险惩罚。",
+          "status": "待用户统一测试"
+        },
+        {
+          "layer": "AI",
+          "requirement": "炮台到达可行动回合后应由通用回合束AI正常操作3×3普攻。",
+          "evidence": "choose_turn_bundle_action遍历太阳神及其召唤物；炮台的pattern_cells候选经过效果与伤害评分。唯一生存到机会的实测炮台生成132个原始区域、9个合法有效候选并正常攻击。",
+          "verdict": "符合",
+          "severity": "P3",
+          "planned_change": "不改回合束；增加‘有行动机会但未行动’机会指标，避免把提前消散误判成AI闲置。",
+          "status": "机会决策点指标已加入，待用户统一测试"
+        },
+        {
+          "layer": "前端/预览",
+          "requirement": "炮台3×3普攻既然会伤及双方，预览必须把范围内友军也列为受影响对象，不能只用格子暗示友伤。",
+          "evidence": "SphinxCannonAreaAttackTrait原预览只从enemy_units收集target_unit_ids，实际结算却由basic_attack_area_affects_allies包含友军；现改为从全部在场单位收集并排除炮台自身。",
+          "verdict": "已修复待验证",
+          "severity": "P2",
+          "planned_change": "已补炮台预览同时列出敌友目标的定向断言。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "测试",
+          "requirement": "测试需逐项证明技能规则、AI决策、通用AI改动和关键交互边界。",
+          "evidence": "2026-09-06新回归933项，本批唯一失败是测试沿用旧说明的两格回避，合法预览实际为一格；按既定技能索引修正选区及落点，并保留真实连锁结算后的等量交换断言。其他太阳神、赤、犀牛专属测试未列入失败；三名尚未整批签收。",
+          "verdict": "已补充待验证",
+          "severity": "P1",
+          "planned_change": "拆分/补充定向回归与AI测试；只写入统一总测试，不由开发代理运行。",
+          "status": "一格回避场景与旧说明已同步，待用户复跑当前批次"
+        },
+        {
+          "layer": "审计工具",
+          "requirement": "随机对局只有在出现对应机会时才应报告条件性日志缺失。",
+          "evidence": "旧审计把‘破坏了地形’列为无条件日志并曾误报；本轮又确认仅记录技能可用不足以判断错失，且他人同名动作/日志可能串入目标武将。现把‘存在有效候选但未选’列为高优先级错失，把‘可用但无有效候选’列为覆盖缺口，并按事件中的动作来源、目标和相关单位归因。",
+          "verdict": "已修复待验证",
+          "severity": "P1",
+          "planned_change": "保留条件日志与召唤生命周期指标；新增有效机会分类和跨武将日志隔离。",
+          "status": "审计分类与归因已二次修正，待用户复跑当前批次"
+        }
+      ]
+    },
+    {
+      "code": "excel_r142",
+      "name": "猫叔",
+      "design_baseline": "docs/武将设计思想.json#excel_r142",
+      "baseline_locked_at": "2026-09-01",
+      "review_status": "已完整验收：设计、5项设计推断、战斗实现、通用AI、测试与两轮用户日志均已逐层审查；同一范围动作重复反制已按声明动作token修复，2026-09-02复测30场中猫叔32次反制均为单token单触发",
+      "design_inferences": [
+        "嘲讽之吼按区域默认造成当前攻4伤害，且未写阵营限定所以影响敌我双方。",
+        "任意敌我动作影响猫叔均触发一次反制；目标锁定后触发，原动作不取消。",
+        "反制发生在原动作锁定后、结算前；来源被拉动后原动作仍按已经声明的目标与格子继续。",
+        "指定攻击以合法普攻声明完成，来源离场或目标回合结束清除，最新指定目标覆盖旧目标。",
+        "强制直线移动不受来源速度限制，沿合法直线停在可到达的最近位置。"
+      ],
+      "audit_evidence": "reports/current-hero-deep-audit/excel_r142--excel_r198--excel_r206：2026-09-02全新复测10场、8胜2负、自动高信号0/P3；猫叔反制32次。人工扫描30份trace确认不存在同token重复rule_trigger，也不存在单步重复反制；原第10场龙范围普攻现只触发一次。当前三将专属测试未出现在919项回归的31个失败/错误中，其余失败已归类为战略、房间、前端、军团炮或时间停止等非本批范围。",
+      "acceptance_status": "accepted",
+      "accepted_at": "2026-09-02",
+      "acceptance_evidence": "用户全新focused复测完成；10场猫叔对局和跨30场token不变量人工复核通过，高信号0，当前三将专属回归无失败。",
+      "items": [
+        {
+          "layer": "战斗实现",
+          "requirement": "嘲讽之吼必须对周围7×7敌我双方造成当前攻4的破魔伤害，再给仍存活命中单位施加指定攻击。",
+          "evidence": "旧CatTauntRoarSkill明确写成敌方、无伤害，只调用validate_target并加状态；现改为effect_units_at_cells双方取值、DamageContext当前攻、ignore_shield，并仅在伤害未取消且目标存活后加状态。",
+          "verdict": "已修复待验证",
+          "severity": "P1",
+          "planned_change": "已补敌我伤害、破盾和状态顺序的定向测试。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "战斗实现",
+          "requirement": "猫叔反制必须覆盖敌我普攻/技能以及直接区域伤害，并且一个声明动作只触发一次。",
+          "evidence": "第一版修复虽共享_trigger接入on_targeted/on_before_damage，但用回合、来源、动作名和动作序号去重；用户日志证明龙的一次范围普攻在伤害与后续效果使用不同动作名，仍重复触发。现Battle为每个已声明QueuedAction提供稳定resolution token，两个钩子按同一token去重；嵌套声明动作仍各有独立token。",
+          "verdict": "再次修复待验证",
+          "severity": "P1",
+          "planned_change": "已补友方直接区域技能触发，以及龙的范围普攻含后续效果时整次动作只反制一次的定向测试。",
+          "status": "待用户重跑当前批次"
+        },
+        {
+          "layer": "战斗实现",
+          "requirement": "直线拉近应走到合法直线上距离猫叔最近的可达点，而不是找不到恰好邻接共线格就完全不移动。",
+          "evidence": "旧_straight_destination_around只搜索与起点严格共线的邻接落点；现枚举八方向可达直线点，先取与猫叔距离最小者，再取达到同等最近距离所需步数最少者，障碍前停止。",
+          "verdict": "已修复待验证",
+          "severity": "P2",
+          "planned_change": "已补非共线起点仍沿直线显著拉近的定向测试。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "通用战斗规则",
+          "requirement": "被双方区域嘲讽命中的己方单位必须能把己方猫叔作为合法强制普攻目标。",
+          "evidence": "旧basic_attack_preview_for_payload只枚举enemy_units，造成友方指定目标不可执行；现Battle.forced_basic_attack_target把有效指定目标加入普攻预览，并在声明时冻结友方目标许可，单体和区域普攻结算均可完成契约。",
+          "verdict": "已修复待验证",
+          "severity": "P1",
+          "planned_change": "通用指定攻击目标动作生成与AI候选均已支持己方强制目标。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "AI",
+          "requirement": "猫叔AI必须把怒吼的攻4伤害、控制收益、友伤、队友强制攻击和自身未来承伤放在同一净值中。",
+          "evidence": "旧taunt_control_score只统计敌方控制数量；现用真实技能伤害探针计算敌我伤害与破盾，敌方控制扣除预计反打，友方加入伤害及攻击资源浪费惩罚。",
+          "verdict": "已修复待验证",
+          "severity": "P1",
+          "planned_change": "已补两名队友在范围内时拒绝怒吼的AI测试。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "通用AI",
+          "requirement": "所有单位选择攻击或技能影响猫叔时都要计入扣魔、被拉近和后续移动/主动技能锁定成本。",
+          "evidence": "旧攻击与技能评分没有猫叔反制成本；现build_attack_candidates/build_skill_candidates统一扣除猫叔反制机会成本，强制攻击以高契约分覆盖该惩罚。",
+          "verdict": "已修复待验证",
+          "severity": "P1",
+          "planned_change": "已补有暴露替代目标时通用AI避开猫叔、被嘲讽时仍正确攻击猫叔的测试。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "通用AI",
+          "requirement": "震开要计算推散已聚拢单位、损失后续近战接触与1魔资源的机会成本，致命防御时仍可使用。",
+          "evidence": "旧knockback固定按威胁加分；现按周围敌人的未来近战价值、被推队友和低魔非紧急场景扣分，保留致命威胁的高紧急分。",
+          "verdict": "已改进待验证",
+          "severity": "P2",
+          "planned_change": "通过当前批次决策日志观察猫叔是否仍无条件震开。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "审计工具",
+          "requirement": "自动审计必须把同一声明动作重复触发一次性反制识别为高信号，不能仅因对局无执行异常就给P3。",
+          "evidence": "旧报告自动高信号为0，但同一步trace出现两条‘因攻击或技能猫叔失去’日志。现猫叔每次实际反制都会写入带action resolution token的结构化rule_trigger事件；match_audit按token检查一次性触发不变量，并以duplicate_once_per_action_trigger记录error；不同嵌套动作的token不同，不会误报。batch审计把该分类列入高信号。",
+          "verdict": "已修复待验证",
+          "severity": "P1",
+          "planned_change": "已补同一token重复事件必须报错、不同嵌套动作token不得误报的审计组件测试；重跑后该历史场景若复现，应进入suspected_defects而非P3。",
+          "status": "待用户重跑当前批次"
+        },
+        {
+          "layer": "测试",
+          "requirement": "测试需覆盖伤害/阵营、破魔、指定攻击、友方强制目标、反制去重/范围触发、拉近和AI净值。",
+          "evidence": "tests/test_battle.py与tests/test_behavior.py已加入对应定向用例；根据用户首轮结果修正了一个会在怒吼前杀死目标的AI测试夹具，以及一个把直线拉近等价落点写死的过度约束断言；本轮遵照流程不运行回合测试。",
+          "verdict": "已补充待验证",
+          "severity": "P1",
+          "planned_change": "由用户运行python detail_test_all_wujiangs.py --current统一执行。",
+          "status": "待用户重跑"
+        }
+      ]
+    },
+    {
+      "code": "excel_r198",
+      "name": "三轮车人",
+      "design_baseline": "docs/武将设计思想.json#excel_r198",
+      "baseline_locked_at": "2026-09-01",
+      "review_status": "已完整验收：设计、5项设计推断、战斗实现、AI、测试与两轮用户日志均已逐层审查；召唤顺序、攻击后移动经济与AI重规划符合设计，2026-09-02复测未发现新缺陷",
+      "design_inferences": [
+        "二轮车和一轮车均只能部署在直接召唤者周围合法格。",
+        "允许多座二轮车并存，每座独立拥有每回合一次的一轮车召唤。",
+        "召唤物入场回合不能行动，直接召唤者离场只级联自己的分支。",
+        "所有攻击后收益均以普攻声明完成为准，即使命中被取消或伤害为0也触发，但穿刺等主动技能不触发。",
+        "本体普攻后每次增加一次普通移动；车体普攻后重置普通移动使用量，不重置其他资源。"
+      ],
+      "audit_evidence": "reports/current-hero-deep-audit/excel_r142--excel_r198--excel_r206：2026-09-02全新复测10场、2胜8负、自动高信号0/P3；二轮车召唤10/13个有效机会，一轮车召唤1/1。人工逐步对照再次确认本体召唤→神速/移动→普攻→再次移动，以及二轮车召唤子车→移动→攻击；攻击后未再移动的代表场景随即结束战斗，不构成漏用。当前三将专属测试无失败，未发现实现或AI偏离设计。",
+      "acceptance_status": "accepted",
+      "accepted_at": "2026-09-02",
+      "acceptance_evidence": "用户全新focused复测完成；10场对局的召唤、攻击后动态移动资源和AI重规划人工复核通过，高信号0，当前三将专属回归无失败。",
+      "items": [
+        {
+          "layer": "战斗实现",
+          "requirement": "本体每完成一次普攻，本回合普通移动上限独立+1，未命中也触发，技能不触发。",
+          "evidence": "ExtraMoveAfterAttackTrait以本回合attacks_used修改普通移动上限；攻击次数在普攻结算路径中增加，技能路径不增加，回合刷新后归零。",
+          "verdict": "符合",
+          "severity": "P3",
+          "planned_change": "保留实现，补足多次与未命中边界测试。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "战斗实现",
+          "requirement": "二轮车/一轮车完成普攻后重置普通移动次数和距离，不重置攻击、技能或神速。",
+          "evidence": "ResetMoveAfterAttackTrait只在on_basic_attack_finished清零move_used、normal_move_actions_used、normal_move_steps_used。",
+          "verdict": "符合",
+          "severity": "P3",
+          "planned_change": "保留实现。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "战斗实现",
+          "requirement": "允许多座二轮车并存，每座独立召唤一轮车；所有召唤相邻部署、入场禁动。",
+          "evidence": "两个召唤技能按各自actor周围合法格生成且无场上同名上限；每个BicycleSummon拥有独立SummonUnicycleSkill；Battle.summon_unit令turn_ready=false。",
+          "verdict": "符合",
+          "severity": "P3",
+          "planned_change": "新增两条并存分支及各自子召唤测试。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "战斗实现",
+          "requirement": "召唤消散必须按直接召唤者分支级联。",
+          "evidence": "Battle.summon_unit记录直接summoner_id；cleanup_dead_units循环清理召唤者已死亡的单位，因此三轮车人→二轮车→一轮车逐层级联，单座二轮车死亡不影响另一分支。",
+          "verdict": "符合",
+          "severity": "P3",
+          "planned_change": "新增单分支清理、另一分支保留的测试。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "AI",
+          "requirement": "二轮车落点应同时考虑入场暴露、下回合攻击接触和未来一轮车合法空位。",
+          "evidence": "旧通用召唤评分只奖励接近敌人；现cycle_summon_score计算下一轮速5+范1接触、敌方可达威胁、过近惩罚，并让二轮车强烈保留邻接空格。",
+          "verdict": "已改进待验证",
+          "severity": "P2",
+          "planned_change": "已补受地形限制时仍选择保留子召唤空位的AI测试。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "通用AI",
+          "requirement": "车体攻击重置移动后必须重新生成动作候选，实现移动→攻击→再移动。",
+          "evidence": "choose_turn_action/choose_turn_bundle_action每次行动后重新读取action_snapshot；ResetMoveAfterAttackTrait在普攻完成时立即清零移动使用量。新增测试锁定攻击后再次生成move。",
+          "verdict": "符合并补测试",
+          "severity": "P2",
+          "planned_change": "保留动态重规划架构，观察当前批次日志中的攻击后移动机会采用率。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "测试",
+          "requirement": "测试需覆盖独立召唤分支、入场禁动、移动增益/重置、级联和AI重规划。",
+          "evidence": "tests/test_battle.py与tests/test_behavior.py已扩充上述场景；本轮不运行动态测试。",
+          "verdict": "已补充待验证",
+          "severity": "P1",
+          "planned_change": "由用户运行当前批次统一测试。",
+          "status": "首轮日志符合，待统一回归重跑"
+        }
+      ]
+    },
+    {
+      "code": "excel_r206",
+      "name": "反击拳手",
+      "design_baseline": "docs/武将设计思想.json#excel_r206",
+      "baseline_locked_at": "2026-09-01",
+      "review_status": "已完整验收：设计、6项设计推断、战斗实现、通用AI、测试与两轮用户日志均已逐层审查；嘲讽服从、反应选择、临时防御与吸血符合设计，2026-09-02复测未发现新缺陷",
+      "design_inferences": [
+        "擂台嘲讽按区域默认造成当前攻3伤害并影响敌我双方。",
+        "目标有普攻资源时只能移动到可对拳手声明一拳，声明消耗次数并解除。",
+        "指定攻击在拳手离场、目标回合结束或回合开始时没有普攻资源时失效，最新指定来源覆盖旧来源。",
+        "组合格挡反击是普通格挡/反击之外的可选候选，守+1只留当前连锁。",
+        "组合只响应敌方速度1且仍在拳手普攻范围内的来源，反击先于原动作结算，原动作随后按通用连锁规则继续或失效。",
+        "普攻式反击造成伤害触发攻击吸血，穿刺不触发。"
+      ],
+      "audit_evidence": "reports/current-hero-deep-audit/excel_r142--excel_r198--excel_r206：2026-09-02全新复测10场、8胜2负、自动高信号0/P3；擂台嘲讽7/37，组合格挡反击33/35，保护3次、普通格挡4次。人工逐步对照再次确认被嘲讽单位服从指定攻击，组合反击先结算、临时守链尾清除、实际伤害触发吸血，AI会按威胁切换保护/格挡。普通反击因组合通常严格占优而未采用，合法候选与定向测试均保留；当前三将专属测试无失败，未发现新缺陷。",
+      "acceptance_status": "accepted",
+      "accepted_at": "2026-09-02",
+      "acceptance_evidence": "用户全新focused复测完成；10场对局的嘲讽义务、复合反应、临时防御和吸血人工复核通过，高信号0，当前三将专属回归无失败。",
+      "items": [
+        {
+          "layer": "战斗实现",
+          "requirement": "擂台嘲讽必须对周围8格敌我双方造成当前攻3破魔伤害，再给存活命中单位施加指定攻击。",
+          "evidence": "旧RingTauntSkill明确实现为敌方、无伤害；现改为双方区域DamageContext、当前攻、ignore_shield，伤害成功且存活后才加状态。",
+          "verdict": "已修复待验证",
+          "severity": "P1",
+          "planned_change": "已补敌我伤害、破盾与控制顺序测试。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "战斗实现",
+          "requirement": "目标下回合有普攻资源时才激活指定攻击；声明消耗正常次数并解除，拳手离场/回合结束清除。",
+          "evidence": "RequiredAttackStatus已实现声明解除、来源失效、owner_turn_end过期与最新覆盖；BoxerTauntStatus补充无可用攻击次数时不激活。",
+          "verdict": "已修复待验证",
+          "severity": "P2",
+          "planned_change": "补充无攻击数和友方强制目标测试。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "通用战斗规则",
+          "requirement": "被擂台嘲讽命中的己方单位必须能合法普攻己方拳手。",
+          "evidence": "Battle.forced_basic_attack_target及声明冻结许可同时服务猫叔与反击拳手；AI候选也允许只为完成契约而攻击指定己方目标。",
+          "verdict": "已修复待验证",
+          "severity": "P1",
+          "planned_change": "复用通用指定攻击测试。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "战斗实现",
+          "requirement": "普通格挡、普通反击和组合格挡反击必须同时保留；组合只对敌方速度1、来源在范围的动作开放。",
+          "evidence": "BlockCounterTrait提供普通两个候选；BoxerBlockCounterSkill为额外被动技能，can_react_to检查敌方、速度与attack_target_allowed范围。",
+          "verdict": "符合",
+          "severity": "P3",
+          "planned_change": "保留实现，补远程来源不生成组合测试。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "战斗实现",
+          "requirement": "组合反应先临时守+1、再进行普攻式反击，链尾清除；反击伤害触发吸血。",
+          "evidence": "react先加expire_with_chain TemporaryDefenseStatus，再resolve_attack_damage；该上下文is_skill=false且带attack标签，AttackLifeStealTrait会在实际伤害后回复，finalize_reaction_window清除临时守。",
+          "verdict": "符合",
+          "severity": "P3",
+          "planned_change": "补足吸血、链尾清理和穿刺不吸血断言。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "AI",
+          "requirement": "嘲讽评分必须同时计算攻3伤害、友伤、控制价值、预计承伤、可反击与吸血收益。",
+          "evidence": "旧taunt_control_score只数敌方控制；现按真实技能伤害探针、敌我阵营、未来攻击资源、预计敌方伤害和拳手反击伤害综合评分。",
+          "verdict": "已修复待验证",
+          "severity": "P1",
+          "planned_change": "已补两名队友邻接时拒绝擂台嘲讽的AI测试。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "通用AI",
+          "requirement": "格挡类AI要按守+1实际减少的伤害评分，不能把破魔误当成无视防御；组合还要计算反击击杀与吸血。",
+          "evidence": "旧block分支遇ignore_shield直接否决，混淆破魔与守+1；现temporary_defense_prevention_score在回滚探针内比较守+1前后威胁，组合评分再加入反击、击杀与缺血吸血价值。",
+          "verdict": "已修复待验证",
+          "severity": "P1",
+          "planned_change": "保留普通格挡/反击作为合法替代，当前批次观察组合采用质量。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "测试",
+          "requirement": "测试需覆盖双方嘲讽、普攻资源门槛、三个反应候选、临时守、反击吸血与AI选择。",
+          "evidence": "tests/test_battle.py与tests/test_behavior.py已扩充对应场景；本轮只做静态编译。",
+          "verdict": "已补充待验证",
+          "severity": "P1",
+          "planned_change": "由用户运行当前批次统一测试。",
+          "status": "首轮日志符合，待统一回归重跑"
+        }
+      ]
+    },
+    {
+      "code": "excel_r291",
+      "name": "机甲忍者。赤",
+      "design_baseline": "docs/武将设计思想.json#excel_r291",
+      "baseline_locked_at": "2026-09-02",
+      "review_status": "2026-09-06复核新10场：45次声明逐条对应45条公开随机破魔日志，无遗漏或重复；专属测试未列入失败。本批随太阳神测试修正保持待复测。",
+      "design_inferences": [
+        "最近锚点不分敌我，地形也可作锚；按声明线由近到远和稳定单位顺序自动确定。",
+        "地形锚点只提供位移，只有单位锚点建立本回合下一次直接伤害+1。",
+        "没有合法直线邻接落点时只跳过位移，既有线伤和单位追击仍保留。",
+        "追击在本发铁锁结算后生效，首次对同一单位建立的赤来源直接伤害+1并立即消耗。",
+        "每次普攻或技能声明后端只采样一次随机破魔，结果仅随该动作传播并公开记录。"
+      ],
+      "audit_evidence": "9月4日新10场3胜7负、铁锁7次、吸魔3次、回避27次。逐场声明/公开随机日志数为2/2、6/6、7/7、2/2、2/2、6/6、2/2、6/6、10/10、2/2，共45/45；每次声明同一步均有对应结果。929项回归没有赤专属失败。",
+      "acceptance_status": "pending_user_retest",
+      "items": [
+        {
+          "layer": "战斗实现",
+          "requirement": "面板及回避、吸魔、铁锁路径必须映射源表；铁锁每回合首发免费、后续0.5魔且无次数上限，只伤敌方并固定破魔。",
+          "evidence": "excel_r291专用工厂映射IronChainPathSkill与RedDrainManaSkill；通用回避保留。mana_cost_for_payload按uses_this_turn首发归零，后续回到0.5；max_uses_per_turn未设置；affected_units过滤友军，resolve_hit固定ignore_shield。",
+          "verdict": "符合",
+          "severity": "P3",
+          "planned_change": "保留数值与资源规则，补首发/后续费用、敌友过滤和固定破魔断言。",
+          "status": "已审查，待用户当前批次测试"
+        },
+        {
+          "layer": "战斗实现",
+          "requirement": "铁锁必须把纯墙体、地形场和地形单位纳入最近锚点；地形只移动，不产生追击。",
+          "evidence": "旧anchor_for_cells只检查units_at，纯blocked_cells墙体和is_terrain场地无法成为锚。现按声明线近到远检查稳定单位、墙体和地形场；带地形语义的单位归类为terrain，不创建RedNextDamageStatus。",
+          "verdict": "已修复待验证",
+          "severity": "P1",
+          "planned_change": "已加入墙体位于敌人之前时优先锁墙、只伤敌人并且无追击状态的定向测试。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "战斗实现",
+          "requirement": "锚点在伤害前锁定；位移只能在5格内沿一条直线到达锚点真正周围，失败不回滚伤害或单位追击。",
+          "evidence": "旧实现只有活着且仍有position的单位锚才能继续，并调用可跨全图且只求最近距离的通用拉近函数。现先保存锚点及占格，再结算伤害；destination_for_anchor仅枚举5格直线可达点并要求与锚占格距离恰为1；失败后仍建立单位追击。",
+          "verdict": "已修复待验证",
+          "severity": "P1",
+          "planned_change": "已补锚点被本发击破后仍保留追击，以及墙体阻路只到合法邻格的测试。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "战斗实现",
+          "requirement": "追击只强化赤对绑定单位的下一份直接伤害一次；本发铁锁、场地伤害、队友伤害和其他目标不能消费。",
+          "evidence": "RedNextDamageStatus在本发完成后添加；on_before_damage核对source与target并排除from_field_effect，修改该DamageContext后立即移除；duration=1且any_turn_end使其在当前回合末失效。",
+          "verdict": "符合",
+          "severity": "P2",
+          "planned_change": "保留实现，并由当前批次定向与审计日志核对一次性消费。",
+          "status": "已审查，待用户当前批次测试"
+        },
+        {
+          "layer": "战斗实现",
+          "requirement": "随机破魔必须每个声明恰采样一次、公开结果、同动作共享，且不能泄漏到后续动作。",
+          "evidence": "RedRandomPierceTrait在on_owner_action_declared单次采样并把结果写入动作payload；2026-09-03日志发现用普通battle.log写结果时，对隐身目标的动作会被隐身抑制。现改用带来源的公开事件接口，保证随机结果公开，同时仍只存在于本次payload。",
+          "verdict": "已修复待验证",
+          "severity": "P1",
+          "planned_change": "保留动作载荷传播；公开结果改走不可被隐身目标抑制的公开事件，并补隐身目标场景。",
+          "status": "二次修复并补测试，待用户复跑当前批次"
+        },
+        {
+          "layer": "AI",
+          "requirement": "铁锁评分必须接受强制最近锚点，计算实际落点风险和本回合追击兑现，不能只按线伤与免费奖励决策。",
+          "evidence": "旧iron_chain_path_score只调用skill_damage_score、目标价值与首发+12。现复用战斗实现的anchor_for_cells/destination_for_anchor，加入真实落点移动价值、敌方可达伤害、多攻威胁、敌方单位追击收益、友军/地形锚机会成本；无敌方命中仍拒绝。",
+          "verdict": "已修复待验证",
+          "severity": "P1",
+          "planned_change": "已补两条等伤线路中避开高攻敌人可达落点的AI行为测试。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "测试",
+          "requirement": "测试矩阵必须覆盖锚点阵营/地形/顺序、严格位移、追击生命周期、费用与随机动作边界，并验证AI落位质量。",
+          "evidence": "已覆盖墙体锚、死亡锚点锁定、随机状态不残留、强制锚点落位风险、首发免费、单位追击和单动作单随机；本轮补隐身目标仍公开随机结果，并把致死样本血量改为真实可击破值、把墙体落点断言改为验证直线/5格/真实邻接而非唯一坐标。开发代理未运行动态测试。",
+          "verdict": "已补充待验证",
+          "severity": "P1",
+          "planned_change": "由用户运行python detail_test_all_wujiangs.py --current。",
+          "status": "测试夹具与公开日志场景已修，待用户复跑当前批次"
+        }
+      ]
+    },
+    {
+      "code": "excel_r356",
+      "name": "强袭犀牛",
+      "design_baseline": "docs/武将设计思想.json#excel_r356",
+      "baseline_locked_at": "2026-09-02",
+      "review_status": "2026-09-06复核新10场：24拳包含7个完整三拳回合，4次到期无锚等待日志可见。龙息与实际回归仍为随机局覆盖缺口，专属定向测试未列入失败；本批随太阳神测试修正保持待复测。",
+      "design_inferences": [
+        "只有真实破坏触发遗志与计时，伤害和明确非伤害破坏均可。",
+        "遗志快照覆盖当前全部其他友军含召唤物/分身，未来入场者不补领。",
+        "同名遗志不叠层，新触发只刷新接收者完整3个自己的回合。",
+        "回归等待破坏后3个完整全局固定行动环。",
+        "无兽人或无落点时持续重试，多锚按固定行动槽和稳定格序自动选择。",
+        "回归同一单位，满血满魔并清临时状态，保留固定槽、永久变化及本场技能记录且不立即行动。"
+      ],
+      "audit_evidence": "9月4日新10场5胜5负、神速8次、普攻24次、变硬6次、震开3次。第2/3/5/6/7/9/10场各有一次完整三拳，另第3场后续2拳、第4场1拳。第7场步骤67/72/74/76均记录到期等待回归。龙息8个可用节点无有效候选；随机局未满足全部回归条件，保留条件覆盖缺口。929项回归无犀牛专属失败。",
+      "acceptance_status": "pending_user_retest",
+      "items": [
+        {
+          "layer": "战斗实现",
+          "requirement": "面板与神速、龙息、震开、变硬、每回合三次普攻必须完整映射源表。",
+          "evidence": "excel_r356使用通用ShensuSkill、DragonBreathSkill、KnockbackSkill、HardenSkill，并由AttackCountTrait把每回合普攻数改为3。",
+          "verdict": "符合",
+          "severity": "P3",
+          "planned_change": "不改通用技能数值，补AI连续三拳行为断言。",
+          "status": "已审查，待用户当前批次测试"
+        },
+        {
+          "layer": "战斗实现",
+          "requirement": "每次真实破坏都应触发一次遗志和一个回归计时；同一条生命不得重复触发，但回归后的下一条生命必须重新具备资格。",
+          "evidence": "RhinoDeathTrait以triggered防止伤害钩子与移除钩子重复。审查发现旧triggered只在初次入场重置，回归后第二次死亡会永久失效；现回归前明确重置，add_unit入场钩子再次确认新生命状态。",
+          "verdict": "已修复待验证",
+          "severity": "P1",
+          "planned_change": "已补同一犀牛回归后第二次破坏再次产生单个回归记录、刷新而不叠遗志的测试。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "战斗实现",
+          "requirement": "遗志只给破坏瞬间仍在场的其他友军，持续各自3回合；同名效果不叠加只刷新。",
+          "evidence": "trigger_legacy快照player_units、排除owner和离场单位，包含正常召唤/分身；已有同名状态先移除再添加RhinoLegacyStatus(duration=3, owner_turn_end)。",
+          "verdict": "符合",
+          "severity": "P2",
+          "planned_change": "保留实现，当前批次检查接收者数量、层数与刷新时长。",
+          "status": "已审查，待用户当前批次测试"
+        },
+        {
+          "layer": "战斗实现",
+          "requirement": "回归要等待死亡后3个完整全局行动环；到期无兽人本体或无合法格必须保留记录并在以后每个武将回合重试。",
+          "evidence": "return_turn_number=death_turn_number+固定turn_order槽数×3；turn_number会为死亡槽也推进。on_turn_start未到期或无候选时保留field effect；兽人候选排除召唤和分身。为让设计规定的持续重试可观察，现于到期但没有合法兽人/落点时记录明确等待日志。",
+          "verdict": "符合并补测试",
+          "severity": "P2",
+          "planned_change": "保留重试机制；补所有兽人邻格阻塞时保留记录、腾格后自动回归，并断言到期等待日志。",
+          "status": "等待日志与断言已补，待用户复跑当前批次"
+        },
+        {
+          "layer": "战斗实现",
+          "requirement": "多个兽人锚必须按固定行动槽选择第一个有合法格者，落点使用稳定格序。",
+          "evidence": "旧实现按等级降序、unit_id选锚，会让高等级后槽越过前槽。现按turn_order_unit_ids索引再按unit_id排序，周围格继续按y/x稳定顺序。",
+          "verdict": "已修复待验证",
+          "severity": "P1",
+          "planned_change": "已补前槽4级兽人优先于后槽5级兽人的阻塞重试测试。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "战斗实现",
+          "requirement": "回归应满血满魔、清上一生命临时状态，保留永久数值变化、身份、固定行动槽、冷却和本场使用记录，并且不赠送即时行动。",
+          "evidence": "旧实现无条件移除全部status，误删duration=None的永久StatModifierStatus。现只保留无期限数值状态，清除其他临时状态；沿用原对象与skill对象，恢复血魔并把turn_ready及当前回合动作字段清零，固定turn_order不改。",
+          "verdict": "已修复待验证",
+          "severity": "P1",
+          "planned_change": "已补永久/临时状态分离、技能记录/冷却、固定槽及无即时行动断言。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "通用AI",
+          "requirement": "三次普攻必须作为三次依次声明的动作，每拳后重新生成候选，不能打一拳便结束。",
+          "evidence": "choose_turn_action和choose_turn_bundle_action每次调用重新读取action_snapshot；Battle每拳只递增一次attacks_used，达到attack_actions_per_turn前继续提供普攻候选。旧集中审计中犀牛已有稳定多拳信号，未发现需改通用评分的证据。",
+          "verdict": "符合并补测试",
+          "severity": "P2",
+          "planned_change": "保留通用重规划架构，新增0魔且持续有目标时连续选择并执行三次普攻的行为测试。",
+          "status": "待用户当前批次测试"
+        },
+        {
+          "layer": "测试",
+          "requirement": "测试矩阵必须覆盖两次死亡、遗志刷新、完整行动环、无兽人/无格重试、固定槽选锚、回归保留边界和三拳AI。",
+          "evidence": "已在伤害/非伤害破坏和三环计时基础上覆盖第二次死亡、状态与场次记录、固定槽、阻塞重试及逐拳重规划；本轮再断言到期无合法锚/落点时输出等待日志。审计工具同时区分‘技能可用但无有效候选’与真实错失，并隔离其他武将同名日志。开发代理未运行动态测试。",
+          "verdict": "已补充待验证",
+          "severity": "P1",
+          "planned_change": "由用户运行python detail_test_all_wujiangs.py --current。",
+          "status": "等待可观察性与审计分类已补，待用户复跑当前批次"
+        }
+      ]
+    }
+  ]
+}

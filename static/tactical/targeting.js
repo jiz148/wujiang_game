@@ -555,7 +555,7 @@ export function currentPreview() {
   if (state.selectedActionCode === "mana_pull" && state.stagedPayload?.targetUnitId) {
     const target = stagedTarget();
     return {
-      cellKeys: positionsToSet(manaPullDestinations(target)),
+      cellKeys: positionsToSet(descentMomentDestinations(action, target)),
       targetIds: new Set(target ? [target.id] : []),
       secondaryCellKeys: positionsToSet(target?.position ? [target.position] : []),
       destinationCellKeys: new Set(),

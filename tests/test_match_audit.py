@@ -13,10 +13,28 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from wujiang.tactical.heroes.registry import create_battle, create_hero  # noqa: E402
-from wujiang.tools.match_audit import FindingRecorder, action_diagnostic, parse_roster, record_candidate_gap, run_match_audit  # noqa: E402
+from wujiang.tools.match_audit import (  # noqa: E402
+    FindingRecorder,
+    action_diagnostic,
+    parse_roster,
+    record_candidate_gap,
+    record_step_invariants,
+    run_match_audit,
+)
 from wujiang.tactical.rooms.ai import difficulty_profile  # noqa: E402
 from wujiang.tools.batch_match_audit import build_match_plan, run_batch_audit  # noqa: E402
-from wujiang.tools.per_hero_ai_debug import build_per_hero_match_plan, run_per_hero_ai_debug  # noqa: E402
+from wujiang.tools.per_hero_ai_debug import (  # noqa: E402
+    build_per_hero_match_plan,
+    completed_audit_manifest,
+    run_per_hero_ai_debug,
+)
+from wujiang.tools.all_hero_deep_audit import (  # noqa: E402
+    analyze_target,
+    current_batch_output_dir,
+    load_current_hero_codes,
+    load_design_profiles,
+    render_hero_review,
+)
 
 
 def read_jsonl(path: Path) -> list[dict[str, object]]:
@@ -44,6 +62,63 @@ def normalize_unit_ids(value):
 
 
 class MatchAuditToolTests(unittest.TestCase):
+    def test_duplicate_cat_retaliation_for_one_resolution_token_is_high_signal_and_attributed_to_cat(self) -> None:
+        battle = create_battle("excel_r142", "bard")
+        findings = FindingRecorder()
+        event = {
+            "payload": {"type": "attack"},
+            "new_summary_events": [
+                {"kind": "rule_trigger", "rule_code": "cat_retaliation", "action_resolution_token": 17},
+                {"kind": "rule_trigger", "rule_code": "cat_retaliation", "action_resolution_token": 17},
+            ],
+        }
+
+        record_step_invariants(battle, event, findings, step=4)
+
+        self.assertEqual(len(findings.items), 1)
+        self.assertEqual(findings.items[0]["category"], "duplicate_once_per_action_trigger")
+        self.assertEqual(findings.items[0]["actor"]["hero_code"], "excel_r142")
+
+    def test_two_cat_retaliations_from_nested_declared_actions_do_not_share_an_invariant_bucket(self) -> None:
+        battle = create_battle("excel_r142", "bard")
+        findings = FindingRecorder()
+        event = {
+            "payload": {"type": "attack"},
+            "new_summary_events": [
+                {"kind": "rule_trigger", "rule_code": "cat_retaliation", "action_resolution_token": 17},
+                {"kind": "rule_trigger", "rule_code": "cat_retaliation", "action_resolution_token": 18},
+            ],
+        }
+
+        record_step_invariants(battle, event, findings, step=4)
+
+        self.assertEqual(findings.items, [])
+
+    def test_current_review_batch_is_loaded_from_explicit_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            review_path = Path(temp_dir) / "review.json"
+            review_path.write_text(
+                json.dumps(
+                    {"current_hero_codes": ["excel_r126", "excel_r142", "excel_r126"]},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(load_current_hero_codes(review_path), ["excel_r126", "excel_r142"])
+            self.assertEqual(
+                current_batch_output_dir(load_current_hero_codes(review_path)),
+                Path("reports/current-hero-deep-audit/excel_r126--excel_r142"),
+            )
+
+    def test_current_review_batch_requires_explicit_nonempty_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            review_path = Path(temp_dir) / "review.json"
+            review_path.write_text(json.dumps({"heroes": []}), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "current_hero_codes"):
+                load_current_hero_codes(review_path)
+
     def test_parse_roster_accepts_comma_and_semicolon_separators(self) -> None:
         self.assertEqual(parse_roster("bard, ellie;dark_human"), ["bard", "ellie", "dark_human"])
         with self.assertRaises(ValueError):
@@ -190,6 +265,191 @@ class MatchAuditToolTests(unittest.TestCase):
             self.assertIn("questionnaire", summary)
             report = result.report_path.read_text(encoding="utf-8")
             self.assertIn("# Per-Hero AI Debug Summary", report)
+
+    def test_resume_requires_complete_outputs_and_matching_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            match_dir = Path(temp_dir)
+            manifest = {
+                "seed": 23,
+                "difficulty": "standard",
+                "max_steps": 300,
+                "steps_executed": 91,
+                "team1": ["excel_r126", "bard"],
+                "team2": ["ellie", "fire_funeral"],
+            }
+            (match_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            for filename in ("trace.jsonl", "battle_report.md", "findings.jsonl", "findings.md"):
+                (match_dir / filename).write_text("", encoding="utf-8")
+
+            reusable = completed_audit_manifest(
+                match_dir,
+                team1=manifest["team1"],
+                team2=manifest["team2"],
+                seed=23,
+                difficulty="standard",
+                max_steps=300,
+            )
+            self.assertEqual(reusable, manifest)
+            self.assertIsNone(
+                completed_audit_manifest(
+                    match_dir,
+                    team1=manifest["team1"],
+                    team2=manifest["team2"],
+                    seed=24,
+                    difficulty="standard",
+                    max_steps=300,
+                )
+            )
+
+            (match_dir / "findings.md").unlink()
+            self.assertIsNone(
+                completed_audit_manifest(
+                    match_dir,
+                    team1=manifest["team1"],
+                    team2=manifest["team2"],
+                    seed=23,
+                    difficulty="standard",
+                    max_steps=300,
+                )
+            )
+
+    def test_deep_audit_compares_trace_observations_with_design_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            match_dir = Path(temp_dir) / "match"
+            match_dir.mkdir()
+            event = {
+                "actor": {"hero_code": "excel_r126", "name": "太阳神"},
+                "payload": {"type": "skill", "skill_code": "sphinx_cannon"},
+                "reason": "ai_turn",
+                "success": True,
+                "decision": {
+                    "action_diagnostics": [
+                        {
+                            "kind": "skill",
+                            "code": "sphinx_cannon",
+                            "available": True,
+                            "effective_payload_count": 3,
+                        },
+                        {
+                            "kind": "skill",
+                            "code": "solar_judgment",
+                            "available": True,
+                            "effective_payload_count": 1,
+                        },
+                    ]
+                },
+                "new_logs": ["太阳神 使用斯芬克斯炮。"],
+                "state_delta": {},
+            }
+            (match_dir / "trace.jsonl").write_text(json.dumps(event, ensure_ascii=False) + "\n", encoding="utf-8")
+            design = load_design_profiles(ROOT / "docs" / "武将设计思想.json")["excel_r126"]
+            review = analyze_target(
+                "excel_r126",
+                {"code": "excel_r126", "name": "太阳神"},
+                [
+                    {
+                        "target_match_index": 1,
+                        "seed": 7,
+                        "team1": ["excel_r126", "bard"],
+                        "team2": ["ellie", "fire_funeral"],
+                        "winner": 1,
+                        "steps": 20,
+                        "finding_count": 0,
+                        "high_signal_count": 0,
+                        "battle_report": str(match_dir / "battle_report.md"),
+                        "output_dir": str(match_dir),
+                    }
+                ],
+                [],
+                design,
+            )
+
+            self.assertEqual(review["metrics"]["action_code_counts"]["sphinx_cannon"], 1)
+            self.assertEqual(review["metrics"]["effective_action_decision_points"]["excel_r126:sphinx_cannon"], 1)
+            self.assertIn("solar_judgment", review["expected_action_gaps"])
+            self.assertIn("solar_judgment", review["expected_action_missed_opportunities"])
+            self.assertEqual(review["priority"], "P1")
+            self.assertNotIn("破坏了地形", review["expected_log_gaps"])
+            self.assertTrue(review["design_baseline_available"])
+            rendered = render_hero_review(review)
+            self.assertIn("核心设计意图", rendered)
+            self.assertIn("solar_judgment", rendered)
+
+    def test_deep_audit_does_not_attribute_another_hero_log_to_the_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            match_dir = Path(temp_dir) / "match"
+            match_dir.mkdir()
+            event = {
+                "actor": {"hero_code": "dragon_rider", "name": "龙骑"},
+                "payload": {"type": "skill", "skill_code": "dragon_breath"},
+                "reason": "ai_turn",
+                "success": True,
+                "decision": {"action_diagnostics": []},
+                "new_logs": ["龙骑 使用了【龙息】。", "强袭犀牛 受到 1 点伤害。"],
+                "new_summary_events": [],
+                "state_delta": {},
+            }
+            (match_dir / "trace.jsonl").write_text(json.dumps(event, ensure_ascii=False) + "\n", encoding="utf-8")
+            design = load_design_profiles(ROOT / "docs" / "武将设计思想.json")["excel_r356"]
+            review = analyze_target(
+                "excel_r356",
+                {"code": "excel_r356", "name": "强袭犀牛"},
+                [{
+                    "target_match_index": 1,
+                    "seed": 7,
+                    "team1": ["excel_r356", "dragon_rider"],
+                    "team2": ["bard", "ellie"],
+                    "winner": 1,
+                    "steps": 10,
+                    "finding_count": 0,
+                    "high_signal_count": 0,
+                    "battle_report": str(match_dir / "battle_report.md"),
+                    "output_dir": str(match_dir),
+                }],
+                [],
+                design,
+            )
+
+            self.assertEqual(review["metrics"]["log_term_counts"]["龙息"], 0)
+
+    def test_deep_audit_attributes_findings_to_the_actual_actor_not_the_planned_match_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            match_dir = Path(temp_dir) / "match"
+            match_dir.mkdir()
+            (match_dir / "trace.jsonl").write_text("", encoding="utf-8")
+            design = load_design_profiles(ROOT / "docs" / "武将设计思想.json")["excel_r126"]
+            finding = {
+                "category": "action_error",
+                "severity": "error",
+                "target": "excel_r126",
+                "attributed_code": "excel_r142",
+                "target_match_index": 1,
+                "actor": {"hero_code": "excel_r142", "name": "猫叔"},
+            }
+            review = analyze_target(
+                "excel_r126",
+                {"code": "excel_r126", "name": "太阳神"},
+                [
+                    {
+                        "target_match_index": 1,
+                        "seed": 7,
+                        "team1": ["excel_r126", "excel_r142"],
+                        "team2": ["bard", "ellie"],
+                        "winner": 1,
+                        "steps": 10,
+                        "finding_count": 1,
+                        "high_signal_count": 1,
+                        "battle_report": str(match_dir / "battle_report.md"),
+                        "output_dir": str(match_dir),
+                    }
+                ],
+                [finding],
+                design,
+            )
+
+            self.assertEqual(review["finding_count"], 0)
+            self.assertEqual(review["high_signal_count"], 0)
+            self.assertEqual(review["matches"][0]["high_signal_count"], 0)
 
     def test_candidate_gap_marks_insufficient_required_cells_as_info(self) -> None:
         findings = FindingRecorder()

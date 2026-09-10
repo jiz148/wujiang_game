@@ -189,6 +189,9 @@ class BattleComponent(ABC):
     ) -> None:
         return None
 
+    def on_target_action_declared(self, battle: "Battle", actor: "Unit", action_type: str, payload: dict[str, Any]) -> None:
+        return None
+
     def on_unit_moved(self, battle: "Battle", ctx: "MoveContext") -> None:
         return None
 
@@ -274,6 +277,14 @@ class BattleComponent(ABC):
         payload: Optional[dict[str, Any]] = None,
     ) -> Optional[list["Position"]]:
         return None
+
+    def basic_attack_area_affects_allies(
+        self,
+        battle: "Battle",
+        actor: "Unit",
+        payload: Optional[dict[str, Any]] = None,
+    ) -> bool:
+        return False
 
     def allows_block_counter(self, battle: "Battle", actor: "Unit") -> bool:
         return True
@@ -408,6 +419,9 @@ class TemporaryDefenseStatus(StatusEffect):
 
 
 class Skill(BattleComponent, ABC):
+    excludes_caster_from_effect = False
+    excludes_allies_from_effect = False
+
     kind = "skill"
     requires_direct_unit_target_line = True
 
@@ -486,7 +500,7 @@ class Skill(BattleComponent, ABC):
             if blocked:
                 return False, reason
         if self.cooldown_remaining > 0:
-            return False, f"还需冷却 {self.cooldown_remaining} 个回合。"
+            return False, f"还需冷却 {self.cooldown_remaining} 个己方回合。"
         if self.max_uses_per_turn is not None and self.uses_this_turn >= self.max_uses_per_turn:
             return False, "本回合使用次数已满。"
         if self.max_uses_per_battle is not None and self.uses_this_battle >= self.max_uses_per_battle:
@@ -502,7 +516,8 @@ class Skill(BattleComponent, ABC):
         self.sync_turn_scope(battle)
 
     def on_any_turn_end(self, battle: "Battle", ended_player_id: int) -> None:
-        if self.cooldown_remaining > 0:
+        # Cooldowns are rounds of the owning hero, not turns of every ally/enemy.
+        if self.cooldown_remaining > 0 and battle.unit_belongs_to_current_turn(self.owner):
             self.cooldown_remaining -= 1
 
     def sync_turn_scope(self, battle: "Battle") -> None:
@@ -702,6 +717,11 @@ class Skill(BattleComponent, ABC):
     ) -> bool:
         return False
 
+    def ignores_magic_immunity_for_payload(
+        self, battle: "Battle", actor: "Unit", payload: dict[str, Any]
+    ) -> bool:
+        return False
+
     def cannot_evade_for_payload(
         self,
         battle: "Battle",
@@ -801,6 +821,7 @@ class DamageContext:
     lethal: bool = False
     destroyed_as_clone: bool = False
     tags: set[str] = field(default_factory=set)
+    actual_damage: float = 0.0
 
     @property
     def damage(self) -> float:
@@ -1447,6 +1468,8 @@ class Battle:
         self.visual_events: list[VisualEvent] = []
         self._next_visual_event_id = 1
         self.stale_queued_action_count = 0
+        self._next_action_resolution_token = 1
+        self._current_action_resolution_token: Optional[int] = None
         self.combat_stats: dict[str, dict[str, Any]] = {}
         self.summary_events: list[dict[str, Any]] = []
         self._next_summary_event_id = 1
@@ -1460,6 +1483,11 @@ class Battle:
         self.fast_ai_simulation = False
         self.on_replay_checkpoint = None
         self._replay_match_end_emitted = False
+
+    @property
+    def current_action_resolution_token(self) -> Optional[int]:
+        """Stable only while one declared queued action is resolving."""
+        return self._current_action_resolution_token
 
     def _emit_replay_checkpoint(self, reason: str) -> None:
         if not bool(getattr(self, "fast_ai_simulation", False)):
@@ -1602,6 +1630,24 @@ class Battle:
         self.summary_events.append(event)
         self.summary_events = self.summary_events[-300:]
         return event
+
+    def record_rule_trigger_summary(
+        self,
+        rule_code: str,
+        *,
+        actor: Unit,
+        target: Unit | None = None,
+    ) -> dict[str, Any]:
+        """Record a rule trigger with the enclosing declared-action identity."""
+        return self._append_summary_event(
+            "rule_trigger",
+            rule_code=rule_code,
+            action_resolution_token=self.current_action_resolution_token,
+            actor_unit_id=actor.unit_id,
+            actor_name=actor.name,
+            target_unit_id=target.unit_id if target is not None else None,
+            target_name=target.name if target is not None else None,
+        )
 
     def record_damage_summary(self, ctx: DamageContext, actual_damage: float) -> None:
         amount = round(max(0.0, float(actual_damage)), 4)
@@ -2963,8 +3009,8 @@ class Battle:
             carried_rider.moved_this_turn = True
         if mounted_on is not None and unit.position not in self.unit_cells(mounted_on):
             self.clear_mounted_state(unit)
+        unit.moved_this_turn = unit.moved_this_turn or ctx.start != ctx.end
         if not triggered_by_reaction:
-            unit.moved_this_turn = True
             if not via_skill:
                 unit.normal_move_steps_used += max(0, len(path) - 1)
                 unit.normal_move_actions_used += 1
@@ -3242,6 +3288,7 @@ class Battle:
             old_hp = ctx.target.current_hp
             ctx.target.take_damage_fraction(ctx.raw_damage)
             actual_damage = round(max(0.0, old_hp - ctx.target.current_hp), 4)
+            ctx.actual_damage = actual_damage
             self.record_damage_summary(ctx, actual_damage)
             self.log_public_event(
                 f"{ctx.target.name} 受到 {ctx.raw_damage} 点伤害。",
@@ -3380,7 +3427,11 @@ class Battle:
         attack_payload["attack_cells"] = [cell.to_dict() for cell in area_cells]
         actor.attacks_used += attack_cost
         actor.actions_taken_this_turn.append("attack")
-        friendly_fire = bool(attack_payload.get("friendly_fire"))
+        affects_allies = bool(attack_payload.get("friendly_fire")) or any(
+            component.basic_attack_area_affects_allies(self, actor, attack_payload)
+            for component in actor.iter_components()
+        )
+        forced_allied_target_id = str(attack_payload.get("forced_allied_attack_target_id") or "")
         impact = None
         raw_impact = attack_payload.get("impact_cell")
         if isinstance(raw_impact, dict) and raw_impact.get("x") is not None and raw_impact.get("y") is not None:
@@ -3389,7 +3440,11 @@ class Battle:
 
         targets = []
         for unit in self.effect_units_at_cells(area_cells):
-            if not friendly_fire and unit.player_id == actor.player_id:
+            if (
+                not affects_allies
+                and unit.player_id == actor.player_id
+                and unit.unit_id != forced_allied_target_id
+            ):
                 continue
             if attack_payload.get("structures_need_direct_hit") and is_siege_structure(unit):
                 if not structure_hit_by_impact(self, unit, impact):
@@ -3838,21 +3893,38 @@ class Battle:
                 return preview
         attack_targets: list[str] = []
         attack_cells: list[dict[str, int]] = []
-        for enemy in self.enemy_units(actor.player_id):
-            ignore_stealth = self.attack_ignores_stealth(actor, enemy)
-            if self.attack_target_allowed(actor, enemy, ignore_stealth=ignore_stealth, payload=resolved_payload)[0]:
-                attack_targets.append(enemy.unit_id)
+        candidates = list(self.enemy_units(actor.player_id))
+        forced_target = self.forced_basic_attack_target(actor)
+        if forced_target is not None and all(unit.unit_id != forced_target.unit_id for unit in candidates):
+            candidates.append(forced_target)
+        for target in candidates:
+            ignore_stealth = self.attack_ignores_stealth(actor, target)
+            if self.attack_target_allowed(actor, target, ignore_stealth=ignore_stealth, payload=resolved_payload)[0]:
+                attack_targets.append(target.unit_id)
                 valid_cells = []
-                for cell in self.unit_cells(enemy):
+                for cell in self.unit_cells(target):
                     cell_payload = dict(resolved_payload)
                     cell_payload["x"] = cell.x
                     cell_payload["y"] = cell.y
-                    if self.attack_target_allowed(actor, enemy, ignore_stealth=ignore_stealth, payload=cell_payload)[0]:
+                    if self.attack_target_allowed(actor, target, ignore_stealth=ignore_stealth, payload=cell_payload)[0]:
                         valid_cells.append(cell)
                 if not valid_cells:
-                    valid_cells = self.unit_cells(enemy)
+                    valid_cells = self.unit_cells(target)
                 attack_cells.extend(cell.to_dict() for cell in valid_cells)
         return {"cells": attack_cells, "target_unit_ids": attack_targets, "requires_target": True}
+
+    def forced_basic_attack_target(self, actor: Unit) -> Optional[Unit]:
+        for component in actor.iter_components():
+            target_id = str(getattr(component, "required_attack_target_id", "") or "")
+            if not target_id:
+                continue
+            forces = getattr(component, "forces_attack_target", None)
+            if callable(forces) and not bool(forces(self)):
+                continue
+            target = self.units.get(target_id)
+            if target is not None and target.alive and target.position is not None and not target.banished:
+                return target
+        return None
 
     def build_queued_action(self, payload: dict[str, Any]) -> QueuedAction:
         action_type = payload.get("type")
@@ -3904,6 +3976,9 @@ class Battle:
             )
         if action_type == "attack":
             queued_payload = self.resolved_basic_attack_payload(actor, queued_payload)
+            forced_target = self.forced_basic_attack_target(actor)
+            if forced_target is not None and forced_target.player_id == actor.player_id:
+                queued_payload["forced_allied_attack_target_id"] = forced_target.unit_id
             area_cells = self.basic_attack_area_cells_for_payload(actor, queued_payload)
             if area_cells is not None:
                 attack_cost = int(queued_payload.get("attack_cost", 1))
@@ -3924,11 +3999,29 @@ class Battle:
                     queued_payload["declared_source_x"] = actor.position.x
                     queued_payload["declared_source_y"] = actor.position.y
                 queued_payload["attack_cells"] = [cell.to_dict() for cell in area_cells]
-                target_units = [
-                    unit
-                    for unit in self.effect_units_at_cells(area_cells)
-                    if unit.player_id != actor.player_id
-                ]
+                affects_allies = bool(queued_payload.get("friendly_fire")) or any(
+                    component.basic_attack_area_affects_allies(self, actor, queued_payload)
+                    for component in actor.iter_components()
+                )
+                forced_allied_target_id = str(queued_payload.get("forced_allied_attack_target_id") or "")
+                impact = None
+                raw_impact = queued_payload.get("impact_cell")
+                if isinstance(raw_impact, dict) and raw_impact.get("x") is not None and raw_impact.get("y") is not None:
+                    impact = Position(int(raw_impact["x"]), int(raw_impact["y"]))
+                from wujiang.tactical.engine.siege import is_siege_structure, structure_hit_by_impact
+
+                target_units = []
+                for unit in self.effect_units_at_cells(area_cells):
+                    if (
+                        not affects_allies
+                        and unit.player_id == actor.player_id
+                        and unit.unit_id != forced_allied_target_id
+                    ):
+                        continue
+                    if queued_payload.get("structures_need_direct_hit") and is_siege_structure(unit):
+                        if not structure_hit_by_impact(self, unit, impact):
+                            continue
+                    target_units.append(unit)
                 if not target_units:
                     raise ActionError("攻击区域内没有有效目标。")
                 target_ids: list[str] = []
@@ -3967,6 +4060,8 @@ class Battle:
             queued_payload["ignore_shield"] = ignore_shield
             queued_payload["half_ignore_shield"] = half_ignore_shield
             queued_payload["ignore_stealth"] = ignore_stealth
+            if forced_target is not None and target.unit_id == forced_target.unit_id and target.player_id == actor.player_id:
+                queued_payload["allow_allied_attack_target"] = True
             return QueuedAction(
                 action_type="attack",
                 actor_id=actor.unit_id,
@@ -3992,6 +4087,8 @@ class Battle:
             queued_payload["half_ignore_shield"] = skill.half_ignores_shield_for_payload(self, actor, payload)
             queued_payload["ignore_stealth"] = skill.ignores_stealth_for_payload(self, actor, payload)
             queued_payload["cannot_evade"] = skill.cannot_evade_for_payload(self, actor, payload)
+            if skill.ignores_magic_immunity_for_payload(self, actor, payload):
+                queued_payload["ignore_magic_immunity"] = True
             declared_targets = self.payload_target_unit_ids(payload)
             if skill.target_mode in {"ally", "enemy", "unit"} and skill.requires_direct_unit_target_line:
                 for target_id in declared_targets:
@@ -4023,7 +4120,12 @@ class Battle:
             ]
             target_cells = list(skill.get_target_cells_for_payload(self, actor, payload))
             targets: list[str] = []
-            for unit in self.effect_units([*target_units, *self.units_at_cells(target_cells)]):
+            for unit in self.effect_units(
+                [*target_units, *self.units_at_cells(target_cells)],
+                ignore=actor if skill.excludes_caster_from_effect else None,
+            ):
+                if skill.excludes_allies_from_effect and unit.player_id == actor.player_id:
+                    continue
                 if unit.unit_id not in targets:
                     targets.append(unit.unit_id)
             if declared_targets:
@@ -4538,6 +4640,16 @@ class Battle:
         raise ActionError("未知技能后续效果。")
 
     def resolve_queued_action(self, queued_action: QueuedAction) -> None:
+        previous_token = self._current_action_resolution_token
+        resolution_token = self._next_action_resolution_token
+        self._next_action_resolution_token += 1
+        self._current_action_resolution_token = resolution_token
+        try:
+            self._resolve_queued_action(queued_action)
+        finally:
+            self._current_action_resolution_token = previous_token
+
+    def _resolve_queued_action(self, queued_action: QueuedAction) -> None:
         with self.suppress_logs() if self.queued_action_hides_logs(queued_action) else nullcontext():
             actor = self.units.get(queued_action.actor_id)
             if actor is None or not actor.alive or actor.banished:
@@ -4672,6 +4784,11 @@ class Battle:
                 reaction_window_timing = skill.reaction_window_timing(self, actor, queued_action.payload)
             if queued_action.action_type in {"attack", "skill"}:
                 actor.notify_action_declared(self, queued_action.action_type, queued_action.payload)
+                for target_id in queued_action.target_unit_ids:
+                    target = self.units.get(target_id)
+                    if target is not None:
+                        for component in list(target.iter_components()):
+                            component.on_target_action_declared(self, actor, queued_action.action_type, queued_action.payload)
             if queued_action.action_type == "skill" and reaction_window_timing == "after":
                 self.resolve_queued_action(queued_action)
                 self.advance_followup_actions()

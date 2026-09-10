@@ -22,6 +22,7 @@ HIGH_SIGNAL_CATEGORIES = {
     "ai_candidate_builder_error",
     "ai_payload_generation_gap",
     "ai_candidate_filtered",
+    "duplicate_once_per_action_trigger",
     "match_error",
 }
 

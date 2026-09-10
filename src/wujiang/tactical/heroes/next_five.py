@@ -82,8 +82,11 @@ def apply_piercing_status_effect(
     tags: set[str] | None = None,
     ignore_magic_immunity: bool = False,
     ignore_targeting_restrictions: bool = False,
+    refresh_existing: bool = True,
 ) -> bool:
     if not target.alive or target.position is None or target.banished:
+        return False
+    if not refresh_existing and target.has_status(status.name):
         return False
     is_hostile = target.player_id != source.player_id
     ctx = battle.validate_target(
@@ -275,6 +278,10 @@ class AllStatsPlusStatus(StatusEffect):
             return value + 1
         return value
 
+    def on_removed(self, battle: Battle) -> None:
+        if self.owner is not None:
+            self.owner.clamp_mana()
+
 
 class SummonLifetimeStatus(StatusEffect):
     def __init__(self, *, rounds: int, expire_log: str) -> None:
@@ -341,7 +348,7 @@ class PlantGrowthFieldEffect(BattleFieldEffect):
         end: Position,
         current_cost: int,
     ) -> int:
-        if (start.x, start.y) in self.cells:
+        if any((cell.x, cell.y) in self.cells for cell in battle.unit_cells_at(unit, start)):
             return max(current_cost, 2)
         return current_cost
 
@@ -374,8 +381,12 @@ class RemoteAreaDamageSkill(Skill):
     def chosen_cells(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
         return match_payload_pattern(payload, self.patterns(battle, actor))
 
+    def queued_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
+        return {"declared_area_cells": positions_to_dict(self.chosen_cells(battle, actor, payload))}
+
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        cells = self.chosen_cells(battle, actor, payload)
+        declared = payload.get("declared_area_cells")
+        cells = [Position(int(cell["x"]), int(cell["y"])) for cell in declared] if declared is not None else self.chosen_cells(battle, actor, payload)
         for unit in battle.units_at_cells(cells):
             damage_ctx = battle.resolve_damage(
                 DamageContext(
@@ -388,9 +399,16 @@ class RemoteAreaDamageSkill(Skill):
                     tags={"skill", self.code},
                 )
             )
-            if unit.alive and damage_followup_effect_applies(damage_ctx, allow_on_shield_break=True):
-                replace_status_by_name(battle, unit, self.status_factory())
-                battle.log(f"{unit.name} 获得了【{self.name}】的附加效果。")
+            self.apply_followup_effect(battle, unit, damage_ctx)
+
+    def apply_followup_effect(self, battle: Battle, unit: HeroUnit, damage_ctx: DamageContext) -> None:
+        if not unit.alive or not damage_followup_effect_applies(damage_ctx, allow_on_shield_break=True):
+            return
+        if not damage_ctx.shield_consumed and unit.total_shields() > 0:
+            unit.consume_one_shield()
+            battle.log(f"{unit.name} 的1层护盾被【{self.name}】的附加效果贯穿。")
+        replace_status_by_name(battle, unit, self.status_factory())
+        battle.log(f"{unit.name} 获得了【{self.name}】的附加效果。")
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
         preview = pattern_selection_preview(self.patterns(battle, actor))
@@ -500,7 +518,7 @@ class ThunderGodSkill(Skill):
 
 class WaterWaveSkill(Skill):
     def __init__(self) -> None:
-        super().__init__("water_wave", "水之波动", "普通技能：冷却 4轮，只能对自己使用；全能力 +1，持续 2轮，不回复当前魔。", cooldown_turns=8, target_mode="self")
+        super().__init__("water_wave", "水之波动", "普通技能：冷却 4轮，只能对自己使用；全能力 +1，持续 2轮，不回复当前魔。", cooldown_turns=4, target_mode="self")
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         replace_status_by_name(battle, actor, AllStatsPlusStatus(duration=2))
@@ -565,47 +583,6 @@ class EarthWalkerCleanupStatus(StatusEffect):
         self.owner.remove_status(self, battle)
 
 
-class EarthWalkerSkill(Skill):
-    def __init__(self) -> None:
-        super().__init__(
-            "earth_walker",
-            "土行者",
-            "普通技能：不费魔，每回合最多 1 次，在范内制造 1 个分身；本体本回合不能继续行动，分身本回合可以行动但不能普攻或使用技能，并随机与新分身换位。",
-            max_uses_per_turn=1,
-            target_mode="cell",
-        )
-
-    def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        destination = payload_position(payload)
-        ensure_distance(actor, destination, actor.targeting_range())
-        if actor.position is None:
-            raise ActionError("单位不在战场上。")
-        if battle.is_occupied(destination):
-            raise ActionError("分身位置已被占用。")
-        original_position = actor.position
-        clone = ElementHunterClone(actor.player_id, actor)
-        battle.summon_unit(clone, destination, summoner=actor)
-        clone.turn_ready = True
-        clone.can_act_on_entry_turn = True
-        chosen_clone = random.choice([clone])
-        actor.position, chosen_clone.position = chosen_clone.position, original_position
-        actor.turn_ready = False
-        actor.add_status(EarthWalkerCleanupStatus([clone.unit_id]))
-        battle.log(f"{actor.name} 使用土行者制造了分身，并与分身交换了位置。")
-
-    def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
-        if actor.position is None:
-            return {"cells": [], "target_unit_ids": [], "secondary_cells": [], "requires_target": True}
-        cells = [
-            Position(x, y)
-            for x in range(battle.width)
-            for y in range(battle.height)
-            if actor.position.distance_to(Position(x, y)) <= actor.targeting_range()
-            and not battle.is_occupied(Position(x, y))
-        ]
-        return {"cells": positions_to_dict(cells), "target_unit_ids": [], "secondary_cells": [], "requires_target": True}
-
-
 class PlantGrowthSkill(Skill):
     def __init__(self) -> None:
         super().__init__("plant_growth", "植物生长", "普通技能：每回合最多 1 次，远程选择完整 5*5 区域；持续 1轮，普通移动每步若起点在区域内则消耗 2 点移动点数，飞行单位也会受到影响。", max_uses_per_turn=1, target_mode="cell")
@@ -616,8 +593,12 @@ class PlantGrowthSkill(Skill):
     def chosen_cells(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
         return match_payload_pattern(payload, self.patterns(battle, actor))
 
+    def queued_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
+        return {"declared_area_cells": positions_to_dict(self.chosen_cells(battle, actor, payload))}
+
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        cells = self.chosen_cells(battle, actor, payload)
+        declared = payload.get("declared_area_cells")
+        cells = [Position(int(cell["x"]), int(cell["y"])) for cell in declared] if declared is not None else self.chosen_cells(battle, actor, payload)
         battle.add_field_effect(PlantGrowthFieldEffect(actor.unit_id, cells))
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
@@ -633,6 +614,8 @@ class PlantGrowthSkill(Skill):
 
 
 class RendingSkill(Skill):
+    excludes_caster_from_effect = True
+
     def __init__(self) -> None:
         super().__init__(
             "rending",
@@ -649,7 +632,7 @@ class RendingSkill(Skill):
         return cell
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        cell = self._target_cell(battle, actor, payload)
+        cell = battle.payload_positions(payload, "declared_area_cells")[0] if "declared_area_cells" in payload else self._target_cell(battle, actor, payload)
         targets = [unit for unit in battle.units_at(cell) if unit.unit_id != actor.unit_id]
         if not targets:
             battle.log("【撕裂】没有命中有效目标。")
@@ -667,6 +650,9 @@ class RendingSkill(Skill):
                     tags={"skill", "rending"},
                 )
             )
+
+    def queued_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
+        return {"declared_area_cells": positions_to_dict([self._target_cell(battle, actor, payload)])}
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
         cells = [
@@ -693,12 +679,17 @@ class SandstormWeatherEffect(BattleFieldEffect):
     weather_name = "沙尘"
     global_weather = True
 
-    def __init__(self, *, duration: int = 2) -> None:
+    def __init__(self, *, duration: int = 2, source_unit_id: str | None = None) -> None:
         super().__init__(
             "沙尘",
             "全场天气：回合结束时非土单位受天气伤害；飞行 1/8，其他 1/16；沙尘中不能隐身，回避距离 -1。",
             duration=duration,
         )
+        self.source_unit_id = source_unit_id
+
+    def on_turn_start(self, battle: Battle, active_unit: HeroUnit | None) -> None:
+        if self.source_unit_id and active_unit is not None and active_unit.unit_id == self.source_unit_id:
+            battle.remove_field_effect(self)
 
     def merge_into_existing(self, battle: Battle, existing_effects: list[BattleFieldEffect]) -> bool:
         for effect in list(existing_effects):
@@ -709,6 +700,8 @@ class SandstormWeatherEffect(BattleFieldEffect):
                 continue
             if self.duration is not None:
                 effect.duration = max(int(effect.duration or 0), self.duration)
+            if isinstance(effect, SandstormWeatherEffect):
+                effect.source_unit_id = self.source_unit_id
             battle.log("天气【沙尘】刷新。")
             return True
         return False
@@ -720,8 +713,13 @@ class SandstormWeatherEffect(BattleFieldEffect):
         for unit in list(battle.all_units()):
             if not unit.alive or unit.banished or unit.position is None:
                 continue
+            if not battle.unit_belongs_to_current_turn(unit):
+                continue
             if unit.attribute == "土":
                 continue
+            if getattr(unit, "_sandstorm_damage_turn", None) == battle.turn_number:
+                continue
+            unit._sandstorm_damage_turn = battle.turn_number
             damage = 0.125 if unit.has_flying else 0.0625
             battle.resolve_damage(
                 DamageContext(
@@ -736,7 +734,10 @@ class SandstormWeatherEffect(BattleFieldEffect):
                     tags={"weather", "sandstorm"},
                 )
             )
-        super().on_any_turn_end(battle, ended_player_id)
+        if self.source_unit_id is None:
+            super().on_any_turn_end(battle, ended_player_id)
+        elif self.source_unit_id not in battle.units:
+            battle.remove_field_effect(self)
 
 
 class WindSandSkill(Skill):
@@ -765,11 +766,13 @@ class WindSandSkill(Skill):
         return match_payload_pattern(payload, self.patterns(battle, actor))
 
     def resolve_weather_effect(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> None:
-        duration = int(queued_action.payload.get("duration", 2))
-        battle.add_field_effect(SandstormWeatherEffect(duration=duration))
+        battle.add_field_effect(SandstormWeatherEffect(duration=1, source_unit_id=actor.unit_id))
+
+    def queued_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
+        return {"declared_area_cells": positions_to_dict(self.chosen_cells(battle, actor, payload))}
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        cells = self.chosen_cells(battle, actor, payload)
+        cells = battle.payload_positions(payload, "declared_area_cells") if "declared_area_cells" in payload else self.chosen_cells(battle, actor, payload)
         targets = battle.units_at_cells(cells)
         for unit in targets:
             battle.resolve_damage(
@@ -814,17 +817,27 @@ class WindSandSkill(Skill):
 
 
 class CrazySandSkill(Skill):
+    excludes_caster_from_effect = True
+
     def __init__(self) -> None:
         super().__init__(
             "crazy_sand",
             "狂沙",
             "普通技能：冷却 2轮，选择有效方向；直线 5 格造成当前攻伤害，并瞬移到第 6 格，第 6 格越界或被占用则不能选择。",
-            cooldown_turns=4,
+            cooldown_turns=2,
             target_mode="cell",
         )
 
     def directions(self) -> list[tuple[int, int]]:
         return [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+
+    def can_use(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok:
+            return ok, reason
+        if actor.cannot_move:
+            return False, "当前不能使用狂沙位移。"
+        return (True, "") if self.patterns(battle, actor) else (False, "没有可放置完整身体的狂沙落点。")
 
     def _patterns_with_destinations(self, battle: Battle, actor: HeroUnit) -> list[tuple[list[Position], Position]]:
         if actor.position is None:
@@ -867,7 +880,11 @@ class CrazySandSkill(Skill):
         raise ActionError("该狂沙方向当前不可用。")
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        line, destination = self.chosen_line_and_destination(battle, actor, payload)
+        if "declared_area_cells" in payload:
+            line = battle.payload_positions(payload, "declared_area_cells")
+            destination = Position(int(payload["crazy_sand_dest_x"]), int(payload["crazy_sand_dest_y"]))
+        else:
+            line, destination = self.chosen_line_and_destination(battle, actor, payload)
         for unit in battle.units_at_cells(line):
             if unit.unit_id == actor.unit_id:
                 continue
@@ -883,6 +900,9 @@ class CrazySandSkill(Skill):
                 )
             )
         if actor.alive and actor.position is not None:
+            if not battle.can_place_unit(actor, destination, ignore=actor, mover=actor):
+                battle.log(f"{actor.name} 的狂沙落点已受阻，保留原位。")
+                return
             battle.move_unit(
                 actor,
                 destination,
@@ -891,6 +911,10 @@ class CrazySandSkill(Skill):
                 max_distance=6,
                 tags={"crazy_sand"},
             )
+
+    def queued_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
+        line, destination = self.chosen_line_and_destination(battle, actor, payload)
+        return {"declared_area_cells": positions_to_dict(line), "crazy_sand_dest_x": destination.x, "crazy_sand_dest_y": destination.y}
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
         preview = pattern_selection_preview(self.patterns(battle, actor))
@@ -939,7 +963,7 @@ class AttackLockTrait(Trait):
         if not self.locked_target_id:
             return None
         target = battle.units.get(self.locked_target_id)
-        if target is None or not target.alive or target.position is None:
+        if target is None or not target.alive:
             self.locked_target_id = None
             return None
         effective_target = battle.effect_recipient(target)
@@ -986,13 +1010,13 @@ class LinaDestroyRewardTrait(Trait):
         self.used_this_turn = False
 
     def _eligible_target(self, target: HeroUnit) -> bool:
-        return (not target.is_summon) or target.stat("defense") >= 4
+        return (not target.is_summon and not target.is_clone) or target.stat("defense") >= 4
 
     def on_after_damage(self, battle: Battle, ctx: DamageContext) -> None:
         owner = self.owner
         if owner is None or self.used_this_turn or ctx.source is None or ctx.source.unit_id != owner.unit_id:
             return
-        if ctx.target.alive or not (ctx.is_skill or "attack" in ctx.tags):
+        if ctx.target.alive or ctx.from_field_effect or not ((ctx.is_skill and "skill" in ctx.tags) or "attack" in ctx.tags):
             return
         if not self._eligible_target(ctx.target):  # type: ignore[arg-type]
             return
@@ -1011,7 +1035,7 @@ class NoEnemyHealAuraTrait(Trait):
 
     def on_before_heal(self, battle: Battle, ctx: HealContext) -> None:
         owner = self.owner
-        if owner is None or not owner.alive or owner.position is None or ctx.target.player_id == owner.player_id:
+        if owner is None or not owner.alive or owner.banished or owner.position is None or ctx.target.player_id == owner.player_id:
             return
         if battle.distance_between_units(owner, ctx.target) <= 3:
             ctx.cancelled = True
@@ -1086,8 +1110,8 @@ class RockGodSandstormAura(BattleFieldEffect):
 
     def on_any_turn_end(self, battle: Battle, ended_player_id: int) -> None:
         owners = self.get_owner_units(battle)
-        self.owner_unit_ids = {owner.unit_id for owner in owners}
-        if not owners:
+        self.owner_unit_ids = {unit_id for unit_id in self.owner_unit_ids if unit_id in battle.units and battle.units[unit_id].alive}
+        if not self.owner_unit_ids:
             battle.remove_field_effect(self)
             return
         if any(isinstance(effect, SandstormWeatherEffect) for effect in battle.field_effects):
@@ -1096,10 +1120,15 @@ class RockGodSandstormAura(BattleFieldEffect):
         for unit in list(battle.all_units()):
             if not unit.alive or unit.banished or unit.position is None:
                 continue
+            if not battle.unit_belongs_to_current_turn(unit):
+                continue
             if not any(position_key(cell) in area_keys for cell in battle.unit_cells(unit)):
                 continue
             if unit.attribute == "土":
                 continue
+            if getattr(unit, "_sandstorm_damage_turn", None) == battle.turn_number:
+                continue
+            unit._sandstorm_damage_turn = battle.turn_number
             damage = 0.125 if unit.has_flying else 0.0625
             battle.resolve_damage(
                 DamageContext(
@@ -1146,7 +1175,7 @@ class RockGodSandstormTrait(Trait):
 
 
 class RockAbsorbStatStatus(StatusEffect):
-    def __init__(self, stat_name: str, delta: int, *, duration: int = 1) -> None:
+    def __init__(self, stat_name: str, delta: int, *, duration: int = 1, source_unit_id: str | None = None) -> None:
         label = RockAbsorbSkill.stat_labels()[stat_name]
         sign = "+" if delta > 0 else ""
         super().__init__(
@@ -1157,11 +1186,20 @@ class RockAbsorbStatStatus(StatusEffect):
         )
         self.stat_name = stat_name
         self.delta = delta
+        self.source_unit_id = source_unit_id
 
     def modify_stat(self, stat_name: str, value: float) -> float:
         if stat_name == self.stat_name:
-            return value + self.delta
+            return max(0 if stat_name == "mana" else 1, value + self.delta)
         return value
+
+    def on_owner_turn_start(self, battle: Battle) -> None:
+        if self.source_unit_id is None:
+            super().on_owner_turn_start(battle)
+
+    def on_any_turn_end(self, battle: Battle, ended_player_id: int) -> None:
+        if self.source_unit_id and self.source_unit_id not in battle.units and self.owner is not None:
+            self.owner.remove_status(self, battle)
 
     def on_removed(self, battle: Battle) -> None:
         if self.owner is not None and self.stat_name == "mana":
@@ -1199,6 +1237,8 @@ class RockAbsorbFootprintStatus(StatusEffect):
 
 
 class DragonBreathSkill(Skill):
+    excludes_caster_from_effect = True
+
     def __init__(self) -> None:
         super().__init__(
             "dragon_breath",
@@ -1216,7 +1256,7 @@ class DragonBreathSkill(Skill):
         return match_payload_pattern(payload, self.patterns(battle, actor))
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        cells = self.chosen_cells(battle, actor, payload)
+        cells = battle.payload_positions(payload, "declared_area_cells") if "declared_area_cells" in payload else self.chosen_cells(battle, actor, payload)
         for unit in battle.units_at_cells(cells):
             if unit.unit_id == actor.unit_id:
                 continue
@@ -1226,11 +1266,14 @@ class DragonBreathSkill(Skill):
                     target=unit,
                     attack_power=actor.stat("attack"),
                     is_skill=True,
-                    action_name="龙息",
+                    action_name=self.name,
                     area_cell_hits=battle.unit_hit_count_for_cells(unit, cells),
-                    tags={"skill", "dragon_breath"},
+                    tags={"skill", self.code},
                 )
             )
+
+    def queued_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
+        return {"declared_area_cells": positions_to_dict(self.chosen_cells(battle, actor, payload))}
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
         preview = pattern_selection_preview(self.patterns(battle, actor))
@@ -1288,9 +1331,10 @@ class DoomLightStatus(FlagStatus):
         damage = round(owner.current_hp / 2, 4)
         self.triggers_remaining -= 1
         if damage <= 0:
+            super().on_owner_turn_start(battle)
             return
         source = battle.units.get(self.source_unit_id)
-        source_unit = source if isinstance(source, HeroUnit) and source.alive else None
+        source_unit = source if isinstance(source, HeroUnit) and source.alive and not source.banished else None
         battle.log(f"{owner.name} 的末日光发作。")
         damage_ctx = battle.resolve_damage(
             DamageContext(
@@ -1307,15 +1351,14 @@ class DoomLightStatus(FlagStatus):
         )
         if (
             source_unit is not None
-            and damage_ctx.raw_damage is not None
-            and damage_ctx.raw_damage > 0
+            and damage_ctx.actual_damage > 0
             and not damage_ctx.cancelled
         ):
             battle.heal(
                 HealContext(
                     source=source_unit,
                     target=source_unit,
-                    amount=damage_ctx.raw_damage,
+                    amount=damage_ctx.actual_damage,
                     action_name="末日光吸收",
                 )
             )
@@ -1344,7 +1387,7 @@ class DoomLightSkill(Skill):
         return match_payload_pattern(payload, self.patterns(battle, actor))
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        cells = self.chosen_cells(battle, actor, payload)
+        cells = battle.payload_positions(payload, "declared_area_cells") if "declared_area_cells" in payload else self.chosen_cells(battle, actor, payload)
         for unit in battle.units_at_cells(cells):
             apply_piercing_status_effect(
                 battle,
@@ -1355,7 +1398,11 @@ class DoomLightSkill(Skill):
                 is_skill=True,
                 tags={"skill", "doom_light"},
                 ignore_targeting_restrictions=True,
+                refresh_existing=False,
             )
+
+    def queued_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
+        return {"declared_area_cells": positions_to_dict(self.chosen_cells(battle, actor, payload))}
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
         preview = pattern_selection_preview(self.patterns(battle, actor))
@@ -1410,8 +1457,6 @@ class ApocalypseSkill(Skill):
         return choices
 
     def selected_n(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> int:
-        if payload.get("resolved_n") is not None:
-            return int(payload["resolved_n"])
         raw = payload.get("choice_code", payload.get("n"))
         try:
             selected = int(raw)
@@ -1472,7 +1517,11 @@ class ApocalypseSkill(Skill):
         self.uses_this_battle += 1
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        n, cells = self.chosen_cells(battle, actor, payload)
+        if "declared_area_cells" in payload:
+            n = int(payload["resolved_n"])
+            cells = battle.payload_positions(payload, "declared_area_cells")
+        else:
+            n, cells = self.chosen_cells(battle, actor, payload)
         for unit in battle.units_at_cells(cells):
             battle.resolve_damage(
                 DamageContext(
@@ -1486,6 +1535,10 @@ class ApocalypseSkill(Skill):
                     tags={"skill", "apocalypse"},
                 )
             )
+
+    def queued_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
+        n, cells = self.chosen_cells(battle, actor, payload)
+        return {"resolved_n": n, "declared_area_cells": positions_to_dict(cells)}
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
         choices = self.pattern_choices(battle, actor)
@@ -1550,11 +1603,16 @@ class DoomLightRetaliationTrait(Trait):
             is_skill=False,
             tags={"doom_light_trait"},
             ignore_targeting_restrictions=True,
+            refresh_existing=False,
         )
+
+    def on_target_action_declared(self, battle: Battle, actor: HeroUnit, action_type: str, payload: dict[str, Any]) -> None:
+        if action_type == "attack":
+            self.apply_doom_light(battle, actor)
 
     def on_after_damage(self, battle: Battle, ctx: DamageContext) -> None:
         owner = self.owner
-        if owner is None or "doom_light" in ctx.tags:
+        if owner is None or "doom_light" in ctx.tags or not ctx.raw_damage or ctx.raw_damage <= 0:
             return
         if ctx.source is not None and ctx.target.unit_id == owner.unit_id and ctx.source.unit_id != owner.unit_id:
             self.apply_doom_light(battle, ctx.source)  # type: ignore[arg-type]
@@ -1563,10 +1621,26 @@ class DoomLightRetaliationTrait(Trait):
 
     def on_damage_cancelled(self, battle: Battle, ctx: DamageContext) -> None:
         owner = self.owner
-        if owner is None or "attack" not in ctx.tags or ctx.source is None:
+        if owner is None or ctx.is_skill or "attack" not in ctx.tags or ctx.source is None:
             return
         if ctx.target.unit_id == owner.unit_id and ctx.source.unit_id != owner.unit_id:
             self.apply_doom_light(battle, ctx.source)  # type: ignore[arg-type]
+
+
+class RockAbsorbLinkStatus(StatusEffect):
+    def __init__(self) -> None:
+        super().__init__("岩吸连结", "同次岩吸的能力交换在岩神下次己方回合开始时一起结束。", duration=1, tick_scope="owner_turn_start")
+
+    def on_removed(self, battle: Battle) -> None:
+        if self.owner is None:
+            return
+        for unit in list(battle.all_units()):
+            for status in list(unit.statuses):
+                if isinstance(status, RockAbsorbStatStatus) and status.source_unit_id == self.owner.unit_id:
+                    unit.remove_status(status, battle)
+
+    def on_owner_removed(self, battle: Battle) -> None:
+        self.on_removed(battle)
 
 
 class RockAbsorbSkill(Skill):
@@ -1653,11 +1727,12 @@ class RockAbsorbSkill(Skill):
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         stat_name = self.selected_stat(payload)
-        targets = self.affected_units(battle, actor)
-        gain = len(targets)
-        candidates = self.growth_candidates(battle, actor, gain)
-        required_cells = min(gain, len(candidates))
-        selected_cells = self.selected_growth_cells(battle, actor, payload, required_cells)
+        declaration = payload if "rock_absorb_area" in payload else self.queued_payload_metadata(battle, actor, payload)
+        targets = [unit for unit in battle.units_at_cells(battle.payload_positions(declaration, "rock_absorb_area")) if unit is not actor]
+        selected_cells = battle.payload_positions(declaration, "rock_absorb_growth")
+        previous_link = actor.get_status("岩吸连结")
+        if previous_link is not None:
+            actor.remove_status(previous_link, battle)
         applied_count = 0
         for target in targets:
             ctx = battle.validate_target(
@@ -1666,6 +1741,7 @@ class RockAbsorbSkill(Skill):
                 action_name="岩吸",
                 is_skill=True,
                 is_hostile=target.player_id != actor.player_id,
+                ignore_targeting_restrictions=True,
                 tags={"skill", "rock_absorb"},
             )
             if ctx.cancelled:
@@ -1673,21 +1749,47 @@ class RockAbsorbSkill(Skill):
                     battle.log_public_event(ctx.reason, source=actor, target=target)
                 continue
             applied_count += 1
-            replace_status_by_name(battle, target, RockAbsorbStatStatus(stat_name, -1))
+            target.add_status(RockAbsorbStatStatus(stat_name, -1, source_unit_id=actor.unit_id))
             if stat_name == "mana":
                 target.current_mana = round(max(0.0, target.current_mana - 1), 2)
                 target.clamp_mana()
             battle.log(f"{target.name} 受到岩吸影响，{self.stat_labels()[stat_name]} -1。")
         if applied_count:
-            replace_status_by_name(battle, actor, RockAbsorbStatStatus(stat_name, applied_count))
+            actor.add_status(RockAbsorbStatStatus(stat_name, applied_count, source_unit_id=actor.unit_id))
             if stat_name == "mana":
                 actor.current_mana = round(actor.current_mana + applied_count, 2)
                 actor.clamp_mana()
-        gained_cells = selected_cells[:applied_count]
+        gained_cells: list[Position] = []
+        connected = {position_key(cell) for cell in battle.unit_cells(actor)}
+        remaining = list(selected_cells)
+        while remaining and len(gained_cells) < applied_count:
+            candidate = next((cell for cell in remaining if battle.in_bounds(cell)
+                              and not battle.is_occupied(cell, ignore=actor, mover=actor)
+                              and position_key(cell) not in connected
+                              and any((cell.x + dx, cell.y + dy) in connected for dx, dy in ORTHOGONAL_DIRECTIONS)), None)
+            if candidate is None:
+                break
+            remaining.remove(candidate)
+            gained_cells.append(candidate)
+            connected.add(position_key(candidate))
         if gained_cells:
             actor.set_footprint_cells([*battle.unit_cells(actor), *gained_cells])
-            replace_status_by_name(battle, actor, RockAbsorbFootprintStatus())
+            footprint_status = actor.get_status("岩吸占格")
+            if footprint_status is None:
+                actor.add_status(RockAbsorbFootprintStatus())
+            else:
+                footprint_status.duration = 1
             battle.log(f"{actor.name} 因岩吸增加了 {len(gained_cells)} 个占格。")
+
+        if applied_count:
+            actor.add_status(RockAbsorbLinkStatus())
+
+    def queued_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
+        self.selected_stat(payload)
+        targets = self.affected_units(battle, actor)
+        required = min(len(targets), len(self.growth_candidates(battle, actor, len(targets))))
+        growth = self.selected_growth_cells(battle, actor, payload, required)
+        return {"rock_absorb_area": positions_to_dict(self.aura_cells(battle, actor)), "rock_absorb_growth": positions_to_dict(growth)}
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
         targets = self.affected_units(battle, actor)
@@ -1802,21 +1904,33 @@ class RockCannonSkill(Skill):
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         selected, direction, remaining = self.validate_selection(battle, actor, payload)
         actor.set_footprint_cells(remaining)
-        impacts = self.impact_positions(battle, actor, selected, direction)
-        attack_power = 3 + len(selected)
-        for index, impact in enumerate(impacts, start=1):
-            cells = impact_area(battle, impact)
-            battle.queue_area_damage_effect(
-                actor=actor,
-                display_name="岩石炮",
-                cells=cells,
-                attack_power=attack_power,
-                speed=self.chain_speed,
-                tags={"skill", "rock_cannon"},
-                segment_index=index,
-                segment_count=len(impacts),
-            )
+        self.queue_projectile(battle, actor, selected, direction, 0)
         battle.log(f"{actor.name} 发射了 {len(selected)} 个身体格。")
+
+    def queue_projectile(self, battle: Battle, actor: HeroUnit, selected: list[Position], direction: tuple[int, int], index: int) -> None:
+        if index >= len(selected) or not actor.alive:
+            return
+        impact = self.impact_positions(battle, actor, [selected[index]], direction)[0]
+        cells = impact_area(battle, impact)
+        battle.queue_skill_effect_action(
+            actor=actor, display_name=self.name, effect_code="area_damage", target_cells=cells,
+            payload={"cells": positions_to_dict(cells), "attack_power": 3 + len(selected),
+                     "tags": ["skill", "rock_cannon"], "projectiles": positions_to_dict(selected),
+                     "direction": {"dx": direction[0], "dy": direction[1]}},
+            speed=self.chain_speed, segment_index=index + 1, segment_count=len(selected),
+            effect_resolver=self.resolve_projectile,
+        )
+
+    def resolve_projectile(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> None:
+        queued_action.effect_resolver = None
+        battle.resolve_skill_effect(actor, queued_action)
+        selected = battle.payload_positions(queued_action.payload, "projectiles")
+        direction = self.selected_direction(queued_action.payload)
+        self.queue_projectile(battle, actor, selected, direction, int(queued_action.payload["segment_index"]))
+
+    def queued_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
+        self.validate_selection(battle, actor, payload)
+        return {}
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
         body_cells = battle.unit_cells(actor)
@@ -1858,7 +1972,7 @@ class ElementHunter(AbstractHero):
     race = "精灵"
     level = 7
     base_stats = Stats(attack=3, defense=3, speed=2, attack_range=2, mana=5)
-    raw_skill_text = "光墙 神速 完全燃烧（一回合一次；4*4；造成当前攻伤害；被击中后每回合魔-1；5轮）暴风雪（一回合一次；3*3，被击中后3轮不能移动）￥雷神（攻4守5速4范3，5轮；召唤的单位被对方的伤害破坏后此技能重置） 水之波动（4轮一次；全能力+1；2轮）土行者（一回合一次；制造一个分身，当回合可以行动；在下个回合结束时如果场上有分身则破坏所有分身） 植物生长（一回合一次；选择5*5的范围；那个范围直到下个回合结束时移动一格需要两个移动点数）"
+    raw_skill_text = "光墙 神速 完全燃烧（一回合一次；4*4；当前攻伤害；目标5次己方回合开始时魔-1） 暴风雪（一回合一次；3*3；当前攻伤害；3轮不能普通移动） ￥雷神（攻4守5速4范3魔0；5轮；登场不能行动；被敌方普攻或技能直接伤害破坏后重置） 水之波动（4己方轮一次；全能力及魔上限+1，2轮；不补当前魔） 土行者（每回合一次；不费魔；制造3个分身并随机换位，本体结束行动；分身当回合只能移动，下次己方回合开始前全部破坏） 植物生长（每回合一次；5*5；直到自己下次回合开始前，敌我普通移动每步起点在区域内时消耗2点移动点数，飞行也受影响）"
     raw_trait_text = "所有技能的伤害以外效果破魔并且不会与同名技能的效果叠加"
 
     def build_skills(self) -> list[Skill]:
@@ -3203,6 +3317,27 @@ class SplitSkill(Skill):
                 "required_cells": self.clone_count,
             },
         }
+
+
+class EarthWalkerSkill(SplitSkill):
+    def __init__(self) -> None:
+        super().__init__()
+        self.code = "earth_walker"
+        self.name = "土行者"
+        self.mana_cost = 0
+        self.description = "普通技能：不费魔，每回合一次，在范内制造3个分身并随机换位；本体结束行动，分身当回合只能移动，下次己方回合开始前破坏。"
+
+    def _clone_probe(self, actor: HeroUnit) -> ElementHunterClone:
+        return ElementHunterClone(actor.player_id, actor)
+
+    def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
+        previous_ids = set(battle.units)
+        super().execute(battle, actor, payload)
+        clones = [unit for unit in battle.all_units() if unit.unit_id not in previous_ids and unit.is_clone and unit.summoner_id == actor.unit_id]
+        for clone in clones:
+            clone.turn_ready = True
+            clone.can_act_on_entry_turn = True
+        actor.add_status(EarthWalkerCleanupStatus([clone.unit_id for clone in clones]))
 
 
 class MagneticWaveSkill(ManaPointCostSkill):
