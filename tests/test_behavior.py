@@ -13738,8 +13738,10 @@ class DevelopedHeroReviewR02BehaviorTests(unittest.TestCase):
         self.assertLess(score, 0)
         self.assertEqual(ally.current_hp, 0.5)
         battle.perform_action(payload)
+        self.assertEqual(ally.current_hp, 0.5)
+        self.assertEqual(ally.total_shields(), 0)
+        bard.get_skill("heal").execute(battle, bard, payload)
         self.assertEqual(ally.current_hp, 0.25)
-        self.assertEqual(ally.total_shields(), 1)
 
     def test_bard_ai_avoids_healing_full_or_unhealable_allies_and_useless_chant(self) -> None:
         from wujiang.tactical.rooms.ai import ally_buff_score, score_skill_payload
@@ -13878,6 +13880,18 @@ class DevelopedHeroReviewR02BehaviorTests(unittest.TestCase):
 
 
 class DevelopedHeroReviewR03BehaviorTests(unittest.TestCase):
+    def test_common_range_uses_actual_occupied_cells_for_large_support_targets(self) -> None:
+        from wujiang.tactical.heroes.common import ensure_distance
+        battle = create_battle("bard", "elite_soldier")
+        bard = primary_hero(battle, 1)
+        bard.position = Position(6, 1)
+        dragon = create_hero("doomlight_dragon", 1)
+        battle.add_unit(dragon, Position(1, 1))
+        ensure_distance(bard, dragon, 4)
+        dragon.current_hp = 0.5
+        bard.get_skill("heal").execute(battle, bard, {"target_unit_id": dragon.unit_id})
+        self.assertEqual(dragon.current_hp, 0.75)
+
     def test_sandstorm_ticks_only_current_bundle_and_lasts_until_caster_returns(self) -> None:
         from wujiang.tactical.heroes.next_five import SandstormWeatherEffect
         battle = create_battle(["undead_king_lina", "ellie"], ["bard", "elite_soldier"])
@@ -13924,6 +13938,8 @@ class DevelopedHeroReviewR03BehaviorTests(unittest.TestCase):
         lina.position, enemy.position = Position(2, 4), Position(5, 4)
         enemy.max_health = enemy.current_hp = 4
         action = next(item for item in battle.action_snapshot_for(lina)["actions"] if item.get("code") == "crazy_sand")
+        self.assertTrue(action["preview"]["pattern_destinations"])
+        self.assertTrue(all(len(entry["destination_cells"]) == 4 for entry in action["preview"]["pattern_destinations"]))
         payload = next(p for p in skill_payloads_for_action(battle, lina, action)
                        if p["x"] == 8 and p["y"] == 4 and {"x": 5, "y": 4} in p["cells"])
         self.assertGreater(score_skill_payload(battle, lina, action, payload, difficulty_profile("standard"), instant_only=False), 0)

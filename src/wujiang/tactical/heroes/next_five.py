@@ -924,6 +924,11 @@ class CrazySandSkill(Skill):
             for unit in battle.all_units()
             if unit.unit_id != actor.unit_id and any((cell.x, cell.y) in cell_keys for cell in battle.unit_cells(unit))
         ]
+        preview["pattern_destinations"] = [
+            {"pattern": positions_to_dict(line), "destination": destination.to_dict(),
+             "destination_cells": positions_to_dict(battle.unit_cells_at(actor, destination))}
+            for line, destination in self._patterns_with_destinations(battle, actor)
+        ]
         preview.update({"target_unit_ids": targets, "secondary_cells": [], "requires_target": True})
         return preview
 
@@ -2001,7 +2006,7 @@ class UndeadKingLina(AbstractHero):
     base_stats = Stats(attack=4, defense=4, speed=4, attack_range=3, mana=5)
     footprint_width = 2
     footprint_height = 2
-    raw_skill_text = "隐身 变硬 ￥撕裂 风沙（一回合一次；2*4；对有单位的格子使用后直到下个回合结束前天气变为沙尘）震开 狂沙（2轮一次；直线5格，移动到第6格，对经过的单位造成伤害）"
+    raw_skill_text = "隐身 变硬 ￥撕裂 风沙（每回合一次；远程2*4或4*2；当前攻伤害，有单位则全场沙尘至自己下次回合开始） 震开 狂沙（2己方轮一次；锁定直线5格伤害，瞬移到第6格；完整身体落点受阻时不移动）"
     raw_trait_text = "攻击两次；攻击半破魔；在攻击对象死之前无法攻击其他单位；占4格；每破坏一个武将或守在4以上的单位移动，攻击重置，并且魔+那个单位剩余的魔，此效果每回合最多发动一次；此单位周围7*7的对方单位不能回复；在沙尘天气并且非隐身时自然回复"
 
     def build_skills(self) -> list[Skill]:
@@ -2035,7 +2040,7 @@ class RockGod(AbstractHero):
     base_stats = Stats(attack=3, defense=5, speed=2, attack_range=1, mana=3)
     footprint_width = 2
     footprint_height = 2
-    raw_skill_text = "变硬 震开 龙息 岩吸（一回合一次；可以对‘沙尘’中所有单位生效；指定一个能力值，那些单位直到下回合结束，那个能力值-1；护盾类效果可以挡住岩吸；此单位可以任意增加等于因为此效果减少的能力值；此效果生效的时间内每增加一点能力值，此单位格子尽量增加一格；效果结束后此单位格子恢复到2*2） 岩石炮（直线移动此单位的任意数量格子直到触碰到单位；那些格子消失并对周围造3+格子数量的伤害）"
+    raw_skill_text = "变硬 震开 龙息 岩吸（每回合一次；选择一种能力；自身局部沙尘内除自己外单位该能力-1，自己按未被盾挡的目标数增加同项能力并尽量连通增生；交换与增生在自己下次回合开始时结束） 岩石炮（选择身体格及方向发射，至少留1格且身体连通；每弹碰撞或到边界产生独立3*3攻值3+本次弹数的非破魔敌我伤害，每弹可分别连锁）"
     raw_trait_text = "自然回魔；此单位周围9*9天气变为“沙尘”；占2*2"
 
     def build_skills(self) -> list[Skill]:
@@ -2151,7 +2156,7 @@ class RideableMountTrait(Trait):
         rider = battle.units.get(owner.mount_owner_id)
         if not isinstance(rider, HeroUnit) or not rider.alive:
             return
-        duration = 2 if battle.active_player == rider.player_id else 1
+        duration = 2 if battle.unit_belongs_to_current_turn(rider) else 1
         replace_status_by_name(battle, rider, MotorHorseCooldownStatus(duration))
 
 
@@ -2214,7 +2219,7 @@ class SixBladeStyleStatus(StatusEffect):
         return value
 
     def modify_attack_actions_per_turn(self, value: int) -> int:
-        return max(value, 6)
+        return 6
 
 
 class SixBladeStyleSkill(Skill):
@@ -2254,7 +2259,8 @@ class HealMountSkill(Skill):
         ok, reason = super().can_use(battle, actor, payload)
         if not ok:
             return ok, reason
-        if battle.mounted_unit_for(actor) is None:
+        mount = battle.mounted_unit_for(actor)
+        if mount is None or mount.hero_code != "motor_horse":
             return False, "只有乘骑状态时才能治疗良驹。"
         return True, ""
 
@@ -2400,6 +2406,16 @@ class ArcAttackTrait(Trait):
         return True, ""
 
 
+class MasamuneArcAttackTrait(ArcAttackTrait):
+    """Masamune selects one cell of the arc; other arc heroes retain area attacks."""
+
+    def basic_attack_payload_metadata(self, battle: Battle, actor: Unit, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {"attack_cells": [], "attack_tags": ["arc_attack"]}
+
+    def basic_attack_area_cells(self, battle: Battle, actor: Unit, payload: dict[str, Any] | None = None) -> Optional[list[Position]]:
+        return None
+
+
 class MountedFreeLeapTrait(Trait):
     def __init__(self) -> None:
         super().__init__("乘骑飞跃", "乘骑状态时，每回合可以不用魔使用 1 次飞跃。")
@@ -2421,7 +2437,7 @@ class UnmountedCombatTrait(Trait):
         owner = self.owner
         if owner is None or ctx.source is None or ctx.source.unit_id != owner.unit_id:
             return
-        if ctx.is_skill or "attack" not in ctx.tags or ctx.cancelled or (ctx.raw_damage or 0) <= 0:
+        if ctx.is_skill or "attack" not in ctx.tags or ctx.cancelled or ctx.actual_damage <= 0:
             return
         if battle.mounted_unit_for(owner) is not None:
             return
@@ -2541,7 +2557,7 @@ class Masamune(AbstractHero):
 
     def build_traits(self) -> list[Trait]:
         return [
-            ArcAttackTrait(),
+            MasamuneArcAttackTrait(),
             MountedFreeLeapTrait(),
             TripleStrikeAttackTrait(),
             UnmountedCombatTrait(),
@@ -2600,7 +2616,7 @@ def resolve_area_damage(
 ) -> tuple[set[str], set[str]]:
     original_enemy_ids: set[str] = set()
     damaged_enemy_ids: set[str] = set()
-    for unit in battle.units_at_cells(cells):
+    for unit in battle.effect_units_at_cells(cells):
         if enemy_only and unit.player_id == actor.player_id:
             continue
         if unit.player_id != actor.player_id:
@@ -2621,7 +2637,7 @@ def resolve_area_damage(
                 tags=set(tags),
             )
         )
-        if unit.player_id != actor.player_id and not ctx.cancelled and (ctx.raw_damage or 0) > 0:
+        if unit.player_id != actor.player_id and (ctx.actual_damage > 0 or (unit.is_clone and not unit.alive and not ctx.cancelled)):
             damaged_enemy_ids.add(unit.unit_id)
     return original_enemy_ids, damaged_enemy_ids
 
@@ -2637,6 +2653,7 @@ def maybe_queue_jade_reactive_bonus(
 ) -> None:
     if not payload.get("enemy_reacted"):
         return
+    original_enemy_ids = set(payload.get("declared_enemy_target_ids", original_enemy_ids))
     if not original_enemy_ids or original_enemy_ids.issubset(damaged_enemy_ids):
         return
     for trait in actor.traits:
@@ -2684,7 +2701,22 @@ class JadeReactiveOverclockTrait(Trait):
             self.apply_bonus_to_skill(battle, skill_code, amount)
 
 
-class JadeMachineGunSkill(MachineGunSkill):
+class DeclaredAreaSkillMixin:
+    def queued_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
+        cells = match_payload_pattern(payload, self.patterns(battle, actor))
+        return {
+            "declared_area_cells": positions_to_dict(cells),
+            "declared_enemy_target_ids": [unit.unit_id for unit in battle.effect_units_at_cells(cells) if unit.player_id != actor.player_id],
+        }
+
+    def chosen_cells(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
+        return battle.payload_positions(payload, "declared_area_cells") or match_payload_pattern(payload, self.patterns(battle, actor))
+
+
+class JadeMachineGunSkill(DeclaredAreaSkillMixin, MachineGunSkill):
+    def chosen_line(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
+        return self.chosen_cells(battle, actor, payload)
+
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         cells = self.chosen_line(battle, actor, payload)
         original_enemy_ids, damaged_enemy_ids = resolve_area_damage(
@@ -2706,7 +2738,7 @@ class JadeMachineGunSkill(MachineGunSkill):
         )
 
 
-class MissileSkill(WindowChargeSkill):
+class MissileSkill(DeclaredAreaSkillMixin, WindowChargeSkill):
     def __init__(self) -> None:
         super().__init__(
             "missile",
@@ -2721,7 +2753,7 @@ class MissileSkill(WindowChargeSkill):
         return remote_rectangle_patterns(battle, actor, 2, 2)
 
     def chosen_cells(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
-        return match_payload_pattern(payload, self.patterns(battle, actor))
+        return super().chosen_cells(battle, actor, payload)
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         cells = self.chosen_cells(battle, actor, payload)
@@ -2780,21 +2812,30 @@ class IonShieldSkill(MultiTargetChainShieldSkill):
         return True, ""
 
 
-class LaserSkill(Skill):
+class LaserSkill(DeclaredAreaSkillMixin, Skill):
     def __init__(self) -> None:
         super().__init__(
             "laser",
             "激光",
             "普通技能：冷却 3 轮，远程选择 2*10 区域；按当前攻造成伤害。",
-            cooldown_turns=6,
+            cooldown_turns=3,
+            max_uses_per_turn=1,
             target_mode="cell",
         )
+        self.burst_turn_number = -1
+
+    def allows_additional_use_during_cooldown(self, battle: Battle, actor: HeroUnit) -> bool:
+        return self.burst_turn_number == battle.turn_number
+
+    def prepay_resources(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any] | None = None) -> None:
+        super().prepay_resources(battle, actor, payload)
+        self.burst_turn_number = battle.turn_number
 
     def patterns(self, battle: Battle, actor: HeroUnit) -> list[list[Position]]:
         return combined_remote_rectangle_patterns(battle, actor, [(2, 10), (10, 2)])
 
     def chosen_cells(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
-        return match_payload_pattern(payload, self.patterns(battle, actor))
+        return super().chosen_cells(battle, actor, payload)
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         cells = self.chosen_cells(battle, actor, payload)
@@ -2882,8 +2923,17 @@ class QuantumShieldSkill(DelayedCooldownMultiTargetWallSkill):
             "被动技能：连锁速度 2，不费魔，每回合最多 3 次；效果与墙相同。只要本轮使用过，下一轮整轮不能使用，再下一轮恢复可用。",
             mana_cost=0,
             max_uses_per_turn=3,
-            cooldown_turns=4,
+            cooldown_turns=2,
         )
+
+    def on_owner_turn_start(self, battle: Battle) -> None:
+        Skill.on_owner_turn_start(self, battle)
+        self.cooldown_remaining = 1 if self.cooldown_pending else 0
+        self.cooldown_pending = False
+
+    def on_any_turn_end(self, battle: Battle, ended_player_id: int) -> None:
+        # The disabled round includes all opponents after Jade's own turn end.
+        pass
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         raise ActionError("量子盾只能通过连锁使用。")
@@ -2905,7 +2955,7 @@ class MechEnhancementSkill(Skill):
             "mech_enhancement",
             "机甲强化",
             "普通技能：冷却 3 轮；自己守 +1，持续 2 轮，并回复 1/2 生命。",
-            cooldown_turns=6,
+            cooldown_turns=3,
             target_mode="self",
         )
 
@@ -2972,7 +3022,7 @@ class PlasmaThrusterSkill(Skill):
         if not ok:
             return ok, reason
         if actor.cannot_move:
-            return False, f"{actor.name} å½“å‰æ— æ³•ç§»åŠ¨ã€‚"
+            return False, f"{actor.name} 当前无法移动。"
         return True, ""
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
@@ -3030,6 +3080,7 @@ class StanceFieldEffect(BattleFieldEffect):
         if not any(position_key(cell) in protected_keys for cell in battle.unit_cells(ctx.target)):
             return
         ctx.cancelled = True
+        ctx.preserve_followup_effects = True
         ctx.reason = f"{ctx.target.name} 受到立场保护，这次伤害无效。"
 
     def on_turn_start(self, battle: Battle, active_unit: Optional[HeroUnit]) -> None:
@@ -3043,7 +3094,7 @@ class StanceFieldEffect(BattleFieldEffect):
         if owner is None:
             battle.remove_field_effect(self)
             return
-        if not self.armed and ended_player_id == self.owner_player_id:
+        if not self.armed and battle.unit_belongs_to_current_turn(owner):
             self.armed = True
 
 
@@ -3053,7 +3104,7 @@ class StanceSkill(Skill):
             "stance",
             "立场",
             "普通技能：冷却 2 轮；从这个回合结束后的第一个对方回合开始，到自己下个回合开始前，周围 7*7 内的其他己方单位不受到伤害。",
-            cooldown_turns=4,
+            cooldown_turns=2,
             target_mode="self",
         )
 
@@ -3340,7 +3391,7 @@ class EarthWalkerSkill(SplitSkill):
         actor.add_status(EarthWalkerCleanupStatus([clone.unit_id for clone in clones]))
 
 
-class MagneticWaveSkill(ManaPointCostSkill):
+class MagneticWaveSkill(DeclaredAreaSkillMixin, ManaPointCostSkill):
     def __init__(self) -> None:
         super().__init__(
             "magnetic_wave",
@@ -3356,11 +3407,11 @@ class MagneticWaveSkill(ManaPointCostSkill):
         return remote_rectangle_patterns(battle, actor, 3, 3)
 
     def chosen_cells(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
-        return match_payload_pattern(payload, self.patterns(battle, actor))
+        return super().chosen_cells(battle, actor, payload)
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         cells = self.chosen_cells(battle, actor, payload)
-        for unit in battle.units_at_cells(cells):
+        for unit in battle.effect_units_at_cells(cells):
             damage_ctx = battle.resolve_damage(
                 DamageContext(
                     source=actor,
@@ -3457,7 +3508,7 @@ class NManaGuardTrait(Trait):
     def on_before_damage(self, battle: Battle, ctx: DamageContext) -> None:
         if self.owner is None or ctx.target.unit_id != self.owner.unit_id:
             return
-        if self.owner.current_mana <= 0:
+        if self.owner.current_mana <= 0 or ctx.cancelled or (ctx.raw_damage is not None and ctx.raw_damage <= 0):
             return
         self.owner.spend_mana(1)
         ctx.cancelled = True

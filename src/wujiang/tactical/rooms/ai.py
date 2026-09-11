@@ -726,9 +726,8 @@ def skill_payloads_for_action(battle: Battle, actor: Unit, action: dict[str, Any
     if code == "rock_cannon":
         return rock_cannon_payloads(battle, actor)
     if code == "crazy_sand":
-        skill = actor.get_skill(code)
-        return [{**base_payload, "cells": positions_to_payload(line), "x": destination.x, "y": destination.y}
-                for line, destination in skill._patterns_with_destinations(battle, actor)]
+        return [{**base_payload, "cells": entry["pattern"], "x": entry["destination"]["x"], "y": entry["destination"]["y"]}
+                for entry in preview.get("pattern_destinations", [])]
     if code in {"split", "earth_walker"}:
         return split_payloads(battle, actor, action)
     if code in {"descent_moment", "mana_pull"}:
@@ -1737,7 +1736,11 @@ def score_attack_payload(
     if hero_style(actor) != "support":
         score += profile.aggressive_bonus
     if str(payload.get("attack_variant") or "") == "triple":
-        score += 24.0
+        ordinary = {**payload, "attack_variant": "default"}
+        normal_damage = estimate_attack_damage(battle, actor, target, ordinary, attack_power=battle.basic_attack_preview_power(actor, ordinary))
+        score -= 35.0 if normal_damage >= expected_damage else 8.0 + max(0.0, min(target.current_hp, normal_damage * 3) - expected_damage) * 100.0
+    if actor.hero_code == "n":
+        score += 18.0 + (20.0 if actor.current_mana < 1 else 0.0)
     forced_target = required_attack_target(battle, actor)
     if forced_target is not None and target.unit_id == forced_target.unit_id:
         score += 500.0
@@ -1778,6 +1781,8 @@ def score_skill_payload(
     skill = skill_from_ai_action(actor, action, code)
     if code in {"rock_absorb", "rock_cannon", "doom_light", "apocalypse"}:
         return resource_effect_score(battle, actor, skill, payload, profile)
+    if code == "magnetic_wave":
+        return magnetic_wave_score(battle, actor, skill, payload)
     targets = skill_effect_units(battle, actor, skill, payload)
     role = hero_style(actor)
     if code == "iron_chain_path":
@@ -1822,6 +1827,16 @@ def score_skill_payload(
         if code == "crazy_sand":
             score -= score_move_destination(battle, actor, actor.position, role, profile) if actor.position is not None else 0.0
             score += skill_damage_score(battle, actor, skill, payload, profile) - 15.0
+        if code == "mounted_leap" and actor.position is not None:
+            score -= score_move_destination(battle, actor, actor.position, role, profile)
+            before = masamune_attack_plan_value(battle, actor, profile)
+            with ai_probe_rollback(battle):
+                battle.clear_mounted_state(actor)
+                actor.position = destination
+                if actor.get_skill("six_blade_style").can_use(battle, actor, {})[0]:
+                    actor.get_skill("six_blade_style").execute(battle, actor, {})
+                after = masamune_attack_plan_value(battle, actor, profile)
+            score += min(100.0, after - before) - 40.0
         if code == "true_blade_air_slash":
             score += true_blade_air_slash_score(battle, actor, skill, payload, profile)
         return score
@@ -1831,6 +1846,11 @@ def score_skill_payload(
         return world_seed_score(battle, actor, payload, profile)
     if code in SUMMON_SKILL_CODES:
         destination = payload_destination(payload)
+        if code == "split" and actor.hero_code == "n":
+            if best_available_attack_score(battle, actor, profile) > 0:
+                return -1000.0
+            nearby = any(distance_between_units(battle, actor, enemy) <= enemy.normal_move_distance() + enemy.targeting_range() for enemy in living_hostile_combatants(battle, actor.player_id))
+            return 22.0 if nearby and actor.current_mana >= 2.5 else -20.0
         if code == "earth_walker":
             if actor.has_status("土行者") or not living_hostile_combatants(battle, actor.player_id):
                 return -1000.0
@@ -1860,14 +1880,18 @@ def score_skill_payload(
         return restored * 34.0 if restored >= 0.5 else -8.0
     if code in HEAL_SKILL_CODES:
         healed = primary_target_unit(battle, payload, targets)
+        if code == "heal_mount":
+            healed = battle.mounted_unit_for(actor)
         if healed is None:
             healed = actor
-        if code == "heal":
+        if code in {"heal", "heal_mount", "mech_enhancement"}:
             with ai_probe_rollback(battle):
                 before_hp = healed.current_hp
+                before_defense = healed.stat("defense")
                 skill.execute(battle, actor, payload)
                 gain = healed.current_hp - before_hp
-            return gain * 200.0 + (50.0 if healed.current_hp <= 0.5 else 0.0) if gain > 0 else -1000.0
+                defense_gain = healed.stat("defense") - before_defense
+            return gain * 200.0 + max(0.0, defense_gain) * 24.0 + (50.0 if gain > 0 and healed.current_hp <= 0.5 else 0.0) if gain > 0 or defense_gain > 0 else -1000.0
         missing = max(0.0, healed.max_health - healed.current_hp)
         score = missing * 120.0
         if code == "mech_enhancement":
@@ -1970,6 +1994,11 @@ def score_reaction_payload(
             score -= 120.0
         if queued_action.payload.get("half_ignore_shield"):
             score -= 15.0
+        if code == "quantum_shield":
+            # Ion gives the same shield without sacrificing the following round.
+            ion = next((skill for skill in reactor.skills if skill.code == "ion_shield"), None)
+            if ion is not None and ion.can_react_with_payload(battle, reactor, queued_action, payload)[0]:
+                score -= 30.0
         return score
     if code == "block":
         prevention = temporary_defense_prevention_score(battle, reactor, queued_action)
@@ -2500,7 +2529,10 @@ def sandstorm_value(battle: Battle, actor: Unit) -> float:
             value += 22.0
         score += value if unit.player_id != actor.player_id else -value
     if actor.hero_code == "undead_king_lina" and not battle.unit_in_weather("沙尘", actor):
-        score += min(0.25, max(0.0, actor.max_health - actor.current_hp)) * 80.0
+        with ai_probe_rollback(battle):
+            hp_before = actor.current_hp
+            battle.heal(HealContext(source=actor, target=actor, amount=0.25, action_name="AI沙尘恢复估值"))
+            score += max(0.0, actor.current_hp - hp_before) * 80.0
         score += min(1.0, max(0.0, actor.max_mana() - actor.current_mana)) * 16.0
     return score
 
@@ -2575,6 +2607,47 @@ def resource_effect_score(battle: Battle, actor: Unit, skill: Any, payload: dict
         return score
 
 
+def magnetic_wave_score(battle: Battle, actor: Unit, skill: Any, payload: dict[str, Any]) -> float:
+    units = skill_effect_units(battle, actor, skill, payload)
+    before = {unit.unit_id: (unit.current_hp, unit.current_mana, unit.turn_ready, unit.alive, unit.total_shields()) for unit in units}
+    with ai_probe_rollback(battle):
+        try:
+            probe = dict(payload)
+            probe.update(skill.queued_payload_metadata(battle, actor, probe))
+            skill.execute(battle, actor, probe)
+        except (ActionError, ValueError):
+            return -1000.0
+        score = -40.0  # Two mana points could instead become two mana guards.
+        for unit in units:
+            hp, mana, ready, alive, shields = before[unit.unit_id]
+            hostile = unit.player_id != actor.player_id
+            sign = 1.0 if hostile else -1.0
+            score += sign * ((hp - unit.current_hp) * (110.0 if hostile else 160.0) + (mana - unit.current_mana) * 16.0 + (shields - unit.total_shields()) * 8.0)
+            if alive and not unit.alive:
+                score += sign * 160.0
+            if ready and not unit.turn_ready and unit.alive and battle.unit_belongs_to_current_turn(unit):
+                attacks = max(0, unit.attack_actions_per_turn() - unit.attacks_used)
+                score += sign * (25.0 + min(4, attacks) * 18.0 + (15.0 if unit.remaining_normal_move_distance(battle) > 0 else 0.0))
+        return score
+
+
+def masamune_attack_plan_value(battle: Battle, actor: Unit, profile: DifficultyProfile) -> float:
+    best = 0.0
+    remaining = max(0, actor.attack_actions_per_turn() - actor.attacks_used)
+    for action in battle.action_snapshot_for(actor).get("actions", []):
+        if action.get("kind") != "attack" or not action.get("available"):
+            continue
+        for payload in attack_payloads_for_action(battle, actor, action):
+            if not attack_payload_is_legal(battle, actor, payload):
+                continue
+            target = battle.get_unit(payload["target_unit_id"])
+            resolved = battle.resolved_basic_attack_payload(actor, payload)
+            damage = estimate_attack_damage(battle, actor, target, payload, attack_power=battle.basic_attack_preview_power(actor, payload))
+            total = min(target.current_hp, damage * (remaining // max(1, int(resolved.get("attack_cost", 1)))))
+            best = max(best, total * 100.0 + (95.0 if total >= target.current_hp - 1e-9 else 0.0))
+    return best
+
+
 def skill_damage_score(
     battle: Battle,
     actor: Unit,
@@ -2613,6 +2686,10 @@ def skill_damage_score(
         score += hostile_unit_value(unit) * 0.5
         if damage >= unit.current_hp - 1e-9:
             score += 90.0
+            if actor.hero_code == "undead_king_lina":
+                reward = next((trait for trait in actor.traits if trait.name == "击破重置"), None)
+                if reward is not None and not reward.used_this_turn and reward._eligible_target(unit):
+                    score += 55.0
     if code in {"judgment_fire", "great_funeral", "laser", "missile", "machine_gun", "pierce", "large_pierce_plus", "remote_dragon_breath", "dragon_breath", "magnetic_wave", "whirlwind_attack"}:
         score += len([unit for unit in affected if unit.player_id != actor.player_id]) * 18.0
     if hero_style(actor) != "support":
@@ -3315,7 +3392,13 @@ def self_buff_score(battle: Battle, actor: Unit, code: str, profile: DifficultyP
             after = best_available_attack_score(battle, actor, profile)
         return after + 20.0 if after > before + 1.0 else -1000.0
     if code == "six_blade_style":
-        return 54.0 if battle.action_snapshot_for(actor).get("attack_targets") else 12.0
+        before = masamune_attack_plan_value(battle, actor, profile)
+        before_score = best_available_attack_score(battle, actor, profile)
+        with ai_probe_rollback(battle):
+            actor.get_skill(code).execute(battle, actor, {})
+            after = masamune_attack_plan_value(battle, actor, profile)
+            after_score = best_available_attack_score(battle, actor, profile)
+        return max(before_score, after_score) + 25.0 if after > before + 1.0 else -1000.0
     if code == "form_shift":
         return 58.0
     if code == "into_darkness":
@@ -3333,7 +3416,13 @@ def self_buff_score(battle: Battle, actor: Unit, code: str, profile: DifficultyP
     if code == "mech_enhancement":
         return 38.0
     if code == "n_skill":
-        return 26.0 if actor.mana_points >= 1 else -10.0
+        if actor.mana_points < 1:
+            return -1000.0
+        if actor.current_mana < 1:
+            return 160.0
+        if actor.mana_points <= 2 and any(distance_between_units(battle, actor, enemy) <= enemy.normal_move_distance() + enemy.targeting_range() for enemy in enemies):
+            return -20.0
+        return 32.0
     if code in {"shensu", "big_shensu"}:
         enemies = [unit for unit in battle.enemy_units(actor.player_id) if unit.alive and unit.position is not None and not unit.banished]
         if not enemies or actor.move_used:
@@ -3377,7 +3466,7 @@ def field_skill_score(
     if code == "stance":
         nearby_allies = sum(1 for unit in allies if unit.unit_id != actor.unit_id and distance_between_units(battle, actor, unit) <= 3)
         nearby_enemies = sum(1 for unit in enemies if distance_between_units(battle, actor, unit) <= 4)
-        return nearby_allies * 24.0 + nearby_enemies * 10.0
+        return nearby_allies * 24.0 + nearby_enemies * 10.0 if nearby_allies else -1000.0
     if code == "great_holy_light":
         nearby_enemies = sum(1 for unit in enemies if not unit.cannot_normal_move and distance_between_units(battle, actor, unit) <= 5)
         if not nearby_enemies:
@@ -3798,6 +3887,13 @@ def hostile_skill_effect_target_has_impact(
     target: Unit,
 ) -> bool:
     code = str(skill.code)
+    if code == "magnetic_wave":
+        with ai_probe_rollback(battle):
+            before = unit_impact_signature(target)
+            probe = dict(payload)
+            probe.update(skill.queued_payload_metadata(battle, actor, probe))
+            skill.execute(battle, actor, probe)
+            return unit_impact_signature(target) != before
     if code == "heaven_punishment":
         selected_code = str(payload.get("disabled_skill_code") or "")
         return bool(selected_code) and any(
@@ -3970,7 +4066,7 @@ def probe_skill_damage_impact(
             half_ignore_shield=half_ignore_shield,
             ignore_magic_immunity=skill.ignores_magic_immunity_for_payload(battle, probe_actor, payload),
             cannot_evade=skill.cannot_evade_for_payload(battle, probe_actor, payload),
-            ignore_targeting_restrictions=str(skill.code) in {"great_funeral", "judgment_fire"},
+            ignore_targeting_restrictions=str(skill.code) in {"great_funeral", "judgment_fire", "wind_sand", "crazy_sand", "dragon_breath", "remote_dragon_breath", "rending", "complete_burn", "blizzard", "machine_gun", "missile", "laser", "magnetic_wave"},
             resolve_defenses=False,
             tags=set(target_tags),
         )

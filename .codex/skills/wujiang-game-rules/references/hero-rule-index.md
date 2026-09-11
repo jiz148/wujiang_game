@@ -280,6 +280,7 @@ Update this file whenever a hero, skill, trait, or durable gameplay rule changes
 
 ### 不死王利娜 (`undead_king_lina`)
 
+- R03 reviewed 2026-09-10, static only: Crazy Sand cooldown is two own rounds; declared line/landing survive reactions, blocked landing retains current position, movement-disabled use is rejected. `pattern_destinations` provides full footprint to UI and AI. Rending/Wind Sand lock declared cells. Wind Sand expires after source's next own-start recovery; Sandstorm ticks only the affected unit's own end. Lock survives temporary absence; reset excludes field/periodic kills. AI prices lock commitment, eligible resets and weather net value. Consolidated tests pending.
 - Stats: level 8, 刺客, 土, 灵体, 攻4 守4 速4 范3 魔5; occupies `2*2` and should render as one footprint-spanning board piece.
 - File: `src/wujiang/heroes/next_five.py`, class `UndeadKingLina`.
 - Skills:
@@ -299,6 +300,7 @@ Update this file whenever a hero, skill, trait, or durable gameplay rule changes
 
 ### 岩神 (`rock_god`)
 
+- R03 reviewed 2026-09-10, static only: Rock Absorb records area/growth at declaration; shared source link expires stat exchange together and cleans up on source death. Non-mana floor is one, successful targets still count at floor; partial shields select a connected subset of declared growth cells. Cannon validates at declaration, consumes body before damage and recomputes each next projectile's impact after previous reactions. Local/global weather ticks once at each affected unit's own end; temporary banishment does not erase aura ownership. AI uses actual effect deltas, connected growth and meaningful two-cell cannon candidates, with body/HP costs and rollback-safe followups.
 - Stats: level 4, 狂战, 土, 石人, 攻3 守5 速2 范1 魔3; base `2*2`, dynamic irregular footprint allowed.
 - File: `src/wujiang/heroes/next_five.py`, class `RockGod`.
 - Skills:
@@ -313,6 +315,7 @@ Update this file whenever a hero, skill, trait, or durable gameplay rule changes
 
 ### 神龙。末日光 (`doomlight_dragon`)
 
+- R03 reviewed 2026-09-10, static only: Doom Light does not refresh duration or first-source attribution; duplicate callbacks do not consume extra shields. Basic declaration invokes `on_target_action_declared`; only actual damaging skills cause damage retaliation and ticks cannot recurse. Absorption uses `DamageContext.actual_damage`, not theoretical damage or net HP after recovery, with living/on-board source and healing restrictions. Apocalypse locks explicit n/area before payment, rejects forged resolved_n override, and respects original cells after displacement. AI separates new infection from immediate damage, prices paid HP/friendly harm and useful finishers. Common support range checks/previews now use full footprints; R02 Heal reversal follows normal special-loss defenses.
 - Stats: level 4, 法师, 光, 古龙, 攻3 守4 速3 范3 魔5; occupies `2*2`, has flying, and can heal above max hp.
 - File: `src/wujiang/heroes/next_five.py`, class `DoomlightDragon`.
 - Skills:

@@ -89,7 +89,9 @@ def ensure_distance(actor: HeroUnit, target: HeroUnit | Position, max_distance: 
     other = target.position if isinstance(target, HeroUnit) else target
     if origin is None or other is None:
         raise ActionError("目标不在战场上。")
-    if origin.distance_to(other) > max_distance:
+    origins = actor.footprint_cells()
+    targets = target.footprint_cells() if isinstance(target, HeroUnit) else [target]
+    if min(start.distance_to(end) for start in origins for end in targets) > max_distance:
         raise ActionError("目标超出技能范围。")
 
 
@@ -1711,7 +1713,7 @@ class DefendTwiceSkill(Skill):
             for unit in battle.player_units(actor.player_id)
             if unit.position is not None
             and actor.position is not None
-            and actor.position.distance_to(unit.position) <= actor.targeting_range()
+            and battle.distance_between_units(actor, unit) <= actor.targeting_range()
         ]
         return {"cells": positions_to_dict([unit.position for unit in targets if unit.position]), "target_unit_ids": [unit.unit_id for unit in targets], "secondary_cells": [], "requires_target": True}
 
@@ -1732,13 +1734,13 @@ class HealSkill(Skill):
         ensure_ally(actor, target)
         ensure_distance(actor, target, actor.targeting_range())
         if target.attribute == "暗" or target.race in {"灵体", "恶魔"}:
-            target.take_damage_fraction(0.25)
-            battle.log(f"{target.name} 因回血效果反转而失去1/4生命。")
+            battle.resolve_damage(DamageContext(source=actor, target=target, attack_power=0, raw_damage=0.25,
+                                                is_skill=True, action_name="回血反转", tags={"skill", "heal_reversal"}))
             return
         battle.heal(HealContext(source=actor, target=target, amount=0.25, action_name="回血"))
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
-        targets = [unit for unit in battle.player_units(actor.player_id) if unit.position and actor.position and actor.position.distance_to(unit.position) <= actor.targeting_range()]
+        targets = [unit for unit in battle.player_units(actor.player_id) if unit.position and actor.position and battle.distance_between_units(actor, unit) <= actor.targeting_range()]
         return {"cells": positions_to_dict([unit.position for unit in targets if unit.position]), "target_unit_ids": [unit.unit_id for unit in targets], "secondary_cells": [], "requires_target": True}
 
 
@@ -1762,7 +1764,7 @@ class BaptismSkill(Skill):
         battle.log(f"{target.name} 获得了魔免（来自洗礼）。")
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
-        targets = [unit for unit in battle.player_units(actor.player_id) if unit.race == "人类" and unit.position and actor.position and actor.position.distance_to(unit.position) <= actor.targeting_range()]
+        targets = [unit for unit in battle.player_units(actor.player_id) if unit.race == "人类" and unit.position and actor.position and battle.distance_between_units(actor, unit) <= actor.targeting_range()]
         return {"cells": positions_to_dict([unit.position for unit in targets if unit.position]), "target_unit_ids": [unit.unit_id for unit in targets], "secondary_cells": [], "requires_target": True}
 
 
@@ -1783,7 +1785,7 @@ class ChantSkill(Skill):
         battle.log(f"{target.name} 获得了 {gained} 点魔力点。")
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
-        targets = [unit for unit in battle.all_units() if unit.position and actor.position and actor.position.distance_to(unit.position) <= actor.targeting_range()]
+        targets = [unit for unit in battle.all_units() if unit.position and actor.position and battle.distance_between_units(actor, unit) <= actor.targeting_range()]
         return {"cells": positions_to_dict([unit.position for unit in targets if unit.position]), "target_unit_ids": [unit.unit_id for unit in targets], "secondary_cells": [], "requires_target": True}
 
 

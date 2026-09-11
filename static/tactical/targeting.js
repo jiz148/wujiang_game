@@ -638,11 +638,17 @@ export function currentPreview() {
   if (patternSelection(action)) {
     const chosenCells = stagedPatternCells(action);
     const activeCells = nextPatternSelectionCells(action, chosenCells);
+    const destinations = chosenCells.length ? (action.preview?.pattern_destinations || [])
+      .filter((entry) => {
+        const patternKeys = positionsToSet(entry.pattern || []);
+        return chosenCells.every((cell) => patternKeys.has(positionKey(cell)));
+      })
+      .flatMap((entry) => entry.destination_cells || []) : [];
     return {
       cellKeys: positionsToSet(activeCells),
       targetIds: new Set(),
       secondaryCellKeys: positionsToSet(chosenCells),
-      destinationCellKeys: new Set(),
+      destinationCellKeys: positionsToSet(destinations),
     };
   }
   if (multiUnitSelection(action)) {

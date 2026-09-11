@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import assert from "node:assert/strict";
-import { FileBlob, SpreadsheetFile } from "@oai/artifact-tool";
+import { FileBlob, SpreadsheetFile } from "file:///C:/Users/jiz14/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/@oai/artifact-tool/dist/artifact_tool.mjs";
 
 const root = "C:/Users/jiz14/TeamGH/wujiang_game";
 const outputDir = `${root}/outputs/hero-review-followup-20260904`;
@@ -42,7 +42,7 @@ if (process.argv.includes("--inspect")) {
     const existing = originalDesign.findIndex((row, index) => index > 0 && row[2] === hero.code);
     if (existing > 0) {
       designSheet.getRange(`AA${existing + 1}`).values = [[hero.review_status]];
-      if (hero.batch === "R01") {
+      if (["R01", "R02", "R03"].includes(hero.batch)) {
         designSheet.getRange(`A${existing + 1}:AB${existing + 1}`).values = [designFields.map(key => {
           const value = hero[key];
           return value == null ? null : typeof value === "object" ? JSON.stringify(value) : value;
@@ -88,7 +88,7 @@ if (process.argv.includes("--inspect")) {
   }
   const unchangedDesign = structuredClone(expected.get("武将设计思想").slice(0, originalDesign.length));
   for (let row = 1; row < originalDesign.length; row += 1) {
-    if (originalDesign[row][0] === "R01") unchangedDesign[row] = originalDesign[row];
+    if (["R01", "R02", "R03"].includes(originalDesign[row][0])) unchangedDesign[row] = originalDesign[row];
     else unchangedDesign[row][26] = originalDesign[row][26];
   }
   assert.deepEqual(unchangedDesign, before.get("武将设计思想").values);

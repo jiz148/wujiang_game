@@ -499,7 +499,7 @@ class Skill(BattleComponent, ABC):
             blocked, reason = component.blocks_skill_use(battle, actor, self)
             if blocked:
                 return False, reason
-        if self.cooldown_remaining > 0:
+        if self.cooldown_remaining > 0 and not self.allows_additional_use_during_cooldown(battle, actor):
             return False, f"还需冷却 {self.cooldown_remaining} 个己方回合。"
         if self.max_uses_per_turn is not None and self.uses_this_turn >= self.max_uses_per_turn:
             return False, "本回合使用次数已满。"
@@ -511,6 +511,9 @@ class Skill(BattleComponent, ABC):
         if block_reason:
             return False, block_reason
         return True, ""
+
+    def allows_additional_use_during_cooldown(self, battle: "Battle", actor: "Unit") -> bool:
+        return False
 
     def on_owner_turn_start(self, battle: "Battle") -> None:
         self.sync_turn_scope(battle)

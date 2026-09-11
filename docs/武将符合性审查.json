@@ -9,16 +9,19 @@
     "user_override_date": "2026-09-06"
   },
   "current_hero_codes": [
-    "elite_soldier",
-    "bard",
-    "element_hunter"
+    "undead_king_lina",
+    "rock_god",
+    "doomlight_dragon"
   ],
   "developed_hero_inspection_progress": {
     "definition": "完成新设计优先流程：独立记录并锁定设计初衷，随后对照审查战斗实现、武将专属与通用AI、测试，并完成所有必要修改；用户复测签收单独统计",
     "developed_public_total": 73,
-    "inspected_and_modified": 12,
-    "remaining_to_inspect_and_modify": 61,
+    "inspected_and_modified": 15,
+    "remaining_to_inspect_and_modify": 58,
     "inspected_and_modified_codes": [
+      "undead_king_lina",
+      "rock_god",
+      "doomlight_dragon",
       "elite_soldier",
       "bard",
       "element_hunter",
@@ -32,11 +35,257 @@
       "excel_r291",
       "excel_r356"
     ],
-    "remaining_set_rule": "每次从当前 list_heroes() 中排除 inspected_and_modified_codes；具体61名名单同步在 docs/武将补全实施计划.md",
+    "remaining_set_rule": "每次从当前 list_heroes() 中排除 inspected_and_modified_codes；具体58名名单同步在 docs/武将补全实施计划.md",
     "focused_retest_accepted": 3,
-    "awaiting_consolidated_test": 12
+    "awaiting_consolidated_test": 15
   },
   "heroes": [
+    {
+      "code": "masamune",
+      "name": "天位骑士。政宗",
+      "items": [
+        {
+          "layer": "战斗/目标与骑乘",
+          "requirement": "逐一核对面板、初始骑乘、八向点选单目标、六刀、三连、治马、下马反应和召回时钟。",
+          "evidence": "next_five.py::Masamune/ArcAttackTrait/MotorHorseSkill/RideableMountTrait/UnmountedCombatTrait；core.py攻击声明与骑乘重定向。",
+          "verdict": "发现实现偏差",
+          "severity": "P1",
+          "planned_change": "弧面误走范围攻击分支，点击一个目标会命中整排；召回锁定用active_player误将同队其他武将算己方回合；六刀max(value,6)不符合固定上限。保留其他武将范围弧形，政宗单独修正。",
+          "status": "待修正并补用例；动态验证后置"
+        },
+        {
+          "layer": "AI",
+          "requirement": "骑乘移动、六刀前置、重斩次数机会成本、治愈当前马。",
+          "evidence": "ai.py::attack_payloads_for_action/score_attack_payload/self_buff_score/score_skill_payload。",
+          "verdict": "发现AI偏差",
+          "severity": "P1",
+          "planned_change": "六刀固定54分会排在先攻击之后；重斩无条件+24偏好；治马估值默认本体而非受伤坐骑，免费飞跃缺少下马成本。",
+          "status": "待修正并补用例；动态验证后置"
+        },
+        {
+          "layer": "测试/预览",
+          "requirement": "设计要求单格选中、重斩扣3、下马切换、多将召回及AI操作顺序。",
+          "evidence": "tests/test_battle.py 5760–6055；已有弧形大单位测试反而期待两格额外伤害，choice_pattern前端本来只点一个格。",
+          "verdict": "测试缺口与旧预期",
+          "severity": "P1",
+          "planned_change": "修正旧多格伤害预期，增加多人召回、六刀优先、治马及单格受击/反应覆盖。",
+          "status": "待修正并补用例；动态验证后置"
+        }
+      ],
+      "review_status": "战斗、AI与现有测试已读，偏差已记录，修正进行中；未动态验证。",
+      "design_baseline": "docs/武将设计思想.json R04；docs/武将实现问题清单.xlsx 武将设计思想；2026-09-10先锁定。",
+      "audit_evidence": "本轮仅源规则和代码对照；新动态审计留待全部73名完成。"
+    },
+    {
+      "code": "jade",
+      "name": "翡翠",
+      "items": [
+        {
+          "layer": "战斗/声明与超频",
+          "requirement": "导弹/激光/机枪声明原格，原始敌方目标连锁后无伤触发下轮增长；激光增长也必须兑现。",
+          "evidence": "next_five.py::JadeReactiveOverclockTrait/JadeMachineGunSkill/MissileSkill/LaserSkill/resolve_area_damage。",
+          "verdict": "发现实现偏差",
+          "severity": "P1",
+          "planned_change": "区域结算重新验证施法者当前范围，原始对象在反应后才采集导致回避不触发；激光无次数上限使超频直接忽略。固定声明元数据与实际损血，提供同可用轮次数并保持冷却。",
+          "status": "待修正并补用例；动态验证后置"
+        },
+        {
+          "layer": "战斗/轮次与防御",
+          "requirement": "导弹2自身轮；离子每敌将回合2；量子可用轮每敌将3且下一整轮禁用；强化3、立场2轮冷却；立场仅伤害。",
+          "evidence": "WindowChargeSkill/DelayedCooldownMultiTargetWallSkill/MechEnhancementSkill/StanceFieldEffect/PlasmaThrusterSkill。",
+          "verdict": "发现实现偏差",
+          "severity": "P1",
+          "planned_change": "激光/强化/立场仍为6/6/4旧计数，量子旧全场回合冷却；立场cancel未保留后续效果。次数按全场turn_number刷新本身符合；喷射提示乱码修复。",
+          "status": "待修正并补用例；动态验证后置"
+        },
+        {
+          "layer": "AI/测试",
+          "requirement": "范围火力敌友净值，支援量子资源，强化/立场有效收益；多人轮次和回避超频。",
+          "evidence": "ai.py::skill_damage_score/field_skill_score/score_reaction_payload；test_battle 6138–6220及behavior量子/立场场景。",
+          "verdict": "发现AI偏差与测试缺口",
+          "severity": "P1",
+          "planned_change": "立场无盟友也因敌人数得到正分；治愈仅缺血估值不反映禁疗；增加声明移动/超频激光次数、多人防护/窗口和伤害后续场景。",
+          "status": "待修正并补用例；动态验证后置"
+        }
+      ],
+      "review_status": "战斗、AI与现有测试已读，偏差已记录，修正进行中；未动态验证。",
+      "design_baseline": "docs/武将设计思想.json R04；docs/武将实现问题清单.xlsx 武将设计思想；2026-09-10先锁定。",
+      "audit_evidence": "本轮仅源规则和代码对照；新动态审计留待全部73名完成。"
+    },
+    {
+      "code": "n",
+      "name": "N",
+      "items": [
+        {
+          "layer": "战斗/资源与控制",
+          "requirement": "声明产点、己方开始攻击数快照、无上限魔、逐段免伤、磁力波当前行动终止与三分身。",
+          "evidence": "next_five.py::NAttackManaPointTrait/NAttackCountTrait/NManaGuardTrait/MagneticWaveSkill/SplitSkill；core.py::spend_mana/resolve_damage。",
+          "verdict": "部分符合，边界待修",
+          "severity": "P1",
+          "planned_change": "产点/快照/分身三格和基础逐段护体已实现；磁力波需固定声明区；护体在已被场地取消或显式零伤害时仍耗魔。缺少分数魔、多将控制对象和探查回滚边界。",
+          "status": "待修正并补用例；动态验证后置"
+        },
+        {
+          "layer": "AI",
+          "requirement": "攻击产点、回魔与存2点磁力波、分身结束输出的成本；磁力波按真实控制效果。",
+          "evidence": "ai.py::self_buff_score/score_skill_payload/skill_control_bonus/hostile_skill_effect_target_has_impact。",
+          "verdict": "发现AI偏差",
+          "severity": "P1",
+          "planned_change": "N回魔固定26分会把反应预算花光；分身固定高分不比较剩余有效普攻；磁力波对非当前/已不能行动目标仍加泛控制分，护盾/免伤效果未区分。",
+          "status": "待修正并补用例；动态验证后置"
+        },
+        {
+          "layer": "测试/公开信息",
+          "requirement": "独立检查现有声明产点/快照/三分身/对手信息和多段免伤用例；增加相关边界与AI资源取舍。",
+          "evidence": "tests/test_battle.py 6300–6480；现有behavior分身公开信息与随时技能场景。",
+          "verdict": "现有主路径符合，边界缺口",
+          "severity": "P2",
+          "planned_change": "保留已有真身信息隐藏/单格候选模式；补零伤害/已防护不耗魔、仅伤害免疫仍受磁力波控制、非当前行动不延后、分身避免放弃输出。",
+          "status": "待修正并补用例；动态验证后置"
+        }
+      ],
+      "review_status": "战斗、AI与现有测试已读，偏差已记录，修正进行中；未动态验证。",
+      "design_baseline": "docs/武将设计思想.json R04；docs/武将实现问题清单.xlsx 武将设计思想；2026-09-10先锁定。",
+      "audit_evidence": "本轮仅源规则和代码对照；新动态审计留待全部73名完成。"
+    },
+    {
+      "code": "undead_king_lina",
+      "name": "不死王利娜",
+      "items": [
+        {
+          "layer": "战斗/生命周期",
+          "requirement": "2×2面板、双攻半破魔、声明执念、合格击破再动与吸魔、天气回复及禁疗逐条核对。",
+          "evidence": "next_five.py::UndeadKingLina/HalfPierceAttackTrait/AttackLockTrait/LinaDestroyRewardTrait/NoEnemyHealAuraTrait/LinaSandstormRecoveryTrait。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "原执念会因目标暂离且position为空解除，奖励未排除场地伤害；现保留存活目标锁定，奖励限定带攻击/技能标识的直接伤害，禁疗光环不来自被放逐本体。既有半破魔、骑乘后实际对象锁定、双攻与剩余魔收益保留。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "战斗/声明与天气",
+          "requirement": "撕裂、风沙、狂沙声明区固定；狂沙完整身体落点合法，2己方轮冷却；风沙一轮不被多人回合缩短。",
+          "evidence": "next_five.py::RendingSkill/WindSandSkill/CrazySandSkill/SandstormWeatherEffect；core.py自身回合时钟。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "狂沙冷却4改2，禁止无法移动时施放，伤害线及落点声明锁定，连锁占据落点只取消位移；风沙到来源下次己方开始自然回复后到期，天气每目标自身结束一次。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "AI/预览",
+          "requirement": "狂沙载荷必须包含真实落点并兼顾伤害/安全；执念承诺、合格再动、天气净敌友收益与实际回复。",
+          "evidence": "ai.py::skill_payloads_for_action/reviewed_attack_synergy/sandstorm_value/skill_damage_score；CrazySandSkill.preview；targeting.js::computeHighlights。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "原狂沙仅选区载荷无落点导致AI负评分；现前端和AI共用pattern_destinations与四格落点。普攻考虑新锁定代价，普攻/技能击破合格目标奖励再动；天气回复通过实际治疗探测判断禁疗。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "测试",
+          "requirement": "多人天气计时/己方伤害、暂离执念、场地击破不再动、连锁受阻狂沙、AI与完整落点预览。",
+          "evidence": "tests/test_behavior.py::DevelopedHeroReviewR03BehaviorTests；test_battle.py既有利娜面板/半破魔/多格伤害/骑乘锁定/击破奖励。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P2",
+          "planned_change": "新增对应确定性场景，保留已有正常成功边界。此轮仅静态检查，未运行用例。",
+          "status": "代码与用例已更新；未运行动态测试"
+        }
+      ],
+      "review_status": "2026-09-10完成战斗、AI、预览及测试代码逐项检查修改；静态检查通过，动态验证等待全部已开发武将完成后统一运行。",
+      "design_baseline": "docs/武将设计思想.json#undead_king_lina",
+      "baseline_locked_at": "2026-09-09",
+      "audit_evidence": "2026-09-09三份源规则设计基线先写入JSON与XLSX，随后逐个读战斗、AI、测试和前端相关代码；2026-09-10静态复核。无本轮动态验证结果。"
+    },
+    {
+      "code": "rock_god",
+      "name": "岩神",
+      "items": [
+        {
+          "layer": "战斗/能力与身体",
+          "requirement": "岩吸五属性、同次交换统一到期、盾按目标阻挡、最低属性仍计收益、完整连通增长与受阻恢复。",
+          "evidence": "next_five.py::RockAbsorbSkill/RockAbsorbStatStatus/RockAbsorbLinkStatus/RockAbsorbFootprintStatus。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "原减值在各目标自身开始提前过期、非魔可能降到0、部分目标被盾挡后直接截取列表可能断体；现按源清理交换，非魔最低1，声明区及增长格固定，从选格中逐步增长保持连通，受阻格略过；源死亡清除交换。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "战斗/炮击与天气",
+          "requirement": "岩石炮逐弹连锁、方向/发射格固定、每弹按当前碰撞决定攻(3+弹数)3×3敌我伤害；身体至少一格且连通。",
+          "evidence": "next_five.py::RockCannonSkill.queue_projectile/resolve_projectile；RockGodSandstormAura；core.py::queue_skill_effect_action。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "原一次预计算所有弹体落点，后续连锁变化无效；改为前弹完成后计算下弹碰撞。声明时验证身体和方向；保留边界爆炸、不破魔与友伤。局部沙尘按单位自身结束，临时放逐不永久丢失光环来源，同回合全局/局部只伤一次。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "AI/预览",
+          "requirement": "岩吸选择实际有效属性及合法增长，炮击命中、重复溅射、友伤和身体成本必须计分。",
+          "evidence": "ai.py::rock_absorb_payloads/rock_cannon_payloads/resource_effect_score；targeting.js::statCellSelection/bodyDirectionSelection。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "原岩吸使用增长格当伤害区、炮击使用发射身体当目标导致错误估值；现回滚执行真实效果，逐弹评估，不运行反应。增长改为连通扩展避免组合爆炸；炮击增加相邻双格候选，空炮负分，保留原跟进队列。现有前端属性/增长/身体方向选择协议沿用。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "测试",
+          "requirement": "部分加盾仍连通、属性最低值、源统一过期、后续炮弹读取反应后站位、全局局部天气不叠加与AI队列回滚。",
+          "evidence": "tests/test_behavior.py::DevelopedHeroReviewR03BehaviorTests；test_battle.py::rock_absorb/rock_cannon/same_named_sandstorm既有场景。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P2",
+          "planned_change": "新增边界场景，旧天气用例改为在受影响者自己的回合末断言。已有魔容量交换、隐身下保护、基础恢复受阻、炮线自挡、多弹连锁与龙息近身选格用例已读。未动态运行。",
+          "status": "代码与用例已更新；未运行动态测试"
+        }
+      ],
+      "review_status": "2026-09-10完成战斗、AI、预览及测试代码逐项检查修改；静态检查通过，动态验证等待全部已开发武将完成后统一运行。",
+      "design_baseline": "docs/武将设计思想.json#rock_god",
+      "baseline_locked_at": "2026-09-09",
+      "audit_evidence": "2026-09-09三份源规则设计基线先写入JSON与XLSX，随后逐个读战斗、AI、测试和前端相关代码；2026-09-10静态复核。无本轮动态验证结果。"
+    },
+    {
+      "code": "doomlight_dragon",
+      "name": "神龙。末日光",
+      "items": [
+        {
+          "layer": "战斗/末日光生命周期",
+          "requirement": "纯效果大招、反噬、四次目标自身减半、同名不刷新/首次来源保留、实际伤害吸收/超量生命/禁疗。",
+          "evidence": "next_five.py::DoomLightStatus/DoomLightSkill/DoomLightRetaliationTrait；apply_piercing_status_effect(refresh_existing=False)；core.py::DamageContext.actual_damage/on_target_action_declared。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "原重复施加重置时长和来源，回调可能重复破盾，吸收按理论伤害；现已有状态不刷新，普攻声明即反噬，零伤技能不触发伤害反噬，tick不递归。新增实际伤害量在伤害后回复前记录，仅回复有效首次来源且仍经过禁疗。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "战斗/技能边界",
+          "requirement": "石墙、神速、变硬、远程龙息及末日的明确n、先付血、严格小于当前血、固定原选区、边缘截断与友伤。",
+          "evidence": "next_five.py::DoomlightDragon/RemoteDragonBreathSkill/ApocalypseSkill；common.py通用墙/神速/变硬；core.py::use_skill。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "末日声明锁定n与原区，不接受传入resolved_n覆盖明确选择，付血后施法者移位不重算范围；龙息锁区并采用实际技能名日志。共用ensure_distance及吟游诗人支援预览改为全占格距离。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "AI/前端",
+          "requirement": "纯效果新感染收益、施法者禁疗导致吸收无效、末日生命成本/自伤友伤、显式n及安全余血。",
+          "evidence": "ai.py::resource_effect_score/reviewed_attack_synergy/skill_payloads_for_action；targeting.js::choicePatternSelection。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P1",
+          "planned_change": "原大招按普通即时伤害并重复奖励感染，末日忽略n生命费用；现探测实际效果和生命支付，拒绝重复感染、惩罚低血继续作战、允许实际终结正向边界；保留显式choice_code和截断选区。",
+          "status": "代码与用例已更新；未运行动态测试"
+        },
+        {
+          "layer": "测试/共享交互",
+          "requirement": "首次来源/不刷新/只破一盾、伤害后恢复不抹掉真实吸收、声明反噬、付血锁区与AI负/正向使用边界。",
+          "evidence": "tests/test_behavior.py::DevelopedHeroReviewR03BehaviorTests及R02回血反转用例；test_battle.py既有吸收超量与n=1/1.25严格边界。",
+          "verdict": "已检查并修正，待统一动态验证",
+          "severity": "P2",
+          "planned_change": "新增确定性场景及AI回滚断言；另按通用规则8.3修正R02回血反转仍受护盾等防御，并覆盖大型友军支援距离。未动态运行。",
+          "status": "代码与用例已更新；未运行动态测试"
+        }
+      ],
+      "review_status": "2026-09-10完成战斗、AI、预览及测试代码逐项检查修改；静态检查通过，动态验证等待全部已开发武将完成后统一运行。",
+      "design_baseline": "docs/武将设计思想.json#doomlight_dragon",
+      "baseline_locked_at": "2026-09-09",
+      "audit_evidence": "2026-09-09三份源规则设计基线先写入JSON与XLSX，随后逐个读战斗、AI、测试和前端相关代码；2026-09-10静态复核。无本轮动态验证结果。"
+    },
     {
       "code": "elite_soldier",
       "name": "精兵",
@@ -93,7 +342,7 @@
           "evidence": "first_five.py::Bard；common.py::DefendTwiceSkill/HealSkill/BaptismSkill/ChantSkill/StationaryRecoveryTrait；core.py::move_unit。",
           "verdict": "已检查并修正，待统一动态验证",
           "severity": "P1",
-          "planned_change": "补齐暗属性/灵体/恶魔回血反转；拒绝同源守*2重复施放；强制或连锁移动也取消原地回复而不消耗普通移动次数。",
+          "planned_change": "补齐暗属性/灵体/恶魔回血反转；拒绝同源守*2重复施放；强制或连锁移动也取消原地回复而不消耗普通移动次数。 2026-09-10源规则8.3交互补查：反转失血仍走护盾/魔免等伤害防御；大型目标支援的执行与预览按全占格距离。",
           "status": "代码与用例已更新；未运行动态测试"
         },
         {
