@@ -295,6 +295,7 @@ class ParalyzingGloveSkill(Skill):
             is_skill=True,
             is_hostile=True,
             ignore_shield=True,
+            damage_target=True,
         )
         if target_ctx.cancelled:
             battle.log(target_ctx.reason)
@@ -634,7 +635,7 @@ class JudgmentFireSkill(Skill):
         for unit in units:
             target_ctx = battle.validate_target(
                 actor, unit, action_name="审判日之火", is_skill=True, is_hostile=True,
-                ignore_magic_immunity=True, cannot_evade=True, ignore_targeting_restrictions=True,
+                ignore_magic_immunity=True, cannot_evade=True, ignore_targeting_restrictions=True, damage_target=True,
             )
             if target_ctx.cancelled:
                 battle.log(target_ctx.reason)

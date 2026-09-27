@@ -228,6 +228,14 @@ def next_decision(
     step: int,
 ) -> Optional[dict[str, Any]]:
     try:
+        damage_prompt = battle.pending_damage_choice
+        if damage_prompt is not None:
+            unit = battle.get_unit(damage_prompt["unit_id"])
+            return {
+                "reason": "ai_damage_choice", "phase": "damage", "actor": unit_ref(unit),
+                "payload": ai_policy.choose_damage_choice_action(battle),
+                "summary": f"{unit.name} chooses whether to prevent incoming damage",
+            }
         prompt = battle.current_respawn_prompt()
         if prompt is not None:
             unit = battle.get_unit(prompt.unit_id)
@@ -784,6 +792,13 @@ def record_candidate_gap(
 
 
 def build_fallback_decision(battle: Battle, summary: str) -> Optional[dict[str, Any]]:
+    if battle.pending_damage_choice is not None:
+        unit = battle.get_unit(battle.pending_damage_choice["unit_id"])
+        return {
+            "reason": "ai_damage_fallback", "phase": "damage", "actor": unit_ref(unit),
+            "payload": {"type": "damage_choice", "unit_id": unit.unit_id, "stat_name": "decline"},
+            "summary": summary,
+        }
     if battle.pending_chain is not None:
         current_unit_id = battle.pending_chain.current_unit_id()
         actor = None
@@ -928,6 +943,8 @@ def record_step_invariants(
 
 
 def current_phase(battle: Battle) -> str:
+    if battle.pending_damage_choice is not None:
+        return "damage"
     if battle.current_respawn_prompt() is not None:
         return "respawn"
     if battle.pending_chain is not None:
@@ -948,6 +965,10 @@ def battle_state_digest(battle: Battle) -> dict[str, Any]:
         "phase": current_phase(battle),
         "pending_chain": queued_action_ref(battle, queued) if queued is not None else None,
         "pending_respawn": prompt.to_public_dict() if prompt is not None else None,
+        "pending_damage_choice": (
+            {key: battle.pending_damage_choice[key] for key in ("unit_id", "action_name", "damage", "event_index", "stats")}
+            if battle.pending_damage_choice is not None else None
+        ),
         "winner": battle.winner,
     }
     return {"meta": meta, "units": units}

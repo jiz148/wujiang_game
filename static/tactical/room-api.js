@@ -11,7 +11,7 @@ import { clearResumableTutorial, refreshRecentMatches } from '../platform/home.j
 import { roomStateLabel, syncAiPreview } from '../tactical/battle-ui.js';
 import { clearActionSelection, clearStoredIdentity, loadStoredIdentity, resetRoomSession, saveStoredIdentity, syncSelectedUnitAfterStateChange } from '../tactical/session.js';
 import { actionNeedsTarget, controllerTypeLabel, currentPreview, currentRoomSeat, randomRoomRosterSize, roomSummaries, unitIsSelectableTarget } from '../tactical/targeting.js';
-import { maxVisualEventId, positionKey, syncBattleVfxState, tutorialState, visualEvents } from '../tactical/vfx.js';
+import { maxVisualEventId, positionKey, selectedAction, syncBattleVfxState, tutorialState, visualEvents, wrapCopiedActionPayload } from '../tactical/vfx.js';
 import { adoptBattleLaunchFromRoom, currentBattleLaunch, rememberBattleLaunch } from '../bridge/battle-launch.js';
 import { loadRecordedMatchEnds, syncStrategyCampaignFromRoomPayload } from '../bridge/campaign-battle.js';
 
@@ -1137,6 +1137,7 @@ export async function controlSimulation(action, speed = null) {
 }
 
 export async function performAction(payload) {
+  payload = wrapCopiedActionPayload(payload, selectedAction());
   const previousTutorial = tutorialState();
   try {
     const response = await fetchJson("/api/rooms/action", {
@@ -1300,7 +1301,13 @@ export function restartFromGameOver() {
 
 export function onActionClick(action) {
   if (!canInteract()) return;
+  if (action.kind === "damage_choice") {
+    performAction({ type: "damage_choice", unit_id: state.battle.pending_damage_choice.unit_id,
+      stat_name: action.stat_name });
+    return;
+  }
   state.sidebarExpanded = "command";
+  state.mimicChoice = null;
   if (isChainMode()) {
     if (action.code === "chain_skip") {
       performAction({ type: "chain_skip" });

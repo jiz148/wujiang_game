@@ -19,6 +19,7 @@ from wujiang.tactical.engine.core import (
     TargetContext,
     Trait,
 )
+from wujiang.tactical.engine.army import is_army_soldier
 from wujiang.tactical.heroes.base import AbstractHero
 from wujiang.tactical.heroes.common import (
     AttackCountTrait,
@@ -83,8 +84,13 @@ def apply_piercing_status_effect(
     ignore_magic_immunity: bool = False,
     ignore_targeting_restrictions: bool = False,
     refresh_existing: bool = True,
+    consume_shield: bool = True,
+    cannot_evade: bool = True,
 ) -> bool:
+    target = battle.effect_recipient(target)
     if not target.alive or target.position is None or target.banished:
+        return False
+    if target.direct_effects_blocked():
         return False
     if not refresh_existing and target.has_status(status.name):
         return False
@@ -97,7 +103,8 @@ def apply_piercing_status_effect(
         is_hostile=is_hostile,
         ignore_shield=True,
         ignore_magic_immunity=ignore_magic_immunity,
-        cannot_evade=True,
+        cannot_evade=cannot_evade,
+        resolve_defenses=False,
         ignore_targeting_restrictions=ignore_targeting_restrictions,
         tags=set(tags or set()),
     )
@@ -105,15 +112,22 @@ def apply_piercing_status_effect(
         if ctx.reason:
             battle.log_public_event(ctx.reason, source=source, target=target)
         return False
-    if is_hostile and target.total_shields() > 0:
+    if consume_shield and is_hostile and target.total_shields() > 0:
         target.consume_one_shield()
         battle.log_public_event(
             f"{target.name} 的 1 层护盾被【{action_name}】贯穿并打碎。",
             source=source,
             target=target,
         )
+    if is_hostile and target.dodge_charges > 0 and not ctx.cannot_evade:
+        target.dodge_charges -= 1
+        battle.log_public_event(f"{target.name} 闪避了【{action_name}】。", source=source, target=target)
+        return False
+    if is_skill and battle.destroy_clone_for_skill_effect(target, source=source, action_name=action_name):
+        return True
+    status.is_skill_effect = is_skill
     replace_status_by_name(battle, target, status)
-    return True
+    return status in target.statuses
 
 
 def remote_rectangle_patterns(battle: Battle, actor: HeroUnit, width: int, height: int) -> list[list[Position]]:
@@ -900,7 +914,7 @@ class CrazySandSkill(Skill):
                 )
             )
         if actor.alive and actor.position is not None:
-            if not battle.can_place_unit(actor, destination, ignore=actor, mover=actor):
+            if actor.cannot_move or not battle.can_place_unit(actor, destination, ignore=actor, mover=actor):
                 battle.log(f"{actor.name} 的狂沙落点已受阻，保留原位。")
                 return
             battle.move_unit(
@@ -1262,9 +1276,7 @@ class DragonBreathSkill(Skill):
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         cells = battle.payload_positions(payload, "declared_area_cells") if "declared_area_cells" in payload else self.chosen_cells(battle, actor, payload)
-        for unit in battle.units_at_cells(cells):
-            if unit.unit_id == actor.unit_id:
-                continue
+        for unit in battle.effect_units_at_cells(cells, ignore=actor):
             battle.resolve_damage(
                 DamageContext(
                     source=actor,
@@ -1285,8 +1297,8 @@ class DragonBreathSkill(Skill):
         cell_keys = {(cell["x"], cell["y"]) for cell in preview["cells"]}
         targets = [
             unit.unit_id
-            for unit in battle.all_units()
-            if unit.unit_id != actor.unit_id and any((cell.x, cell.y) in cell_keys for cell in battle.unit_cells(unit))
+            for unit in battle.effect_units_at_cells([Position(x, y) for x, y in cell_keys], ignore=actor)
+            if battle.unit_can_be_selected(unit, actor=actor)[0]
         ]
         preview.update({"target_unit_ids": targets, "secondary_cells": [], "requires_target": True})
         return preview
@@ -1295,7 +1307,7 @@ class DragonBreathSkill(Skill):
         return self.chosen_cells(battle, actor, payload)
 
     def get_target_units_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[HeroUnit]:
-        return [unit for unit in battle.units_at_cells(self.chosen_cells(battle, actor, payload)) if unit.unit_id != actor.unit_id]  # type: ignore[list-item]
+        return battle.effect_units_at_cells(self.chosen_cells(battle, actor, payload), ignore=actor)  # type: ignore[return-value]
 
 
 class RemoteDragonBreathSkill(DragonBreathSkill):
@@ -1517,7 +1529,7 @@ class ApocalypseSkill(Skill):
             raise ActionError("末日需要先选择范围。")
         n = self.selected_n(battle, actor, payload)
         payload["resolved_n"] = n
-        actor.current_hp = round(actor.current_hp - n, 4)
+        actor.take_damage_fraction(n)
         self.uses_this_turn += 1
         self.uses_this_battle += 1
 
@@ -2590,11 +2602,8 @@ def area_patterns_preview(
 ) -> dict[str, Any]:
     preview = pattern_selection_preview(patterns)
     cell_keys = {(cell["x"], cell["y"]) for cell in preview["cells"]}
-    targets = [
-        unit.unit_id
-        for unit in battle.all_units()
-        if any((cell.x, cell.y) in cell_keys for cell in battle.unit_cells(unit))
-    ]
+    targets = [unit.unit_id for unit in battle.effect_units_at_cells([Position(x, y) for x, y in cell_keys])
+               if battle.unit_can_be_selected(unit, actor=actor)[0]]
     preview.update({"target_unit_ids": targets, "secondary_cells": [], "requires_target": True})
     return preview
 
@@ -2725,8 +2734,7 @@ class JadeMachineGunSkill(DeclaredAreaSkillMixin, MachineGunSkill):
             action_name="机枪",
             cells=cells,
             attack_power=actor.stat("attack"),
-            tags={"skill", "attack", "machine_gun"},
-            enemy_only=True,
+            tags={"skill", "machine_gun"},
         )
         maybe_queue_jade_reactive_bonus(
             battle,
@@ -2751,6 +2759,16 @@ class MissileSkill(DeclaredAreaSkillMixin, WindowChargeSkill):
 
     def patterns(self, battle: Battle, actor: HeroUnit) -> list[list[Position]]:
         return remote_rectangle_patterns(battle, actor, 2, 2)
+
+    def on_owner_turn_start(self, battle: Battle) -> None:
+        Skill.on_owner_turn_start(self, battle)
+
+    def on_any_turn_end(self, battle: Battle, ended_player_id: int) -> None:
+        Skill.on_any_turn_end(self, battle, ended_player_id)
+        if self.owner is not None and battle.unit_belongs_to_current_turn(self.owner) and self.window_is_active():
+            self.window_remaining_turns = max(0, self.window_remaining_turns - 1)
+            if self.window_remaining_turns == 0:
+                self.window_remaining_uses = 0
 
     def chosen_cells(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
         return super().chosen_cells(battle, actor, payload)
@@ -2781,7 +2799,7 @@ class MissileSkill(DeclaredAreaSkillMixin, WindowChargeSkill):
         return self.chosen_cells(battle, actor, payload)
 
     def get_target_units_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[HeroUnit]:
-        return battle.units_at_cells(self.chosen_cells(battle, actor, payload))  # type: ignore[return-value]
+        return battle.effect_units_at_cells(self.chosen_cells(battle, actor, payload))  # type: ignore[return-value]
 
 
 class IonShieldSkill(MultiTargetChainShieldSkill):
@@ -2895,6 +2913,7 @@ class DelayedCooldownMultiTargetWallSkill(MultiTargetChainShieldSkill):
         actor: HeroUnit,
         payload: dict[str, Any] | None = None,
     ) -> None:
+        self.sync_turn_scope(battle)
         actor.spend_mana(self.mana_cost_for_payload(battle, actor, payload))
         self.uses_this_turn += 1
         self.uses_this_battle += 1
@@ -3257,10 +3276,10 @@ class StandardCloneSummon(AbstractHero):
         self.raw_skill_text = source.raw_skill_text
         self.raw_trait_text = source.raw_trait_text
         self.base_stats = Stats(
-            attack=int(source.stat("attack")),
-            defense=int(source.stat("defense")),
-            speed=int(source.stat("speed")),
-            attack_range=int(source.targeting_range()),
+            attack=source.stat("attack"),
+            defense=source.stat("defense"),
+            speed=source.stat("speed"),
+            attack_range=source.targeting_range(),
             mana=source.max_mana(),
         )
         self.base_footprint_offsets = list(source.base_footprint_offsets)
@@ -3338,10 +3357,16 @@ class SplitSkill(Skill):
             raise ActionError(f"需要选择 {self.clone_count} 个合法的分身位置。")
         return selected
 
+    def queued_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
+        return {"declared_clone_cells": positions_to_dict(self.selected_destinations(battle, actor, payload))}
+
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         if actor.position is None:
             raise ActionError("单位不在战场上。")
-        destinations = self.selected_destinations(battle, actor, payload)
+        destinations = battle.payload_positions(payload, "declared_clone_cells") or self.selected_destinations(battle, actor, payload)
+        if any(not battle.can_place_unit(self._clone_probe(actor), cell) for cell in destinations):
+            battle.log(f"{actor.name} 的分身落点被占用，未能召唤。")
+            return
         original_position = actor.position
         clones: list[StandardCloneSummon] = []
         for destination in destinations:
@@ -3423,15 +3448,19 @@ class MagneticWaveSkill(DeclaredAreaSkillMixin, ManaPointCostSkill):
                     tags={"skill", "magnetic_wave"},
                 )
             )
-            if (
-                unit.alive
-                and damage_followup_effect_applies(damage_ctx)
-                and unit.player_id == battle.active_player
-                and battle.unit_belongs_to_current_turn(unit)
-                and unit.turn_ready
-            ):
-                unit.turn_ready = False
-                battle.log(f"{unit.name} 受到磁力波影响，本回合不能行动。")
+            self.apply_followup_effect(battle, actor, unit, damage_ctx)
+
+    def apply_followup_effect(self, battle: Battle, actor: HeroUnit, unit: Unit, damage_ctx: DamageContext) -> None:
+        if not (unit.alive and damage_followup_effect_applies(damage_ctx) and battle.unit_belongs_to_current_turn(unit) and unit.turn_ready):
+            return
+        if damage_ctx.cancelled and damage_ctx.preserve_followup_effects:
+            effect = battle.validate_target(actor, unit, action_name=self.name, is_skill=True,
+                                            is_hostile=unit.player_id != actor.player_id,
+                                            ignore_targeting_restrictions=True, tags={"skill", self.code})
+            if effect.cancelled:
+                return
+        unit.turn_ready = False
+        battle.log(f"{unit.name} 受到磁力波影响，本回合不能行动。")
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
         return area_patterns_preview(battle, actor, self.patterns(battle, actor))
@@ -3596,6 +3625,11 @@ class MagicShieldSkill(Skill):
             return False, "只能对敌方动作连锁。"
         if queued_action.action_type not in {"skill", "skill_effect"}:
             return False, "魔盾只能对敌方技能连锁。"
+        source = battle.units.get(queued_action.actor_id)
+        code = queued_action.payload.get("skill_code")
+        skill = next((item for item in source.skills if item.code == code), None) if source else None
+        if skill is None or skill.timing != "active":
+            return False, "魔盾只能对敌方主动技能连锁。"
         if battle.reaction_proxy_target(actor, queued_action) is None:
             return False, "当前动作没有影响到自己。"
         return True, ""
@@ -3627,6 +3661,22 @@ class BloodGuardSkill(Skill):
             max_uses_per_turn=1,
             target_mode="ally",
         )
+
+    def can_use(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok or not payload:
+            return ok, reason
+        try:
+            target = payload_target_unit(battle, payload)
+            ensure_ally(actor, target)
+            ensure_distance(actor, target, actor.targeting_range())
+            if target.is_summon or target.is_clone:
+                return False, "只能对己方武将使用。"
+            if any(status.name == "守*2" and getattr(status, "source_unit_id", None) == actor.unit_id for status in target.statuses):
+                return False, "来自同一武将的效果不能叠加。"
+        except (ActionError, KeyError, TypeError, ValueError) as exc:
+            return False, str(exc)
+        return True, ""
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         target = payload_target_unit(battle, payload)
@@ -3666,6 +3716,7 @@ class BloodGuardSkill(Skill):
             and not unit.is_clone
             and unit.position is not None
             and actor.position is not None
+            and not any(status.name == "守*2" and getattr(status, "source_unit_id", None) == actor.unit_id for status in unit.statuses)
             and battle.distance_between_units(actor, unit) <= actor.targeting_range()
         ]
         return {"cells": positions_to_dict([unit.position for unit in targets if unit.position]), "target_unit_ids": [unit.unit_id for unit in targets], "secondary_cells": [], "requires_target": True}
@@ -3693,6 +3744,22 @@ class BloodArtSkill(Skill):
             target_mode="ally",
         )
 
+    def can_use(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok or not payload:
+            return ok, reason
+        try:
+            target = payload_target_unit(battle, payload)
+            ensure_ally(actor, target)
+            ensure_distance(actor, target, actor.targeting_range())
+            if target.is_summon or target.is_clone:
+                return False, "只能对己方武将使用。"
+            if any(status.name == "噬血术" and getattr(status, "source_unit_id", None) == actor.unit_id for status in target.statuses):
+                return False, "来自同一武将的效果不能叠加。"
+        except (ActionError, KeyError, TypeError, ValueError) as exc:
+            return False, str(exc)
+        return True, ""
+
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         target = payload_target_unit(battle, payload)
         ensure_ally(actor, target)
@@ -3719,6 +3786,7 @@ class BloodArtSkill(Skill):
             and not unit.is_clone
             and unit.position is not None
             and actor.position is not None
+            and not any(status.name == "噬血术" and getattr(status, "source_unit_id", None) == actor.unit_id for status in unit.statuses)
             and battle.distance_between_units(actor, unit) <= actor.targeting_range()
         ]
         return {"cells": positions_to_dict([unit.position for unit in targets if unit.position]), "target_unit_ids": [unit.unit_id for unit in targets], "secondary_cells": [], "requires_target": True}
@@ -3743,6 +3811,18 @@ class BloodDanceSkill(Skill):
             max_uses_per_turn=1,
             target_mode="ally",
         )
+
+    def can_use(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok or not payload:
+            return ok, reason
+        try:
+            target = payload_target_unit(battle, payload)
+            ensure_ally(actor, target)
+            ensure_distance(actor, target, actor.targeting_range())
+        except (ActionError, KeyError, TypeError, ValueError) as exc:
+            return False, str(exc)
+        return True, ""
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         target = payload_target_unit(battle, payload)
@@ -3775,11 +3855,32 @@ class SacrificeRitualSkill(ManaPointCostSkill):
             target_mode="cell",
         )
 
+    def revival_controller(self, battle: Battle, unit: HeroUnit) -> HeroUnit | None:
+        original = battle.units.get(unit.mount_owner_id or unit.summoner_id or "")
+        if original is not None and original.alive and not original.banished and original.player_id == unit.player_id:
+            return original
+        candidates = [hero for hero in battle.hero_units(unit.player_id) if hero.alive and not hero.banished]
+        order = {unit_id: i for i, unit_id in enumerate(battle.turn_order_unit_ids)}
+        return min(candidates, key=lambda hero: (order.get(hero.unit_id, len(order)), hero.unit_id), default=None)
+
+    def can_use(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok or not payload:
+            return ok, reason
+        try:
+            target = self.candidate_by_payload(battle, payload)
+            if payload_position(payload) not in self.legal_destinations(battle, actor, target):
+                return False, "该位置不能作为献祭仪式的召唤落点。"
+        except (ActionError, KeyError, TypeError, ValueError) as exc:
+            return False, str(exc)
+        return True, ""
+
     def destroyed_candidates(self, battle: Battle) -> list[HeroUnit]:
         return [
             unit
             for unit in battle.destroyed_units
             if unit.unit_id not in battle.units and not unit.alive
+            and (not unit.is_summon or self.revival_controller(battle, unit) is not None)
         ]  # type: ignore[list-item]
 
     def candidate_by_payload(self, battle: Battle, payload: dict[str, Any]) -> HeroUnit:
@@ -3815,6 +3916,8 @@ class SacrificeRitualSkill(ManaPointCostSkill):
         target.max_health = 0.25
         target.current_hp = 0.25
         target.current_mana = target.max_mana()
+        # turn_ready prevents entry actions; the next owner refresh may act normally.
+        target.can_act_on_entry_turn = True
         target.turn_ready = False
         target.move_used = False
         target.normal_move_actions_used = 0
@@ -3824,7 +3927,13 @@ class SacrificeRitualSkill(ManaPointCostSkill):
         target.moved_this_turn = False
         target.actions_taken_this_turn = []
         target.clear_end_of_turn_shields()
-        battle.add_unit(target, destination)
+        if target.is_summon:
+            controller = self.revival_controller(battle, target)
+            if controller is None:
+                raise ActionError("召回单位没有同阵营的维持武将。")
+            target.summoner_id = controller.unit_id
+            target.mount_owner_id = controller.unit_id if target.mount_owner_id else None
+        battle.add_unit(target, destination, trigger_enter_effects=False)
         battle.destroyed_units = [unit for unit in battle.destroyed_units if unit.unit_id != target.unit_id]
         battle.notify_destroyed_hero_count_changed()
         battle.log(f"{actor.name} 通过献祭仪式召回了 {target.name}。")
@@ -3876,13 +3985,13 @@ class BloodManaPointTrait(Trait):
                 if isinstance(status, BloodDanceLockStatus) and status.source_unit_id == owner.unit_id:
                     unit.remove_status(status, battle)
 
-    def on_after_damage(self, battle: Battle, ctx: DamageContext) -> None:
+    def on_battle_damage(self, battle: Battle, ctx: DamageContext) -> None:
         owner = self.owner
         if owner is None or not owner.alive or owner.position is None:
             return
         if ctx.source is None or ctx.source.unit_id == ctx.target.unit_id:
             return
-        if ctx.cancelled or ctx.raw_damage is None or ctx.raw_damage < 0.25:
+        if ctx.cancelled or ctx.actual_damage < 0.25:
             return
         if owner.mana_points >= 8:
             return
@@ -3901,7 +4010,7 @@ class BloodSkillDamageGuardTrait(Trait):
         owner = self.owner
         if owner is None or ctx.target.unit_id != owner.unit_id:
             return
-        if not ctx.is_skill or ctx.from_field_effect or owner.mana_points < 8:
+        if ctx.cancelled or not ctx.is_skill or owner.mana_points < 8 or ctx.raw_damage == 0:
             return
         ctx.cancelled = True
         ctx.preserve_followup_effects = True
@@ -3975,7 +4084,10 @@ class ChainPullSkill(Skill):
         return patterns
 
     def chosen_line(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
-        return match_payload_pattern(payload, self.patterns(battle, actor))
+        return battle.payload_positions(payload, "declared_chain_cells") or match_payload_pattern(payload, self.patterns(battle, actor))
+
+    def queued_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
+        return {"declared_chain_cells": positions_to_dict(self.chosen_line(battle, actor, payload))}
 
     def first_hit(self, battle: Battle, actor: HeroUnit, cells: list[Position]) -> HeroUnit | None:
         for cell in cells:
@@ -3990,7 +4102,7 @@ class ChainPullSkill(Skill):
         if target is None:
             battle.log(f"{actor.name} 的链条没有击中单位。")
             return
-        target_ctx = battle.validate_target(actor, target, action_name="链条", is_skill=True, is_hostile=target.player_id != actor.player_id)
+        target_ctx = battle.validate_target(actor, target, action_name="链条", is_skill=True, is_hostile=target.player_id != actor.player_id, ignore_targeting_restrictions=True)
         if target_ctx.cancelled:
             battle.log(target_ctx.reason)
             return
@@ -4024,7 +4136,9 @@ class ChainPullSkill(Skill):
         return preview
 
     def get_target_cells_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
-        return self.chosen_line(battle, actor, payload)
+        cells = self.chosen_line(battle, actor, payload)
+        target = self.first_hit(battle, actor, cells)
+        return [cell for cell in cells if target is not None and cell in battle.unit_cells(target)]
 
     def get_target_units_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[HeroUnit]:
         target = self.first_hit(battle, actor, self.chosen_line(battle, actor, payload))
@@ -4041,45 +4155,29 @@ class WhirlwindAttackSkill(Skill):
             target_mode="self",
         )
 
+    def area_cells(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
+        if "declared_area_cells" in payload:
+            return battle.payload_positions(payload, "declared_area_cells")
+        body = battle.unit_cells(actor)
+        return [cell for cell in square_around_cells(battle, body, radius=1) if cell not in body]
+
+    def queued_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
+        return {"declared_area_cells": positions_to_dict(self.area_cells(battle, actor, payload))}
+
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        targets = [
-            unit
-            for unit in battle.all_units()
-            if unit.unit_id != actor.unit_id
-            and unit.alive
-            and unit.position is not None
-            and not unit.banished
-            and battle.distance_between_units(actor, unit) <= 1
-        ]
-        for unit in targets:
-            battle.resolve_attack_damage(actor, unit, action_name="回天", tags={"whirlwind"})
+        for unit in self.get_target_units_for_payload(battle, actor, payload):
+            if actor.alive and unit.alive and not unit.banished:
+                battle.resolve_attack_damage(actor, unit, action_name="回天", tags={"whirlwind"}, payload={"area_attack": True})
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
-        targets = [
-            unit
-            for unit in battle.all_units()
-            if unit.unit_id != actor.unit_id
-            and unit.position is not None
-            and battle.distance_between_units(actor, unit) <= 1
-        ]
-        cells = dedupe_positions([cell for unit in targets for cell in battle.unit_cells(unit)])
-        return {
-            "cells": positions_to_dict(cells),
-            "target_unit_ids": [unit.unit_id for unit in targets],
-            "secondary_cells": positions_to_dict(battle.unit_cells(actor)),
-            "requires_target": False,
-        }
+        cells = self.area_cells(battle, actor, {})
+        return {"cells": positions_to_dict(cells), "target_unit_ids": [unit.unit_id for unit in self.get_target_units_for_payload(battle, actor, {})], "secondary_cells": positions_to_dict(battle.unit_cells(actor)), "requires_target": False}
+
+    def get_target_cells_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
+        return self.area_cells(battle, actor, payload)
 
     def get_target_units_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[HeroUnit]:
-        return [
-            unit
-            for unit in battle.all_units()
-            if unit.unit_id != actor.unit_id
-            and unit.alive
-            and unit.position is not None
-            and not unit.banished
-            and battle.distance_between_units(actor, unit) <= 1
-        ]  # type: ignore[list-item]
+        return [unit for unit in battle.effect_units_at_cells(self.area_cells(battle, actor, payload)) if unit.unit_id != actor.unit_id]
 
 
 class RedHeatStatus(StatModifierStatus):
@@ -4092,9 +4190,7 @@ class RedHeatStatus(StatModifierStatus):
         damage = round(self.owner.current_hp / 2, 4)
         if damage <= 0:
             return
-        self.owner.take_damage_fraction(damage)
-        battle.log(f"{self.owner.name} 因红热失去了一半当前生命。")
-        battle.cleanup_dead_units()
+        battle.resolve_damage(DamageContext(source=self.owner, target=self.owner, attack_power=0, raw_damage=damage, is_skill=True, action_name="红热", tags={"red_heat", "special_health_loss"}))
 
 
 class RedHeatSkill(Skill):
@@ -4139,27 +4235,25 @@ class EssenceAttackStatus(StatusEffect):
         self.charges = charges
 
     def modify_attack_actions_per_turn(self, value: int) -> int:
-        return value + self.charges
+        return value + 2
 
-    def on_targeted(self, battle: Battle, ctx: TargetContext) -> None:
-        if self.owner is None or ctx.actor.unit_id != self.owner.unit_id or ctx.is_skill or "attack" not in ctx.tags:
-            return
-        if self.charges > 0:
-            ctx.ignore_shield = True
+    def basic_attack_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.owner is not actor or self.charges <= 0 or payload.get("area_attack") or payload.get("reaction_attack"):
+            return {}
+        return {"ignore_shield": True, "essence_attack": True}
 
-    def on_before_damage(self, battle: Battle, ctx: DamageContext) -> None:
-        if self.owner is None or ctx.source is None or ctx.source.unit_id != self.owner.unit_id:
-            return
-        if ctx.is_skill or "attack" not in ctx.tags or self.charges <= 0:
-            return
-        ctx.ignore_shield = True
+    def on_owner_action_declared(self, battle: Battle, action_type: str, payload: dict[str, Any]) -> None:
+        if action_type == "attack" and self.charges > 0:
+            self.charges -= 1
+            payload["ignore_shield"] = True
+            payload["essence_attack"] = True
+            payload["essence_declared"] = True
+            self.description = f"剩余 {self.charges} 次破魔攻击；本回合攻击上限仍额外 +2。"
 
-    def on_after_damage(self, battle: Battle, ctx: DamageContext) -> None:
-        if self.owner is None or ctx.source is None or ctx.source.unit_id != self.owner.unit_id:
-            return
-        if ctx.is_skill or "attack" not in ctx.tags or self.charges <= 0:
-            return
-        self.charges -= 1
+    def on_basic_attack_finished(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any], damage_contexts: list[DamageContext], missed: bool) -> None:
+        # Direct engine callers have no queued declaration; consume once at finish.
+        if payload.get("essence_attack") and not payload.get("essence_declared") and self.charges > 0:
+            self.charges -= 1
 
     def on_owner_turn_end(self, battle: Battle) -> None:
         if self.owner is not None and self.charges > 0:
@@ -4193,31 +4287,43 @@ class EssenceSkill(Skill):
 
 class ForesightRewardStatus(StatusEffect):
     def __init__(self) -> None:
-        super().__init__("见切奖励", "攻次数 +1，速 +1。", duration=1, tick_scope="owner_turn_end")
+        super().__init__("见切奖励", "下个自己的回合攻击次数 +1、速 +1。", duration=1, tick_scope="owner_turn_end")
+        self.active = False
+
+    def on_owner_turn_start(self, battle: Battle) -> None:
+        self.active = True
+
+    def on_owner_turn_end(self, battle: Battle) -> None:
+        if self.active:
+            super().on_owner_turn_end(battle)
 
     def modify_attack_actions_per_turn(self, value: int) -> int:
-        return value + 1
+        return value + int(self.active)
 
     def modify_stat(self, stat_name: str, value: float) -> float:
-        if stat_name == "speed":
-            return value + 1
-        return value
+        return value + 1 if self.active and stat_name == "speed" else value
 
 
 class ForesightBlockStatus(StatusEffect):
-    def __init__(self) -> None:
-        super().__init__("见切", "挡住下一次普攻。")
+    def __init__(self, queued_action: QueuedAction) -> None:
+        super().__init__("见切", "挡住本次声明的普攻。")
+        self.queued_action = queued_action
+        self.expire_with_chain = True
 
     def on_before_damage(self, battle: Battle, ctx: DamageContext) -> None:
         owner = self.owner
-        if owner is None or ctx.target.unit_id != owner.unit_id:
+        if owner is None or ctx.target.unit_id != owner.unit_id or ctx.cancelled:
             return
-        if ctx.is_skill or "attack" not in ctx.tags:
+        current = battle.resolving_action
+        declaration = self.queued_action.payload.get("declaration_id")
+        same_action = current is self.queued_action or (
+            current is not None and declaration is not None
+            and current.payload.get("declaration_id") == declaration
+        )
+        if ctx.is_skill or "attack" not in ctx.tags or not same_action:
             return
         ctx.cancelled = True
         ctx.reason = f"{owner.name} 用见切挡住了普攻。"
-        owner.remove_status(self, battle)
-        replace_status_by_name(battle, owner, ForesightRewardStatus())
         battle.emit_defense_visual_event(source=ctx.source, target=owner, action_name=ctx.action_name, defense_reason="block")
 
 
@@ -4247,7 +4353,8 @@ class ForesightSkill(Skill):
         return True, ""
 
     def react(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any], queued_action: QueuedAction) -> None:
-        replace_status_by_name(battle, actor, ForesightBlockStatus())
+        actor.add_status(ForesightBlockStatus(queued_action), source=actor)
+        actor.add_status(ForesightRewardStatus(), source=actor)
         battle.log(f"{actor.name} 准备用见切挡住这次普攻。")
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
@@ -4263,6 +4370,8 @@ class ForesightSkill(Skill):
 
 
 class StillnessStatus(StatusEffect):
+    provided_flags = frozenset({"cannot_move", "cannot_attack", "cannot_use_skills", "magic_immunity"})
+
     def __init__(self) -> None:
         super().__init__("定", "无法行动，守 +2，魔免，自然回血。", duration=4, tick_scope="owner_turn_start")
 
@@ -4288,10 +4397,21 @@ class StillnessStatus(StatusEffect):
         owner = self.owner
         if owner is None:
             return
-        owner.cannot_move = any(getattr(status, "flag_name", "") == "cannot_move" for status in owner.statuses)
-        owner.cannot_attack = owner.is_clone or any(getattr(status, "flag_name", "") == "cannot_attack" for status in owner.statuses)
-        owner.cannot_use_skills = owner.is_clone or any(getattr(status, "flag_name", "") == "cannot_use_skills" for status in owner.statuses)
-        owner.magic_immunity = any(isinstance(status, MagicImmunityStatus) or isinstance(status, StillnessStatus) for status in owner.statuses)
+        for flag in ("cannot_move", "cannot_attack", "cannot_use_skills"):
+            remaining = any(
+                flag in getattr(component, "provided_flags", ())
+                or (getattr(component, "flag_name", "") in {flag, "cannot_act"}
+                    and getattr(component, "value", True) and getattr(component, "flag_active", True))
+                for component in owner.iter_components()
+            )
+            setattr(owner, flag, (owner.is_clone and flag != "cannot_move") or remaining)
+        owner.magic_immunity = any(
+            isinstance(component, MagicImmunityStatus)
+            or "magic_immunity" in getattr(component, "provided_flags", ())
+            or (getattr(component, "flag_name", "") == "magic_immunity"
+                and getattr(component, "value", True) and getattr(component, "flag_active", True))
+            for component in owner.iter_components()
+        )
 
 
 class StillnessSkill(Skill):
@@ -4328,18 +4448,21 @@ class SplitMovementTrait(Trait):
     def allows_split_normal_movement(self, battle: Battle, actor: HeroUnit) -> bool:
         return self.owner is not None and actor.unit_id == self.owner.unit_id
 
-    def on_owner_turn_start(self, battle: Battle) -> None:
-        owner = self.owner
-        if owner is None:
-            return
-        for status in list(owner.statuses):
-            if getattr(status, "flag_name", "") in {"cannot_move", "cannot_normal_move"} and status.name != "定":
-                owner.remove_status(status, battle)
 
 
 class AntiSpeedReductionTrait(Trait):
     def __init__(self) -> None:
-        super().__init__("不受敌方减速", "不会受到来自对方单位的速度下降。")
+        super().__init__("不受敌方减速", "不会受到来自对方单位的速度下降或无法位移。")
+
+    def enemy_sourced(self, status: StatusEffect) -> bool:
+        player_id = getattr(status, "source_player_id", None)
+        return self.owner is not None and player_id is not None and player_id != self.owner.player_id
+
+    def accepts_status(self, status: StatusEffect) -> bool:
+        return not (self.enemy_sourced(status) and getattr(status, "flag_name", "") in {"cannot_move", "cannot_normal_move"} and getattr(status, "value", True))
+
+    def modify_received_stat_change(self, status: StatusEffect, stat_name: str, before: float, after: float) -> float:
+        return before if stat_name == "speed" and after < before and self.enemy_sourced(status) else after
 
 
 class AttackLifeStealTrait(Trait):
@@ -4350,7 +4473,7 @@ class AttackLifeStealTrait(Trait):
         owner = self.owner
         if owner is None or ctx.source is None or ctx.source.unit_id != owner.unit_id:
             return
-        if ctx.is_skill or "attack" not in ctx.tags or ctx.cancelled or (ctx.raw_damage or 0) <= 0:
+        if ctx.is_skill or "attack" not in ctx.tags or ctx.cancelled or ctx.actual_damage <= 0:
             return
         battle.heal(HealContext(source=owner, target=owner, amount=0.25, action_name="攻击吸血"))
 
@@ -4437,7 +4560,7 @@ class ChanterCardFieldEffect(BattleFieldEffect):
 
     def owner_unit(self, battle: Battle) -> HeroUnit | None:
         owner = battle.units.get(self.owner_unit_id)
-        if owner is None or not isinstance(owner, HeroUnit) or not owner.alive:
+        if owner is None or not isinstance(owner, HeroUnit) or not owner.alive or owner.banished or owner.position is None:
             return None
         return owner
 
@@ -4457,7 +4580,7 @@ class ChanterCardFieldEffect(BattleFieldEffect):
         return data
 
     def blocks_skill_use(self, battle: Battle, actor: HeroUnit, skill: Skill) -> tuple[bool, str]:
-        if self.card_type != "paralysis" or actor.player_id == self.owner_player_id:
+        if self.owner_unit(battle) is None or actor.magic_immunity or self.card_type != "paralysis" or actor.player_id == self.owner_player_id:
             return False, ""
         if actor.position is None or actor.banished or not actor.alive:
             return False, ""
@@ -4473,10 +4596,11 @@ class ChanterCardFieldEffect(BattleFieldEffect):
         if self.card_type not in {"poison", "drain"}:
             return
         area = self.affected_cells(battle)
-        for unit in list(battle.current_turn_bundle_units(include_banished=False)):
+        recipients = {battle.effect_recipient(unit).unit_id: battle.effect_recipient(unit) for unit in battle.current_turn_bundle_units(include_banished=False)}
+        for unit in list(recipients.values()):
             if unit.player_id == self.owner_player_id or unit.position is None or not unit.alive:
                 continue
-            if not unit_in_cells(battle, unit, area):
+            if unit.magic_immunity or not unit_in_cells(battle, unit, area):
                 continue
             target = unit  # type: ignore[assignment]
             if self.card_type == "poison":
@@ -4493,6 +4617,8 @@ class ChanterCardFieldEffect(BattleFieldEffect):
                     )
                 )
                 continue
+            if is_mana_drain_immune(target) or target.current_mana <= 0:
+                continue
             target_ctx = battle.validate_target(
                 owner,
                 target,
@@ -4501,6 +4627,7 @@ class ChanterCardFieldEffect(BattleFieldEffect):
                 is_hostile=True,
                 ignore_shield=True,
                 from_field_effect=True,
+                ignore_targeting_restrictions=True,
                 tags={"chanter_card", "drain_card"},
             )
             if target_ctx.cancelled:
@@ -4530,6 +4657,11 @@ class ChanterCardSkill(Skill):
             return ok, reason
         if actor.has_status("形态转换"):
             return False, "形态转换后不能使用三种牌。"
+        if payload:
+            try:
+                self.selected_center(battle, actor, payload)
+            except (ActionError, KeyError, TypeError, ValueError) as exc:
+                return False, str(exc)
         return True, ""
 
     def selectable_centers(self, battle: Battle, actor: HeroUnit) -> list[Position]:
@@ -4544,6 +4676,9 @@ class ChanterCardSkill(Skill):
         cells.sort(key=lambda cell: (cell.y, cell.x))
         return cells
 
+    def queued_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
+        return {"declared_card_center": positions_to_dict([self.selected_center(battle, actor, payload)])}
+
     def selected_center(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> Position:
         center = payload_position(payload)
         if center not in self.selectable_centers(battle, actor):
@@ -4551,7 +4686,7 @@ class ChanterCardSkill(Skill):
         return center
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        center = self.selected_center(battle, actor, payload)
+        center = battle.payload_positions(payload, "declared_card_center")[0] if "declared_card_center" in payload else self.selected_center(battle, actor, payload)
         battle.add_field_effect(ChanterCardFieldEffect(actor.unit_id, actor.player_id, self.card_type, center))
         battle.log(f"{actor.name} 在 ({center.x}, {center.y}) 放置了{self.name}。")
 
@@ -4590,9 +4725,11 @@ class CardTranspositionSkill(Skill):
         ]
 
     def selectable_centers(self, battle: Battle, actor: HeroUnit) -> list[Position]:
-        centers = [card.center for card in self.own_cards(battle, actor)]
-        if actor.position is not None:
-            centers = [center for center in centers if center != actor.position]
+        if actor.position is None or actor.cannot_move:
+            return []
+        centers = dedupe_positions([card.center for card in self.own_cards(battle, actor)
+                                    if card.center not in battle.unit_cells(actor)
+                                    and battle.can_place_unit(actor, card.center, ignore=actor, mover=actor)])
         centers.sort(key=lambda cell: (cell.y, cell.x))
         return centers
 
@@ -4634,10 +4771,8 @@ class CardTranspositionSkill(Skill):
             return False, str(exc)
         if actor.position is None:
             return False, "单位不在战场上。"
-        if card.center == actor.position:
-            return False, "ç›®æ ‡ä½ç½®ä¸èƒ½ä¸Žå½“å‰ä½ç½®ç›¸åŒã€‚"
-        if not battle.can_place_unit(actor, card.center, ignore=actor, mover=actor):
-            return False, "牌所在格已被占用，无法交换。"
+        if card.center not in self.selectable_centers(battle, actor):
+            return False, "当前不能位移，或该牌不是合法交换落点。"
         return True, ""
 
     def react(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any], queued_action: QueuedAction) -> None:
@@ -4702,9 +4837,21 @@ class MagicClawSkill(Skill):
                 return card
         raise ActionError("魔爪需要选择自己放置的一张牌。")
 
+    def can_use(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok or not payload:
+            return ok, reason
+        try:
+            self.selected_card(battle, actor, payload)
+        except (ActionError, KeyError, TypeError, ValueError) as exc:
+            return False, str(exc)
+        return True, ""
+
+    def queued_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
+        return {"declared_area_cells": positions_to_dict(self.selected_card(battle, actor, payload).claw_cells(battle))}
+
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        card = self.selected_card(battle, actor, payload)
-        cells = card.claw_cells(battle)
+        cells = self.get_target_cells_for_payload(battle, actor, payload)
         for target in battle.effect_units_at_cells(cells):
             if target.player_id == actor.player_id or target.position is None or not target.alive:
                 continue
@@ -4715,16 +4862,21 @@ class MagicClawSkill(Skill):
                 is_skill=True,
                 is_hostile=True,
                 ignore_shield=True,
+                ignore_targeting_restrictions=True,
                 tags={"magic_claw"},
             )
             if target_ctx.cancelled:
                 battle.log(target_ctx.reason)
                 continue
+            lock = MagicClawLockStatus(actor.unit_id)
+            lock.source_player_id = actor.player_id
+            if any(not trait.accepts_status(lock) for trait in target.traits):
+                continue
             consume_pierced_shield_for_effect(battle, actor, target, "魔爪")
             for status in list(target.statuses):
                 if isinstance(status, MagicClawLockStatus) and status.source_unit_id == actor.unit_id:
                     target.remove_status(status, battle)
-            target.add_status(MagicClawLockStatus(actor.unit_id))
+            target.add_status(lock, source=actor)
             battle.log(f"{target.name} 被魔爪束缚，暂时不能位移。")
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
@@ -4739,7 +4891,7 @@ class MagicClawSkill(Skill):
         }
 
     def get_target_cells_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
-        return self.selected_card(battle, actor, payload).claw_cells(battle)
+        return battle.payload_positions(payload, "declared_area_cells") if "declared_area_cells" in payload else self.selected_card(battle, actor, payload).claw_cells(battle)
 
     def ignores_shield_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> bool:
         return True
@@ -4797,6 +4949,9 @@ class ChanterCardCleanupTrait(Trait):
                 if isinstance(status, MagicClawLockStatus) and status.source_unit_id == owner.unit_id:
                     unit.remove_status(status, battle)
 
+    def on_owner_banished(self, battle: Battle) -> None:
+        self.on_owner_removed(battle)
+
     def on_owner_removed(self, battle: Battle) -> None:
         owner = self.owner
         if owner is None:
@@ -4818,7 +4973,7 @@ class Chanter(AbstractHero):
     race = "精灵"
     level = 3
     base_stats = Stats(attack=1, defense=2, speed=3, attack_range=4, mana=5)
-    raw_skill_text = "【1麻痹牌(被击中格子及周围3*3对方单位不能使用技能）【1 毒牌（被击中格子及周围3*3对方单位每回合结束时受到2的伤害）【1吸魔牌（被击中格子及周围3*3对方单位每回合结束时被此单位吸魔）【1 光墙 【0.5移形换位（被动技能；一回合2次；与场上的自己放置的“麻痹牌”，“毒牌”或者“吸魔牌”交换位置）【1.5魔爪（一回合最多使用一次；选择一个自己放置的“麻痹牌”，“毒牌”或者“吸魔牌”，那周围3*3所有的对方单位受到以下破魔效果：直到下个回合结束时不能移动或使用位移） ￥形态转换（攻4守5速4范1，不能使用“麻痹牌”，“毒牌”，“吸魔牌”）"
+    raw_skill_text = "【1麻痹牌(被击中格子及周围3*3对方单位不能使用技能）【1 毒牌（被击中格子及周围3*3对方单位每回合结束时受到2的伤害）【1吸魔牌（被击中格子及周围3*3对方单位每回合结束时被此单位吸魔）【1 光墙 【0.5移形换位（被动技能；一回合2次；与场上的自己放置的“麻痹牌”，“毒牌”或者“吸魔牌”交换位置）【1.5魔爪（一回合最多使用一次；选择一个自己放置的“麻痹牌”，“毒牌”或者“吸魔牌”，那周围3*3所有的对方单位受到以下破魔效果：直到咏唱者下个回合开始前不能移动或使用位移） ￥形态转换（攻4守5速4范1，不能使用“麻痹牌”，“毒牌”，“吸魔牌”）"
     raw_trait_text = "自然回魔"
 
     def build_skills(self) -> list[Skill]:
@@ -4837,6 +4992,13 @@ class Chanter(AbstractHero):
 
 
 class ErasureCounterStatus(StatusEffect):
+    def on_owner_removed(self, battle: Battle) -> None:
+        if self.owner is not None:
+            self.owner.remove_status(self, battle)
+
+    def on_owner_banished(self, battle: Battle) -> None:
+        self.on_owner_removed(battle)
+
     def __init__(self, source_unit_id: str) -> None:
         super().__init__("抹杀计数点", "可被放置者的【抹杀】移除并结算破魔扣血。")
         self.source_unit_id = source_unit_id
@@ -4922,13 +5084,28 @@ class PrematureBurialSkill(Skill):
             for unit in battle.all_units()
             if unit.position is not None
             and not unit.banished
-            and battle.distance_between_units(actor, unit) <= 5
+            and unit.alive
+            and battle.unit_target_in_range_and_line(actor, unit, 5)
+            and battle.unit_can_be_selected(unit, actor=actor)[0]
         ]  # type: ignore[list-item]
+
+    def can_use(self, battle: Battle, actor: HeroUnit, payload: Optional[dict[str, Any]] = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok:
+            return ok, reason
+        if payload:
+            try:
+                if payload_target_unit(battle, payload) not in self.targets(battle, actor):
+                    return False, "目标不在埋葬的合法范5直线范围内。"
+            except ActionError as exc:
+                return False, str(exc)
+        return True, ""
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         target = payload_target_unit(battle, payload)
         if target not in self.targets(battle, actor):
             raise ActionError("目标超出过早的埋葬范围。")
+        target = battle.effect_recipient(target)
         is_hostile = target.player_id != actor.player_id
         target_ctx = battle.validate_target(
             actor,
@@ -5006,18 +5183,16 @@ class ErasureSkill(Skill):
             for status in list(target.statuses):
                 if isinstance(status, ErasureCounterStatus) and status.source_unit_id == actor.unit_id:
                     target.remove_status(status, battle)
-            battle.resolve_damage(
-                DamageContext(
-                    source=actor,
-                    target=target,
-                    attack_power=0,
-                    raw_damage=0.25 * count,
-                    is_skill=True,
-                    action_name="抹杀",
-                    ignore_shield=True,
-                    tags={"erasure"},
+            for _ in range(count):
+                if not target.alive or target.position is None or target.banished:
+                    break
+                battle.resolve_damage(
+                    DamageContext(
+                        source=actor, target=target, attack_power=0, raw_damage=0.25,
+                        is_skill=True, action_name="抹杀", ignore_shield=True,
+                        tags={"skill", "erasure", "special_health_loss"},
+                    )
                 )
-            )
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
         targets = self.targets(battle, actor)
@@ -5032,7 +5207,7 @@ class ErasureSkill(Skill):
         return self.targets(battle, actor)
 
     def get_target_cells_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
-        return dedupe_positions([cell for unit in self.targets(battle, actor) for cell in battle.unit_cells(unit)])
+        return [Position(x, y) for y in range(battle.height) for x in range(battle.width)]
 
     def ignores_shield_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> bool:
         return True
@@ -5040,37 +5215,44 @@ class ErasureSkill(Skill):
 
 class DescentMomentAttackStatus(StatusEffect):
     def __init__(self, target_unit_id: str, target_name: str, normal_attack_cap: int) -> None:
-        super().__init__(
-            "降临时刻",
-            f"本回合额外获得 2 次普攻；额外普攻只能攻击 {target_name}。",
-            duration=1,
-            tick_scope="owner_turn_end",
-        )
+        super().__init__("降临时刻", f"本回合额外2次普攻优先用于 {target_name}，普通普攻可攻击其他目标。",
+                         duration=1, tick_scope="owner_turn_end")
         self.target_unit_id = target_unit_id
         self.normal_attack_cap = normal_attack_cap
+        self.extra_attacks_used = 0
 
     def modify_attack_actions_per_turn(self, value: int) -> int:
         return value + 2
 
-    def can_attack_target_with_payload(
-        self,
-        battle: Battle,
-        actor: HeroUnit,
-        target: HeroUnit,
-        payload: Optional[dict[str, Any]] = None,
-    ) -> tuple[bool, str]:
+    def can_attack_target_with_payload(self, battle: Battle, actor: HeroUnit, target: HeroUnit,
+                                       payload: Optional[dict[str, Any]] = None) -> tuple[bool, str]:
         if self.owner is None or actor.unit_id != self.owner.unit_id:
             return True, ""
-        if actor.attacks_used < self.normal_attack_cap:
+        if payload and payload.get("descent_extra_declared"):
             return True, ""
-        if target.unit_id != self.target_unit_id:
-            return False, "降临时刻的额外普攻只能攻击指定目标。"
-        return True, ""
+        if target.unit_id == self.target_unit_id and self.extra_attacks_used < 2:
+            return True, ""
+        if actor.attacks_used - self.extra_attacks_used < self.normal_attack_cap:
+            return True, ""
+        return False, "普通普攻已用完；降临额外普攻只能攻击指定目标。"
+
+    def on_owner_action_declared(self, battle: Battle, action_type: str, payload: dict[str, Any]) -> None:
+        if action_type == "attack" and payload.get("target_unit_id") == self.target_unit_id and self.extra_attacks_used < 2:
+            self.extra_attacks_used += 1
+            payload["descent_extra_declared"] = True
+
+    def on_basic_attack_finished(self, battle: Battle, actor: Unit, payload: dict[str, Any],
+                                 damage_contexts: list[DamageContext], missed: bool) -> None:
+        if payload.get("queued_resolution") or payload.get("reaction_attack"):
+            return
+        if not payload.get("descent_extra_declared") and self.extra_attacks_used < 2:
+            if any(ctx.target.unit_id == self.target_unit_id for ctx in damage_contexts):
+                self.extra_attacks_used += 1
 
     def to_public_dict(self, battle: Battle) -> dict[str, Any]:
         data = super().to_public_dict(battle)
-        data["target_unit_id"] = self.target_unit_id
-        data["normal_attack_cap"] = self.normal_attack_cap
+        data.update(target_unit_id=self.target_unit_id, normal_attack_cap=self.normal_attack_cap,
+                    extra_attacks_left=max(0, 2 - self.extra_attacks_used))
         return data
 
 
@@ -5094,9 +5276,12 @@ class DescentMomentSkill(Skill):
             if unit.position is not None
             and not unit.banished
             and erasure_counter_count(unit) > 0
+            and battle.unit_can_be_selected(unit, actor=actor)[0]
         ]  # type: ignore[list-item]
 
     def legal_destinations(self, battle: Battle, actor: HeroUnit, target: HeroUnit) -> list[Position]:
+        if actor.position is None or actor.cannot_move or battle.mounted_unit_for(actor) is not None:
+            return []
         cells = dedupe_positions(
             [
                 neighbor
@@ -5104,7 +5289,7 @@ class DescentMomentSkill(Skill):
                 for neighbor in battle.neighbors(cell)
             ]
         )
-        return [cell for cell in cells if battle.can_place_unit(actor, cell, ignore=actor, mover=actor)]
+        return [cell for cell in cells if cell != actor.position and battle.can_place_unit(actor, cell, ignore=actor, mover=actor)]
 
     def target_from_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> HeroUnit:
         if not payload.get("target_unit_id"):
@@ -5139,6 +5324,25 @@ class DescentMomentSkill(Skill):
             ),
         )
 
+    def can_use(self, battle: Battle, actor: HeroUnit, payload: Optional[dict[str, Any]] = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok:
+            return ok, reason
+        if not any(self.legal_destinations(battle, actor, unit) for unit in self.targets(battle, actor)):
+            return False, "没有可降临的目标与合法落点。"
+        if payload:
+            try:
+                target = self.target_from_payload(battle, actor, payload)
+                self.destination_from_payload(battle, actor, target, payload)
+            except ActionError as exc:
+                return False, str(exc)
+        return True, ""
+
+    def queued_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
+        target = self.target_from_payload(battle, actor, payload)
+        destination = self.destination_from_payload(battle, actor, target, payload)
+        return {"dest_x": destination.x, "dest_y": destination.y}
+
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         target = self.target_from_payload(battle, actor, payload)
         destination = self.destination_from_payload(battle, actor, target, payload)
@@ -5172,7 +5376,7 @@ class DescentMomentSkill(Skill):
         }
 
     def get_target_units_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[HeroUnit]:
-        return []
+        return [self.target_from_payload(battle, actor, payload)]
 
     def get_target_cells_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
         if payload.get("dest_x") is None or payload.get("dest_y") is None:
@@ -5194,13 +5398,38 @@ class ShadowCounterSkill(Skill):
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         raise ActionError("暗影反击只能通过连锁使用。")
 
+    def retreat_paths(self, battle: Battle, actor: HeroUnit) -> dict[Position, list[Position]]:
+        if actor.position is None or actor.cannot_move or actor.cannot_normal_move:
+            return {}
+        paths: dict[Position, list[Position]] = {}
+        for middle in battle.neighbors(actor.position):
+            if not battle.can_place_unit(actor, middle, ignore=actor, mover=actor):
+                continue
+            for end in battle.neighbors(middle):
+                if end != actor.position and battle.can_place_unit(actor, end, ignore=actor, mover=actor):
+                    paths.setdefault(end, [middle, end])
+        return paths
+
     def retreat_cells(self, battle: Battle, actor: HeroUnit) -> list[Position]:
-        if actor.position is None or actor.cannot_move:
-            return []
-        return sorted(
-            battle.reachable_positions(actor, max_distance=2, exact_distance=2, ignore_units=False),
-            key=lambda cell: (cell.y, cell.x),
-        )
+        return sorted(self.retreat_paths(battle, actor), key=lambda cell: (cell.y, cell.x))
+
+    def can_react_with_payload(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction,
+                               payload: Optional[dict[str, Any]] = None) -> tuple[bool, str]:
+        ok, reason = super().can_react_with_payload(battle, actor, queued_action, payload)
+        if not ok:
+            return ok, reason
+        if payload and payload_position(payload) not in self.retreat_paths(battle, actor):
+            return False, "暗影反击需要恰好两步且不穿过单位的合法路径。"
+        return True, ""
+
+    def queued_reaction_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
+        destination = payload_position(payload)
+        paths = self.retreat_paths(battle, actor)
+        if destination not in paths or actor.position is None:
+            raise ActionError("没有合法暗影反击路径。")
+        return {"shadow_origin": actor.position.to_dict(),
+                "shadow_path": positions_to_dict(paths[destination]),
+                "reaction_effect_cells": positions_to_dict(self.affected_cells(battle, actor.position))}
 
     def affected_cells(self, battle: Battle, origin: Position) -> list[Position]:
         cells = [
@@ -5226,22 +5455,19 @@ class ShadowCounterSkill(Skill):
         return True, ""
 
     def react(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any], queued_action: QueuedAction) -> None:
+        locked = payload if "shadow_origin" in payload else self.queued_reaction_payload_metadata(battle, actor, payload)
         destination = payload_position(payload)
-        if destination not in self.retreat_cells(battle, actor):
-            raise ActionError("该位置不能用于暗影反击。")
-        if actor.position is None:
-            raise ActionError("单位不在战场上。")
-        origin = actor.position
-        battle.move_unit(
-            actor,
-            destination,
-            via_skill=True,
-            exact_distance=2,
-            triggered_by_reaction=True,
-            max_distance=2,
-            tags={"shadow_counter"},
-        )
-        affected = self.affected_cells(battle, origin)
+        path = battle.payload_positions(locked, "shadow_path")
+        origin_data = locked["shadow_origin"]
+        origin = Position(int(origin_data["x"]), int(origin_data["y"]))
+        if actor.position == origin and not actor.cannot_move and not actor.cannot_normal_move and all(
+            battle.can_place_unit(actor, step, ignore=actor, mover=actor) for step in path
+        ):
+            battle.move_unit(actor, destination, path=path, via_skill=True, exact_distance=2,
+                             triggered_by_reaction=True, max_distance=2, tags={"shadow_counter"})
+        else:
+            battle.log(f"{actor.name} 的暗影反击位移受阻，仍结算原位置的计数点。")
+        affected = battle.payload_positions(locked, "reaction_effect_cells")
         targets = [
             unit
             for unit in battle.effect_units_at_cells(affected)
@@ -5254,6 +5480,7 @@ class ShadowCounterSkill(Skill):
                 action_name="暗影反击",
                 is_skill=True,
                 is_hostile=True,
+                ignore_targeting_restrictions=True,
                 tags={"erasure_counter", "shadow_counter"},
             )
             if target_ctx.cancelled:
@@ -5279,14 +5506,17 @@ class ErasureApostleDestroyRewardTrait(Trait):
         owner = self.owner
         if owner is None or ctx.source is None or ctx.source.unit_id != owner.unit_id:
             return
-        if ctx.cancelled or ctx.target.alive:
+        if ctx.cancelled or ctx.target.alive or ctx.from_field_effect or not (ctx.is_skill or "attack" in ctx.tags):
             return
+        if "erasure_rewarded" in ctx.tags:
+            return
+        ctx.tags.add("erasure_rewarded")
         remaining_mana = max(0.0, float(ctx.target.current_mana))
         if remaining_mana > 0:
             gained = owner.gain_mana(remaining_mana)
             if gained > 0:
                 battle.log(f"{owner.name} 破坏单位后回收了 {gained} 点魔。")
-        if not ctx.target.is_summon and not ctx.target.is_clone:
+        if isinstance(ctx.target, HeroUnit) and not ctx.target.is_summon and not ctx.target.is_clone and not is_army_soldier(ctx.target):
             skill = owner.skill_map().get("erasure")
             if skill is not None:
                 skill.uses_this_battle = 0
@@ -5358,10 +5588,11 @@ def apply_dragon_piercing_status(
         source,
         target,
         action_name=action_name,
-        is_skill=True,
+        is_skill="dragon_attack_debuff" not in tags,
         is_hostile=is_hostile,
         ignore_shield=True,
         cannot_evade=True,
+        ignore_targeting_restrictions=True,
         tags=tags,
     )
     if target_ctx.cancelled:
@@ -5457,7 +5688,7 @@ class DragonSmokeFieldEffect(BattleFieldEffect):
 
     def unit_in_area(self, battle: Battle, unit: HeroUnit) -> bool:
         affected = {position_key(cell) for cell in self.cells}
-        return any(position_key(cell) in affected for cell in battle.unit_cells(unit))
+        return any(position_key(cell) in affected for cell in battle.unit_cells(battle.effect_recipient(unit)))
 
     def sync_restrictions(self, battle: Battle) -> None:
         for unit in battle.all_units():
@@ -5484,6 +5715,9 @@ class DragonSmokeFieldEffect(BattleFieldEffect):
             for status in list(unit.statuses):
                 if isinstance(status, DragonSmokeRestrictionStatus) and status.field_id == self.component_id:
                     unit.remove_status(status, battle)
+
+    def on_unit_entered(self, battle: Battle, unit: Unit) -> None:
+        self.sync_restrictions(battle)
 
     def on_unit_moved(self, battle: Battle, ctx: Any) -> None:
         self.sync_restrictions(battle)
@@ -5514,7 +5748,7 @@ class DragonRideableMountTrait(RideableMountTrait):
         rider = battle.units.get(owner.mount_owner_id)
         if not isinstance(rider, HeroUnit) or not rider.alive:
             return
-        duration = 2 if battle.active_player == rider.player_id else 1
+        duration = 2 if battle.unit_belongs_to_current_turn(rider) else 1
         replace_status_by_name(battle, rider, DragonMountCooldownStatus(duration))
 
 
@@ -5715,6 +5949,9 @@ class DragonRiderTurnTrait(Trait):
     def on_owner_removed(self, battle: Battle) -> None:
         self.cleanup_source_effects(battle)
 
+    def on_owner_banished(self, battle: Battle) -> None:
+        self.cleanup_source_effects(battle)
+
 
 class DragonSummonSkill(Skill):
     def __init__(self) -> None:
@@ -5761,7 +5998,7 @@ class DragonSummonSkill(Skill):
         }
 
 
-class DragonSlashSkill(Skill):
+class DragonSlashSkill(DeclaredAreaSkillMixin, Skill):
     directions = ChainPullSkill.directions
 
     def __init__(self) -> None:
@@ -5810,7 +6047,7 @@ class DragonSlashSkill(Skill):
         return patterns
 
     def chosen_line(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
-        return match_payload_pattern(payload, self.patterns(battle, actor))
+        return self.chosen_cells(battle, actor, payload)
 
     def first_hit(self, battle: Battle, actor: HeroUnit, cells: list[Position]) -> HeroUnit | None:
         ignored = self.ignored_units(battle, actor)
@@ -5832,6 +6069,7 @@ class DragonSlashSkill(Skill):
             is_hostile=target.player_id != actor.player_id,
             ignore_shield=True,
             cannot_evade=True,
+            ignore_targeting_restrictions=True,
             tags={"skill", "dragon_slash", "chain_pull"},
         )
         if target_ctx.cancelled:
@@ -5873,8 +6111,10 @@ class DragonSlashSkill(Skill):
             for unit in battle.effect_units_at_cells(cells)
             if unit.unit_id not in ignored
         ]
+        first = self.first_hit(battle, actor, cells)
+        first_context = None
         for unit in targets:
-            battle.resolve_damage(
+            ctx = battle.resolve_damage(
                 DamageContext(
                     source=actor,
                     target=unit,
@@ -5885,8 +6125,9 @@ class DragonSlashSkill(Skill):
                     tags={"skill", "attack", "dragon_slash"},
                 )
             )
-        first = self.first_hit(battle, actor, cells)
-        if first is not None:
+            if first is not None and unit.unit_id == first.unit_id:
+                first_context = ctx
+        if first is not None and first_context is not None and damage_followup_effect_applies(first_context, allow_on_shield_break=True):
             self.apply_chain_effect(battle, actor, first, cells)
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
@@ -5909,7 +6150,7 @@ class DragonSlashSkill(Skill):
         return [unit for unit in battle.effect_units_at_cells(cells) if unit.unit_id not in ignored]  # type: ignore[list-item]
 
 
-class DragonSmokeSkill(Skill):
+class DragonSmokeSkill(DeclaredAreaSkillMixin, Skill):
     def __init__(self) -> None:
         super().__init__(
             "smoke_spray",
@@ -5922,9 +6163,6 @@ class DragonSmokeSkill(Skill):
 
     def patterns(self, battle: Battle, actor: HeroUnit) -> list[list[Position]]:
         return combined_remote_rectangle_patterns(battle, actor, [(3, 6), (6, 3)])
-
-    def chosen_cells(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
-        return match_payload_pattern(payload, self.patterns(battle, actor))
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         cells = self.chosen_cells(battle, actor, payload)
@@ -5952,7 +6190,7 @@ class DragonRider(AbstractHero):
     base_stats = Stats(attack=4, defense=4, speed=3, attack_range=1, mana=5)
     entry_footprint_width = 2
     entry_footprint_height = 2
-    raw_skill_text = "龙息 召龙（攻3守5速5范4；飞行，占2*2；受到的技能伤害-1，到1；最多受到一格伤害；攻击范围3*3；攻击带有以下破魔效果：被击中后直到下个回合结束前速-1，守-1） 保护 龙斩（一回合一次；伤5格；带有破魔的链条效果；收到链条效果的单位直到下个回合结束前速-2，到1） 链条 【1喷烟（一回合最多使用一次；3*6；没有伤害；被击中区域直到下个回合结束前所有除单位无法使用主动技能，攻击）"
+    raw_skill_text = "龙息 召龙（攻3守5速5范4；飞行，占2*2；受到公式技能攻击值-1，到1；固定扣血不减免；最多受到一格伤害；攻击范围3*3；攻击带有以下破魔效果：被击中后直到龙骑下个自己的回合开始前速-1，守-1） 保护 龙斩（一回合一次；伤5格；带有破魔的链条效果；收到链条效果的单位直到龙骑下个自己的回合开始前速-2，到1） 链条 【1喷烟（一回合最多使用一次；3*6；没有伤害；被击中区域直到龙骑下个自己的回合开始前所有除单位无法使用主动技能，攻击）"
     raw_trait_text = "场上每有一个己方“法师”武将，每回合开始时魔+1"
 
     def build_skills(self) -> list[Skill]:
@@ -6006,7 +6244,7 @@ class AttackManaDrainTrait(Trait):
         owner = self.owner
         if owner is None or ctx.source is None or ctx.source.unit_id != owner.unit_id:
             return
-        if ctx.is_skill or "attack" not in ctx.tags or ctx.cancelled or (ctx.raw_damage or 0) <= 0:
+        if ctx.is_skill or "attack" not in ctx.tags or ctx.cancelled or ctx.actual_damage <= 0:
             return
         if ctx.target.player_id == owner.player_id:
             return
@@ -6038,7 +6276,7 @@ class NearbyEnemyHeroMagicImmunityTrait(Trait):
             return False
         surrounding = {position_key(cell) for cell in self.surrounding_cells(battle, owner)}
         for unit in battle.enemy_units(owner.player_id):
-            if unit.is_summon or unit.is_clone:
+            if unit.is_summon or unit.is_clone or is_army_soldier(unit) or not isinstance(unit, HeroUnit) or not unit.alive or unit.banished or unit.position is None:
                 continue
             if any(position_key(cell) in surrounding for cell in battle.unit_cells(unit)):
                 return False
@@ -6092,7 +6330,7 @@ class SoulWraithGrowthStatus(StatusEffect):
 
 
 class SoulWraithFailedAttackGrowthTrait(Trait):
-    prevention_markers = ("护盾", "挡住", "格挡", "闪避", "见切")
+    track_attack_reaction_prevention = True
 
     def __init__(self) -> None:
         super().__init__("受阻成长", "普攻因对方技能未造成伤害后，攻 +1、速 +1、每回合移动次数 +1，直到普攻造成伤害。")
@@ -6130,11 +6368,10 @@ class SoulWraithFailedAttackGrowthTrait(Trait):
         return any(
             ctx.source is not None
             and ctx.source.unit_id == owner.unit_id
-            and ctx.target.player_id != owner.player_id
             and not ctx.is_skill
             and "attack" in ctx.tags
             and not ctx.cancelled
-            and (ctx.raw_damage or 0) > 0
+            and (ctx.actual_damage > 0 or ctx.destroyed_as_clone)
             for ctx in damage_contexts
         )
 
@@ -6145,20 +6382,7 @@ class SoulWraithFailedAttackGrowthTrait(Trait):
         damage_contexts: list[DamageContext],
         missed: bool,
     ) -> bool:
-        if not bool(payload.get("enemy_reacted")):
-            return False
-        if missed:
-            return True
-        for ctx in damage_contexts:
-            if ctx.source is None or ctx.source.unit_id != owner.unit_id or ctx.target.player_id == owner.player_id:
-                continue
-            if not ctx.cancelled:
-                continue
-            if ctx.shield_consumed:
-                return True
-            if any(marker in str(ctx.reason) for marker in self.prevention_markers):
-                return True
-        return False
+        return bool(payload.get("enemy_skill_prevented_attack"))
 
     def on_basic_attack_finished(
         self,
@@ -6169,7 +6393,7 @@ class SoulWraithFailedAttackGrowthTrait(Trait):
         missed: bool,
     ) -> None:
         owner = self.owner
-        if owner is None or actor.unit_id != owner.unit_id:
+        if owner is None or actor.unit_id != owner.unit_id or not owner.alive or owner.banished or owner.position is None:
             return
         if self.attack_dealt_damage(owner, damage_contexts):
             self.clear_stacks(battle)

@@ -1,16 +1,21 @@
 // Pointer and keyboard interaction on the battle board.
 import { $ } from '../core/dom.js';
-import { backstepFollowUpTargetIds, canInteract, currentRespawnPrompt, inspectBoardUnit, isChainMode, isRespawnMode, setStagedBackstepRetreatCell, stagedBackstepRetreatCell, unitById } from '../core/net.js';
+import { backstepFollowUpTargetIds, canInteract, currentRespawnPrompt, inspectBoardUnit, isChainMode, isDamageChoiceMode, isRespawnMode, setStagedBackstepRetreatCell, stagedBackstepRetreatCell, unitById } from '../core/net.js';
 import { render } from '../core/render.js';
 import { state, ui } from '../core/state.js';
 import { keyboardHelpIsOpen, syncModalIsolation } from '../core/ui.js';
 import { closeProfileModal, profileModalVisible } from '../platform/auth.js';
 import { attackTargetIdAtCell, completeTutorialUnitSelection, explainInvalidBoardChoice, performAction } from '../tactical/room-api.js';
 import { clearActionSelection } from '../tactical/session.js';
-import { actionNeedsTarget, attackChoicePatternSelection, bodyDirectionSelection, currentPreview, movePathAnchorForClickedCell, movePathIndexForClickedCell, movePathSelection, multiUnitSelection, patternSelection, patternSelectionIsOrdered, reviveSelectionCells, reviveUnitCellSelection, sameCell, setStagedBodyCells, setStagedMovePath, setStagedMultiTargetIds, setStagedPatternCells, setStagedReviveCell, setStagedStatCells, stagedAttackActionPayload, stagedBodyCells, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, statCellRequired, statCellSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
+import { actionNeedsTarget, attackChoicePatternSelection, bodyDirectionSelection, currentPreview, movePathAnchorForClickedCell, movePathIndexForClickedCell, movePathSelection, multiUnitSelection, patternSelection, patternSelectionIsOrdered, reviveSelectionCells, reviveUnitCellSelection, sameCell, setStagedBodyCells, setStagedMovePath, setStagedMultiTargetIds, setStagedPatternCells, setStagedReviveCell, setStagedStatCells, setStagedUnitDirectionTargetId, stagedAttackActionPayload, stagedBodyCells, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, statCellRequired, statCellSelection, unitDirectionSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
 import { positionKey, positionsToSet, selectedAction, targetIdsToSet } from '../tactical/vfx.js';
 
 export function onBoardClick(x, y, occupant) {
+  if (isDamageChoiceMode()) {
+    inspectBoardUnit(occupant);
+    render();
+    return;
+  }
   if (!canInteract()) {
     clearActionSelection();
     inspectBoardUnit(occupant);
@@ -27,9 +32,11 @@ export function onBoardClick(x, y, occupant) {
       movePathSelection(action)
       || patternSelection(action)
       || multiUnitSelection(action)
+      || unitDirectionSelection(action)
       || statCellSelection(action)
       || bodyDirectionSelection(action)
       || reviveUnitCellSelection(action)
+      || action.preview?.destinations_by_target
       || (isChainMode() && action.code === "backstep_shot")
     ),
   );
@@ -184,6 +191,16 @@ export function onBoardClick(x, y, occupant) {
     return;
   }
 
+  if (unitDirectionSelection(action)) {
+    if (!(occupant && canUseUnit)) {
+      explainInvalidBoardChoice(action, occupant);
+      return;
+    }
+    setStagedUnitDirectionTargetId(occupant.id);
+    render();
+    return;
+  }
+
   if (statCellSelection(action)) {
     const chosenCells = stagedStatCells(action);
     const existingIndex = chosenCells.findIndex((cell) => sameCell(cell, { x, y }));
@@ -312,6 +329,27 @@ export function onBoardClick(x, y, occupant) {
       target_unit_id: state.stagedPayload.targetUnitId,
       dest_x: x,
       dest_y: y,
+    });
+    return;
+  }
+
+  if (action.preview?.destinations_by_target) {
+    if (!state.stagedPayload?.targetUnitId) {
+      if (!(occupant && canUseUnit)) {
+        explainInvalidBoardChoice(action, occupant);
+        return;
+      }
+      state.stagedPayload = { targetUnitId: occupant.id };
+      render();
+      return;
+    }
+    if (!canUseCell) {
+      explainInvalidBoardChoice(action, occupant);
+      return;
+    }
+    performAction({
+      type: "skill", unit_id: state.selectedUnitId, skill_code: action.code,
+      target_unit_id: state.stagedPayload.targetUnitId, x, y,
     });
     return;
   }

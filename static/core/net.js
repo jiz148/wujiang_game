@@ -108,6 +108,10 @@ export function isChainMode() {
   return Boolean(state.battle?.pending_chain);
 }
 
+export function isDamageChoiceMode() {
+  return Boolean(state.battle?.pending_damage_choice);
+}
+
 export function currentRespawnPrompt() {
   return state.battle?.pending_respawn || null;
 }

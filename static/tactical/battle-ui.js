@@ -1,7 +1,7 @@
 // Battle screen rendering: board, units, action panel and log.
 import { $ } from '../core/dom.js';
 import { applyBoardCamera, boardBasePixels, clampBoardZoom } from '../core/events.js';
-import { activeBundles, allUnits, backstepFollowUpTargetIds, boardPieceZIndex, boardUnits, bundleFor, canInteract, currentRespawnPrompt, hasBattle, hasRoom, hoveredUnit, inspectBoardUnit, inspectedUnit, isAiTakeover, isChainMode, isGameOver, isReplayMode, isRespawnMode, selectedUnit, stagedBackstepRetreatCell, stagedTarget, unitById, unitFootprintBounds, unitHasLargeFootprint, unitOccupiedCells, unitsAtCell, viewerPlayerId, viewerTeamId } from '../core/net.js';
+import { activeBundles, allUnits, backstepFollowUpTargetIds, boardPieceZIndex, boardUnits, bundleFor, canInteract, currentRespawnPrompt, hasBattle, hasRoom, hoveredUnit, inspectBoardUnit, inspectedUnit, isAiTakeover, isChainMode, isDamageChoiceMode, isGameOver, isReplayMode, isRespawnMode, selectedUnit, stagedBackstepRetreatCell, stagedTarget, unitById, unitFootprintBounds, unitHasLargeFootprint, unitOccupiedCells, unitsAtCell, viewerPlayerId, viewerTeamId } from '../core/net.js';
 import { render } from '../core/render.js';
 import { applyScreen } from '../core/router.js';
 import { state, ui } from '../core/state.js';
@@ -9,7 +9,7 @@ import { effectiveProfileName } from '../platform/auth.js';
 import { currentBattleLaunch, isCampaignBattleLaunch } from '../bridge/battle-launch.js';
 import { isRandomRoomMode, loadReplayStep, onActionClick, roomModeMeta, setArmyOrder, shouldShowLobbyPanel } from '../tactical/room-api.js';
 import { clearActionSelection } from '../tactical/session.js';
-import { actionLabel, actionLimitLabel, actionManaLabel, actionNeedsTarget, actionTierLabel, actionTimingLabel, actionTitle, bodyDirectionSelection, canCompleteTargetSelection, choicePatternSelection, currentPreview, fieldEffectMarker, fieldEffectsByCell, hasCancelableTargetSelection, movePathSelection, multiUnitSelection, normalizedPatternCells, patternSelection, patternSelectionCanComplete, randomRoomFallbackSummary, randomRoomRosterSize, reviveUnitCellSelection, stagedAttackVariantCode, stagedBodyCells, stagedBodyDirection, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, statCellRequired, statCellSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
+import { actionLabel, actionLimitLabel, actionManaLabel, actionNeedsTarget, actionTierLabel, actionTimingLabel, actionTitle, bodyDirectionSelection, canCompleteTargetSelection, choicePatternSelection, currentPreview, fieldEffectMarker, fieldEffectsByCell, hasCancelableTargetSelection, movePathSelection, multiUnitSelection, normalizedPatternCells, patternSelection, patternSelectionCanComplete, randomRoomFallbackSummary, randomRoomRosterSize, reviveUnitCellSelection, stagedAttackVariantCode, stagedBodyCells, stagedBodyDirection, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, stagedUnitDirection, stagedUnitDirectionTargetId, statCellRequired, statCellSelection, unitDirectionSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
 import { actionByCode, actionWheelLayer, displayActions, fieldEffectDuration, fieldEffects, flushPendingArmyVfx, hoveredAction, hpRatio, manaDisplayClass, manaPipsMarkup, positionKey, positionsToSet, renderBattleVfx, selectedAction, trimNumber, tutorialState, unitBoundsRelativeToStage, unitStatusSummary } from '../tactical/vfx.js';
 
 export function renderScreens() {
@@ -57,6 +57,47 @@ function renderBoardAlert() {
 
   const action = selectedAction();
 
+  if (action?.preview?.selection?.mode === "mimic_skill") {
+    const escape = (value) => String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
+    const buttons = (action.preview.selection.targets || []).flatMap((source) => source.skills.map((skill) =>
+      `<button type="button" class="board-alert-choice" data-mimic-source="${escape(source.unit_id)}" data-mimic-code="${escape(skill.code)}" ${skill.action.available ? "" : "disabled"} title="${escape(skill.action.reason || "")}">${escape(source.name)} · ${escape(skill.name)}（${action.code === "agency_borrowed_skill" ? "" : "1点 + "}${trimNumber(skill.action.mana_cost)}魔）</button>`
+    )).join("");
+    showBoardHint(action.name, "选择技能后，按高亮范围选择目标或落点。费用与使用限制按自身计算，其他特殊代价仍需支付。", buttons);
+    return;
+  }
+
+  if (action?.preview?.selection?.mode === "agency_contract" && !action.preview.selection.attached) {
+    const escape = (value) => String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
+    const targets = action.preview.selection.targets || [];
+    const source = targets.find((entry) => entry.unit_id === state.stagedPayload?.agencyTarget) || targets[0];
+    const labels = { attack: "攻", defense: "守", speed: "速", attack_range: "范", mana: "魔" };
+    const options = (entries, selected) => entries.map(([value, label]) => `<option value="${escape(value)}" ${value === selected ? "selected" : ""}>${escape(label)}</option>`).join("");
+    const controls = source ? `
+      <label>载体 <select data-agency-target>${options(targets.map((entry) => [entry.unit_id, entry.name]), source.unit_id)}</select></label>
+      <label>属性 <select data-agency-stat>${options(action.preview.selection.stats.map((name) => [name, labels[name]]), state.stagedPayload?.agencyStat || "attack")}</select></label>
+      <label>技能 <select data-agency-skill>${options(source.skills.map((skill) => [skill.code, skill.name]), state.stagedPayload?.agencySkill || source.skills[0]?.code)}</select></label>
+      <button type="button" class="board-alert-choice" data-agency-bind>确认附着</button>` : "";
+    showBoardHint("代行契约", source ? "选择载体、要借用的属性和技能，再确认附着。附着期间随载体移动。" : "当前没有可用载体。", controls);
+    return;
+  }
+
+  if (action?.code === "heaven_punishment") {
+    const escape = (value) => String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
+    const targets = action.preview?.heaven_punishment_targets || [];
+    const target = targets.find((entry) => entry.unit_id === state.stagedPayload?.heavenTarget) || targets[0];
+    const selectedSkill = target?.skills?.find((entry) => entry.code === state.stagedPayload?.heavenSkill) || target?.skills?.[0];
+    const option = (value, label, selected) => `<option value="${escape(value)}" ${value === selected ? "selected" : ""}>${escape(label)}</option>`;
+    const controls = target ? `
+      <label>敌方单位 <select data-heaven-target>${targets.map((entry) => option(entry.unit_id, entry.name, target.unit_id)).join("")}</select></label>
+      <label>封印技能 <select data-heaven-skill>${target.skills.map((entry) => option(entry.code, entry.name, selectedSkill?.code)).join("")}</select></label>
+      <button type="button" class="board-alert-choice" data-heaven-select>确定目标和技能</button>` : "";
+    const chosen = stagedPatternCells(action);
+    showBoardHint("天罚", target
+      ? `${state.stagedPayload?.heavenTarget ? "已确定封印目标；" : "先确定要封印的敌人和技能；"}再在棋盘选覆盖目标的 5×5 区域。当前已选 ${chosen.length} 格。`
+      : "当前范围没有公开主动技能可选。", controls);
+    return;
+  }
+
   if (isChainMode() && !action) {
     hideBoardHint();
     return;
@@ -100,6 +141,14 @@ function renderBoardAlert() {
     return;
   }
 
+  if (action?.preview?.destinations_by_target) {
+    const target = stagedTarget();
+    showBoardHint(actionTitle(action), state.stagedPayload?.targetUnitId
+      ? `已选中 ${target?.name || "目标"}，请点击蓝色高亮的合法落点。`
+      : "先点击高亮目标，再选择与它对应的合法落点。");
+    return;
+  }
+
   if (action?.code === "backstep_shot" && isChainMode()) {
     const retreatCell = stagedBackstepRetreatCell(action);
     const source = unitById(state.battle?.pending_chain?.queued_action?.actor_id || "");
@@ -120,7 +169,8 @@ function renderBoardAlert() {
     const chosenIds = stagedMultiTargetIds(action);
     showBoardHint(
       actionTitle(action),
-      `${chosenIds.length ? `已选择 ${chosenIds.length} 个目标。` : "请点击高亮单位来选择目标。"} 选好后可以点击“完成选择”，再次点击同一目标可取消。`,
+      multiUnitSelection(action).prompt
+        || `${chosenIds.length ? `已选择 ${chosenIds.length} 个目标。` : "请点击高亮单位来选择目标。"} 选好后可以点击“完成选择”，再次点击同一目标可取消。`,
     );
     return;
   }
@@ -132,7 +182,9 @@ function renderBoardAlert() {
     const statButtons = (statCellSelection(action).stats || []).map((entry) => `
       <button type="button" class="board-alert-choice ${statName === entry.code ? "is-selected" : ""}" data-stat-choice="${entry.code}">${entry.label}</button>
     `).join("");
-    showBoardHint(actionTitle(action), `先选择要吸取的能力值，再选择 ${required} 个新增占格。当前已选 ${chosenCells.length} 个新增格。`, statButtons);
+    const hint = statCellSelection(action).prompt
+      || `先选择要吸取的能力值，再选择 ${required} 个新增占格。当前已选 ${chosenCells.length} 个新增格。`;
+    showBoardHint(actionTitle(action), hint, statButtons);
     return;
   }
 
@@ -191,18 +243,29 @@ function renderBoardAlert() {
       return;
     }
     if (!choiceCode) {
-      showBoardHint(actionTitle(action), "先选择这次的 n，再逐格点击要覆盖的区域。", choiceButtons);
+      showBoardHint(actionTitle(action), choicePatternSelection(action).choice_prompt || "先选择这次的 n，再逐格点击要覆盖的区域。", choiceButtons);
       return;
     }
     if (!chosenCells.length) {
-      showBoardHint(actionTitle(action), `已选择 ${choiceCode}。现在请逐格点击这个 n 对应的合法区域；若贴着边界导致剩余格子本应落在棋盘外，可以直接点“完成选择”。`, choiceButtons);
+      showBoardHint(actionTitle(action), `已选择 ${choiceLabel}。${choicePatternSelection(action).cell_prompt || "现在请逐格点击对应的合法区域；若已选满，可以直接点“完成选择”。"}`, choiceButtons);
       return;
     }
     showBoardHint(
       actionTitle(action),
-      `已选择 ${choiceCode}，并选中 ${chosenCells.length} 格。${canComplete ? "当前已经可以点击“完成选择”结算；若还想扩大到同一合法区域，可继续点蓝色高亮格子。" : "请继续点击蓝色高亮的剩余格子。"} 点击已选格子可撤回该格。`,
+      `已选择 ${choiceLabel}，并选中 ${chosenCells.length} 格。${canComplete ? "当前已经可以点击“完成选择”结算；若还想扩大到同一合法区域，可继续点蓝色高亮格子。" : "请继续点击蓝色高亮的剩余格子。"} 点击已选格子可撤回该格。`,
       choiceButtons,
     );
+    return;
+  }
+
+  if (action && unitDirectionSelection(action)) {
+    const targetId = stagedUnitDirectionTargetId(action);
+    const direction = stagedUnitDirection(action);
+    const buttons = (unitDirectionSelection(action).directions || []).map((entry) => {
+      const selected = direction && direction.dx === Number(entry.dx) && direction.dy === Number(entry.dy);
+      return `<button type="button" class="board-alert-choice ${selected ? "is-selected" : ""}" data-unit-direction-dx="${entry.dx}" data-unit-direction-dy="${entry.dy}">${entry.label || `${entry.dx},${entry.dy}`}</button>`;
+    }).join("");
+    showBoardHint(actionTitle(action), targetId ? "已选目标。请选择推动方向，再点“完成选择”。" : "请先点击要推动的近战目标，再选方向。", buttons);
     return;
   }
 
@@ -614,7 +677,7 @@ export function renderBoard() {
           </div>
         </div>
         ${hideMana ? "" : `
-        <div class="${manaDisplayClass(unit)}" aria-label="魔力 ${trimNumber(unit.mana)} / ${trimNumber(unit.max_mana || unit.base_stats?.mana || unit.stats?.max_mana || unit.stats?.mana || unit.mana)}">
+        <div class="${manaDisplayClass(unit)}" aria-label="魔力 ${unit.unbounded_mana ? "无限" : `${trimNumber(unit.mana)} / ${trimNumber(unit.max_mana || unit.base_stats?.mana || unit.stats?.max_mana || unit.stats?.mana || unit.mana)}`} ">
           ${manaPipsMarkup(unit)}
         </div>`}
       `;
@@ -857,7 +920,7 @@ function renderUnitHoverCard(unit) {
   return `
     <strong>${unit.name}</strong>
     <p>${unit.role} · ${unit.attribute} / ${unit.race} · 玩家 ${unit.player_id}</p>
-    <p>血 ${trimNumber(unit.hp)} / ${trimNumber(unit.max_hp)} · 魔 ${trimNumber(unit.mana)} / ${trimNumber(unit.max_mana || unit.base_stats?.mana || unit.stats?.max_mana || unit.stats?.mana || unit.mana)} · 魔力点 ${trimNumber(unit.mana_points || unit.stats?.mana_points || 0)}</p>
+    <p>血 ${trimNumber(unit.hp)} / ${trimNumber(unit.max_hp)} · 魔 ${unit.unbounded_mana ? "∞" : `${trimNumber(unit.mana)} / ${trimNumber(unit.max_mana || unit.base_stats?.mana || unit.stats?.max_mana || unit.stats?.mana || unit.mana)}`} · 魔力点 ${trimNumber(unit.mana_points || unit.stats?.mana_points || 0)}</p>
     <p>盾 ${unit.total_shields} · 闪 ${unit.dodge_charges} · 攻 ${trimNumber(unit.stats.attack)} / 守 ${trimNumber(unit.stats.defense)}</p>
     <p>状态:${statuses}</p>
     <p>特性:${traits}</p>
@@ -879,9 +942,15 @@ function chainQueuedActionSummary(chain) {
 
 export function chainQueuedActionPrompt(chain) {
   const summary = chainQueuedActionSummary(chain);
-  if (summary && summary.startsWith("\u3010")) return summary;
+  const gravityPayload = chain?.queued_action?.payload;
+  const gravityResult = gravityPayload?.skill_code === "gravity_field"
+    && Array.isArray(gravityPayload.gravity_coin_values)
+    && [1, 2, 4, 8].includes(Number(gravityPayload.gravity_side))
+    ? `硬币 ${gravityPayload.gravity_coin_values.join("、")}，范围 ${gravityPayload.gravity_side}×${gravityPayload.gravity_side}；`
+    : "";
+  if (summary && summary.startsWith("\u3010")) return `${gravityResult}${summary}`;
   const actionName = chain?.queued_action?.display_name || "\u539f\u52a8\u4f5c";
-  return `\u3010${actionName}\u3011\uff1a${summary}`;
+  return `\u3010${actionName}\u3011：${gravityResult}${summary}`;
 }
 
 export function renderHoverCard() {
@@ -1044,7 +1113,7 @@ export function renderSelectedCard() {
   const traits = (unit.traits || []).map((trait) => trait.name).join(" · ") || "无";
   const maxMana = unitMaxMana(unit);
   const hpPercent = Math.round(resourceRatio(unit.hp, unit.max_hp) * 100);
-  const manaPercent = Math.round(resourceRatio(unit.mana, maxMana) * 100);
+  const manaPercent = unit.unbounded_mana ? 100 : Math.round(resourceRatio(unit.mana, maxMana) * 100);
   const viewer = viewerTeamId();
   const sideLabel = viewer == null
     ? `玩家 ${unit.player_id}`
@@ -1067,7 +1136,7 @@ export function renderSelectedCard() {
       <div class="selected-card__meter is-mana">
         <span>魔</span>
         <div class="selected-card__bar" aria-hidden="true"><i style="width: ${manaPercent}%"></i></div>
-        <b>${trimNumber(unit.mana)} / ${trimNumber(maxMana)}</b>
+        <b>${unit.unbounded_mana ? "∞" : `${trimNumber(unit.mana)} / ${trimNumber(maxMana)}`}</b>
       </div>
       <div class="selected-card__vitals">
         固定护盾 ${unit.shields || 0} · 临时护盾 ${unit.temporary_shields || 0} · 闪避 ${unit.dodge_charges || 0}
@@ -1130,7 +1199,7 @@ function currentTurnPlayerId(battle) {
   const unit = unitById(battle?.active_turn_unit_id);
   const raw = armyTurn
     ? (battle?.army?.army_turn_player_id ?? battle?.active_player)
-    : (unit?.player_id ?? battle?.active_player);
+    : (battle?.active_player ?? unit?.player_id);
   return Number(raw) === 2 ? 2 : 1;
 }
 
@@ -1138,6 +1207,8 @@ function currentTurnSubject(battle) {
   if (Boolean(battle?.is_army_turn || battle?.army?.is_army_turn)) {
     return "军队";
   }
+  const handoff = unitById(battle?.control_handoff_unit_id);
+  if (handoff) return `${handoff.name}（控制权交接）`;
   const unit = unitById(battle?.active_turn_unit_id);
   return unit?.name || battle?.active_turn_unit_name || "武将";
 }
@@ -1387,6 +1458,13 @@ export function renderChainPanel() {
     hideBar();
     return;
   }
+  if (isDamageChoiceMode()) {
+    const prompt = state.battle.pending_damage_choice;
+    if (caption) caption.textContent = `拉奥将受到 ${prompt.damage} 点【${prompt.action_name}】伤害，请选择能力抵消或承受伤害。`;
+    skipBtn?.classList.add("hidden");
+    hideBar();
+    return;
+  }
   if (!isChainMode()) {
     if (caption) caption.textContent = "选择一个行动。连锁出现时，可选响应也会列在这里。";
     skipBtn?.classList.add("hidden");
@@ -1398,7 +1476,7 @@ export function renderChainPanel() {
   const sourceUnit = unitById(chain.queued_action.actor_id);
   const currentReactor = unitById(chain.current_unit_id);
   const sourceSummary = chainQueuedActionPrompt(chain);
-  const summary = `等待 ${currentReactor?.name || "响应方"} · ${sourceUnit?.name || "来源"} 的【${chain.queued_action.display_name || "动作"}】`;
+  const summary = `等待 ${currentReactor?.name || "响应方"} · ${sourceUnit?.name || "来源"} 的 ${sourceSummary}`;
   if (caption) caption.textContent = summary;
   if (text) text.textContent = summary;
   bar?.classList.remove("hidden");

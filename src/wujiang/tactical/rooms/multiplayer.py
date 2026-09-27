@@ -30,6 +30,7 @@ from wujiang.tactical.engine.core import (
 from wujiang.tactical.heroes.registry import RoomBattleEntry, create_room_battle, list_heroes
 from wujiang.tactical.rooms.ai import (
     choose_chain_reaction,
+    choose_damage_choice_action,
     choose_instant_action,
     choose_respawn_action,
     choose_turn_bundle_action,
@@ -489,6 +490,8 @@ def battle_unit_owner_seat_id(battle: Battle, unit: Unit | None) -> Optional[int
 
 
 def _active_units_for_viewer(battle: Battle) -> list[Unit]:
+    if battle.pending_damage_choice is not None:
+        return [battle.get_unit(battle.pending_damage_choice["unit_id"])]
     prompt = battle.current_respawn_prompt()
     if prompt is not None:
         return [battle.get_unit(prompt.unit_id)]
@@ -503,7 +506,7 @@ def _active_units_for_viewer(battle: Battle) -> list[Unit]:
 
 
 def _instant_units_for_viewer(battle: Battle, viewer_player_id: int) -> list[Unit]:
-    if battle.pending_chain is not None or battle.current_respawn_prompt() is not None:
+    if battle.pending_damage_choice is not None or battle.pending_chain is not None or battle.current_respawn_prompt() is not None:
         return []
     return battle.instant_action_units_for_player(viewer_player_id)
 
@@ -1142,6 +1145,8 @@ class GameRoom:
                 return action_code or "连锁"
         if action_type == "respawn_select":
             return "重新出现"
+        if action_type == "damage_choice":
+            return "能力抵消" if payload.get("stat_name") != "decline" else "承受伤害"
         if action_type == "end_turn":
             return "结束回合"
         if action_type == "chain_skip":
@@ -1360,6 +1365,13 @@ class GameRoom:
         if self.battle is None or self.battle.winner is not None:
             return None
         try:
+            if self.battle.pending_damage_choice is not None:
+                seat = self._current_prompt_seat()
+                if seat is None or not seat.is_ai_controlled:
+                    return None
+                prompt = self.battle.pending_damage_choice
+                unit = self.battle.get_unit(prompt["unit_id"])
+                return choose_damage_choice_action(self.battle), "ai_damage_choice", unit
             if self.battle.current_respawn_prompt() is not None:
                 seat = self._current_prompt_seat()
                 if seat is None or not seat.is_ai_controlled:
@@ -1409,6 +1421,10 @@ class GameRoom:
             seat = self._current_prompt_seat()
             if seat is None or not seat.is_ai_controlled or self.battle is None:
                 return None
+            if self.battle.pending_damage_choice is not None:
+                prompt = self.battle.pending_damage_choice
+                unit = self.battle.get_unit(prompt["unit_id"])
+                return {"type": "damage_choice", "unit_id": unit.unit_id, "stat_name": "decline"}, "ai_damage_fallback", unit
             if self.battle.pending_chain is not None:
                 current_unit_id = self.battle.pending_chain.current_unit_id()
                 reactor = self.battle.get_unit(current_unit_id) if current_unit_id else None
@@ -1493,6 +1509,12 @@ class GameRoom:
         if self.battle is None:
             return False
         seat = self._current_prompt_seat()
+        if self.battle.pending_damage_choice is not None:
+            if seat is None or not seat.is_ai_controlled:
+                return False
+            prompt = self.battle.pending_damage_choice
+            self._perform_battle_action({"type": "damage_choice", "unit_id": prompt["unit_id"], "stat_name": "decline"}, reason="ai_damage_fallback")
+            return True
         if self.battle.pending_chain is not None:
             if seat is None or not seat.is_ai_controlled:
                 return False
@@ -1526,7 +1548,7 @@ class GameRoom:
     def _recover_stalled_inactive_turn(self) -> bool:
         if self.battle is None or self.battle.winner is not None:
             return False
-        if self.battle.pending_chain is not None or self.battle.current_respawn_prompt() is not None:
+        if self.battle.pending_damage_choice is not None or self.battle.pending_chain is not None or self.battle.current_respawn_prompt() is not None:
             return False
         if self.battle.is_army_turn():
             self._perform_battle_action({"type": "end_turn"}, reason="army_turn")
@@ -2100,6 +2122,8 @@ class GameRoom:
     def _current_prompt_seat(self) -> Optional[PlayerSeat]:
         if self.battle is None:
             return None
+        if self.battle.pending_damage_choice is not None:
+            return self.seats.get(self._unit_owner_seat_id(self.battle.get_unit(self.battle.pending_damage_choice["unit_id"])) or -1)
         prompt = self.battle.current_respawn_prompt()
         if prompt is not None:
             return self.seats.get(self._unit_owner_seat_id(self.battle.get_unit(prompt.unit_id)) or -1)
@@ -2108,7 +2132,8 @@ class GameRoom:
             if current_unit_id:
                 return self.seats.get(self._unit_owner_seat_id(self.battle.get_unit(current_unit_id)) or -1)
             return None
-        current_unit = self.battle.current_turn_unit()
+        active_units = self.battle.current_turn_bundle_units()
+        current_unit = active_units[0] if active_units else self.battle.current_turn_unit()
         if current_unit is None:
             return None
         return self.seats.get(self._unit_owner_seat_id(current_unit) or -1)
@@ -2117,6 +2142,9 @@ class GameRoom:
         if self.battle is None or self.battle.winner is not None:
             return None, None, None
         seat = self._current_prompt_seat()
+        damage_prompt = self.battle.pending_damage_choice
+        if damage_prompt is not None:
+            return f"damage:{damage_prompt['prompt_id']}", "damage", seat
         prompt = self.battle.current_respawn_prompt()
         if prompt is not None:
             return f"respawn:{prompt.unit_id}", "respawn", seat
@@ -2130,7 +2158,7 @@ class GameRoom:
         current_unit = self.battle.current_turn_unit()
         if current_unit is None:
             return None, None, seat
-        return f"turn:{self.battle.completed_turns}:{current_unit.unit_id}", "turn", seat
+        return f"turn:{self.battle.completed_turns}:{current_unit.unit_id}:{self.battle.active_player}", "turn", seat
 
     def _sync_turn_timer(self, *, now: Optional[float] = None) -> None:
         current_time = time.time() if now is None else now
@@ -2166,6 +2194,12 @@ class GameRoom:
         if prompt_kind == "chain":
             payload = {"type": "chain_skip"}
             action_label = "自动放弃连锁"
+        elif prompt_kind == "damage":
+            prompt = self.battle.pending_damage_choice
+            if prompt is None:
+                return False
+            payload = {"type": "damage_choice", "unit_id": prompt["unit_id"], "stat_name": "decline"}
+            action_label = "自动承受伤害"
         elif prompt_kind == "respawn":
             prompt = self.battle.current_respawn_prompt()
             if prompt is None:
@@ -2218,7 +2252,7 @@ class GameRoom:
         }
 
     def allows_instant_action_override(self, seat: PlayerSeat, payload: dict[str, Any]) -> bool:
-        if self.battle is None or self.battle.pending_chain is not None or self.battle.current_respawn_prompt() is not None:
+        if self.battle is None or self.battle.pending_damage_choice is not None or self.battle.pending_chain is not None or self.battle.current_respawn_prompt() is not None:
             return False
         if payload.get("type") != "skill":
             return False
@@ -2241,6 +2275,7 @@ class GameRoom:
         if (
             self.battle is None
             or self.battle.winner is not None
+            or self.battle.pending_damage_choice is not None
             or self.battle.pending_chain is not None
             or self.battle.current_respawn_prompt() is not None
         ):
@@ -2511,7 +2546,13 @@ class GameRoom:
             if max_steps is not None and steps >= max_steps:
                 break
             try:
-                if self.battle.current_respawn_prompt() is not None:
+                if self.battle.pending_damage_choice is not None:
+                    seat = self._current_prompt_seat()
+                    if seat is None or not seat.is_ai:
+                        break
+                    self._perform_battle_action(choose_damage_choice_action(self.battle), reason="ai_damage_choice")
+                    steps += 1
+                elif self.battle.current_respawn_prompt() is not None:
                     seat = self._current_prompt_seat()
                     if seat is None or not seat.is_ai:
                         break
@@ -2571,7 +2612,11 @@ class GameRoom:
                 seat = self._current_prompt_seat()
                 if seat is None or not seat.is_ai:
                     break
-                if self.battle.pending_chain is not None:
+                if self.battle.pending_damage_choice is not None:
+                    prompt = self.battle.pending_damage_choice
+                    self._perform_battle_action({"type": "damage_choice", "unit_id": prompt["unit_id"], "stat_name": "decline"}, reason="ai_damage_fallback")
+                    steps += 1
+                elif self.battle.pending_chain is not None:
                     self._perform_battle_action({"type": "chain_skip"}, reason="ai_chain_fallback")
                     steps += 1
                 elif self.battle.current_respawn_prompt() is not None:

@@ -1,6 +1,6 @@
 // Battle visual effects and animation scheduling.
 import { $ } from '../core/dom.js';
-import { bundleFor, isChainMode, isGameOver, isRespawnMode, normalizedCell, unitById, unitOccupiedCells } from '../core/net.js';
+import { bundleFor, isChainMode, isDamageChoiceMode, isGameOver, isRespawnMode, normalizedCell, unitById, unitOccupiedCells } from '../core/net.js';
 import { state, ui } from '../core/state.js';
 
 export function trimNumber(value) {
@@ -22,6 +22,9 @@ export function manaDisplayClass(unit) {
 }
 
 export function manaPipsMarkup(unit) {
+  if (unit?.unbounded_mana) {
+    return '<span class="mana-count">∞</span>';
+  }
   const mana = manaValue(unit);
   if (mana > 5) {
     return `<span class="mana-pip is-filled"></span><span class="mana-count">${trimNumber(mana)}</span>`;
@@ -70,6 +73,22 @@ export function fieldEffectDuration(effect) {
 
 export function displayActions() {
   if (isGameOver()) return [];
+  if (isDamageChoiceMode()) {
+    const prompt = state.battle.pending_damage_choice;
+    const labels = { attack: "攻", defense: "守", speed: "速", attack_range: "范" };
+    return [
+      ...(prompt.stats || []).map((stat) => ({
+        code: `damage_choice_${stat}`, name: `降低${labels[stat]}并抵消`, kind: "damage_choice",
+        stat_name: stat, timing: "reaction", available: true,
+        description: `永久降低${labels[stat]}1点，抵消这次生命伤害。`,
+        preview: { cells: [], target_unit_ids: [], requires_target: false },
+      })),
+      { code: "damage_choice_decline", name: "承受伤害", kind: "damage_choice",
+        stat_name: "decline", timing: "reaction", available: true,
+        description: "保留属性，承受这次伤害。",
+        preview: { cells: [], target_unit_ids: [], requires_target: false } },
+    ];
+  }
   if (isRespawnMode()) return [];
   const bundle = bundleFor(state.selectedUnitId);
   if (!bundle) return [];
@@ -113,7 +132,7 @@ function mergeAttackVariants(actions) {
   ));
   if (!attackVariants.length) return actions;
   return actions
-    .filter((action) => action.kind !== "attack" || action === primaryAttack)
+    .filter((action) => !attackVariants.includes(action))
     .map((action) => (action === primaryAttack ? { ...action, attackVariants } : action));
 }
 
@@ -156,6 +175,13 @@ export function actionByCode(code) {
 
 export function selectedAction() {
   if (!state.selectedActionCode) return null;
+  if (state.mimicChoice?.actorId === state.selectedUnitId && state.selectedActionCode === state.mimicChoice.code) {
+    const wrapper = actionByCode(state.mimicChoice.wrapperCode || "mimic_skill");
+    const source = wrapper?.preview?.selection?.targets?.find((entry) => entry.unit_id === state.mimicChoice.sourceId);
+    const skill = source?.skills?.find((entry) => entry.code === state.mimicChoice.code);
+    if (!wrapper?.available || !skill?.action?.available) return null;
+    return { ...skill.action, name: `${wrapper.code === "agency_borrowed_skill" ? "代行" : "模仿"}·${skill.name}`, _mimicSourceId: source.unit_id, _copyWrapperCode: wrapper.code };
+  }
   const live = actionByCode(state.selectedActionCode);
   if (live) {
     state.selectedActionSnapshot = live;
@@ -165,6 +191,19 @@ export function selectedAction() {
     return state.selectedActionSnapshot;
   }
   return null;
+}
+
+export function wrapCopiedActionPayload(payload, action) {
+  if (!action?._mimicSourceId) return payload;
+  const code = payload.type === "chain_react" ? payload.action_code : payload.skill_code;
+  if (!["skill", "chain_react"].includes(payload.type) || code !== action.code) return payload;
+  if (action._copyWrapperCode === "agency_borrowed_skill") {
+    return payload.type === "chain_react"
+      ? { type: "chain_react", unit_id: payload.unit_id, action_code: "agency_borrowed_skill", contract_payload: { ...payload, skill_code: action.code } }
+      : { type: "skill", unit_id: payload.unit_id, skill_code: "agency_borrowed_skill", contract_payload: { ...payload } };
+  }
+  return { type: "skill", unit_id: payload.unit_id, skill_code: "mimic_skill",
+    target_unit_id: action._mimicSourceId, mimic_skill_code: action.code, copied_payload: { ...payload } };
 }
 
 export function hoveredAction() {
