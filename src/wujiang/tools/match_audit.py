@@ -135,13 +135,20 @@ def run_match_audit(
         step += 1
 
     if battle.winner is None and step >= max_steps:
+        completed_turns = int(getattr(battle, "completed_turns", 0) or 0)
+        turn_limit = int(getattr(battle, "turn_timeout_limit", 0) or 0)
         findings.add(
             severity="info",
             category="simulation_limit",
             source="match_audit",
             message="Simulation stopped at max_steps before a winner was decided.",
             step=step,
-            evidence={"max_steps": max_steps},
+            evidence={
+                "max_steps": max_steps,
+                "completed_turns": completed_turns,
+                "turn_limit": turn_limit,
+                "turns_until_terminal_rule": max(0, turn_limit - completed_turns) if turn_limit else None,
+            },
         )
 
     manifest = {
@@ -228,6 +235,14 @@ def next_decision(
     step: int,
 ) -> Optional[dict[str, Any]]:
     try:
+        damage_prompt = battle.pending_damage_choice
+        if damage_prompt is not None:
+            unit = battle.get_unit(damage_prompt["unit_id"])
+            return {
+                "reason": "ai_damage_choice", "phase": "damage", "actor": unit_ref(unit),
+                "payload": ai_policy.choose_damage_choice_action(battle),
+                "summary": f"{unit.name} chooses whether to prevent incoming damage",
+            }
         prompt = battle.current_respawn_prompt()
         if prompt is not None:
             unit = battle.get_unit(prompt.unit_id)
@@ -276,6 +291,7 @@ def next_decision(
         return build_fallback_decision(battle, f"decision error: {type(exc).__name__}: {exc}")
 
 
+@ai_policy.with_enemy_view("actor")
 def build_turn_decision(
     battle: Battle,
     actor: Unit,
@@ -370,6 +386,7 @@ def build_turn_bundle_decision(
     return max(actionable, key=lambda decision: float(decision.get("selected_score") or 0.0))
 
 
+@ai_policy.with_enemy_view("reactor")
 def build_reaction_decision(
     battle: Battle,
     reactor: Unit,
@@ -443,6 +460,7 @@ def build_instant_decision_for_waiting_side(
     return None
 
 
+@ai_policy.with_enemy_view("units")
 def build_instant_decision(
     battle: Battle,
     units: Iterable[Unit],
@@ -607,6 +625,21 @@ def action_diagnostic(
             raw_payloads = ai_policy.skill_payloads_for_action(battle, actor, action)
             diagnostic_payloads = ai_policy.trim_skill_payloads_for_ai(battle, actor, raw_payloads, limit=64)
             selection_mode = str(selection.get("mode") or "")
+            if code == "mimic_skill" and not raw_payloads:
+                nested_skills = [
+                    skill
+                    for entry in selection.get("targets", [])
+                    for skill in entry.get("skills", [])
+                    if skill.get("action", {}).get("available")
+                ]
+                if not nested_skills:
+                    diag["expected_filter_reason"] = "no_available_copied_skill"
+                elif battle.mounted_unit_for(actor) is not None and all(
+                    skill.get("code") in ai_policy.MOVE_SKILL_CODES
+                    and skill.get("code") != "mounted_leap"
+                    for skill in nested_skills
+                ):
+                    diag["expected_filter_reason"] = "mounted_rider_only_copied_move_skills"
             if (
                 battle.mounted_unit_for(actor) is not None
                 and str(action.get("code") or "") in ai_policy.MOVE_SKILL_CODES
@@ -784,6 +817,13 @@ def record_candidate_gap(
 
 
 def build_fallback_decision(battle: Battle, summary: str) -> Optional[dict[str, Any]]:
+    if battle.pending_damage_choice is not None:
+        unit = battle.get_unit(battle.pending_damage_choice["unit_id"])
+        return {
+            "reason": "ai_damage_fallback", "phase": "damage", "actor": unit_ref(unit),
+            "payload": {"type": "damage_choice", "unit_id": unit.unit_id, "stat_name": "decline"},
+            "summary": summary,
+        }
     if battle.pending_chain is not None:
         current_unit_id = battle.pending_chain.current_unit_id()
         actor = None
@@ -928,6 +968,8 @@ def record_step_invariants(
 
 
 def current_phase(battle: Battle) -> str:
+    if battle.pending_damage_choice is not None:
+        return "damage"
     if battle.current_respawn_prompt() is not None:
         return "respawn"
     if battle.pending_chain is not None:
@@ -948,6 +990,10 @@ def battle_state_digest(battle: Battle) -> dict[str, Any]:
         "phase": current_phase(battle),
         "pending_chain": queued_action_ref(battle, queued) if queued is not None else None,
         "pending_respawn": prompt.to_public_dict() if prompt is not None else None,
+        "pending_damage_choice": (
+            {key: battle.pending_damage_choice[key] for key in ("unit_id", "action_name", "damage", "event_index", "stats")}
+            if battle.pending_damage_choice is not None else None
+        ),
         "winner": battle.winner,
     }
     return {"meta": meta, "units": units}

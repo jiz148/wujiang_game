@@ -478,10 +478,10 @@ class MultiplayerRoomTests(unittest.TestCase):
 
         self.finish_current_ai_action(room)
 
-        self.assertEqual(room.current_input_player_id(), 1)
-        self.assertEqual(room.battle.active_player, 2)
-        self.assertIsNotNone(room.battle.pending_chain)
-        self.assertEqual(room.battle.get_unit(room.battle.pending_chain.queued_action.actor_id).hero_code, "elite_soldier")
+        self.assertIsNotNone(room.last_action_meta)
+        self.assertEqual(room.last_action_meta["reason"], "ai_turn")
+        self.assertEqual(room.last_action_meta["actor_name"], "精兵")
+        self.assertTrue(any(step.reason == "ai_turn" for step in room.replay.steps))
 
     def test_ai_seat_uses_protection_reaction_instead_of_skipping(self) -> None:
         room, _, host_token = self.registry.create_room("Alice")
@@ -668,6 +668,11 @@ class MultiplayerRoomTests(unittest.TestCase):
         dark.position = Position(3, 4)
         caster.position = Position(5, 4)
         caster.mana_points = 2
+        # Leave a living, actionable target after the hit so the instant
+        # control effect has enough value for the standard AI threshold.
+        dark.base_stats.defense = 1
+        dark.max_health = 2
+        dark.current_hp = 2
 
         room.perform_action(host_token, {"type": "move", "unit_id": dark.unit_id, "x": 4, "y": 4})
         self.assertIsNotNone(room.pending_simulation_action)
@@ -789,7 +794,9 @@ class MultiplayerRoomTests(unittest.TestCase):
         room.start_battle(host_token)
         hunter = room.battle.player_units(1)[0]
 
-        room.perform_action(host_token, {"type": "skill", "unit_id": hunter.unit_id, "skill_code": "earth_walker", "x": 2, "y": 4})
+        destinations = hunter.get_skill("earth_walker").preview(room.battle, hunter)["cells"][:3]
+        self.assertEqual(len(destinations), 3)
+        room.perform_action(host_token, {"type": "skill", "unit_id": hunter.unit_id, "skill_code": "earth_walker", "cells": destinations})
 
         clone = next(unit for unit in room.battle.all_units() if unit.is_clone)
         host_view = room.serialize_state(host_token)

@@ -1,9 +1,10 @@
 import fs from "node:fs/promises";
 import assert from "node:assert/strict";
-import { FileBlob, SpreadsheetFile } from "@oai/artifact-tool";
+import { FileBlob, SpreadsheetFile } from "file:///C:/Users/jiz14/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/@oai/artifact-tool/dist/artifact_tool.mjs";
 
 const root = "C:/Users/jiz14/TeamGH/wujiang_game";
-const outputDir = `${root}/outputs/hero-review-followup-20260904`;
+const outputDir = `${root}/outputs/hero-review-followup-20260923`;
+await fs.mkdir(outputDir, { recursive: true });
 const inputPath = `${root}/docs/武将实现问题清单.xlsx`;
 const outputPath = `${outputDir}/武将实现问题清单.xlsx`;
 const workbook = await SpreadsheetFile.importXlsx(await FileBlob.load(inputPath));
@@ -42,7 +43,7 @@ if (process.argv.includes("--inspect")) {
     const existing = originalDesign.findIndex((row, index) => index > 0 && row[2] === hero.code);
     if (existing > 0) {
       designSheet.getRange(`AA${existing + 1}`).values = [[hero.review_status]];
-      if (hero.batch === "R01") {
+      if (["R01", "R02", "R03", "R04", "R05", "R06", "R07", "R08", "R09", "R10", "R11", "R12", "R13", "R14", "R15", "R16", "R17", "R18", "R19", "R20", "R21", "R22", "R23"].includes(hero.batch)) {
         designSheet.getRange(`A${existing + 1}:AB${existing + 1}`).values = [designFields.map(key => {
           const value = hero[key];
           return value == null ? null : typeof value === "object" ? JSON.stringify(value) : value;
@@ -77,6 +78,9 @@ if (process.argv.includes("--inspect")) {
     conformity.getRange(`A${index + 2}:M${index + 2}`).copyFrom(conformity.getRange(`A${index + 1}:M${index + 1}`), "all");
   }
   conformity.getRange(`A2:M${rows.length + 1}`).values = rows;
+  rows.forEach((row, index) => {
+    if (["excel_r026", "excel_r027", "excel_r028", "excel_r029", "excel_r030", "excel_r031", "excel_r032", "excel_r033", "excel_r034"].includes(row[0])) conformity.getRange(`A${index + 2}:M${index + 2}`).format.rowHeight = 220;
+  });
 
   workbook.recalculate();
   const expected = new Map(sheets.map(({ name }) => [name, structuredClone(workbook.worksheets.getItem(name).getUsedRange().values)]));
@@ -88,17 +92,23 @@ if (process.argv.includes("--inspect")) {
   }
   const unchangedDesign = structuredClone(expected.get("武将设计思想").slice(0, originalDesign.length));
   for (let row = 1; row < originalDesign.length; row += 1) {
-    if (originalDesign[row][0] === "R01") unchangedDesign[row] = originalDesign[row];
+    if (["R01", "R02", "R03", "R04", "R05", "R06", "R07", "R08", "R09", "R10", "R11", "R12", "R13", "R14", "R15", "R16", "R17", "R18", "R19", "R20", "R21", "R22", "R23"].includes(originalDesign[row][0])) unchangedDesign[row] = originalDesign[row];
     else unchangedDesign[row][26] = originalDesign[row][26];
   }
   assert.deepEqual(unchangedDesign, before.get("武将设计思想").values);
   await inspectAndRender(workbook, "after");
-  const currentPreview = await workbook.render({ sheetName: "武将设计思想", range: "H8:J10", scale: 1, format: "png" });
-  await fs.writeFile(`${outputDir}/r01_designs.png`, new Uint8Array(await currentPreview.arrayBuffer()));
+  const currentPreview = await workbook.render({ sheetName: "武将设计思想", range: "Z38:AA40", scale: 1, format: "png" });
+  await fs.writeFile(`${outputDir}/r11_designs.png`, new Uint8Array(await currentPreview.arrayBuffer()));
+  const laoPreview = await workbook.render({ sheetName: "武将符合性审查", range: "A7:C11", scale: 1, format: "png" });
+  await fs.writeFile(`${outputDir}/r11_lao_review.png`, new Uint8Array(await laoPreview.arrayBuffer()));
   if (designRowCount > originalDesign.length) {
     const preview = await workbook.render({ sheetName: "武将设计思想", range: `H${originalDesign.length + 1}:J${designRowCount}`, scale: 1, format: "png" });
     await fs.writeFile(`${outputDir}/new_designs.png`, new Uint8Array(await preview.arrayBuffer()));
   }
+  const finalHeroPreview = await workbook.render({ sheetName: "武将设计思想", range: "Z74:AA74", scale: 1, format: "png" });
+  await fs.writeFile(`${outputDir}/r23_design_completion.png`, new Uint8Array(await finalHeroPreview.arrayBuffer()));
+  const finalReviewPreview = await workbook.render({ sheetName: "武将符合性审查", range: "A2:D6", scale: 1, format: "png" });
+  await fs.writeFile(`${outputDir}/r23_review_completion.png`, new Uint8Array(await finalReviewPreview.arrayBuffer()));
   const errors = await workbook.inspect({ kind: "match", searchTerm: "#REF!|#DIV/0!|#VALUE!|#NAME\\?|#N/A|#NUM!|#NULL!|#SPILL!|#CALC!", options: { useRegex: true, maxResults: 50 }, maxChars: 4000 });
   await fs.writeFile(`${outputDir}/formula_errors.ndjson`, errors.ndjson);
   const xlsx = await SpreadsheetFile.exportXlsx(workbook);

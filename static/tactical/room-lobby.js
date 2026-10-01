@@ -11,7 +11,7 @@ import { $ } from '../core/dom.js';
 import { fetchJson, hasRoom, viewerPlayerId } from '../core/net.js';
 import { render } from '../core/render.js';
 import { state } from '../core/state.js';
-import { applyRoomPayload, autoConfigureRoom, availableRoomModes, isRandomRoomMode, reportRoomError, selectRoomHero, setRandomRosterSize, setRoomBoardSize, setRoomHeroLimit, setRoomMode, setRoomSeatCount, setRoomTurnTimeout } from '../tactical/room-api.js';
+import { applyRoomPayload, autoConfigureRoom, availableRoomModes, isRandomRoomMode, reportRoomError, selectRoomHero, setBpTeamSize, setRandomRosterSize, setRoomBoardSize, setRoomHeroLimit, setRoomMode, setRoomSeatCount, setRoomTurnTimeout } from '../tactical/room-api.js';
 import { randomRoomRosterSize, seatHeroCount, seatIdentityLabel, setRoomEditSeat } from '../tactical/targeting.js';
 
 function heroByCode(code) {
@@ -37,7 +37,7 @@ export function isSeatLocked(seat) {
 export function canManageSeatRoster(seat) {
   if (!seat || !hasRoom() || state.room?.status !== "lobby") return false;
   if (state.room?.launch_context && state.room.launch_context.allow_roster_edit === false) return false;
-  if (isRandomRoomMode()) return false;
+  if (isRandomRoomMode() || state.room?.mode === "bp") return false;
   if (seat.player_id === viewerPlayerId()) return true;
   return Boolean(state.room?.viewer_is_host && seat.is_ai);
 }
@@ -93,6 +93,7 @@ export function openRoomSetup() {
     mode: String(state.room.mode || ""),
     seatCount: String(state.room.seat_count || 2),
     randomRosterSize: String(randomRoomRosterSize()),
+    bpTeamSize: String(state.room.bp?.team_size || 3),
     heroLimitEnabled: currentLimit > 0,
     heroLimit: String(currentLimit > 0 ? currentLimit : 5),
     turnTimeout: String(Number(state.room.turn_timeout_seconds ?? 0)),
@@ -211,6 +212,7 @@ export async function confirmRoomSetup() {
   const nextMode = draft.mode;
   const nextSeatCount = draft.seatCount;
   const nextRosterSize = draft.randomRosterSize;
+  const nextBpTeamSize = Number(draft.bpTeamSize) === 5 ? 5 : 3;
   const nextHeroLimit = draft.heroLimitEnabled
     ? Math.max(1, Math.min(20, Number.parseInt(draft.heroLimit, 10) || 1))
     : 0;
@@ -221,7 +223,10 @@ export async function confirmRoomSetup() {
   if (isRandomRoomMode() && Number(nextRosterSize) !== randomRoomRosterSize()) {
     await setRandomRosterSize(nextRosterSize);
   }
-  if (nextHeroLimit !== Number(state.room?.hero_limit || 0)) await setRoomHeroLimit(nextHeroLimit);
+  if (state.room?.mode === "bp" && nextBpTeamSize !== Number(state.room?.bp?.team_size || 3)) {
+    await setBpTeamSize(nextBpTeamSize);
+  }
+  if (state.room?.mode !== "bp" && nextHeroLimit !== Number(state.room?.hero_limit || 0)) await setRoomHeroLimit(nextHeroLimit);
   const nextTurnTimeout = [0, 30, 60, 120].includes(Number.parseInt(draft.turnTimeout, 10))
     ? Number.parseInt(draft.turnTimeout, 10)
     : 0;
@@ -277,6 +282,9 @@ export function renderRoomSetupDialog() {
   const randomControl = $("random-roster-size-control");
   const randomInput = $("random-roster-size-input");
   randomControl?.classList.toggle("hidden", draft.mode !== "random");
+  $("bp-team-size-control")?.classList.toggle("hidden", draft.mode !== "bp");
+  const bpSizeSelect = $("bp-team-size-select");
+  if (bpSizeSelect && document.activeElement !== bpSizeSelect) bpSizeSelect.value = draft.bpTeamSize;
   if (randomInput && document.activeElement !== randomInput) {
     randomInput.value = draft.randomRosterSize;
   }
@@ -284,7 +292,8 @@ export function renderRoomSetupDialog() {
   if (limitEnabled) limitEnabled.checked = Boolean(draft.heroLimitEnabled);
   const limitControl = $("room-hero-limit-control");
   const limitInput = $("room-hero-limit-input");
-  limitControl?.classList.toggle("hidden", !draft.heroLimitEnabled);
+  limitControl?.classList.toggle("hidden", draft.mode === "bp" || !draft.heroLimitEnabled);
+  $("room-hero-limit-switch")?.classList.toggle("hidden", draft.mode === "bp");
   if (limitInput && document.activeElement !== limitInput) {
     limitInput.value = draft.heroLimit;
   }

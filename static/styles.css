@@ -8847,3 +8847,18 @@ body.battle-mode .logs .log {
   gap: 4px;
   margin-bottom: var(--s-2);
 }
+
+.bp-panel {
+  margin-top: var(--s-3);
+  padding: var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  background: var(--surface-1);
+}
+
+.bp-panel h3, .bp-panel h4 { margin: 0.6rem 0; }
+.bp-panel p { margin: 0.4rem 0 0.8rem; color: var(--text-2); }
+.bp-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); margin: 0.5rem 0; }
+.bp-row .select { min-width: 11rem; max-width: 25rem; }
+.bp-history { margin-top: var(--s-3); }
+.bp-chip { display: inline-block; margin: 0.2rem; padding: 0.3rem 0.55rem; border-radius: 999px; background: var(--surface-2); }

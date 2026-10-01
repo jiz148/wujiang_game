@@ -36,7 +36,7 @@ BROWSER_GLOBALS = {
     "queueMicrotask", "requestAnimationFrame", "screen", "sessionStorage",
     "setInterval", "setTimeout", "structuredClone", "undefined", "window",
     "BigInt", "CanvasRenderingContext2D", "DOMParser", "DocumentFragment",
-    "Element", "HTMLElement", "IntersectionObserver", "MutationObserver",
+    "Element", "HTMLElement", "HTMLSelectElement", "IntersectionObserver", "MutationObserver",
     "Node", "Notification", "ResizeObserver", "SVGElement", "XMLHttpRequest",
 }
 

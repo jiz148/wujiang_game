@@ -73,6 +73,32 @@ export function multiUnitSelection(action) {
   return action?.preview?.selection?.mode === "multi_unit" ? action.preview.selection : null;
 }
 
+export function unitDirectionSelection(action) {
+  return action?.preview?.selection?.mode === "unit_direction" ? action.preview.selection : null;
+}
+
+export function stagedUnitDirectionTargetId(action = selectedAction()) {
+  if (!action || state.selectedActionCode !== action.code || !unitDirectionSelection(action)) return "";
+  return String(state.stagedPayload?.targetUnitId || "");
+}
+
+export function setStagedUnitDirectionTargetId(targetId) {
+  const direction = state.stagedPayload?.direction;
+  state.stagedPayload = { targetUnitId: String(targetId || ""), ...(direction ? { direction } : {}) };
+}
+
+export function stagedUnitDirection(action = selectedAction()) {
+  if (!action || state.selectedActionCode !== action.code || !unitDirectionSelection(action)) return null;
+  const direction = state.stagedPayload?.direction;
+  return direction?.dx == null || direction?.dy == null ? null
+    : { dx: Number(direction.dx), dy: Number(direction.dy) };
+}
+
+export function setStagedUnitDirection(direction) {
+  const targetUnitId = stagedUnitDirectionTargetId();
+  state.stagedPayload = { targetUnitId, direction: { dx: Number(direction.dx), dy: Number(direction.dy) } };
+}
+
 export function statCellSelection(action) {
   return action?.preview?.selection?.mode === "stat_cells" ? action.preview.selection : null;
 }
@@ -179,11 +205,16 @@ export function setStagedPatternChoice(choiceCode) {
 export function setStagedPatternCells(cells) {
   const normalized = normalizedPatternCells(cells);
   const choiceCode = stagedPatternChoiceCode();
-  state.stagedPayload = stagedPatternState({
+  const sealTarget = selectedAction()?.code === "heaven_punishment" ? {
+    heavenTarget: state.stagedPayload?.heavenTarget,
+    heavenSkill: state.stagedPayload?.heavenSkill,
+  } : null;
+  const next = stagedPatternState({
     choiceCode,
     cells: normalized,
     attackVariant: stagedAttackVariantCode(),
   });
+  state.stagedPayload = sealTarget ? { ...sealTarget, ...(next || {}) } : next;
 }
 
 export function stagedMovePath(action = selectedAction()) {
@@ -538,6 +569,9 @@ export function currentPreview() {
     };
   }
   const action = hoveredAction();
+  if (action?.preview?.selection?.mode === "mimic_skill") {
+    return { cellKeys: new Set(), targetIds: new Set(), secondaryCellKeys: new Set(), destinationCellKeys: new Set() };
+  }
   if (!action) {
     if (isChainMode()) {
       const queued = state.battle?.pending_chain?.queued_action;
@@ -569,6 +603,16 @@ export function currentPreview() {
       targetIds: new Set(target ? [target.id] : []),
       secondaryCellKeys: positionsToSet(target ? unitOccupiedCells(target) : []),
       destinationCellKeys: new Set(),
+    };
+  }
+
+  if (action.preview?.destinations_by_target && state.stagedPayload?.targetUnitId) {
+    const target = stagedTarget();
+    return {
+      cellKeys: positionsToSet(descentMomentDestinations(action, target)),
+      targetIds: new Set(target ? [target.id] : []),
+      secondaryCellKeys: positionsToSet(target ? unitOccupiedCells(target) : []),
+      destinationCellKeys: positionsToSet(descentMomentDestinations(action, target)),
     };
   }
 
@@ -618,7 +662,9 @@ export function currentPreview() {
       cellKeys: positionsToSet(directionCells),
       targetIds: targetIdsToSet(targetIds),
       secondaryCellKeys: new Set(),
-      destinationCellKeys: new Set(),
+      destinationCellKeys: positionsToSet((action.preview?.pattern_destinations || [])
+        .filter((entry) => String(entry.choice_code || "") === choice)
+        .flatMap((entry) => entry.destination_cells || [])),
     };
   }
   if (movePathSelection(action)) {
@@ -638,11 +684,18 @@ export function currentPreview() {
   if (patternSelection(action)) {
     const chosenCells = stagedPatternCells(action);
     const activeCells = nextPatternSelectionCells(action, chosenCells);
+    const destinations = chosenCells.length ? (action.preview?.pattern_destinations || [])
+      .filter((entry) => {
+        if (entry.choice_code && String(entry.choice_code) !== stagedPatternChoiceCode(action)) return false;
+        const patternKeys = positionsToSet(entry.pattern || []);
+        return chosenCells.every((cell) => patternKeys.has(positionKey(cell)));
+      })
+      .flatMap((entry) => entry.destination_cells || []) : [];
     return {
       cellKeys: positionsToSet(activeCells),
       targetIds: new Set(),
       secondaryCellKeys: positionsToSet(chosenCells),
-      destinationCellKeys: new Set(),
+      destinationCellKeys: positionsToSet(destinations),
     };
   }
   if (multiUnitSelection(action)) {
@@ -651,6 +704,15 @@ export function currentPreview() {
       cellKeys: positionsToSet(previewCellsForTargetIds(filteredTargetIds)),
       targetIds: targetIdsToSet(filteredTargetIds),
       secondaryCellKeys: positionsToSet(previewCellsForTargetIds(chosenIds)),
+      destinationCellKeys: new Set(),
+    };
+  }
+  if (unitDirectionSelection(action)) {
+    const chosenId = stagedUnitDirectionTargetId(action);
+    return {
+      cellKeys: positionsToSet(previewCellsForTargetIds(filteredTargetIds)),
+      targetIds: targetIdsToSet(filteredTargetIds),
+      secondaryCellKeys: positionsToSet(previewCellsForTargetIds(chosenId ? [chosenId] : [])),
       destinationCellKeys: new Set(),
     };
   }
@@ -762,9 +824,23 @@ export function canCompleteTargetSelection() {
   const action = selectedAction();
   if (!action) return false;
   if (action.code === "backstep_shot" && isChainMode()) return backstepSelectionCanComplete(action);
+  if (action.code === "heaven_punishment") {
+    if (!patternSelectionCanComplete(action)) return false;
+    const target = (action.preview?.heaven_punishment_targets || []).find(
+      (entry) => entry.unit_id === state.stagedPayload?.heavenTarget,
+    );
+    if (!target?.skills?.some((entry) => entry.code === state.stagedPayload?.heavenSkill)) return false;
+    const area = positionsToSet(stagedPatternCells(action));
+    return unitOccupiedCells(unitById(target.unit_id)).some((cell) => area.has(positionKey(cell)));
+  }
   if (movePathSelection(action)) return movePathCanComplete(action);
   if (patternSelection(action)) return patternSelectionCanComplete(action);
   if (multiUnitSelection(action)) return multiUnitSelectionCanComplete(action);
+  if (unitDirectionSelection(action)) {
+    const targetId = stagedUnitDirectionTargetId(action);
+    return Boolean(targetId && stagedUnitDirection(action)
+      && (action.preview?.target_unit_ids || []).includes(targetId));
+  }
   if (statCellSelection(action)) return statCellSelectionCanComplete(action);
   if (bodyDirectionSelection(action)) return bodyDirectionSelectionCanComplete(action);
   if (reviveUnitCellSelection(action)) return reviveUnitCellSelectionCanComplete(action);

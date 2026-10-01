@@ -299,6 +299,9 @@ class BattleSmokeTests(unittest.TestCase):
             {"cells": [{"x": x, "y": 2} for x in range(2, 7)]},
         )
         self.assertTrue(bard.has_status("毁灭电击"))
+        self.assertFalse(bard.cannot_move)
+        self.assertFalse(bard.cannot_attack)
+        bard.get_status("毁灭电击").on_owner_turn_start(battle)
         self.assertTrue(bard.cannot_move)
         self.assertTrue(bard.cannot_attack)
 
@@ -394,8 +397,8 @@ class BattleSmokeTests(unittest.TestCase):
         enemy.position = Position(8, 8)
         leopard.normal_move_actions_used = 1
         leopard.move_used = True
-        battle.perform_action({"type": "skill", "unit_id": leopard.unit_id, "skill_code": "fly_leap", "x": 5, "y": 1})
-        self.assertEqual(leopard.position, Position(5, 1))
+        battle.perform_action({"type": "skill", "unit_id": leopard.unit_id, "skill_code": "fly_leap", "x": 4, "y": 1})
+        self.assertEqual(leopard.position, Position(4, 1))
         self.assertEqual(leopard.normal_move_actions_used, 0)
 
     def test_oberon_judgment_stone_must_be_summoned_in_surrounding_empty_cell(self) -> None:
@@ -499,7 +502,7 @@ class BattleSmokeTests(unittest.TestCase):
         battle.perform_action({"type": "skill", "unit_id": swordsman.unit_id, "skill_code": "time_stop"})
 
         self.assertEqual(battle.current_turn_unit().unit_id, swordsman.unit_id)
-        self.assertEqual([battle.units[unit_id].hero_code for unit_id in battle.turn_order_unit_ids], ["ellie", "excel_r021", "excel_r021", "bard"])
+        self.assertEqual([battle.units[unit_id].hero_code for unit_id in battle.turn_order_unit_ids], ["ellie", "excel_r021", "bard"])
 
         battle.perform_action({"type": "end_turn"})
         self.assertEqual(battle.current_turn_unit().unit_id, swordsman.unit_id)
@@ -539,7 +542,7 @@ class BattleSmokeTests(unittest.TestCase):
         )
         resolve_pending_chain(battle)
 
-        self.assertAlmostEqual(panther.current_hp, 0.75)
+        self.assertAlmostEqual(panther.current_hp, 0.25)
         self.assertEqual(panther.mana_points, 1)
         self.assertEqual(panther.current_mana, panther.max_mana())
 
@@ -590,7 +593,7 @@ class BattleSmokeTests(unittest.TestCase):
         soldier = next(unit for unit in battle.player_units(1) if getattr(unit, "hero_code", "") == "royal_soldier")
 
         self.assertEqual((soldier.stat("attack"), soldier.stat("defense"), soldier.stat("speed"), soldier.stat("attack_range")), (5.0, 4.0, 2.0, 1.0))
-        self.assertTrue(soldier.has_block_counter)
+        self.assertTrue(battle.unit_can_use_block_counter(soldier))
 
         soldier.current_hp = 0.5
         ctx = battle.resolve_damage(DamageContext(source=fried, target=soldier, attack_power=fried.stat("attack"), is_skill=False, action_name="测试普攻", tags={"attack"}))
@@ -610,8 +613,8 @@ class BattleSmokeTests(unittest.TestCase):
         inspire = build_skill_candidates(battle, fried, actions["fried_inspire"], difficulty_profile("standard"), instant_only=False)
         soldiers = build_skill_candidates(battle, fried, actions["royal_soldier"], difficulty_profile("standard"), instant_only=False)
 
-        self.assertTrue(any(candidate.payload.get("target_unit_id") == bard.unit_id for candidate in inspire))
-        self.assertTrue(any(candidate.payload.get("attack") and candidate.payload.get("range") for candidate in soldiers))
+        self.assertFalse(any(candidate.payload.get("target_unit_id") == bard.unit_id and candidate.score > 0 for candidate in inspire))
+        self.assertTrue(any(candidate.payload.get("choice_code") and candidate.payload.get("cells") for candidate in soldiers))
 
     def test_agency_contract_attaches_then_cancels_with_damage_and_drain(self) -> None:
         battle = create_battle(["excel_r025", "bard"], "ellie")
@@ -638,12 +641,13 @@ class BattleSmokeTests(unittest.TestCase):
 
         self.assertTrue(mubie.cannot_be_targeted)
         self.assertEqual(mubie.position, bard.position)
-        self.assertEqual(mubie.stat("attack"), 6)
+        self.assertEqual(mubie.stat("attack"), bard.stat("attack"))
 
         battle.perform_action({"type": "end_turn"})
         while battle.current_turn_unit().unit_id != mubie.unit_id:
             battle.perform_action({"type": "end_turn"})
         battle.perform_action({"type": "skill", "unit_id": mubie.unit_id, "skill_code": "agency_contract"})
+        resolve_pending_chain(battle)
 
         self.assertFalse(mubie.cannot_be_targeted)
         self.assertEqual(mubie.stat("defense"), 5)
@@ -891,7 +895,8 @@ class BattleSmokeTests(unittest.TestCase):
         ]
         self.assertEqual(len(clones), 1)
         clone = clones[0]
-        self.assertEqual(clone.position, Position(0, 0))
+        self.assertEqual(ninja.position, Position(0, 0))
+        self.assertEqual(clone.position, Position(1, 1))
         self.assertTrue(clone.is_summon)
         self.assertTrue(clone.cannot_attack)
         self.assertTrue(clone.cannot_use_skills)
@@ -946,6 +951,54 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertTrue(battle.has_weather("大雪崩"))
         weather = next(effect for effect in battle.field_effects if getattr(effect, "weather_name", "") == "大雪崩")
         self.assertEqual(weather.duration, 5)
+
+    def test_big_avalanche_restricts_both_sides_and_restores_on_expiry(self) -> None:
+        from wujiang.tactical.heroes.excel_roster import BigAvalancheWeatherEffect
+
+        battle = create_battle(["excel_r071", "bard"], ["excel_r071", "bard"])
+        giants = [unit for unit in battle.all_units() if unit.hero_code == "excel_r071"]
+        bards = [unit for unit in battle.all_units() if unit.hero_code == "bard"]
+        weather = BigAvalancheWeatherEffect()
+        battle.add_field_effect(weather)
+        for giant in giants:
+            self.assertEqual(giant.stat("speed"), 5)
+            self.assertFalse(giant.cannot_move)
+        for bard in bards:
+            self.assertTrue(bard.cannot_move)
+            self.assertTrue(weather.blocks_skill_use(battle, bard, bard.get_skill("heal"))[0])
+            self.assertFalse(weather.blocks_skill_use(battle, bard, bard.get_skill("protection"))[0])
+        summon = MedusaSummon(1)
+        battle.summon_unit(summon, Position(5, 5), summoner=giants[0])
+        self.assertEqual(summon.stat("speed"), 4)
+        self.assertFalse(summon.cannot_move)
+        for _ in range(5):
+            weather.on_any_turn_end(battle, 1)
+        self.assertFalse(battle.has_weather("大雪崩"))
+        self.assertTrue(all(not bard.cannot_move for bard in bards))
+        self.assertTrue(all(giant.stat("speed") == 3 for giant in giants))
+        self.assertEqual(summon.stat("speed"), 2)
+
+    def test_big_avalanche_enhances_snow_skill_through_shield_but_respects_magic_immunity(self) -> None:
+        from wujiang.tactical.heroes.excel_roster import BigAvalancheWeatherEffect
+
+        battle = create_battle("excel_r071", ["bard", "ellie"])
+        giant = primary_hero(battle, 1)
+        bard = next(unit for unit in battle.hero_units(2) if unit.hero_code == "bard")
+        immune = next(unit for unit in battle.hero_units(2) if unit.hero_code == "ellie")
+        giant.position = Position(1, 1)
+        bard.position = Position(4, 1)
+        immune.position = Position(5, 1)
+        bard.shields = 2
+        immune.magic_immunity = True
+        battle.add_field_effect(BigAvalancheWeatherEffect())
+        battle.perform_action({"type": "skill", "unit_id": giant.unit_id, "skill_code": "snow_avalanche",
+                               "cells": [{"x": x, "y": y} for y in (1, 2) for x in range(2, 8)]})
+        resolve_pending_chain(battle)
+        self.assertEqual(bard.current_hp, 0.5)
+        self.assertEqual(bard.shields, 1)
+        self.assertIsNotNone(bard.get_status("雪崩"))
+        self.assertEqual(immune.current_hp, 1)
+        self.assertIsNone(immune.get_status("雪崩"))
 
     def test_excel_roster_magic_warrior_seal_lasts_until_enemy_turn_end(self) -> None:
         battle = create_battle("excel_r158", "bard")
@@ -1021,7 +1074,7 @@ class BattleSmokeTests(unittest.TestCase):
 
         self.assertTrue(battle.has_weather("万魔殿"))
         self.assertEqual(demon.stat("speed"), 6)
-        self.assertIsNotNone(demon.get_status("万魔殿加速"))
+        self.assertEqual(demon.stat("attack"), demon.base_stats.attack + 1)
 
     def test_excel_roster_honest_purify_reduces_enemy_mana(self) -> None:
         battle = create_battle("excel_r113", "bard")
@@ -1064,7 +1117,7 @@ class BattleSmokeTests(unittest.TestCase):
 
         self.assertEqual(bard.shields, 0)
         self.assertIsNotNone(bard.get_status("神圣决斗"))
-        self.assertTrue(bard.cannot_move)
+        self.assertTrue(bard.cannot_normal_move)
 
         battle.perform_action({"type": "end_turn"})
         with self.assertRaises(ActionError):
@@ -1321,6 +1374,42 @@ class BattleSmokeTests(unittest.TestCase):
 
         self.assertNotIn(bard.unit_id, preview["target_unit_ids"])
         self.assertIn(fire_funeral.unit_id, preview["target_unit_ids"])
+        options = preview["heaven_punishment_targets"]
+        self.assertTrue(all(entry["unit_id"] != bard.unit_id for entry in options))
+        self.assertTrue(all(skill["code"] != "protection" for entry in options for skill in entry["skills"]))
+
+    def test_heaven_punishment_requires_explicit_public_active_skill_before_spending(self) -> None:
+        battle = create_battle("excel_r070", "bard")
+        crab = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        crab.position = Position(1, 1)
+        bard.position = Position(4, 1)
+        payload = {"type": "skill", "unit_id": crab.unit_id, "skill_code": "heaven_punishment",
+                   "target_unit_id": bard.unit_id,
+                   "cells": [{"x": x, "y": y} for y in range(5) for x in range(2, 7)]}
+        with self.assertRaisesRegex(ActionError, "选择.*主动技能"):
+            battle.perform_action(payload)
+        self.assertEqual(crab.get_skill("heaven_punishment").uses_this_battle, 0)
+        with self.assertRaisesRegex(ActionError, "公开.*主动"):
+            battle.perform_action({**payload, "disabled_skill_code": "protection"})
+
+    def test_heaven_punishment_has_both_side_damage_and_only_seal_pierces_one_shield(self) -> None:
+        battle = create_battle(["excel_r070", "bard"], "bard")
+        crab = primary_hero(battle, 1)
+        ally = next(unit for unit in battle.hero_units(1) if unit.hero_code == "bard")
+        enemy = primary_hero(battle, 2)
+        crab.position = Position(1, 1)
+        ally.position = Position(3, 1)
+        enemy.position = Position(4, 1)
+        enemy.shields = 2
+        battle.perform_action({"type": "skill", "unit_id": crab.unit_id, "skill_code": "heaven_punishment",
+                               "target_unit_id": enemy.unit_id, "disabled_skill_code": "heal",
+                               "cells": [{"x": x, "y": y} for y in range(5) for x in range(2, 7)]})
+        resolve_pending_chain(battle)
+        self.assertEqual(ally.current_hp, 0.75)
+        self.assertEqual(enemy.current_hp, 1)
+        self.assertEqual(enemy.shields, 1)
+        self.assertIsNotNone(enemy.get_status("技能封印：回血"))
 
     def test_heaven_punishment_misses_if_queued_area_loses_valid_targets(self) -> None:
         battle = create_battle("excel_r070", "excel_r023")
@@ -1401,7 +1490,7 @@ class BattleSmokeTests(unittest.TestCase):
         clone = StandardCloneSummon(2, bard)
         summon = MedusaSummon(2)
         battle.add_unit(clone, Position(3, 3))
-        battle.add_unit(summon, Position(4, 3))
+        battle.summon_unit(summon, Position(4, 3), summoner=bard)
         skill = skill_by_code(noise, "interference")
         cells = [
             cell.to_dict()
@@ -1409,6 +1498,7 @@ class BattleSmokeTests(unittest.TestCase):
                 pattern
                 for pattern in skill.patterns(battle, noise)
                 if clone.position in pattern and summon.position in pattern
+                and bard.position not in pattern and noise.position not in pattern
             )
         ]
 
@@ -1418,7 +1508,9 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertFalse(clone.alive)
         self.assertNotIn(clone.unit_id, battle.units)
         self.assertEqual(summon.player_id, noise.player_id)
-        self.assertEqual(summon.summoner_id, noise.unit_id)
+        self.assertEqual(summon.summoner_id, bard.unit_id)
+        self.assertEqual(battle.controlling_hero_id(summon), noise.unit_id)
+        self.assertEqual(battle.unit_turn_slot_id(summon), bard.unit_id)
 
     def test_excel_roster_noise_wave_pierces_and_blocks_movement_skills(self) -> None:
         battle = create_battle("excel_r094", "excel_r136")
@@ -1518,6 +1610,19 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertLess(bard.current_hp, 3)
         self.assertEqual(skill_by_code(punisher, "sanctuary_judgment").uses_this_battle, 1)
 
+    def test_punisher_judgment_stops_hitting_a_destroyed_target(self) -> None:
+        battle = create_battle("excel_r036", "bard")
+        punisher = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        punisher.position = Position(1, 1)
+        bard.position = Position(3, 1)
+        bard.current_hp = 0.125
+        skill = skill_by_code(punisher, "sanctuary_judgment")
+        with mock.patch.object(battle, "resolve_damage", wraps=battle.resolve_damage) as damage:
+            skill.execute(battle, punisher, {})
+        self.assertFalse(bard.alive)
+        self.assertEqual(damage.call_count, 1)
+
     def test_excel_roster_remi_chaos_bat_and_undying_mana_cost(self) -> None:
         battle = create_battle("excel_r056", "bard")
         remi = primary_hero(battle, 1)
@@ -1586,7 +1691,7 @@ class BattleSmokeTests(unittest.TestCase):
 
         self.assertNotIn(kiku.unit_id, battle.units)
         self.assertIsNotNone(ally.get_status("菊之遗击"))
-        self.assertEqual(ally.attack_actions_per_turn(), 2)
+        self.assertEqual(ally.attack_actions_per_turn(), 1)
         actions = battle.action_snapshot_for(ally)["actions"]
         self.assertIn("kiku_legacy_attack", [action["code"] for action in actions])
 
@@ -1598,7 +1703,7 @@ class BattleSmokeTests(unittest.TestCase):
         battle.perform_action({"type": "attack", "unit_id": ally.unit_id, "target_unit_id": enemy.unit_id, "x": 3, "y": 1})
         resolve_pending_chain(battle)
 
-        with self.assertRaisesRegex(ActionError, "只剩"):
+        with self.assertRaisesRegex(ActionError, "攻击次数已用完"):
             battle.perform_action({"type": "attack", "unit_id": ally.unit_id, "target_unit_id": enemy.unit_id, "x": 3, "y": 1})
 
         battle.perform_action(
@@ -1674,6 +1779,7 @@ class BattleSmokeTests(unittest.TestCase):
         bard.shields = 1
 
         battle.perform_action({"type": "skill", "unit_id": frey.unit_id, "skill_code": "frey_lion_spear"})
+        resolve_pending_chain(battle)
 
         self.assertEqual(bard.shields, 0)
         self.assertLess(bard.current_hp, 2)
@@ -1909,6 +2015,13 @@ class BattleSmokeTests(unittest.TestCase):
         battle.resolve_damage(DamageContext(source=bard, target=ellie, attack_power=10, is_skill=True, action_name="测试伤害", tags={"skill"}))
         self.assertEqual(ellie.current_hp, 2)
 
+        before_nian_hp = nian.current_hp
+        battle.resolve_damage(DamageContext(source=bard, target=nian, attack_power=4, is_skill=True, action_name="测试允许伤害", tags={"skill"}))
+        self.assertLess(nian.current_hp, before_nian_hp)
+        before_bard_hp = bard.current_hp
+        battle.heal(HealContext(source=bard, target=bard, amount=0.25, action_name="测试非伤害行动"))
+        self.assertGreater(bard.current_hp, before_bard_hp)
+
         bard.current_hp = 1
         battle.perform_action(
             {
@@ -1923,6 +2036,16 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertIsNotNone(bard.get_status("碧玉闪光"))
         heal_ctx = battle.heal(HealContext(source=nian, target=bard, amount=0.25, action_name="测试治疗"))
         self.assertTrue(heal_ctx.cancelled)
+
+    def test_nian_dragon_dance_respects_no_heal_but_still_restores_mana(self) -> None:
+        battle = create_battle("excel_r059", "bard")
+        nian = primary_hero(battle, 1)
+        nian.current_hp = 0.5
+        nian.current_mana = 1
+        nian.cannot_heal = True
+        battle.perform_action({"type": "skill", "unit_id": nian.unit_id, "skill_code": "nian_dragon_dance"})
+        self.assertEqual(nian.current_hp, 0.5)
+        self.assertEqual(nian.current_mana, 5)
 
     def test_excel_roster_black_cat_form_and_paw_special_rules(self) -> None:
         battle = create_battle("excel_r066", "bard")
@@ -1956,6 +2079,36 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertFalse(cat.moved_this_turn)
         self.assertEqual(cat.normal_move_steps_used, 0)
         self.assertEqual(cat.normal_move_actions_used, 0)
+
+    def test_black_cat_paw_respects_mana_drain_immunity(self) -> None:
+        battle = create_battle("excel_r066", "excel_r025")
+        cat = primary_hero(battle, 1)
+        mubie = primary_hero(battle, 2)
+        cat.position = Position(1, 1)
+        mubie.position = Position(2, 1)
+        cat.current_mana = 0
+        before = mubie.current_mana
+        battle.perform_action({"type": "skill", "unit_id": cat.unit_id, "skill_code": "black_cat_paw"})
+        resolve_pending_chain(battle)
+        self.assertEqual(mubie.current_mana, before)
+        self.assertEqual(cat.current_mana, 0)
+
+    def test_black_cat_paw_hits_both_sides_but_not_its_own_body(self) -> None:
+        battle = create_battle(["excel_r066", "bard"], "bard")
+        cat = primary_hero(battle, 1)
+        ally = next(unit for unit in battle.hero_units(1) if unit.hero_code == "bard")
+        enemy = primary_hero(battle, 2)
+        cat.position = Position(3, 3)
+        ally.position = Position(4, 3)
+        enemy.position = Position(3, 4)
+        cat.current_mana = 0
+        ally.current_mana = enemy.current_mana = 2
+        battle.perform_action({"type": "skill", "unit_id": cat.unit_id, "skill_code": "black_cat_paw"})
+        resolve_pending_chain(battle)
+        self.assertEqual(cat.current_hp, 1)
+        self.assertEqual(ally.current_hp, 0.75)
+        self.assertEqual(enemy.current_hp, 0.75)
+        self.assertEqual((cat.current_mana, ally.current_mana, enemy.current_mana), (2, 1, 1))
 
     def test_excel_roster_fantasy_bird_moves_targets_and_friendly_mirror_blocks_strong_damage(self) -> None:
         battle = create_battle("excel_r127", "bard")
@@ -2001,7 +2154,8 @@ class BattleSmokeTests(unittest.TestCase):
         )
 
         self.assertEqual(ally.position, Position(4, 3))
-        self.assertTrue(ally.cannot_move)
+        self.assertTrue(ally.cannot_normal_move)
+        self.assertFalse(ally.cannot_move)
 
         battle = create_battle("excel_r127", "bard")
         bird = primary_hero(battle, 1)
@@ -2059,7 +2213,7 @@ class BattleSmokeTests(unittest.TestCase):
 
         payloads = skill_payloads_for_action(battle, fei_wang, action)
 
-        self.assertIn({"type": "skill", "unit_id": fei_wang.unit_id, "skill_code": "gale", "direction": "east"}, payloads)
+        self.assertTrue(any(payload.get("choice_code") == "east" and len(payload.get("cells", [])) == 1 for payload in payloads))
         self.assertFalse(any("x" in payload or "y" in payload for payload in payloads))
 
     def test_excel_roster_fei_wang_gale_and_inner_dimension_sword(self) -> None:
@@ -2103,7 +2257,7 @@ class BattleSmokeTests(unittest.TestCase):
         fei_wang.position = Position(1, 1)
         skill = skill_by_code(fei_wang, "gale")
         cells = skill.area(battle, fei_wang, {"direction": "east"})
-        center = sorted(cells, key=lambda cell: sum(cell.distance_to(other) for other in cells))[len(cells) // 2]
+        center = Position(5, 1)
         bard.position = center
 
         battle.perform_action({"type": "skill", "unit_id": fei_wang.unit_id, "skill_code": "gale", "direction": "east"})
@@ -2134,7 +2288,7 @@ class BattleSmokeTests(unittest.TestCase):
 
         self.assertEqual(red.mana_points, 0)
         self.assertEqual(bard.shields, 0)
-        self.assertEqual(bard.current_hp, 7)
+        self.assertEqual(bard.current_hp, 10 - battle.damage_rule.calculate_damage(3, bard.stat("defense")))
 
         battle = create_battle(["excel_r029", "bard"], "ellie")
         red = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r029")
@@ -2194,10 +2348,12 @@ class BattleSmokeTests(unittest.TestCase):
         bard.shields = 1
         fusion.mana_points = 2
 
-        battle.remove_unit(fusion)
+        bard.base_stats.defense = 3
+        fusion.current_hp, fusion.alive = 0, False
+        battle.cleanup_dead_units()
 
         self.assertEqual(bard.shields, 0)
-        self.assertEqual(bard.current_hp, 8)
+        self.assertEqual(bard.current_hp, 9.875)
 
     def test_excel_roster_natsume_wind_wall_blocks_piercing_effects(self) -> None:
         battle = create_battle("bard", "excel_r031")
@@ -2254,6 +2410,7 @@ class BattleSmokeTests(unittest.TestCase):
         natsume.base_stats.mana = 10
 
         battle.perform_action({"type": "skill", "unit_id": natsume.unit_id, "skill_code": "natsume_dispel"})
+        resolve_pending_chain(battle)
 
         self.assertNotIn(clone.unit_id, battle.units)
         self.assertFalse(dark.has_status("隐身"))
@@ -2307,17 +2464,25 @@ class BattleSmokeTests(unittest.TestCase):
 
         light_wall = skill_by_code(dark, "light_wall")
         self.assertTrue(any(status.blocks_skill_use(battle, dark, light_wall)[0] for status in dark.statuses))
-        self.assertAlmostEqual(dark.current_hp, max(0.0, hp_before_light - 6.0))
+        expected_damage = battle.damage_rule.calculate_damage(6, dark.stat("defense"))
+        self.assertAlmostEqual(dark.current_hp, max(0.0, hp_before_light - expected_damage))
 
         aaron.current_hp = 0.25
         aaron.current_mana = 0
         unicorn.alive = False
         battle.cleanup_dead_units()
 
+        self.assertTrue(aaron.has_status("独角兽遗辉待生效"))
+        self.assertFalse(aaron.has_status("独角兽遗辉"))
+        self.assertAlmostEqual(aaron.current_hp, 0.25)
+        battle.perform_action({"type": "end_turn"})
+        battle.perform_action({"type": "end_turn"})
         self.assertAlmostEqual(aaron.current_hp, aaron.max_health)
         self.assertIsInstance(aaron.current_mana, float)
         self.assertAlmostEqual(aaron.current_mana, aaron.max_mana())
         self.assertEqual(aaron.stat("attack"), aaron.base_stats.attack + 2)
+        self.assertTrue(aaron.has_status("独角兽遗辉"))
+        self.assertEqual(light.mana_cost_for_payload(battle, aaron, {}), 0)
 
     def test_blood_guard_is_once_per_turn(self) -> None:
         battle = create_battle("blood_eater", "ellie")
@@ -2334,11 +2499,16 @@ class BattleSmokeTests(unittest.TestCase):
         skill = skill_by_code(actor, skill_code)
         preview = skill.preview(battle, actor)
         target_cells = {(cell.x, cell.y) for cell in battle.unit_cells(target)}
-        for pattern in preview["selection"]["patterns"]:
+        actor_cells = {(cell.x, cell.y) for cell in battle.unit_cells(actor)}
+        selection = preview["selection"]
+        patterns = (selection["choices"][0]["patterns"] if selection["mode"] == "choice_pattern"
+                    else selection["patterns"])
+        for pattern in patterns:
             cells = [Position(int(cell["x"]), int(cell["y"])) for cell in pattern]
-            if any((cell.x, cell.y) in target_cells for cell in cells):
+            if (any((cell.x, cell.y) in target_cells for cell in cells)
+                    and not any((cell.x, cell.y) in actor_cells for cell in cells)):
                 return [{"x": cell.x, "y": cell.y} for cell in cells]
-        self.fail(f"no {skill_code} pattern hits target")
+        self.fail(f"no {skill_code} pattern hits target without hitting caster")
 
     def test_excel_roster_lao_wave_bullet_paid_and_free_cast(self) -> None:
         paid_battle = create_battle("excel_r033", "dark_human")
@@ -2413,7 +2583,9 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertTrue(cloak.turn_ready)
 
         battle.perform_action({"type": "skill", "unit_id": cloak.unit_id, "skill_code": "equip_mage_cloak", "target_unit_id": lao.unit_id})
-        self.assertFalse(cloak.alive)
+        self.assertTrue(cloak.alive)
+        self.assertIsNone(cloak.position)
+        self.assertEqual(cloak.equipped_to_id, lao.unit_id)
         self.assertIsNotNone(lao.get_status("法师斗篷"))
         self.assertEqual(lao.stat("speed"), 6)
         self.assertEqual(lao.normal_move_actions_per_turn(), 2)
@@ -2421,8 +2593,9 @@ class BattleSmokeTests(unittest.TestCase):
 
         battle.perform_action({"type": "end_turn"})
         battle.perform_action({"type": "end_turn"})
-        battle.perform_action({"type": "skill", "unit_id": lao.unit_id, "skill_code": "summon_mage_cloak", "x": 2, "y": 1})
+        battle.perform_action({"type": "skill", "unit_id": lao.unit_id, "skill_code": "detach_mage_cloak", "x": 2, "y": 1})
         new_cloak = summon_by_code(battle, 1, "mage_cloak")
+        self.assertIs(new_cloak, cloak)
         self.assertTrue(new_cloak.alive)
         self.assertEqual(new_cloak.position, Position(2, 1))
         self.assertIsNone(lao.get_status("法师斗篷"))
@@ -2431,12 +2604,18 @@ class BattleSmokeTests(unittest.TestCase):
         battle = create_battle("bard", "excel_r033")
         bard = primary_hero(battle, 1)
         lao = primary_hero(battle, 2)
+        bard.position = Position(1, 1)
+        lao.position = Position(2, 1)
+        bard.base_stats.attack = 10
         before_hp = lao.current_hp
         before_range = lao.stat("attack_range")
-        ctx = battle.resolve_damage(
-            DamageContext(source=bard, target=lao, attack_power=10, is_skill=False, action_name="测试伤害", tags={"attack"})
-        )
-        self.assertTrue(ctx.cancelled)
+
+        battle.perform_action({"type": "attack", "unit_id": bard.unit_id, "target_unit_id": lao.unit_id})
+        self.assertIsNotNone(battle.pending_chain)
+        battle.perform_action({"type": "chain_react", "unit_id": lao.unit_id,
+                               "action_code": "lao_damage_stat_cancel", "stat_name": "attack_range"})
+        resolve_pending_chain(battle)
+
         self.assertAlmostEqual(lao.current_hp, before_hp)
         self.assertEqual(lao.stat("attack_range"), before_range - 1)
 
@@ -2450,12 +2629,15 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertEqual(len(cannons), 4)
         self.assertTrue(all(cannon.magic_immunity for cannon in cannons))
 
+        destroyed_id = cannons[0].unit_id
         cannons[0].alive = False
-        cannons[0].position = None
+        battle.cleanup_dead_units()
         battle.perform_action({"type": "end_turn"})
         battle.perform_action({"type": "end_turn"})
         restored = [unit for unit in battle.player_units(1) if getattr(unit, "hero_code", "") == "floating_cannon" and unit.alive]
         self.assertEqual(len(restored), 4)
+        self.assertIn(destroyed_id, {unit.unit_id for unit in restored})
+        self.assertIs(battle.get_unit(destroyed_id), cannons[0])
 
     def test_excel_roster_sakura_berserk_buffs_and_forces_nearest_target(self) -> None:
         battle = create_battle("excel_r034", ["bard", "ellie"])
@@ -2481,10 +2663,47 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertEqual(cannon.stat("attack_range"), 2)
         self.assertEqual(cannon.attack_actions_per_turn(), 2)
         trait = next(trait for trait in cannon.traits if trait.name == "浮游炮狂暴属性")
-        ok, _ = trait.can_attack_target_with_payload(battle, cannon, bard, {})
+        ok, _ = trait.can_attack_target_with_payload(battle, cannon, bard, {"target_unit_id": bard.unit_id})
         self.assertTrue(ok)
-        ok, reason = trait.can_attack_target_with_payload(battle, cannon, ellie, {})
+        ok, reason = trait.can_attack_target_with_payload(battle, cannon, ellie, {"target_unit_id": ellie.unit_id})
         self.assertFalse(ok, reason)
+
+    def test_excel_roster_sakura_berserk_attack_uses_forced_route(self) -> None:
+        from wujiang.tactical.heroes.excel_roster import (
+            FloatingCannonBerserkStatus, FloatingCannonBuffStatus, FloatingCannonSummon,
+        )
+
+        battle = create_battle("excel_r034", "bard")
+        sakura = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        sakura.position = Position(0, 0)
+        bard.position = Position(7, 1)
+        bard.max_health = 20
+        bard.current_hp = 20
+        cannon = FloatingCannonSummon(1)
+        battle.summon_unit(cannon, Position(1, 1), summoner=sakura)
+        cannon.turn_ready = True
+        sakura.add_status(FloatingCannonBerserkStatus())
+        cannon.add_status(FloatingCannonBuffStatus())
+
+        battle.perform_action({"type": "attack", "unit_id": cannon.unit_id, "target_unit_id": bard.unit_id})
+        resolve_pending_chain(battle)
+
+        self.assertEqual(battle.distance_between_units(cannon, bard), 2)
+        self.assertEqual(cannon.normal_move_actions_used, 1)
+        self.assertEqual(cannon.attacks_used, 1)
+
+    def test_excel_roster_sakura_banish_does_not_queue_cannon_replacement(self) -> None:
+        battle = create_battle("excel_r034", "bard")
+        sakura = primary_hero(battle, 1)
+        sakura.position = Position(3, 3)
+        battle.perform_action({"type": "skill", "unit_id": sakura.unit_id,
+                               "skill_code": "floating_cannons", "x": 2, "y": 2})
+        cannon = next(unit for unit in battle.player_units(1)
+                      if getattr(unit, "hero_code", "") == "floating_cannon")
+        battle.banish_unit(cannon, 2)
+        trait = next(item for item in sakura.traits if item.name == "浮游炮回补")
+        self.assertEqual(trait.pending_cannons, [])
 
     def test_excel_roster_sakura_cover_consumes_cannon_for_single_target(self) -> None:
         battle = create_battle(["excel_r034", "ellie"], "bard")
@@ -2500,12 +2719,17 @@ class BattleSmokeTests(unittest.TestCase):
 
         battle.perform_action({"type": "end_turn"})
         battle.perform_action({"type": "attack", "unit_id": bard.unit_id, "target_unit_id": ally.unit_id})
-        battle.perform_action({"type": "chain_react", "unit_id": sakura.unit_id, "action_code": "floating_cannon_cover", "target_unit_id": ally.unit_id})
+        sacrificed = cannons_before[0]
+        battle.perform_action({"type": "chain_react", "unit_id": sakura.unit_id,
+                               "action_code": "floating_cannon_cover", "target_unit_id": ally.unit_id,
+                               "cannon_unit_id": sacrificed.unit_id})
         resolve_pending_chain(battle)
 
         cannons_after = [unit for unit in battle.player_units(1) if getattr(unit, "hero_code", "") == "floating_cannon" and unit.alive]
         self.assertAlmostEqual(ally.current_hp, before_hp)
         self.assertEqual(len(cannons_after), len(cannons_before) - 1)
+        self.assertFalse(sacrificed.alive)
+        self.assertEqual(sacrificed.destruction_count, 1)
 
     def test_excel_roster_ushioni_demon_blade_and_large_drain(self) -> None:
         battle = create_battle("excel_r035", ["bard", "ellie"])
@@ -2550,6 +2774,14 @@ class BattleSmokeTests(unittest.TestCase):
         oni.current_mana = oni.max_mana()
         battle.perform_action({"type": "skill", "unit_id": oni.unit_id, "skill_code": "mountain_god_muro"})
         self.assertTrue(oni.allow_unbounded_mana)
+        self.assertTrue(oni.to_public_dict(battle)["unbounded_mana"])
+        oni.current_mana = 0
+        blade = skill_by_code(oni, "demon_blade")
+        self.assertEqual(blade.mana_cost_for_payload(battle, oni, {}), 0)
+        self.assertTrue(blade.can_use(battle, oni, {})[0])
+        self.assertEqual(oni.spend_mana(1), 0)
+        self.assertEqual(oni.current_mana, 0)
+        oni.current_mana = oni.max_mana()
         oni.gain_mana(10)
         self.assertGreater(oni.current_mana, oni.base_stats.mana)
 
@@ -2617,14 +2849,21 @@ class BattleSmokeTests(unittest.TestCase):
         bard.current_mana = 2
         bard.shields = 1
 
-        with mock.patch("wujiang.tactical.heroes.excel_roster.random.random", side_effect=[0.75, 0.75, 0.75]):
+        skill = skill_by_code(dragon, "gravity_field")
+        original_metadata = skill.queued_payload_metadata
+
+        def fixed_gravity_coins(*args):
+            with mock.patch("wujiang.tactical.heroes.excel_roster.random.random", side_effect=[0.25, 0.75, 0.75]):
+                return original_metadata(*args)
+
+        with mock.patch.object(skill, "queued_payload_metadata", side_effect=fixed_gravity_coins):
             battle.perform_action(
                 {
                     "type": "skill",
                     "unit_id": dragon.unit_id,
                     "skill_code": "gravity_field",
-                    "x": 3,
-                    "y": 3,
+                    "x": 5,
+                    "y": 5,
                 }
             )
         resolve_pending_chain(battle)
@@ -2633,6 +2872,22 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(bard.current_mana, 1.0)
         self.assertAlmostEqual(dragon.current_mana, 5.0)
         self.assertLess(bard.current_hp, bard.max_health)
+
+    def test_gravity_field_freezes_three_coin_product_before_reactions(self) -> None:
+        battle = create_battle("excel_r037", "bard")
+        dragon = primary_hero(battle, 1)
+        bard = primary_hero(battle, 2)
+        dragon.position = Position(1, 1)
+        bard.position = Position(3, 3)
+        payload = {"type": "skill", "unit_id": dragon.unit_id, "skill_code": "gravity_field", "x": 3, "y": 3}
+        for rolls, side in (([0.75, 0.75, 0.75], 1), ([0.25, 0.75, 0.75], 2),
+                            ([0.25, 0.25, 0.75], 4), ([0.25, 0.25, 0.25], 8)):
+            with mock.patch("wujiang.tactical.heroes.excel_roster.random.random", side_effect=rolls) as rng:
+                queued = battle.build_queued_action(payload)
+            self.assertEqual(rng.call_count, 3)
+            self.assertEqual(queued.payload["gravity_side"], side)
+            self.assertEqual(len(queued.target_cells), len(skill_by_code(dragon, "gravity_field").cells_for_side(battle, Position(3, 3), side)))
+            self.assertIn(bard.unit_id, queued.target_unit_ids)
 
     def test_damage_formula_equal_attack_only_deals_half(self) -> None:
         battle = create_battle("bard", "ellie")
@@ -2897,12 +3152,14 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertEqual(bard.position, Position(7, 4))
         self.assertTrue(bard.cannot_normal_move)
 
-    def test_mana_pull_chain_preview_includes_target_path_and_destination(self) -> None:
+    def test_mana_pull_chain_targets_original_cell_and_preview_shows_destination(self) -> None:
         battle = create_battle("ellie", "bard")
         ellie = battle.player_units(1)[0]
         bard = battle.player_units(2)[0]
         ellie.position = Position(4, 4)
         bard.position = Position(5, 4)
+        preview = skill_by_code(ellie, "mana_pull").preview(battle, ellie)
+        self.assertIn({"x": 7, "y": 4}, preview["destinations_by_target"][bard.unit_id])
 
         battle.perform_action(
             {
@@ -2919,8 +3176,9 @@ class BattleSmokeTests(unittest.TestCase):
         queued_action = battle.pending_chain.queued_action
         self.assertEqual(
             {(cell.x, cell.y) for cell in queued_action.target_cells},
-            {(5, 4), (6, 4), (7, 4)},
+            {(5, 4)},
         )
+        self.assertEqual((queued_action.payload["dest_x"], queued_action.payload["dest_y"]), (7, 4))
 
     def test_mana_pull_only_blocks_normal_move_and_not_movement_skills(self) -> None:
         battle = create_battle("ellie", "dark_human")
@@ -3871,7 +4129,7 @@ class BattleSmokeTests(unittest.TestCase):
         )
 
         self.assertEqual(dark.position, Position(6, 4))
-        self.assertEqual(ellie.current_hp, 1.0)
+        self.assertEqual(ellie.current_hp, 0.5)
         self.assertFalse(any(type(status).__name__ == "CurseStatus" for status in dark.statuses))
 
     def test_evasion_can_choose_any_legal_cell_at_board_edge(self) -> None:
@@ -3999,6 +4257,7 @@ class BattleSmokeTests(unittest.TestCase):
             {"type": "skill", "unit_id": dark.unit_id, "skill_code": "paralyzing_glove", "target_unit_id": bard.unit_id}
         )
 
+        resolve_pending_chain(battle)
         self.assertIsNone(battle.pending_chain)
         self.assertEqual(bard.current_hp, 4.5)
         self.assertEqual(bard.shields, 0)
@@ -4140,7 +4399,7 @@ class BattleSmokeTests(unittest.TestCase):
         battle.perform_action({"type": "skill", "unit_id": bard.unit_id, "skill_code": "heal", "target_unit_id": ally.unit_id})
         self.assertAlmostEqual(ally.current_hp, 1.25)
 
-    def test_shielded_unit_cannot_chain_against_break_magic(self) -> None:
+    def test_shielded_unit_can_chain_against_break_magic(self) -> None:
         battle = create_battle("dark_human", "ellie")
         dark = battle.player_units(1)[0]
         ellie = battle.player_units(2)[0]
@@ -4155,7 +4414,9 @@ class BattleSmokeTests(unittest.TestCase):
             {"type": "skill", "unit_id": dark.unit_id, "skill_code": "paralyzing_glove", "target_unit_id": ellie.unit_id}
         )
 
-        self.assertIsNone(battle.pending_chain)
+        self.assertIsNotNone(battle.pending_chain)
+        self.assertEqual(ellie.shields, 1)
+        resolve_pending_chain(battle)
         self.assertEqual(ellie.current_mana, mana_before)
         self.assertEqual(ellie.current_hp, 4.0)
         self.assertEqual(ellie.shields, 0)
@@ -4648,6 +4909,7 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertTrue(dark.has_status("遁入黑暗"))
 
         battle.perform_action({"type": "attack", "unit_id": dark.unit_id, "target_unit_id": soldier.unit_id})
+        resolve_pending_chain(battle)
 
         self.assertFalse(dark.has_status("隐身"))
         self.assertIsNone(dark.get_status("黑暗突袭"))
@@ -4845,6 +5107,7 @@ class BattleSmokeTests(unittest.TestCase):
             {"type": "skill", "unit_id": hunter.unit_id, "skill_code": "complete_burn", "cells": cells}
         )
 
+        resolve_pending_chain(battle)
         self.assertIsNone(battle.pending_chain)
 
         self.assertEqual(bard.shields, 0)
@@ -4860,7 +5123,7 @@ class BattleSmokeTests(unittest.TestCase):
         hunter = battle.player_units(1)[0]
 
         self.assertIn("完全燃烧", hunter.raw_skill_text)
-        self.assertIn("造成当前攻伤害", hunter.raw_skill_text)
+        self.assertIn("当前攻伤害", hunter.raw_skill_text)
 
     def test_remote_area_requires_complete_rectangle_but_allows_edge_truncation(self) -> None:
         battle = create_battle("element_hunter", "bard")
@@ -5065,7 +5328,7 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertEqual(hunter.targeting_range(), 3)
         self.assertEqual(hunter.max_mana(), 6)
         self.assertEqual(hunter.current_mana, 5)
-        self.assertEqual(hunter.get_skill("water_wave").cooldown_remaining, 8)
+        self.assertEqual(hunter.get_skill("water_wave").cooldown_remaining, 4)
 
     def test_lina_occupies_four_cells_and_counts_range_from_any_cell(self) -> None:
         battle = create_battle("undead_king_lina", "bard")
@@ -5626,6 +5889,31 @@ class BattleSmokeTests(unittest.TestCase):
         options = battle.pending_chain.options_by_unit.get(dragon.unit_id, [])
         self.assertIn("stone_wall", [option.action_code for option in options])
 
+    def test_thor_heavy_hammer_doubles_stone_wall_reaction_cost_in_options_and_preview(self) -> None:
+        for mana, expected_available in ((1.0, False), (2.0, True)):
+            with self.subTest(mana=mana):
+                battle = create_battle("excel_r143", "doomlight_dragon")
+                thor = battle.player_units(1)[0]
+                dragon = battle.player_units(2)[0]
+                thor.position = Position(4, 4)
+                dragon.position = Position(5, 4)
+                dragon.current_mana = mana
+
+                battle.perform_action({
+                    "type": "skill", "unit_id": thor.unit_id,
+                    "skill_code": "thor_heavy_hammer", "cells": [{"x": 5, "y": 4}],
+                })
+
+                options = (
+                    battle.pending_chain.options_by_unit.get(dragon.unit_id, [])
+                    if battle.pending_chain is not None else []
+                )
+                walls = [option for option in options if option.action_code == "stone_wall"]
+                self.assertEqual(bool(walls), expected_available)
+                if walls:
+                    self.assertEqual(walls[0].preview["selection"]["max_targets"], 1)
+                    self.assertIn(dragon.unit_id, walls[0].preview["target_unit_ids"])
+
     def test_remote_dragon_breath_uses_range_based_two_by_two_selection(self) -> None:
         battle = create_battle("doomlight_dragon", "bard")
         dragon = battle.player_units(1)[0]
@@ -5863,7 +6151,7 @@ class BattleSmokeTests(unittest.TestCase):
 
         self.assertLess(bard.current_hp, 1.0)
 
-    def test_masamune_arc_attack_adds_damage_when_hitting_multiple_cells_of_large_target(self) -> None:
+    def test_masamune_arc_attack_hits_only_selected_cell_of_large_target(self) -> None:
         battle = create_battle("masamune", "undead_king_lina")
         masamune = primary_hero(battle, 1)
         lina = primary_hero(battle, 2)
@@ -5885,7 +6173,8 @@ class BattleSmokeTests(unittest.TestCase):
         if battle.pending_chain is not None:
             battle.perform_action({"type": "chain_skip"})
 
-        self.assertFalse(lina.alive)
+        self.assertTrue(lina.alive)
+        self.assertAlmostEqual(lina.current_hp, 0.5)
 
     def test_targeting_masamune_redirects_attack_and_skill_to_motor_horse(self) -> None:
         battle = create_battle("ellie", "masamune")
@@ -6129,7 +6418,7 @@ class JadeTests(unittest.TestCase):
 
         for _ in range(3):
             battle.perform_action({"type": "end_turn"})
-            self.assertEqual(missile.window_remaining_turns, 2)
+            self.assertEqual(missile.window_remaining_turns, 1)
 
         battle.perform_action({"type": "end_turn"})
         self.assertEqual(battle.current_turn_unit().unit_id, jade.unit_id)
@@ -6205,7 +6494,7 @@ class JadeTests(unittest.TestCase):
         ok, reason = skill.can_react_with_payload(battle, jade, queued, reaction_payload)
         self.assertFalse(ok)
         self.assertEqual(reason, "技能冷却中。")
-        self.assertEqual(skill.cooldown_remaining, 2)
+        self.assertEqual(skill.cooldown_remaining, 1)
 
         battle.perform_action({"type": "end_turn"})
         battle.perform_action({"type": "end_turn"})
@@ -6735,6 +7024,11 @@ class LiTests(unittest.TestCase):
 
         self.assertAlmostEqual(li.current_hp, before_hp)
         self.assertTrue(li.has_status("见切奖励"))
+        self.assertEqual(li.attack_actions_per_turn(), 3)
+        self.assertEqual(li.stat("speed"), 3)
+        battle.perform_action({"type": "end_turn"})
+        while battle.current_turn_unit().unit_id != li.unit_id:
+            battle.perform_action({"type": "end_turn"})
         self.assertEqual(li.attack_actions_per_turn(), 4)
         self.assertEqual(li.stat("speed"), 4)
 
@@ -6792,7 +7086,7 @@ class LiTests(unittest.TestCase):
         battle = create_battle("li", "bard")
         li = primary_hero(battle, 1)
 
-        li.add_status(SlowStatus(2))
+        li.add_status(SlowStatus(2), source=primary_hero(battle, 2))
 
         self.assertEqual(li.stat("speed"), 3)
 
@@ -7013,6 +7307,7 @@ class ErasureApostleTests(unittest.TestCase):
             }
         )
 
+        resolve_pending_chain(battle)
         self.assertEqual(apostle.position, Position(4, 4))
         self.assertEqual(apostle.attack_actions_per_turn(), 3)
 
@@ -7673,7 +7968,8 @@ class HeroBatchH12Tests(unittest.TestCase):
         while battle.current_turn_unit().unit_id != red.unit_id:
             battle.perform_action({"type": "end_turn"})
 
-        with mock.patch("wujiang.tactical.heroes.excel_roster.random.random", return_value=0.0) as roll:
+        pierce_trait = next(trait for trait in red.traits if trait.name == "赤之随机破魔")
+        with mock.patch.object(pierce_trait, "roll_pierce", return_value=True) as roll:
             battle.perform_action({"type": "attack", "unit_id": red.unit_id, "target_unit_id": bard.unit_id, "x": 5, "y": 4})
             resolve_pending_chain(battle)
 

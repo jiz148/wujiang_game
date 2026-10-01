@@ -1,5 +1,5 @@
 // DOM event wiring for every screen.
-import { activeBundles, activeOccupantAt, allUnits, canInteract, currentRespawnPrompt, fetchJson, hasBattle, hasRoom, inputPlayer, isChainMode, isGameOver, isReplayMode, isRespawnMode, recordProductEvent, replayMeta, roomQueryId, simulationMeta, stagedBackstepRetreatCell, stagedBackstepTargetId, syncLocation, toggleSidebarPanel, unitById, viewerPlayerId, visibleUnitAt } from '../core/net.js';
+import { activeBundles, activeOccupantAt, allUnits, canInteract, currentRespawnPrompt, fetchJson, hasBattle, hasRoom, inputPlayer, isChainMode, isDamageChoiceMode, isGameOver, isReplayMode, isRespawnMode, recordProductEvent, replayMeta, roomQueryId, simulationMeta, stagedBackstepRetreatCell, stagedBackstepTargetId, syncLocation, toggleSidebarPanel, unitById, viewerPlayerId, visibleUnitAt } from '../core/net.js';
 import { refreshState, render } from '../core/render.js';
 import { state, ui } from '../core/state.js';
 import { setScreen, syncScreen } from '../core/ui.js';
@@ -12,9 +12,10 @@ import { renderRecoveryButton, renderStrategyPanel } from '../strategic/workbenc
 import { chainQueuedActionPrompt, hideTooltip, renderHoverCard, roomStateLabel, scheduleBoardOverlayRender, showTooltip } from '../tactical/battle-ui.js';
 import { closeKeyboardHelp, focusMainContent, handleBattleKeyboard, onBoardClick, openKeyboardHelp } from '../tactical/board-input.js';
 import { canEditRoomSetup, canManageSeatArmy, canManageSeatRoster, closeAutoConfigure, closeHeroDetail, closeHeroPicker, closeRoomSetup, confirmAutoConfigure, confirmRoomSetup, isSeatLocked, openAutoConfigure, openHeroDetail, openHeroPicker, openRoomSetup, renderAutoConfigureDialog, renderHeroPicker, renderRoomSetupDialog, roomHeroLimit, seatHeroEntries, updateAutoConfigureDraft, updateRoomSetupDraft } from '../tactical/room-lobby.js';
+import { renderBpPanel } from '../tactical/bp-ui.js';
 import { applyRoomPayload, canReclaimSeatByName, controlSimulation, copyInviteLink, createRoom, deleteRoom, exitTutorial, isRandomRoomMode, joinRoom, leaveReplayMode, leaveRoom, loadReplayStep, performAction, renderTutorialGuide, restartFromGameOver, resumeStoredSeat, resumeTutorialBattle, retryTutorialStep, roomModeMeta, selectRoomHero, setAiStyles, setRoomSeatController, setRoomSeatTeam, setSeatArmyComposition, setSeatRandomQuota, shouldShowLobbyPanel, startRoomBattle, startTutorialBattle, surrenderBattle, toggleAiTakeover, toggleRoomReady } from '../tactical/room-api.js';
 import { clearActionSelection, loadStoredIdentity } from '../tactical/session.js';
-import { bodyDirectionSelection, canCompleteTargetSelection, choicePatternSelection, controllerTypeLabel, currentRoomSeat, hasCancelableTargetSelection, isBoardTargetSelectionActive, movePathSelection, multiUnitSelection, patternSelection, randomRoomRosterSize, reviveUnitCellSelection, roomSummaries, sanitizeRandomRosterSizeInput, seatHeroSummary, setStagedAttackVariant, setStagedBodyDirection, setStagedPatternChoice, setStagedReviveUnitId, setStagedStatName, stagedAttackActionPayload, stagedBodyCells, stagedBodyDirection, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, statCellSelection } from '../tactical/targeting.js';
+import { bodyDirectionSelection, canCompleteTargetSelection, choicePatternSelection, controllerTypeLabel, currentRoomSeat, hasCancelableTargetSelection, isBoardTargetSelectionActive, movePathSelection, multiUnitSelection, patternSelection, randomRoomRosterSize, reviveUnitCellSelection, roomSummaries, sanitizeRandomRosterSizeInput, seatHeroSummary, setStagedAttackVariant, setStagedBodyDirection, setStagedPatternChoice, setStagedReviveUnitId, setStagedStatName, setStagedUnitDirection, stagedAttackActionPayload, stagedBodyCells, stagedBodyDirection, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, stagedUnitDirection, stagedUnitDirectionTargetId, statCellSelection, unitDirectionSelection } from '../tactical/targeting.js';
 import { clearBattleVfx, selectedAction, tutorialState } from '../tactical/vfx.js';
 import { createMenu } from './components.js';
 import { $ } from './dom.js';
@@ -308,6 +309,7 @@ export function bindEvents() {
       return;
     }
     if (!canInteract()) return;
+    if (isDamageChoiceMode()) return;
     performAction({ type: "end_turn" });
   });
   $("skip-chain").addEventListener("click", () => {
@@ -330,8 +332,60 @@ export function bindEvents() {
       render();
     });
   });
+  document.addEventListener("change", (event) => {
+    const target = event.target;
+    if (target instanceof HTMLSelectElement && target.matches("[data-heaven-target], [data-heaven-skill]")) {
+      state.stagedPayload = { ...(state.stagedPayload || {}),
+        heavenTarget: document.querySelector("[data-heaven-target]")?.value,
+        heavenSkill: target.matches("[data-heaven-target]") ? null : document.querySelector("[data-heaven-skill]")?.value };
+      render();
+      return;
+    }
+    if (!(target instanceof HTMLSelectElement) || !target.matches("[data-agency-target], [data-agency-stat], [data-agency-skill]")) return;
+    state.stagedPayload = { ...(state.stagedPayload || {}),
+      agencyTarget: document.querySelector("[data-agency-target]")?.value,
+      agencyStat: document.querySelector("[data-agency-stat]")?.value,
+      agencySkill: target.matches("[data-agency-target]") ? null : document.querySelector("[data-agency-skill]")?.value };
+    render();
+  });
   document.addEventListener("click", (event) => {
     const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest("[data-heaven-select]")) {
+      if (selectedAction()?.code !== "heaven_punishment" || !canInteract()) return;
+      state.stagedPayload = { ...(state.stagedPayload || {}),
+        heavenTarget: document.querySelector("[data-heaven-target]")?.value,
+        heavenSkill: document.querySelector("[data-heaven-skill]")?.value };
+      render();
+      return;
+    }
+    if (target?.closest("[data-agency-bind]")) {
+      const action = selectedAction();
+      if (action?.code !== "agency_contract" || !canInteract()) return;
+      performAction({ type: "skill", unit_id: state.selectedUnitId, skill_code: action.code,
+        target_unit_id: document.querySelector("[data-agency-target]")?.value,
+        stat_name: document.querySelector("[data-agency-stat]")?.value,
+        copied_skill_code: document.querySelector("[data-agency-skill]")?.value });
+      return;
+    }
+    const mimicButton = target?.closest("[data-mimic-source]");
+    if (mimicButton && !mimicButton.disabled) {
+      const wrapper = selectedAction();
+      const source = wrapper?.preview?.selection?.targets?.find((entry) => entry.unit_id === mimicButton.dataset.mimicSource);
+      const entry = source?.skills?.find((skill) => skill.code === mimicButton.dataset.mimicCode);
+      if (!entry?.action?.available) return;
+      state.mimicChoice = { actorId: state.selectedUnitId, sourceId: source.unit_id, code: entry.code, wrapperCode: wrapper.code };
+      state.selectedActionCode = entry.code;
+      state.selectedActionSnapshot = null;
+      state.stagedPayload = null;
+      if (!entry.action.preview?.requires_target) {
+        performAction(isChainMode()
+          ? { type: "chain_react", unit_id: state.selectedUnitId, action_code: entry.code }
+          : { type: "skill", unit_id: state.selectedUnitId, skill_code: entry.code });
+      } else {
+        render();
+      }
+      return;
+    }
     const attackVariantButton = target?.closest("[data-attack-variant]");
     if (attackVariantButton) {
       const action = selectedAction();
@@ -363,6 +417,16 @@ export function bindEvents() {
       setStagedBodyDirection({
         dx: Number(directionButton.dataset.directionDx),
         dy: Number(directionButton.dataset.directionDy),
+      });
+      render();
+    }
+    const unitDirectionButton = target?.closest("[data-unit-direction-dx][data-unit-direction-dy]");
+    if (unitDirectionButton) {
+      const action = selectedAction();
+      if (!action || !unitDirectionSelection(action)) return;
+      setStagedUnitDirection({
+        dx: Number(unitDirectionButton.dataset.unitDirectionDx),
+        dy: Number(unitDirectionButton.dataset.unitDirectionDy),
       });
       render();
     }
@@ -435,6 +499,10 @@ export function bindEvents() {
         if (choicePatternSelection(action)) payload.choice_code = stagedPatternChoiceCode(action);
       } else if (multiUnitSelection(action)) {
         payload.target_unit_ids = stagedMultiTargetIds(action);
+        if (action.code === "floating_cannon_cover") {
+          payload.target_unit_id = payload.target_unit_ids[0];
+          payload.cannon_unit_id = payload.target_unit_ids[1];
+        }
       } else if (statCellSelection(action)) {
         payload.stat_name = stagedStatName(action);
         payload.cells = stagedStatCells(action);
@@ -462,8 +530,15 @@ export function bindEvents() {
     if (patternSelection(action)) {
       payload.cells = stagedPatternCells(action);
       if (choicePatternSelection(action)) payload.choice_code = stagedPatternChoiceCode(action);
+      if (action.code === "heaven_punishment") {
+        payload.target_unit_id = state.stagedPayload?.heavenTarget;
+        payload.disabled_skill_code = state.stagedPayload?.heavenSkill;
+      }
     } else if (multiUnitSelection(action)) {
       payload.target_unit_ids = stagedMultiTargetIds(action);
+    } else if (unitDirectionSelection(action)) {
+      payload.target_unit_id = stagedUnitDirectionTargetId(action);
+      payload.direction = stagedUnitDirection(action);
     } else if (statCellSelection(action)) {
       payload.stat_name = stagedStatName(action);
       payload.cells = stagedStatCells(action);
@@ -559,6 +634,11 @@ export function fallbackRoomModes() {
       code: "random",
       name: "随机选人",
       description: "无需手动选将，开局后随机分配武将，使用更大的战场与随机出生，并按能力值决定先手。",
+    },
+    {
+      code: "bp",
+      name: "BP模式",
+      description: "队长轮流禁选武将，再由队员分配控制权，支持3v3和5v5。",
     },
   ];
 }
@@ -749,6 +829,9 @@ function bindRoomLobbyDialogs() {
     const normalized = sanitizeRandomRosterSizeInput(event.target.value);
     event.target.value = normalized;
     updateRoomSetupDraft("randomRosterSize", normalized);
+  });
+  $("bp-team-size-select")?.addEventListener("change", (event) => {
+    updateRoomSetupDraft("bpTeamSize", event.target.value);
   });
   $("room-hero-limit-enabled")?.addEventListener("change", (event) => {
     if (!state.roomSetupDraft) return;
@@ -1155,7 +1238,7 @@ export function renderRoomPanels() {
   $("room-code-label").textContent = state.room.room_id;
   $("room-status-label").textContent = state.room.status === "lobby"
     ? "等待双方就绪"
-    : (isGameOver() ? "对局结束" : "对局进行中");
+    : (state.room.status === "bp" ? "禁选与分配" : (isGameOver() ? "对局结束" : "对局进行中"));
   $("viewer-seat-label").textContent = state.room.viewer_player_id
     ? `席位 ${state.room.viewer_player_id}`
     : "观战";
@@ -1171,7 +1254,7 @@ export function renderRoomPanels() {
   $("room-random-size-label").textContent = String(randomRoomRosterSize());
   const heroLimit = roomHeroLimit();
   const heroLimitFact = $("room-hero-limit-fact");
-  if (heroLimitFact) heroLimitFact.classList.toggle("hidden", !heroLimit);
+  if (heroLimitFact) heroLimitFact.classList.toggle("hidden", state.room.mode === "bp" || !heroLimit);
   const heroLimitLabel = $("room-hero-limit-label");
   if (heroLimitLabel) heroLimitLabel.textContent = String(heroLimit);
   const timeoutLabel = $("room-turn-timeout-label");
@@ -1186,7 +1269,7 @@ export function renderRoomPanels() {
   const openSetup = $("open-room-setup");
   if (openSetup) openSetup.classList.toggle("hidden", !canEditRoomSetup());
   const autoConfigure = $("auto-configure-room");
-  if (autoConfigure) autoConfigure.classList.toggle("hidden", !canEditRoomSetup());
+  if (autoConfigure) autoConfigure.classList.toggle("hidden", state.room.mode === "bp" || !canEditRoomSetup());
 
   leaveRoomBtn.classList.remove("hidden");
   leaveRoomBtn.disabled = false;
@@ -1206,19 +1289,23 @@ export function renderRoomPanels() {
   }
   const canShowStart = state.room.status === "finished"
     ? state.room.viewer_player_id !== null
-    : Boolean(state.room.viewer_is_host && state.room.status === "lobby");
+    : Boolean(state.room.viewer_is_host && (state.room.status === "lobby" && state.room.mode !== "bp" || state.room.status === "bp" && state.room.bp?.phase === "assign"));
   startRoom.classList.toggle("hidden", !canShowStart);
-  startRoom.disabled = state.room.status === "lobby" ? !state.room.can_start : !state.room.can_rematch;
+  startRoom.disabled = state.room.status === "finished" ? !state.room.can_rematch : !state.room.can_start;
   startRoom.textContent = state.room.status === "finished"
     ? (state.room.viewer_is_host ? "同配置再来一局" : "等待房主再开一局")
-    : (isRandomRoomMode() ? "开始随机对局" : "开始对局");
+    : (state.room.mode === "bp" ? "完成分配并开战" : (isRandomRoomMode() ? "开始随机对局" : "开始对局"));
   // 开不了局的原因挂在按钮上。它只有在你想开局时才有意义，不值得为它常设一段文字。
   startRoom.title = startRoom.disabled ? String(state.room.start_blocker || "") : "";
   renderRoomOverflowMenu();
 
   const seatCards = $("seat-cards");
+  const inBp = state.room.mode === "bp" && state.room.status === "bp";
+  $("room-setup-section")?.classList.toggle("hidden", inBp);
+  seatCards.classList.toggle("hidden", inBp);
   seatCards.replaceChildren();
   (state.room.seats || []).forEach((seat) => seatCards.append(createSeatCard(seat)));
+  renderBpPanel();
 }
 
 function renderRoomList() {
@@ -1310,6 +1397,10 @@ export function ensureSelectedUnit() {
     state.selectedUnitId = currentRespawnPrompt()?.unit_id || "";
     return;
   }
+  if (isDamageChoiceMode()) {
+    state.selectedUnitId = state.battle.pending_damage_choice.unit_id;
+    return;
+  }
   if (isChainMode() && !action) {
     state.selectedUnitId = state.battle.pending_chain?.current_unit_id || "";
     return;
@@ -1389,6 +1480,12 @@ export function renderHeader() {
     const unit = unitById(prompt?.unit_id || "");
     pill.textContent = `\u623f\u95f4 ${state.room.room_id} \u00b7 \u73a9\u5bb6 ${inputPlayer()} \u91cd\u65b0\u51fa\u73b0\u4e2d`;
     caption.textContent = `\u8bf7\u4e3a ${unit?.name || "\u6d88\u5931\u5355\u4f4d"} \u9009\u62e9\u91cd\u65b0\u51fa\u73b0\u7684\u4f4d\u7f6e\u3002`;
+    return;
+  }
+  if (isDamageChoiceMode()) {
+    const prompt = state.battle.pending_damage_choice;
+    pill.textContent = `房间 ${state.room.room_id} · 玩家 ${inputPlayer()} 决定伤害`;
+    caption.textContent = `拉奥将受到 ${prompt.damage} 点【${prompt.action_name}】伤害。请选择降低一项能力抵消，或承受伤害。`;
     return;
   }
   if (isChainMode()) {

@@ -11,7 +11,7 @@ import { clearResumableTutorial, refreshRecentMatches } from '../platform/home.j
 import { roomStateLabel, syncAiPreview } from '../tactical/battle-ui.js';
 import { clearActionSelection, clearStoredIdentity, loadStoredIdentity, resetRoomSession, saveStoredIdentity, syncSelectedUnitAfterStateChange } from '../tactical/session.js';
 import { actionNeedsTarget, controllerTypeLabel, currentPreview, currentRoomSeat, randomRoomRosterSize, roomSummaries, unitIsSelectableTarget } from '../tactical/targeting.js';
-import { maxVisualEventId, positionKey, syncBattleVfxState, tutorialState, visualEvents } from '../tactical/vfx.js';
+import { maxVisualEventId, positionKey, selectedAction, syncBattleVfxState, tutorialState, visualEvents, wrapCopiedActionPayload } from '../tactical/vfx.js';
 import { adoptBattleLaunchFromRoom, currentBattleLaunch, rememberBattleLaunch } from '../bridge/battle-launch.js';
 import { loadRecordedMatchEnds, syncStrategyCampaignFromRoomPayload } from '../bridge/campaign-battle.js';
 
@@ -503,6 +503,26 @@ export async function setRoomMode(modeCode) {
     reportRoomError(error.error || "切换房间模式失败。");
   }
 }
+
+async function postBpAction(action, fields) {
+  if (!hasRoom() || !state.playerToken || state.room?.mode !== "bp") return;
+  try {
+    const payload = await fetchJson(`/api/rooms/bp/${action}`, {
+      method: "POST",
+      body: JSON.stringify({room_id: state.room.room_id, player_token: state.playerToken, ...fields}),
+    });
+    applyRoomPayload(payload, { preserveScreen: true });
+    render();
+  } catch (error) {
+    if (error.state) applyRoomPayload(error.state, { preserveScreen: true });
+    reportRoomError(error.error || "BP操作失败。");
+  }
+}
+
+export const setBpTeamSize = (teamSize) => postBpAction("team-size", {team_size: teamSize});
+export const setBpCaptain = (teamId, seatId) => postBpAction("captain", {team_id: teamId, seat_id: seatId});
+export const bpChoose = (heroCode) => postBpAction("choose", {hero_code: heroCode});
+export const bpAssign = (heroCode, controller) => postBpAction("assign", {hero_code: heroCode, controller});
 
 export async function setRandomRosterSize(rosterSize) {
   if (!hasRoom() || !state.playerToken || !state.room?.viewer_is_host) return;
@@ -1137,6 +1157,7 @@ export async function controlSimulation(action, speed = null) {
 }
 
 export async function performAction(payload) {
+  payload = wrapCopiedActionPayload(payload, selectedAction());
   const previousTutorial = tutorialState();
   try {
     const response = await fetchJson("/api/rooms/action", {
@@ -1300,7 +1321,13 @@ export function restartFromGameOver() {
 
 export function onActionClick(action) {
   if (!canInteract()) return;
+  if (action.kind === "damage_choice") {
+    performAction({ type: "damage_choice", unit_id: state.battle.pending_damage_choice.unit_id,
+      stat_name: action.stat_name });
+    return;
+  }
   state.sidebarExpanded = "command";
+  state.mimicChoice = null;
   if (isChainMode()) {
     if (action.code === "chain_skip") {
       performAction({ type: "chain_skip" });

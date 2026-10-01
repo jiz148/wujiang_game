@@ -10,6 +10,7 @@ export const state = {
   inspectedUnitId: "",
   selectedActionCode: "",
   selectedActionSnapshot: null,
+  mimicChoice: null,
   hoveredActionCode: "",
   hoveredUnitId: "",
   hoverPointer: null,

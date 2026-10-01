@@ -1,7 +1,7 @@
 // Battle-room session bookkeeping and polling.
 import { $ } from '../core/dom.js';
 import { ensureSelectedUnit } from '../core/events.js';
-import { activeBundles, allUnits, currentRespawnPrompt, isChainMode, isGameOver, isRespawnMode, roomNameKey, roomQueryId, roomTokenKey, syncLocation, unitById } from '../core/net.js';
+import { activeBundles, allUnits, currentRespawnPrompt, isChainMode, isDamageChoiceMode, isGameOver, isRespawnMode, roomNameKey, roomQueryId, roomTokenKey, syncLocation, unitById } from '../core/net.js';
 import { state } from '../core/state.js';
 import { syncScreen } from '../core/ui.js';
 
@@ -104,6 +104,11 @@ export function syncSelectedUnitAfterStateChange() {
     state.selectedUnitId = currentRespawnPrompt()?.unit_id || "";
     return;
   }
+  if (isDamageChoiceMode()) {
+    clearActionSelection();
+    state.selectedUnitId = state.battle.pending_damage_choice.unit_id;
+    return;
+  }
   if (isChainMode()) {
     state.selectedUnitId = state.battle.pending_chain?.current_unit_id || "";
     return;
@@ -127,6 +132,7 @@ export function syncSelectedUnitAfterStateChange() {
 export function clearActionSelection() {
   state.selectedActionCode = "";
   state.selectedActionSnapshot = null;
+  state.mimicChoice = null;
   state.hoveredActionCode = "";
   state.hoveredUnitId = "";
   state.hoverPointer = null;

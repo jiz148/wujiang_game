@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +17,7 @@ from wujiang.tactical.heroes.registry import create_battle, create_hero  # noqa:
 from wujiang.tools.match_audit import (  # noqa: E402
     FindingRecorder,
     action_diagnostic,
+    build_turn_decision,
     parse_roster,
     record_candidate_gap,
     record_step_invariants,
@@ -62,6 +64,28 @@ def normalize_unit_ids(value):
 
 
 class MatchAuditToolTests(unittest.TestCase):
+    def test_turn_audit_uses_player_visible_clone_identity_and_restores_true_unit(self) -> None:
+        from wujiang.tactical.engine.core import Position
+        from wujiang.tactical.heroes.next_five import StandardCloneSummon
+
+        battle = create_battle("bard", "n")
+        actor, source = battle.player_units(1)[0], battle.player_units(2)[0]
+        actor.position, source.position = Position(4, 4), Position(5, 4)
+        clone = StandardCloneSummon(2, source)
+        battle.summon_unit(clone, Position(5, 3), summoner=source)
+        observed = []
+
+        def visible_diagnostic(_, unit, action, profile, *, instant_only):
+            observed.append(battle.get_unit(clone.unit_id).is_clone)
+            return {"kind": action["kind"], "code": action["code"], "_candidates": []}
+
+        with mock.patch("wujiang.tools.match_audit.action_diagnostic", side_effect=visible_diagnostic):
+            build_turn_decision(battle, actor, "standard", FindingRecorder(), step=0)
+
+        self.assertTrue(observed)
+        self.assertEqual(observed, [False] * len(observed))
+        self.assertIs(battle.get_unit(clone.unit_id), clone)
+
     def test_duplicate_cat_retaliation_for_one_resolution_token_is_high_signal_and_attributed_to_cat(self) -> None:
         battle = create_battle("excel_r142", "bard")
         findings = FindingRecorder()
@@ -550,6 +574,28 @@ class MatchAuditToolTests(unittest.TestCase):
 
         self.assertEqual(diagnostic.get("candidate_count"), 0)
         self.assertEqual(diagnostic.get("expected_filter_reason"), "unlimited_nonhostile_repeat_throttle")
+
+    def test_mounted_panther_self_copy_move_is_not_a_payload_generation_gap(self) -> None:
+        from wujiang.tactical.engine.core import Position
+        from wujiang.tactical.heroes.next_five import MotorHorseSummon
+
+        battle = create_battle("excel_r022", "bard")
+        panther = battle.player_units(1)[0]
+        bard = battle.player_units(2)[0]
+        panther.position = Position(6, 6)
+        bard.position = Position(0, 0)
+        horse = MotorHorseSummon(1)
+        horse.summoner_id = panther.unit_id
+        horse.mount_owner_id = panther.unit_id
+        horse.is_mount = True
+        battle.add_unit(horse, Position(6, 6))
+        battle.set_mounted_state(panther, horse)
+        panther.mana_points = 1
+        action = next(item for item in battle.action_snapshot_for(panther)["actions"] if item.get("code") == "mimic_skill")
+
+        diagnostic = action_diagnostic(battle, panther, action, difficulty_profile("standard"), instant_only=False)
+        self.assertEqual(diagnostic["raw_payload_count"], 0)
+        self.assertEqual(diagnostic["expected_filter_reason"], "mounted_rider_only_copied_move_skills")
 
 
 if __name__ == "__main__":
