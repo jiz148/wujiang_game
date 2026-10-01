@@ -12,6 +12,7 @@ import { renderRecoveryButton, renderStrategyPanel } from '../strategic/workbenc
 import { chainQueuedActionPrompt, hideTooltip, renderHoverCard, roomStateLabel, scheduleBoardOverlayRender, showTooltip } from '../tactical/battle-ui.js';
 import { closeKeyboardHelp, focusMainContent, handleBattleKeyboard, onBoardClick, openKeyboardHelp } from '../tactical/board-input.js';
 import { canEditRoomSetup, canManageSeatArmy, canManageSeatRoster, closeAutoConfigure, closeHeroDetail, closeHeroPicker, closeRoomSetup, confirmAutoConfigure, confirmRoomSetup, isSeatLocked, openAutoConfigure, openHeroDetail, openHeroPicker, openRoomSetup, renderAutoConfigureDialog, renderHeroPicker, renderRoomSetupDialog, roomHeroLimit, seatHeroEntries, updateAutoConfigureDraft, updateRoomSetupDraft } from '../tactical/room-lobby.js';
+import { renderBpPanel } from '../tactical/bp-ui.js';
 import { applyRoomPayload, canReclaimSeatByName, controlSimulation, copyInviteLink, createRoom, deleteRoom, exitTutorial, isRandomRoomMode, joinRoom, leaveReplayMode, leaveRoom, loadReplayStep, performAction, renderTutorialGuide, restartFromGameOver, resumeStoredSeat, resumeTutorialBattle, retryTutorialStep, roomModeMeta, selectRoomHero, setAiStyles, setRoomSeatController, setRoomSeatTeam, setSeatArmyComposition, setSeatRandomQuota, shouldShowLobbyPanel, startRoomBattle, startTutorialBattle, surrenderBattle, toggleAiTakeover, toggleRoomReady } from '../tactical/room-api.js';
 import { clearActionSelection, loadStoredIdentity } from '../tactical/session.js';
 import { bodyDirectionSelection, canCompleteTargetSelection, choicePatternSelection, controllerTypeLabel, currentRoomSeat, hasCancelableTargetSelection, isBoardTargetSelectionActive, movePathSelection, multiUnitSelection, patternSelection, randomRoomRosterSize, reviveUnitCellSelection, roomSummaries, sanitizeRandomRosterSizeInput, seatHeroSummary, setStagedAttackVariant, setStagedBodyDirection, setStagedPatternChoice, setStagedReviveUnitId, setStagedStatName, setStagedUnitDirection, stagedAttackActionPayload, stagedBodyCells, stagedBodyDirection, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, stagedUnitDirection, stagedUnitDirectionTargetId, statCellSelection, unitDirectionSelection } from '../tactical/targeting.js';
@@ -634,6 +635,11 @@ export function fallbackRoomModes() {
       name: "随机选人",
       description: "无需手动选将，开局后随机分配武将，使用更大的战场与随机出生，并按能力值决定先手。",
     },
+    {
+      code: "bp",
+      name: "BP模式",
+      description: "队长轮流禁选武将，再由队员分配控制权，支持3v3和5v5。",
+    },
   ];
 }
 
@@ -823,6 +829,9 @@ function bindRoomLobbyDialogs() {
     const normalized = sanitizeRandomRosterSizeInput(event.target.value);
     event.target.value = normalized;
     updateRoomSetupDraft("randomRosterSize", normalized);
+  });
+  $("bp-team-size-select")?.addEventListener("change", (event) => {
+    updateRoomSetupDraft("bpTeamSize", event.target.value);
   });
   $("room-hero-limit-enabled")?.addEventListener("change", (event) => {
     if (!state.roomSetupDraft) return;
@@ -1229,7 +1238,7 @@ export function renderRoomPanels() {
   $("room-code-label").textContent = state.room.room_id;
   $("room-status-label").textContent = state.room.status === "lobby"
     ? "等待双方就绪"
-    : (isGameOver() ? "对局结束" : "对局进行中");
+    : (state.room.status === "bp" ? "禁选与分配" : (isGameOver() ? "对局结束" : "对局进行中"));
   $("viewer-seat-label").textContent = state.room.viewer_player_id
     ? `席位 ${state.room.viewer_player_id}`
     : "观战";
@@ -1245,7 +1254,7 @@ export function renderRoomPanels() {
   $("room-random-size-label").textContent = String(randomRoomRosterSize());
   const heroLimit = roomHeroLimit();
   const heroLimitFact = $("room-hero-limit-fact");
-  if (heroLimitFact) heroLimitFact.classList.toggle("hidden", !heroLimit);
+  if (heroLimitFact) heroLimitFact.classList.toggle("hidden", state.room.mode === "bp" || !heroLimit);
   const heroLimitLabel = $("room-hero-limit-label");
   if (heroLimitLabel) heroLimitLabel.textContent = String(heroLimit);
   const timeoutLabel = $("room-turn-timeout-label");
@@ -1260,7 +1269,7 @@ export function renderRoomPanels() {
   const openSetup = $("open-room-setup");
   if (openSetup) openSetup.classList.toggle("hidden", !canEditRoomSetup());
   const autoConfigure = $("auto-configure-room");
-  if (autoConfigure) autoConfigure.classList.toggle("hidden", !canEditRoomSetup());
+  if (autoConfigure) autoConfigure.classList.toggle("hidden", state.room.mode === "bp" || !canEditRoomSetup());
 
   leaveRoomBtn.classList.remove("hidden");
   leaveRoomBtn.disabled = false;
@@ -1280,19 +1289,23 @@ export function renderRoomPanels() {
   }
   const canShowStart = state.room.status === "finished"
     ? state.room.viewer_player_id !== null
-    : Boolean(state.room.viewer_is_host && state.room.status === "lobby");
+    : Boolean(state.room.viewer_is_host && (state.room.status === "lobby" && state.room.mode !== "bp" || state.room.status === "bp" && state.room.bp?.phase === "assign"));
   startRoom.classList.toggle("hidden", !canShowStart);
-  startRoom.disabled = state.room.status === "lobby" ? !state.room.can_start : !state.room.can_rematch;
+  startRoom.disabled = state.room.status === "finished" ? !state.room.can_rematch : !state.room.can_start;
   startRoom.textContent = state.room.status === "finished"
     ? (state.room.viewer_is_host ? "同配置再来一局" : "等待房主再开一局")
-    : (isRandomRoomMode() ? "开始随机对局" : "开始对局");
+    : (state.room.mode === "bp" ? "完成分配并开战" : (isRandomRoomMode() ? "开始随机对局" : "开始对局"));
   // 开不了局的原因挂在按钮上。它只有在你想开局时才有意义，不值得为它常设一段文字。
   startRoom.title = startRoom.disabled ? String(state.room.start_blocker || "") : "";
   renderRoomOverflowMenu();
 
   const seatCards = $("seat-cards");
+  const inBp = state.room.mode === "bp" && state.room.status === "bp";
+  $("room-setup-section")?.classList.toggle("hidden", inBp);
+  seatCards.classList.toggle("hidden", inBp);
   seatCards.replaceChildren();
   (state.room.seats || []).forEach((seat) => seatCards.append(createSeatCard(seat)));
+  renderBpPanel();
 }
 
 function renderRoomList() {

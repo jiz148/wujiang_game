@@ -135,13 +135,20 @@ def run_match_audit(
         step += 1
 
     if battle.winner is None and step >= max_steps:
+        completed_turns = int(getattr(battle, "completed_turns", 0) or 0)
+        turn_limit = int(getattr(battle, "turn_timeout_limit", 0) or 0)
         findings.add(
             severity="info",
             category="simulation_limit",
             source="match_audit",
             message="Simulation stopped at max_steps before a winner was decided.",
             step=step,
-            evidence={"max_steps": max_steps},
+            evidence={
+                "max_steps": max_steps,
+                "completed_turns": completed_turns,
+                "turn_limit": turn_limit,
+                "turns_until_terminal_rule": max(0, turn_limit - completed_turns) if turn_limit else None,
+            },
         )
 
     manifest = {
@@ -284,6 +291,7 @@ def next_decision(
         return build_fallback_decision(battle, f"decision error: {type(exc).__name__}: {exc}")
 
 
+@ai_policy.with_enemy_view("actor")
 def build_turn_decision(
     battle: Battle,
     actor: Unit,
@@ -378,6 +386,7 @@ def build_turn_bundle_decision(
     return max(actionable, key=lambda decision: float(decision.get("selected_score") or 0.0))
 
 
+@ai_policy.with_enemy_view("reactor")
 def build_reaction_decision(
     battle: Battle,
     reactor: Unit,
@@ -451,6 +460,7 @@ def build_instant_decision_for_waiting_side(
     return None
 
 
+@ai_policy.with_enemy_view("units")
 def build_instant_decision(
     battle: Battle,
     units: Iterable[Unit],
@@ -615,6 +625,21 @@ def action_diagnostic(
             raw_payloads = ai_policy.skill_payloads_for_action(battle, actor, action)
             diagnostic_payloads = ai_policy.trim_skill_payloads_for_ai(battle, actor, raw_payloads, limit=64)
             selection_mode = str(selection.get("mode") or "")
+            if code == "mimic_skill" and not raw_payloads:
+                nested_skills = [
+                    skill
+                    for entry in selection.get("targets", [])
+                    for skill in entry.get("skills", [])
+                    if skill.get("action", {}).get("available")
+                ]
+                if not nested_skills:
+                    diag["expected_filter_reason"] = "no_available_copied_skill"
+                elif battle.mounted_unit_for(actor) is not None and all(
+                    skill.get("code") in ai_policy.MOVE_SKILL_CODES
+                    and skill.get("code") != "mounted_leap"
+                    for skill in nested_skills
+                ):
+                    diag["expected_filter_reason"] = "mounted_rider_only_copied_move_skills"
             if (
                 battle.mounted_unit_for(actor) is not None
                 and str(action.get("code") or "") in ai_policy.MOVE_SKILL_CODES

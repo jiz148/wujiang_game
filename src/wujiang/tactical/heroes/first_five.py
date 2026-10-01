@@ -72,7 +72,8 @@ class ManaPullSkill(Skill):
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         target = payload_target_unit(battle, payload)
         destination = payload_position(payload, "dest_x", "dest_y")
-        ensure_distance(actor, target, actor.targeting_range())
+        if not battle.is_declared_resolution(actor, payload, {"skill"}):
+            ensure_distance(actor, target, actor.targeting_range())
         if target.position is None:
             raise ActionError("目标不在战场上。")
         direction = straight_direction(target.position, destination)
@@ -150,7 +151,8 @@ class CurseSkill(Skill):
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         target = payload_target_unit(battle, payload)
         ensure_enemy(actor, target)
-        ensure_distance(actor, target, actor.targeting_range())
+        if not battle.is_declared_resolution(actor, payload, {"skill"}):
+            ensure_distance(actor, target, actor.targeting_range())
         target_ctx = battle.validate_target(actor, target, action_name="诅咒", is_skill=True, is_hostile=True)
         if target_ctx.cancelled:
             battle.log(target_ctx.reason)
@@ -171,7 +173,8 @@ class ExperimentSkill(Skill):
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         target = payload_target_unit(battle, payload)
         ensure_ally(actor, target)
-        ensure_distance(actor, target, actor.targeting_range())
+        if not battle.is_declared_resolution(actor, payload, {"skill"}):
+            ensure_distance(actor, target, actor.targeting_range())
         target.add_status(
             StatModifierStatus(
                 "实验",
@@ -244,7 +247,8 @@ class MedusaSkill(Skill):
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         destination = payload_position(payload)
-        ensure_distance(actor, destination, actor.targeting_range())
+        if not battle.is_declared_resolution(actor, payload, {"skill"}):
+            ensure_distance(actor, destination, actor.targeting_range())
         occupants = battle.units_at(destination)
         if any(not unit.is_stealthed() for unit in occupants):
             raise ActionError("召唤位置已被占用。")

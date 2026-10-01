@@ -3586,69 +3586,44 @@ class RecoverManaSkill(Skill):
         super().__init__(
             "recover_mana",
             "回魔",
-            "普通技能：每回合最多 1 次，自己魔 +1。",
-            max_uses_per_turn=1,
-            target_mode="self",
-        )
-
-    def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        gained = actor.gain_mana(1)
-        battle.log(f"{actor.name} 回魔，获得 {gained} 点魔。")
-
-    def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
-        return {
-            "cells": [actor.position.to_dict()] if actor.position else [],
-            "target_unit_ids": [actor.unit_id],
-            "secondary_cells": [],
-            "requires_target": False,
-        }
-
-
-class MagicShieldSkill(Skill):
-    def __init__(self) -> None:
-        super().__init__(
-            "magic_shield",
-            "魔盾",
-            "被动技能：连锁速度 2，被敌方主动技能影响时，自己获得 1 轮魔免。",
+            "普通技能：费 1 魔；选择范内直线上的一个单位，被击中的单位魔 +1。",
             mana_cost=1,
-            timing="passive",
+            target_mode="unit",
         )
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        raise ActionError("魔盾只能通过连锁使用。")
-
-    def can_react_to(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> tuple[bool, str]:
-        ok, reason = super().can_react_to(battle, actor, queued_action)
-        if not ok:
-            return ok, reason
-        if queued_action.source_player_id == actor.player_id:
-            return False, "只能对敌方动作连锁。"
-        if queued_action.action_type not in {"skill", "skill_effect"}:
-            return False, "魔盾只能对敌方技能连锁。"
-        source = battle.units.get(queued_action.actor_id)
-        code = queued_action.payload.get("skill_code")
-        skill = next((item for item in source.skills if item.code == code), None) if source else None
-        if skill is None or skill.timing != "active":
-            return False, "魔盾只能对敌方主动技能连锁。"
-        if battle.reaction_proxy_target(actor, queued_action) is None:
-            return False, "当前动作没有影响到自己。"
-        return True, ""
-
-    def react(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any], queued_action: QueuedAction) -> None:
-        target = battle.reaction_proxy_target(actor, queued_action) or actor
-        target.add_status(MagicImmunityStatus(source_name="魔盾", duration=1))
-        battle.log(f"{target.name} 通过魔盾获得了魔免。")
+        target = battle.effect_recipient(payload_target_unit(battle, payload))
+        target_ctx = battle.validate_target(
+            actor, target, action_name=self.name, is_skill=True,
+            is_hostile=target.player_id != actor.player_id, tags={"mana_recovery"},
+        )
+        if target_ctx.cancelled:
+            battle.log(target_ctx.reason)
+            return
+        gained = target.gain_mana(1)
+        battle.log(f"{actor.name} 对 {target.name} 使用回魔，{target.name} 获得 {gained} 点魔。")
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
+        targets = [
+            unit for unit in battle.all_units()
+            if unit.alive and not unit.banished and unit.position is not None
+            and battle.unit_can_be_selected(unit, actor=actor)[0]
+            and battle.unit_target_in_range_and_line(actor, unit, actor.targeting_range())
+        ]
         return {
-            "cells": [actor.position.to_dict()] if actor.position else [],
-            "target_unit_ids": [actor.unit_id],
+            "cells": positions_to_dict([cell for unit in targets for cell in battle.unit_cells(unit)]),
+            "target_unit_ids": [unit.unit_id for unit in targets],
             "secondary_cells": [],
-            "requires_target": False,
+            "requires_target": True,
         }
 
-    def reaction_preview(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> dict[str, Any]:
-        return self.preview(battle, battle.reaction_proxy_target(actor, queued_action) or actor)
+
+class MagicShieldSkill(LightWallSkill):
+    def __init__(self) -> None:
+        super().__init__()
+        self.code = "magic_shield"
+        self.name = "魔盾"
+        self.description = "被动技能：与光墙相同，连锁速度 2；可保护当前受影响的己方目标，每个目标费 1 魔并获得 1 层只持续本次连锁的临时护盾。"
 
 
 class BloodGuardSkill(Skill):
@@ -5403,10 +5378,11 @@ class ShadowCounterSkill(Skill):
             return {}
         paths: dict[Position, list[Position]] = {}
         for middle in battle.neighbors(actor.position):
-            if not battle.can_place_unit(actor, middle, ignore=actor, mover=actor):
+            if not battle.terrain_step_allowed(actor, actor.position, middle) or not battle.can_place_unit(actor, middle, ignore=actor, mover=actor):
                 continue
             for end in battle.neighbors(middle):
-                if end != actor.position and battle.can_place_unit(actor, end, ignore=actor, mover=actor):
+                if (end != actor.position and battle.terrain_step_allowed(actor, middle, end)
+                        and battle.can_place_unit(actor, end, ignore=actor, mover=actor)):
                     paths.setdefault(end, [middle, end])
         return paths
 
@@ -5461,7 +5437,9 @@ class ShadowCounterSkill(Skill):
         origin_data = locked["shadow_origin"]
         origin = Position(int(origin_data["x"]), int(origin_data["y"]))
         if actor.position == origin and not actor.cannot_move and not actor.cannot_normal_move and all(
-            battle.can_place_unit(actor, step, ignore=actor, mover=actor) for step in path
+            battle.terrain_step_allowed(actor, previous, step)
+            and battle.can_place_unit(actor, step, ignore=actor, mover=actor)
+            for previous, step in zip([origin, *path[:-1]], path)
         ):
             battle.move_unit(actor, destination, path=path, via_skill=True, exact_distance=2,
                              triggered_by_reaction=True, max_distance=2, tags={"shadow_counter"})
@@ -6251,10 +6229,9 @@ class AttackManaDrainTrait(Trait):
         if is_mana_drain_immune(ctx.target):
             battle.log(f"{ctx.target.name} 无法被吸魔。")
             return
-        lost = min(float(ctx.target.current_mana), 1.0)
+        lost = ctx.target.drain_mana(1.0)
         if lost <= 0:
             return
-        ctx.target.spend_mana(lost)
         gained = owner.gain_mana(lost)
         battle.log(f"{owner.name} 通过攻击吸取了 {ctx.target.name} 的 {lost} 点魔。")
         if gained < lost:

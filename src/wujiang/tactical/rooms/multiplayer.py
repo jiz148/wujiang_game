@@ -86,6 +86,10 @@ ROOM_MODES: dict[str, dict[str, str]] = {
         "name": "随机选人",
         "description": "双方无需手动选将，开局后随机分配不重复武将，使用更大的战场、随机出生，并按能力值决定先手。",
     },
+    "bp": {
+        "name": "BP模式",
+        "description": "队长轮流禁选武将，再由队员分配控制权，支持 3v3 和 5v5。",
+    },
 }
 
 
@@ -801,6 +805,12 @@ class GameRoom:
         self.tutorial_checkpoint: Optional[Battle] = None
         self.random_roster_size = DEFAULT_RANDOM_ROSTER_SIZE
         self.hero_limit = 0
+        self.bp_team_size = 3
+        self.bp_captains: dict[int, int] = {}
+        self.bp_first_pick_team: Optional[int] = None
+        self.bp_actions: list[dict[str, Any]] = []
+        self.bp_assignments: dict[str, int | str] = {}
+        self.bp_virtual_seat_ids: list[int] = []
         self.board_width = DEFAULT_BOARD_WIDTH
         self.board_height = DEFAULT_BOARD_HEIGHT
         self.turn_timeout_seconds = DEFAULT_TURN_TIMEOUT_SECONDS
@@ -851,6 +861,18 @@ class GameRoom:
             self.hero_turn_limit = SKIRMISH_HERO_TURN_LIMIT
         if not hasattr(self, "turn_limit_winner"):
             self.turn_limit_winner = 2
+        if not hasattr(self, "bp_team_size"):
+            self.bp_team_size = 3
+        if not hasattr(self, "bp_captains"):
+            self.bp_captains = {}
+        if not hasattr(self, "bp_first_pick_team"):
+            self.bp_first_pick_team = None
+        if not hasattr(self, "bp_actions"):
+            self.bp_actions = []
+        if not hasattr(self, "bp_assignments"):
+            self.bp_assignments = {}
+        if not hasattr(self, "bp_virtual_seat_ids"):
+            self.bp_virtual_seat_ids = []
         self._lock = threading.RLock()
 
     def checkpoint_bytes(self) -> bytes:
@@ -887,6 +909,150 @@ class GameRoom:
         for seat in self.seats.values():
             if seat.is_human:
                 seat.ready = False
+
+    def set_bp_team_size(self, token: str, team_size: Any) -> None:
+        with self._lock:
+            self.require_host(token)
+            if self.status != "lobby" or self.mode != "bp":
+                raise RoomError("只能在BP模式大厅设置武将数量。")
+            if str(team_size) not in {"3", "5"}:
+                raise RoomError("BP模式只支持3v3或5v5。")
+            team_size = int(team_size)
+            if self.bp_team_size != team_size:
+                self.bp_team_size = team_size
+                self.invalidate_readiness()
+                self.touch()
+
+    def set_bp_captain(self, token: str, team_id: Any, seat_id: Any) -> None:
+        with self._lock:
+            self.require_host(token)
+            if self.status != "lobby" or self.mode != "bp":
+                raise RoomError("只能在BP模式大厅指定队长。")
+            team = normalize_team_id(team_id)
+            seat = self._seat(seat_id)
+            if not seat.is_human or seat.team_id != team:
+                raise RoomError("队长必须是该队的真人玩家。")
+            if self.bp_captains.get(team) != seat.player_id:
+                self.bp_captains[team] = seat.player_id
+                self.invalidate_readiness()
+                self.touch()
+
+    def _bp_sequence(self) -> list[tuple[str, int]]:
+        first = self.bp_first_pick_team
+        if first not in TEAM_IDS:
+            return []
+        other = 3 - first
+        teams = [other] * 3 + [first] * 3
+        if self.bp_team_size == 3:
+            picks = [first, first, other, other, first, other]
+        else:
+            picks = [first, first, other, other, first, first, other, other, other, first]
+        return [("ban", team) for team in teams] + [("pick", team) for team in picks]
+
+    def _bp_picks(self, team_id: int) -> list[str]:
+        return [action["hero_code"] for action in self.bp_actions if action["kind"] == "pick" and action["team_id"] == team_id]
+
+    def _bp_phase(self) -> str:
+        if self.status != "bp":
+            return "closed"
+        return "draft" if len(self.bp_actions) < len(self._bp_sequence()) else "assign"
+
+    def _begin_bp(self) -> None:
+        self.bp_first_pick_team = secrets.choice(TEAM_IDS)
+        self.bp_actions = []
+        self.bp_assignments = {}
+        self.status = "bp"
+
+    def bp_choose(self, token: str, hero_code: str) -> None:
+        with self._lock:
+            seat = self.require_seat(token)
+            if self.mode != "bp" or self._bp_phase() != "draft":
+                raise RoomError("当前不在BP禁选阶段。")
+            kind, team = self._bp_sequence()[len(self.bp_actions)]
+            if self.bp_captains.get(team) != seat.player_id:
+                raise RoomError("当前轮到另一队队长操作。")
+            if hero_code not in hero_lookup():
+                raise RoomError("所选武将不存在。")
+            if any(action["hero_code"] == hero_code for action in self.bp_actions):
+                raise RoomError("该武将已经被禁用或选走。")
+            self.bp_actions.append({"kind": kind, "team_id": team, "hero_code": hero_code})
+            self.touch()
+
+    def bp_assign(self, token: str, hero_code: str, controller: Any) -> None:
+        with self._lock:
+            seat = self.require_seat(token)
+            if self.mode != "bp" or self._bp_phase() != "assign":
+                raise RoomError("禁选结束后才能分配武将。")
+            if not seat.is_human or hero_code not in self._bp_picks(seat.team_id):
+                raise RoomError("只能分配本队选中的武将。")
+            previous = self.bp_assignments.get(hero_code)
+            captain = self.bp_captains.get(seat.team_id) == seat.player_id
+            if previous is not None and previous not in (seat.player_id, "ai") and not captain:
+                raise RoomError("该武将已被分配；只有原控制者或队长可以调整。")
+            if controller == "ai":
+                self.bp_assignments[hero_code] = "ai"
+            else:
+                try:
+                    target = self._seat(int(controller))
+                except (TypeError, ValueError) as exc:
+                    raise RoomError("控制席位无效。") from exc
+                if not target.is_human or target.team_id != seat.team_id:
+                    raise RoomError("只能交给本队真人玩家，或指定AI。")
+                if target.player_id != seat.player_id and not captain:
+                    raise RoomError("只有队长可以代其他队员分配武将。")
+                self.bp_assignments[hero_code] = target.player_id
+            self.touch()
+
+    def _bp_assignment_blocker(self) -> Optional[str]:
+        if self._bp_phase() != "assign":
+            return "请先完成BP禁选。"
+        for team in TEAM_IDS:
+            for code in self._bp_picks(team):
+                if code not in self.bp_assignments:
+                    return "请先为全部武将分配真人玩家或AI。"
+        return None
+
+    def _materialize_bp_assignments(self) -> None:
+        for seat in self.seats.values():
+            seat.clear_roster()
+        ai_seats: dict[int, PlayerSeat] = {}
+        for team in TEAM_IDS:
+            existing_ai = next((seat for seat in self._team_seats(team) if seat.is_ai), None)
+            if existing_ai is not None:
+                ai_seats[team] = existing_ai
+            for code in self._bp_picks(team):
+                owner = self.bp_assignments[code]
+                if owner == "ai":
+                    if team not in ai_seats:
+                        seat_id = max(self.seats) + 1
+                        virtual = PlayerSeat(player_id=seat_id, team_id=team)
+                        virtual.set_ai()
+                        self.seats[seat_id] = virtual
+                        self.bp_virtual_seat_ids.append(seat_id)
+                        ai_seats[team] = virtual
+                    target = ai_seats[team]
+                else:
+                    target = self.seats[int(owner)]
+                target.adjust_hero_count(code, 1)
+
+    def _bp_public_state(self) -> dict[str, Any]:
+        sequence = self._bp_sequence()
+        index = len(self.bp_actions)
+        step = sequence[index] if index < len(sequence) else None
+        known = hero_lookup()
+        return {
+            "team_size": self.bp_team_size,
+            "captains": dict(self.bp_captains),
+            "phase": self._bp_phase(),
+            "first_pick_team": self.bp_first_pick_team,
+            "step_index": index,
+            "step_count": len(sequence),
+            "current_kind": step[0] if step else None,
+            "current_team_id": step[1] if step else None,
+            "actions": [{**action, "hero_name": known.get(action["hero_code"], {}).get("name", action["hero_code"])} for action in self.bp_actions],
+            "picks": {team: self._bp_picks(team) for team in TEAM_IDS},
+            "assignments": dict(self.bp_assignments),
+        }
 
     def configure_tutorial(self) -> None:
         with self._lock:
@@ -1698,6 +1864,7 @@ class GameRoom:
             if next_team == seat.team_id:
                 return
             seat.team_id = next_team
+            self.bp_captains = {team: captain for team, captain in self.bp_captains.items() if captain != seat.player_id}
             self.invalidate_readiness()
             self.touch()
 
@@ -1765,6 +1932,10 @@ class GameRoom:
             if next_mode == self.mode:
                 return
             self.mode = next_mode
+            self.bp_captains = {}
+            self.bp_first_pick_team = None
+            self.bp_actions = []
+            self.bp_assignments = {}
             for seat in self.seats.values():
                 seat.clear_roster()
             if self.mode == "random":
@@ -1836,6 +2007,8 @@ class GameRoom:
             self.require_host(token)
             if self.status != "lobby":
                 raise RoomError("只有在大厅中才能自动配置。")
+            if self.mode == "bp":
+                raise RoomError("BP模式由队长禁选武将，不能自动配置阵容。")
             for seat in self.seats.values():
                 if not seat.is_human and seat.controller_type != "ai":
                     seat.set_ai()
@@ -1900,8 +2073,8 @@ class GameRoom:
         with self._lock:
             if self.status != "lobby":
                 raise RoomError("对局已经开始，不能再更改武将。")
-            if self.mode == "random":
-                raise RoomError("随机选人模式下不需要手动选将。")
+            if self.mode in {"random", "bp"}:
+                raise RoomError("当前模式下不能在大厅手动选将。")
             seat = self._editable_seat(token, seat_id)
             if seat.is_human and seat.ready:
                 raise RoomError("准备之后不能再改阵容，请先取消准备。")
@@ -1918,8 +2091,8 @@ class GameRoom:
         with self._lock:
             if self.status != "lobby":
                 raise RoomError("对局已经开始，不能再更改武将。")
-            if self.mode == "random":
-                raise RoomError("随机选人模式下不需要手动选将。")
+            if self.mode in {"random", "bp"}:
+                raise RoomError("当前模式下不能在大厅手动选将。")
             seat = self._editable_seat(token, seat_id)
             if seat.is_human and seat.ready:
                 raise RoomError("准备之后不能再改阵容，请先取消准备。")
@@ -1951,6 +2124,8 @@ class GameRoom:
             if seat.ready == next_ready:
                 return
             seat.ready = next_ready
+            if self.mode == "bp" and self._start_blocker() is None:
+                self._begin_bp()
             self.touch()
 
     def human_ready_count(self) -> int:
@@ -2089,8 +2264,14 @@ class GameRoom:
             seat = self.require_seat(token)
             if self.status == "battle":
                 self.surrender(token)
+            if self.status == "bp":
+                self.status = "lobby"
+                self.bp_first_pick_team = None
+                self.bp_actions = []
+                self.bp_assignments = {}
             leaving_player_id = seat.player_id
             seat.release()
+            self.bp_captains = {team: captain for team, captain in self.bp_captains.items() if captain != leaving_player_id}
             if leaving_player_id == self.host_player_id:
                 self.host_player_id = self._first_human_player_id() or 1
             self.invalidate_readiness()
@@ -2324,6 +2505,7 @@ class GameRoom:
                 "invite_url": self.invite_url(base_url),
                 "host_player_id": self.host_player_id,
                 "random_roster_size": self.random_roster_size,
+                "bp": self._bp_public_state() if self.mode == "bp" else None,
                 "hero_limit": self.hero_limit,
                 "board_width": int(getattr(self, "board_width", DEFAULT_BOARD_WIDTH) or DEFAULT_BOARD_WIDTH),
                 "board_height": int(getattr(self, "board_height", DEFAULT_BOARD_HEIGHT) or DEFAULT_BOARD_HEIGHT),
@@ -2352,6 +2534,8 @@ class GameRoom:
             }
 
     def _start_blocker(self) -> Optional[str]:
+        if self.mode == "bp" and self.status == "bp":
+            return self._bp_assignment_blocker()
         blocker = self._configuration_blocker()
         if blocker is not None:
             return blocker
@@ -2361,6 +2545,8 @@ class GameRoom:
         return None
 
     def _configuration_blocker(self) -> Optional[str]:
+        if self.mode == "bp" and self.status == "bp":
+            return self._bp_assignment_blocker()
         if self.battle is not None:
             return "当前房间已经在对局中。"
         if not self.seats:
@@ -2369,6 +2555,14 @@ class GameRoom:
             return "仍有开放席位未被真人或 AI 占用。"
         if self.human_seat_count() <= 0:
             return "当前至少需要一个真人席位才能开始。"
+        if self.mode == "bp":
+            for team_id in TEAM_IDS:
+                captain = self.seats.get(self.bp_captains.get(team_id, -1))
+                if captain is None or not captain.is_human or captain.team_id != team_id:
+                    return f"请先为{team_name(team_id)}指定真人队长。"
+            if len(hero_lookup()) < 6 + 2 * self.bp_team_size:
+                return "可用武将不足，无法完成本局BP。"
+            return None
         if self.mode == "random":
             for team_id in TEAM_IDS:
                 if self._team_quota_sum(team_id) != self.random_roster_size:
@@ -2442,11 +2636,13 @@ class GameRoom:
                 self.require_host(token)
             else:
                 self.require_seat(token)
-            if self.status != "lobby":
+            if self.status != ("bp" if self.mode == "bp" else "lobby"):
                 raise RoomError("å½“å‰æˆ¿é—´å·²ç»åœ¨å¯¹å±€ä¸­ã€‚")
             blocker = self._start_blocker() if require_confirmation else self._configuration_blocker()
             if blocker is not None:
                 raise RoomError(blocker)
+            if self.mode == "bp":
+                self._materialize_bp_assignments()
             if self.mode == "random":
                 assignments = self._team_random_rosters()
                 for seat in self.seats.values():
@@ -2531,9 +2727,17 @@ class GameRoom:
             self.turn_deadline_at = None
             self.last_turn_timeout = None
             self.status = "lobby"
+            for seat_id in self.bp_virtual_seat_ids:
+                self.seats.pop(seat_id, None)
+            self.bp_virtual_seat_ids = []
+            self.bp_first_pick_team = None
+            self.bp_actions = []
+            self.bp_assignments = {}
             for seat in self.seats.values():
                 seat.ready = False
                 seat.ai_takeover = False
+                if self.mode == "bp":
+                    seat.clear_roster()
             self.touch()
 
     def _resolve_ai_until_human_input(self, max_steps: Optional[int] = None) -> int:
@@ -2731,12 +2935,25 @@ class GameRoom:
                 responsible_seat = self._current_prompt_seat()
                 if responsible_seat is not None and responsible_seat.player_id != seat.player_id:
                     raise RoomError("çŽ°åœ¨è¿˜æ²¡è½®åˆ°ä½ æŽ§åˆ¶çš„å•ä½ã€‚")
+            tutorial_response_recovery = (
+                copy.deepcopy(self.battle)
+                if self.tutorial_state is not None and self.tutorial_state["step_id"] == "chain_response"
+                else None
+            )
             try:
                 self._validate_tutorial_action(payload)
                 self._perform_battle_action(payload, reason="player_action")
             except ActionError as exc:
                 raise RoomError(str(exc)) from exc
             self._update_tutorial_after_action(payload)
+            if (
+                tutorial_response_recovery is not None
+                and self.tutorial_checkpoint is None
+                and self.battle.winner == 2
+            ):
+                # A legal skip may let the queued AI attack defeat Fire Funeral.
+                # Keep the last surviving formal battle state for the free-fight retry.
+                self.tutorial_checkpoint = tutorial_response_recovery
             if self.battle is not None and self.battle.winner is None:
                 if self.tutorial_state is not None:
                     self._resolve_ai_until_human_input()
@@ -2838,6 +3055,7 @@ class GameRoom:
                 "invite_url": self.invite_url(base_url),
                 "host_player_id": self.host_player_id,
                 "random_roster_size": self.random_roster_size,
+                "bp": self._bp_public_state() if self.mode == "bp" else None,
                 "hero_limit": self.hero_limit,
                 "board_width": int(getattr(self, "board_width", DEFAULT_BOARD_WIDTH) or DEFAULT_BOARD_WIDTH),
                 "board_height": int(getattr(self, "board_height", DEFAULT_BOARD_HEIGHT) or DEFAULT_BOARD_HEIGHT),

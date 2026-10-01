@@ -558,6 +558,9 @@ class CurseStatus(StatusEffect):
 
 
 class DelayedDarknessStatus(StatusEffect):
+    flag_name = "cannot_heal"
+    provided_flags = ("cannot_heal",)
+
     def __init__(
         self,
         *,
@@ -586,7 +589,12 @@ class DelayedDarknessStatus(StatusEffect):
 
     def on_removed(self, battle: Battle) -> None:
         if self.owner is not None:
-            self.owner.cannot_heal = False
+            self.owner.cannot_heal = any(
+                getattr(status, "flag_name", "") == "cannot_heal"
+                or "cannot_heal" in getattr(status, "provided_flags", ())
+                or "cannot_heal" in getattr(status, "locked_flags", ())
+                for status in self.owner.statuses
+            )
 
     def on_targeted(self, battle: Battle, ctx: TargetContext) -> None:
         if self.owner is None or self.attack_bonus_spent:
@@ -1105,10 +1113,23 @@ class MultiTargetChainShieldSkill(Skill):
         }
         return [unit for unit in self.ally_targets(battle, actor) if unit.unit_id in threatened_ids]
 
-    def affordable_target_limit(self, actor: HeroUnit) -> int:
-        if self.mana_cost <= 0:
+    def affordable_target_limit(self, actor: HeroUnit, queued_action: Optional[QueuedAction] = None) -> int:
+        multiplier = (
+            max(0.0, float(queued_action.payload.get("reaction_mana_multiplier", 1.0) or 1.0))
+            if queued_action is not None else 1.0
+        )
+        cost_per_target = self.mana_cost * multiplier
+        if cost_per_target <= 0:
             return 99
-        return int((actor.current_mana + 1e-9) // self.mana_cost)
+        return int((actor.current_mana + 1e-9) // cost_per_target)
+
+    def can_react_to(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> tuple[bool, str]:
+        ok, reason = super().can_react_to(battle, actor, queued_action)
+        if not ok:
+            return ok, reason
+        if self.affordable_target_limit(actor, queued_action) < 1:
+            return False, "魔力不足。"
+        return True, ""
 
     def mana_cost_for_payload(
         self,
@@ -1159,7 +1180,7 @@ class MultiTargetChainShieldSkill(Skill):
             return False, "需要选择至少一个目标。"
         if any(target.unit_id not in selectable for target in targets):
             return False, "存在不能被当前护盾保护的目标。"
-        if len(targets) > self.affordable_target_limit(actor):
+        if len(targets) > self.affordable_target_limit(actor, queued_action):
             return False, "当前资源不足，无法同时保护这么多目标。"
         return True, ""
 
@@ -1205,8 +1226,10 @@ class MultiTargetChainShieldSkill(Skill):
                 reaction_payload["target_unit_id"] = actor.unit_id
             elif len(selectable) == 1:
                 reaction_payload["target_unit_id"] = next(iter(selectable))
-        target_ids = [target.unit_id for target in self.chosen_targets(battle, actor, reaction_payload)]
-        targets = [selectable[target_id] for target_id in dict.fromkeys(target_ids) if target_id in selectable]
+        # Declaration already checked range and paid for the selected targets. A
+        # faster reaction may move one of them before this shield resolves.
+        target_ids = battle.payload_target_unit_ids(reaction_payload)
+        targets = [selectable[target_id] for target_id in target_ids if target_id in selectable]
         if not targets:
             battle.log(f"{actor.name} 的【{self.name}】因目标已离开保护范围而未能生效。")
             return
@@ -1221,7 +1244,7 @@ class MultiTargetChainShieldSkill(Skill):
     def reaction_preview(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> dict[str, Any]:
         return multi_unit_selection_preview(
             self.selectable_targets(battle, actor, queued_action),
-            max_targets=self.affordable_target_limit(actor),
+            max_targets=self.affordable_target_limit(actor, queued_action),
         )
 
 
@@ -1266,7 +1289,7 @@ class LightWallSkill(MultiTargetChainShieldSkill):
         )
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
-        raise ActionError("光墙只能通过连锁使用。")
+        raise ActionError(f"{self.name}只能通过连锁使用。")
 
     def can_react_to(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> tuple[bool, str]:
         ok, reason = super().can_react_to(battle, actor, queued_action)
@@ -1275,7 +1298,7 @@ class LightWallSkill(MultiTargetChainShieldSkill):
         if queued_action.source_player_id == actor.player_id:
             return False, "只能对敌方动作连锁。"
         if not self.selectable_targets(battle, actor, queued_action):
-            return False, "当前动作没有影响到可施放光墙的己方目标。"
+            return False, f"当前动作没有影响到可施放{self.name}的己方目标。"
         return True, ""
 
 
@@ -1322,8 +1345,7 @@ class DrainManaSkill(Skill):
         if is_mana_drain_immune(target):
             battle.log(f"{target.name} 无法被吸魔。")
             return
-        lost = min(target.current_mana, 1.0)
-        target.spend_mana(lost)
+        lost = target.drain_mana(1.0)
         actor.gain_mana(lost)
         battle.log(f"{actor.name} 吸取了 {target.name} 的 {lost} 点魔力。")
 
@@ -1470,6 +1492,10 @@ class KnockbackSkill(Skill):
     def outward_destination(self, battle: Battle, actor: HeroUnit, unit: HeroUnit) -> Position | None:
         if actor.position is None or unit.position is None:
             return None
+        if (getattr(unit, "standable_terrain", False)
+                or getattr(unit, "attached_to_unit_id", None)
+                or unit.direct_effects_blocked()):
+            return None
         actor_cells = battle.unit_cells(actor)
         target_cells = battle.unit_cells(unit)
         if not actor_cells or not target_cells:
@@ -1492,6 +1518,8 @@ class KnockbackSkill(Skill):
             if not battle.in_bounds(destination):
                 continue
             if not battle.can_place_unit(unit, destination, ignore=unit):
+                continue
+            if not battle.terrain_step_allowed(unit, unit.position, destination):
                 continue
             if battle.is_forced_movement_blocked(destination):
                 continue

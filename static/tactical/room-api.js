@@ -504,6 +504,26 @@ export async function setRoomMode(modeCode) {
   }
 }
 
+async function postBpAction(action, fields) {
+  if (!hasRoom() || !state.playerToken || state.room?.mode !== "bp") return;
+  try {
+    const payload = await fetchJson(`/api/rooms/bp/${action}`, {
+      method: "POST",
+      body: JSON.stringify({room_id: state.room.room_id, player_token: state.playerToken, ...fields}),
+    });
+    applyRoomPayload(payload, { preserveScreen: true });
+    render();
+  } catch (error) {
+    if (error.state) applyRoomPayload(error.state, { preserveScreen: true });
+    reportRoomError(error.error || "BP操作失败。");
+  }
+}
+
+export const setBpTeamSize = (teamSize) => postBpAction("team-size", {team_size: teamSize});
+export const setBpCaptain = (teamId, seatId) => postBpAction("captain", {team_id: teamId, seat_id: seatId});
+export const bpChoose = (heroCode) => postBpAction("choose", {hero_code: heroCode});
+export const bpAssign = (heroCode, controller) => postBpAction("assign", {hero_code: heroCode, controller});
+
 export async function setRandomRosterSize(rosterSize) {
   if (!hasRoom() || !state.playerToken || !state.room?.viewer_is_host) return;
   const normalized = Math.max(1, Number.parseInt(rosterSize, 10) || 1);

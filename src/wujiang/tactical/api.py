@@ -698,6 +698,52 @@ def post_rooms_set_mode(ctx: RequestContext) -> None:
     return
 
 
+def _post_bp_room_action(ctx: RequestContext, action: str) -> None:
+    handler = ctx.handler
+    payload = ctx.payload
+    room_id = str(payload.get("room_id") or "")
+    token = str(payload.get("player_token") or "")
+    try:
+        room = ROOMS.get_room(room_id)
+        if action == "team-size":
+            room.set_bp_team_size(token, payload.get("team_size"))
+        elif action == "captain":
+            room.set_bp_captain(token, payload.get("team_id"), payload.get("seat_id"))
+        elif action == "choose":
+            room.bp_choose(token, str(payload.get("hero_code") or ""))
+        else:
+            room.bp_assign(token, str(payload.get("hero_code") or ""), payload.get("controller"))
+    except RoomError as exc:
+        error_payload: dict[str, Any] = {"error": str(exc)}
+        try:
+            error_payload["state"] = ROOMS.get_room(room_id).serialize_state(token, base_url=request_base_url(handler))
+        except RoomError:
+            pass
+        json_response(handler, HTTPStatus.BAD_REQUEST, error_payload)
+        return
+    json_response(handler, HTTPStatus.OK, room_state_with_strategy_sync(room, token, base_url=request_base_url(handler)))
+
+
+@post("/api/rooms/bp/team-size")
+def post_rooms_bp_team_size(ctx: RequestContext) -> None:
+    _post_bp_room_action(ctx, "team-size")
+
+
+@post("/api/rooms/bp/captain")
+def post_rooms_bp_captain(ctx: RequestContext) -> None:
+    _post_bp_room_action(ctx, "captain")
+
+
+@post("/api/rooms/bp/choose")
+def post_rooms_bp_choose(ctx: RequestContext) -> None:
+    _post_bp_room_action(ctx, "choose")
+
+
+@post("/api/rooms/bp/assign")
+def post_rooms_bp_assign(ctx: RequestContext) -> None:
+    _post_bp_room_action(ctx, "assign")
+
+
 @post("/api/rooms/set-default-ai-difficulty")
 def post_rooms_set_default_ai_difficulty(ctx: RequestContext) -> None:
     handler = ctx.handler

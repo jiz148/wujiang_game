@@ -169,7 +169,7 @@
               <span id="invite-path-label" class="visually-hidden">未生成</span>
             </div>
 
-            <section class="room-setup">
+            <section id="room-setup-section" class="room-setup">
               <div class="room-setup__facts">
                 <span class="room-setup__fact">
                   <span class="room-setup__label">模式</span>
@@ -203,6 +203,7 @@
             </section>
 
             <div id="seat-cards" class="seat-grid"></div>
+            <section id="bp-panel" class="bp-panel hidden" aria-label="BP禁选与控制权分配"></section>
           </div>
         </section>
       </section>
@@ -459,7 +460,11 @@
             <span class="field__label">每队随机武将数</span>
             <input id="random-roster-size-input" class="input" type="number" min="1" step="1" value="1" />
           </label>
-          <label class="field field--switch" for="room-hero-limit-enabled">
+          <label id="bp-team-size-control" class="field hidden" for="bp-team-size-select">
+            <span>BP每队武将数</span>
+            <select id="bp-team-size-select" class="select"><option value="3">3v3</option><option value="5">5v5</option></select>
+          </label>
+          <label id="room-hero-limit-switch" class="field field--switch" for="room-hero-limit-enabled">
             <span class="field__label">限定武将数量</span>
             <input id="room-hero-limit-enabled" type="checkbox" />
           </label>

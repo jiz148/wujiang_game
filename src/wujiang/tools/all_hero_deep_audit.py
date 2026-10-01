@@ -79,7 +79,7 @@ def current_batch_output_dir(codes: Iterable[str]) -> Path:
 
 def run_consolidated_regression(run_dir: Path) -> dict[str, Any]:
     """Run the complete ordinary test suite and preserve its output without blocking the AI audit."""
-    command = [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"]
+    command = [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py", "-v"]
     print("[regression] running the complete tests directory before hero simulations...", flush=True)
     started = time.perf_counter()
     env = dict(os.environ)
@@ -108,6 +108,10 @@ def run_consolidated_regression(run_dir: Path) -> dict[str, Any]:
     (run_dir / "regression_tests.log").write_text(output, encoding="utf-8")
     ran_match = re.search(r"Ran\s+(\d+)\s+tests?\s+in\s+([0-9.]+)s", output)
     result_lines = re.findall(r"^(OK(?:\s+\([^\n]+\))?|FAILED\s+\([^\n]+\))$", output, flags=re.MULTILINE)
+    skipped_tests = [
+        {"test": match.group(1), "reason": match.group(2)}
+        for match in re.finditer(r"^(test_\S+.*) \.\.\. skipped '([^']*)'$", output, flags=re.MULTILINE)
+    ]
     summary = {
         "command": command,
         "return_code": return_code,
@@ -115,6 +119,7 @@ def run_consolidated_regression(run_dir: Path) -> dict[str, Any]:
         "duration_seconds": duration_seconds,
         "test_count": int(ran_match.group(1)) if ran_match else None,
         "unittest_result": result_lines[-1] if result_lines else None,
+        "skipped_tests": skipped_tests,
         "launch_error": launch_error,
         "log": "regression_tests.log",
         "note": "Regression failures do not stop the per-hero AI audit; inspect the log and review queue together.",

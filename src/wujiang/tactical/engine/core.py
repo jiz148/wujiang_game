@@ -1308,18 +1308,37 @@ class Unit(ABC):
     def iter_components(self) -> Iterable[BattleComponent]:
         yield from self.skills
         yield from self.traits
+        seen_skills = {id(skill) for skill in self.skills}
         for status in self.statuses:
             yield status
-            yield from status.provided_components()
+            for component in status.provided_components():
+                if isinstance(component, Skill):
+                    if id(component) in seen_skills:
+                        continue
+                    seen_skills.add(id(component))
+                yield component
+        for skill in getattr(self, "_triggered_skill_definitions", {}).values():
+            if id(skill) not in seen_skills:
+                yield skill
         yield from self.projected_traits()
 
+    def action_skills(self) -> list[Skill]:
+        skills = list(self.skills)
+        seen = {skill.code for skill in skills}
+        for status in self.statuses:
+            for component in status.provided_components():
+                if isinstance(component, Skill) and component.code not in seen:
+                    skills.append(component)
+                    seen.add(component.code)
+        return skills
+
     def skill_map(self) -> dict[str, Skill]:
-        return {skill.code: skill for skill in self.skills}
+        return {skill.code: skill for skill in self.action_skills()}
 
     def get_skill(self, code: str) -> Skill:
-        for skill in self.skills:
-            if skill.code == code:
-                return skill
+        for component in self.iter_components():
+            if isinstance(component, Skill) and component.code == code:
+                return component
         raise ActionError(f"{self.name} 没有技能 {code}")
 
     def add_status(self, status: StatusEffect, *, source: Optional["Unit"] = None) -> None:
@@ -1515,8 +1534,8 @@ class Unit(ABC):
     def spend_mana(self, amount: float) -> float:
         if self.direct_effects_blocked():
             return 0.0
-        if self.allow_unbounded_mana:
-            return round(max(0.0, float(amount)), 2)
+        if any(getattr(component, "prevents_mana_loss", False) for component in self.iter_components()):
+            return 0.0
         before = self.current_mana
         self.current_mana = round(self.current_mana - amount, 2)
         self.clamp_mana()
@@ -1528,6 +1547,12 @@ class Unit(ABC):
         before = self.mana_points
         self.mana_points = round(min(getattr(self, "max_mana_points", float("inf")), max(self.mana_points + amount, 0.0)), 2)
         return round(self.mana_points - before, 2)
+
+    def drain_mana(self, amount: float) -> float:
+        """Return the actual resource loss, distinct from paying a cost."""
+        before = self.current_mana
+        self.spend_mana(amount)
+        return round(max(0.0, before - self.current_mana), 2)
 
     def spend_mana_points(self, amount: float) -> float:
         if self.direct_effects_blocked():
@@ -2220,18 +2245,43 @@ class Battle:
     def add_field_effect(self, effect: BattleFieldEffect, *, source: Unit | None = None) -> None:
         candidates = self.field_effects
         if getattr(effect, "global_weather", False):
-            if source is None and self.resolving_action is not None:
-                source = self.units.get(self.resolving_action.actor_id)
             owner = source.player_id if source is not None else getattr(effect, "weather_owner_player_id", None)
+            if owner is None:
+                owner = getattr(effect, "source_player_id", None)
+            if owner is None:
+                weather_source = self.units.get(str(getattr(effect, "source_unit_id", "")))
+                owner = weather_source.player_id if weather_source is not None else None
+            if owner is None and self.resolving_action is not None:
+                action_source = self.units.get(self.resolving_action.actor_id)
+                owner = action_source.player_id if action_source is not None else None
             effect.weather_owner_player_id = owner
+            effect.weather_owner_player_ids = {owner} if owner is not None else set()
             for existing in list(self.field_effects):
-                if (owner is not None and getattr(existing, "global_weather", False)
-                        and getattr(existing, "weather_owner_player_id", None) == owner
-                        and self.canonical_weather_name(getattr(existing, "weather_name", "")) != self.canonical_weather_name(getattr(effect, "weather_name", ""))):
+                if owner is None or not getattr(existing, "global_weather", False):
+                    continue
+                owners = set(getattr(existing, "weather_owner_player_ids", set()))
+                if not owners and getattr(existing, "weather_owner_player_id", None) is not None:
+                    owners.add(existing.weather_owner_player_id)
+                if owner not in owners or self.canonical_weather_name(getattr(existing, "weather_name", "")) == self.canonical_weather_name(getattr(effect, "weather_name", "")):
+                    continue
+                owners.remove(owner)
+                if owners:
+                    existing.weather_owner_player_ids = owners
+                    existing.weather_owner_player_id = next(iter(owners))
+                    if getattr(existing, "source_player_id", None) == owner:
+                        existing.source_player_id = existing.weather_owner_player_id
+                else:
                     self.remove_field_effect(existing)
             candidates = [item for item in self.field_effects if getattr(item, "global_weather", False)
-                          and getattr(item, "weather_owner_player_id", None) == owner]
+                          and (owner in getattr(item, "weather_owner_player_ids", set())
+                               or self.canonical_weather_name(getattr(item, "weather_name", "")) == self.canonical_weather_name(getattr(effect, "weather_name", "")))]
         if effect.merge_into_existing(self, candidates):
+            if getattr(effect, "global_weather", False) and owner is not None:
+                for existing in candidates:
+                    if self.canonical_weather_name(getattr(existing, "weather_name", "")) == self.canonical_weather_name(getattr(effect, "weather_name", "")):
+                        existing.weather_owner_player_ids = set(getattr(existing, "weather_owner_player_ids", set())) | {owner}
+                        existing.weather_owner_player_id = owner
+                        break
             self.enforce_sandstorm_stealth_rules()
             return
         self.field_effects.append(effect)
@@ -2866,6 +2916,11 @@ class Battle:
                 return False
         return True
 
+    def can_traverse_position(self, unit: Unit, position: Position, *, ignore_units: bool) -> bool:
+        if ignore_units and unit.has_flying:
+            return all(self.in_bounds(cell) for cell in self.unit_cells_at(unit, position))
+        return self.can_place_unit(unit, position, ignore=unit, mover=unit, ignore_units=ignore_units)
+
     def unit_distance_to_cell(self, unit: Unit, cell: Position) -> int:
         cells = self.unit_cells(unit)
         if not cells:
@@ -3229,7 +3284,7 @@ class Battle:
                 elif current_direction != direction:
                     raise ActionError("该移动必须沿同一直线前进。")
             step_ignores_units = ignore_units and index < len(steps) - 1
-            if not self.can_place_unit(unit, step, ignore=unit, mover=unit, ignore_units=step_ignores_units):
+            if not self.can_traverse_position(unit, step, ignore_units=step_ignores_units):
                 raise ActionError("移动路径被阻挡。")
             distance_cost += self.normal_movement_step_cost(unit, previous, step) if use_movement_cost else 1
             path.append(step)
@@ -3278,7 +3333,7 @@ class Battle:
                 for step, candidate in enumerate(self.line_positions(unit.position, direction, max_distance), start=1):
                     if not self.terrain_step_allowed(unit, previous, candidate):
                         break
-                    if not self.can_place_unit(unit, candidate, ignore=unit, mover=unit, ignore_units=ignore_units):
+                    if not self.can_traverse_position(unit, candidate, ignore_units=ignore_units):
                         break
                     spent += self.normal_movement_step_cost(unit, previous, candidate) if use_movement_cost else 1
                     previous = candidate
@@ -3303,7 +3358,7 @@ class Battle:
                     if not self.terrain_step_allowed(unit, pos, nxt):
                         continue
                     step_ignores_units = ignore_units and nxt != unit.position
-                    if not self.can_place_unit(unit, nxt, ignore=unit, mover=unit, ignore_units=step_ignores_units):
+                    if not self.can_traverse_position(unit, nxt, ignore_units=step_ignores_units):
                         continue
                     next_dist = dist + self.normal_movement_step_cost(unit, pos, nxt)
                     if next_dist > max_distance:
@@ -3331,7 +3386,7 @@ class Battle:
                     continue
                 if nxt in visited:
                     continue
-                if not self.can_place_unit(unit, nxt, ignore=unit, mover=unit, ignore_units=ignore_units):
+                if not self.can_traverse_position(unit, nxt, ignore_units=ignore_units):
                     continue
                 visited.add(nxt)
                 if (
@@ -3381,7 +3436,7 @@ class Battle:
                 if not self.terrain_step_allowed(unit, previous, current):
                     raise ActionError("只有飞行单位可以移动到地形上或离开地形。")
                 step_ignores_units = ignore_units and current != destination
-                if not self.can_place_unit(unit, current, ignore=unit, mover=unit, ignore_units=step_ignores_units):
+                if not self.can_traverse_position(unit, current, ignore_units=step_ignores_units):
                     raise ActionError("移动路径被阻挡。")
                 spent += self.normal_movement_step_cost(unit, previous, current) if use_movement_cost else 1
                 if spent > max_distance:
@@ -3405,7 +3460,7 @@ class Battle:
                     if not self.terrain_step_allowed(unit, pos, nxt):
                         continue
                     step_ignores_units = ignore_units and nxt != destination
-                    if not self.can_place_unit(unit, nxt, ignore=unit, mover=unit, ignore_units=step_ignores_units):
+                    if not self.can_traverse_position(unit, nxt, ignore_units=step_ignores_units):
                         continue
                     next_dist = dist + self.normal_movement_step_cost(unit, pos, nxt)
                     if next_dist > max_distance:
@@ -3440,7 +3495,7 @@ class Battle:
                 if next_dist > max_distance or nxt in parents:
                     continue
                 step_ignores_units = ignore_units and nxt != destination
-                if not self.can_place_unit(unit, nxt, ignore=unit, mover=unit, ignore_units=step_ignores_units):
+                if not self.can_traverse_position(unit, nxt, ignore_units=step_ignores_units):
                     continue
                 parents[nxt] = pos
                 distances[nxt] = next_dist
@@ -4152,10 +4207,20 @@ class Battle:
             if override is not None:
                 origins = override
         declared_resolution = self.is_declared_resolution(actor, payload or {}, {"attack"})
+        target_cells = self.unit_cells(target)
         if not declared_resolution and (
-            not origins or min(origin.distance_to(cell) for origin in origins for cell in self.unit_cells(target)) > actor.targeting_range()
+            not origins or min(origin.distance_to(cell) for origin in origins for cell in target_cells) > actor.targeting_range()
         ):
             return False, "目标超出普攻范围。"
+        resolved_payload = self.resolved_basic_attack_payload(actor, payload)
+        area_attack = (resolved_payload.get("attack_variant") != "allied_heal"
+                       and self.basic_attack_area_cells_for_payload(actor, resolved_payload) is not None)
+        ignore_line = any(component.ignores_direct_unit_target_line(self, actor) for component in actor.iter_components())
+        if not declared_resolution and not area_attack and not ignore_line and not any(
+            origin.distance_to(cell) <= actor.targeting_range() and self.cells_are_straight_aligned(origin, cell)
+            for origin in origins for cell in target_cells
+        ):
+            return False, "目标不在普攻直线上。"
         from wujiang.tactical.engine.siege import siege_min_attack_range
 
         min_range = siege_min_attack_range(actor)
@@ -4163,15 +4228,18 @@ class Battle:
             return False, f"{actor.name} 无法对范 {min_range - 1} 开火。"
         if payload is not None and payload.get("x") is not None and payload.get("y") is not None:
             clicked = Position(int(payload["x"]), int(payload["y"]))
-            if clicked not in self.unit_cells(target):
+            if clicked not in target_cells:
                 return False, "所点格子没有命中该目标。"
             if not declared_resolution and min(origin.distance_to(clicked) for origin in origins) > actor.targeting_range():
                 return False, "所点目标格超出普攻范围。"
+            if not declared_resolution and not area_attack and not ignore_line and not any(
+                self.cells_are_straight_aligned(origin, clicked) for origin in origins
+            ):
+                return False, "所点目标格不在普攻直线上。"
         for component in list(actor.iter_components()):
             ok, reason = component.can_attack_target(self, actor, target)
             if not ok:
                 return False, reason
-        resolved_payload = self.resolved_basic_attack_payload(actor, payload)
         component_payload = None if payload is None else resolved_payload
         for component in list(actor.iter_components()):
             ok, reason = component.can_attack_target_with_payload(self, actor, target, component_payload)
@@ -4831,6 +4899,14 @@ class Battle:
             queued_payload["declared_source_x"] = actor.position.x
             queued_payload["declared_source_y"] = actor.position.y
             declared_target = self.declared_cell_for_target(actor, target, queued_payload)
+            if declared_target is not None and queued_payload.get("x") is None and queued_payload.get("y") is None:
+                candidate_cells = sorted(self.unit_cells(target), key=lambda cell: (cell.y, cell.x))
+                valid_cells = [cell for cell in candidate_cells if self.attack_target_allowed(
+                    actor, target, ignore_stealth=ignore_stealth,
+                    payload={**queued_payload, "x": cell.x, "y": cell.y},
+                )[0]]
+                if valid_cells and declared_target not in valid_cells:
+                    declared_target = valid_cells[0]
             if declared_target is not None:
                 queued_payload["declared_target_x"] = declared_target.x
                 queued_payload["declared_target_y"] = declared_target.y
@@ -5018,6 +5094,8 @@ class Battle:
             if actor is not None:
                 parts.extend(self.basic_attack_effect_notes(actor, payload))
         elif queued_action.action_type == "skill":
+            if payload.get("skill_code") == "gravity_field" and payload.get("gravity_coin_values"):
+                parts.append(f"公开硬币结果 {payload['gravity_coin_values']}，冻结范围边长 {payload['gravity_side']}。")
             if payload.get("skill_code") == "deadly_bow":
                 parts.append(f"声明点数攻值 {self.format_summary_number(float(payload.get('deadly_bow_points', 0)))}；已消耗全部魔力点，按原5格结算。")
             if actor is not None and payload.get("skill_code"):
@@ -6173,7 +6251,7 @@ class Battle:
             if spec.get("is_attack_variant"):
                 action_entry["is_attack_variant"] = True
             actions.append(action_entry)
-        for skill in unit.skills:
+        for skill in unit.action_skills():
             data = skill.to_public_dict(self)
             data["available"] = (
                 unit.can_take_turn_actions(self) and skill.can_use(self, unit, {})[0]
