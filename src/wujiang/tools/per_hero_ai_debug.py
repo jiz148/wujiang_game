@@ -4,6 +4,7 @@ import argparse
 import json
 import random
 import time
+import traceback
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -184,6 +185,7 @@ def run_per_hero_ai_debug(
                 "resumed": resumed,
             }
         except Exception as exc:
+            failure_traceback = traceback.format_exc()
             findings = [
                 {
                     "id": "PER-HERO",
@@ -194,7 +196,7 @@ def run_per_hero_ai_debug(
                     "step": None,
                     "actor": None,
                     "payload": None,
-                    "evidence": {"match": match},
+                    "evidence": {"match": match, "traceback": failure_traceback},
                 }
             ]
             match_summary = {
@@ -207,6 +209,7 @@ def run_per_hero_ai_debug(
                 "finding_count": len(findings),
                 "high_signal_count": count_high_signal(findings),
                 "error": f"{type(exc).__name__}: {exc}",
+                "traceback": failure_traceback,
             }
 
         if progress:

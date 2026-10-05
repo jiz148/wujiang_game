@@ -600,6 +600,13 @@ export function bindEvents() {
     const occupant = unitById(piece.dataset.unitId || "") || activeOccupantAt(x, y);
     onBoardClick(x, y, occupant);
   });
+  $("board-world")?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const piece = event.target?.closest?.(".board-piece.is-mounted-rider, .board-piece.is-terrain-occupant");
+    if (!piece || !$("board-pieces")?.contains(piece)) return;
+    event.preventDefault();
+    onBoardClick(Number(piece.dataset.x), Number(piece.dataset.y), unitById(piece.dataset.unitId || ""));
+  });
   $("board").addEventListener("keydown", (event) => {
     const cell = event.target?.closest?.(".cell");
     if (!cell) return;
@@ -832,6 +839,16 @@ function bindRoomLobbyDialogs() {
   });
   $("bp-team-size-select")?.addEventListener("change", (event) => {
     updateRoomSetupDraft("bpTeamSize", event.target.value);
+    const size = Number(event.target.value) === 5 ? 5 : 3;
+    updateRoomSetupDraft("bpLevelCap", String(state.roomSetupDraft?.bpLevelCaps?.[size] || size * 5));
+    renderRoomSetupDialog();
+  });
+  $("bp-level-cap-input")?.addEventListener("input", (event) => {
+    updateRoomSetupDraft("bpLevelCap", event.target.value);
+    if (state.roomSetupDraft) state.roomSetupDraft.bpLevelCaps[Number(state.roomSetupDraft.bpTeamSize)] = event.target.value;
+  });
+  $("bp-show-win-count")?.addEventListener("change", (event) => {
+    if (state.roomSetupDraft) state.roomSetupDraft.bpShowWinCount = Boolean(event.target.checked);
   });
   $("room-hero-limit-enabled")?.addEventListener("change", (event) => {
     if (!state.roomSetupDraft) return;
@@ -1293,7 +1310,9 @@ export function renderRoomPanels() {
   startRoom.classList.toggle("hidden", !canShowStart);
   startRoom.disabled = state.room.status === "finished" ? !state.room.can_rematch : !state.room.can_start;
   startRoom.textContent = state.room.status === "finished"
-    ? (state.room.viewer_is_host ? "同配置再来一局" : "等待房主再开一局")
+    ? (state.room.mode === "bp"
+      ? (state.room.viewer_is_host ? "进入下一局 BP" : "等待房主开启下一局 BP")
+      : (state.room.viewer_is_host ? "同配置再来一局" : "等待房主再开一局"))
     : (state.room.mode === "bp" ? "完成分配并开战" : (isRandomRoomMode() ? "开始随机对局" : "开始对局"));
   // 开不了局的原因挂在按钮上。它只有在你想开局时才有意义，不值得为它常设一段文字。
   startRoom.title = startRoom.disabled ? String(state.room.start_blocker || "") : "";
@@ -1485,7 +1504,9 @@ export function renderHeader() {
   if (isDamageChoiceMode()) {
     const prompt = state.battle.pending_damage_choice;
     pill.textContent = `房间 ${state.room.room_id} · 玩家 ${inputPlayer()} 决定伤害`;
-    caption.textContent = `拉奥将受到 ${prompt.damage} 点【${prompt.action_name}】伤害。请选择降低一项能力抵消，或承受伤害。`;
+    caption.textContent = prompt.kind === "rotation"
+      ? `安德鲁因【${prompt.action_name}】实际损失 ${prompt.damage} 点生命。请选择队友交换位置，或保持位置。`
+      : `拉奥将受到 ${prompt.damage} 点【${prompt.action_name}】伤害。请选择降低一项能力抵消，或承受伤害。`;
     return;
   }
   if (isChainMode()) {

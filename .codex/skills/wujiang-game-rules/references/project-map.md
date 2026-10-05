@@ -2,6 +2,32 @@
 
 Update this file after every new gameplay requirement or code change in `wujiang_game`. Keep entries concise and durable; do not paste full docs.
 
+- 2026-10-05 Phase H新增塞克托鲁R193：源193、源272水波炮注解和Q001–007推断先锁JSON/XLSX；`excel_roster.py`实现远程2×2水波炮、3轮身体外双方剑斗之魂、友方搬运的攻魔/重置/双单位布阵。`engine/core.py`复用动作回滚选择，AI正式结果/落点评分，前端列布阵目标和格子，房间超时选合法项；`SektoruBehaviorTests`待用户定向跑。公开池暂78名。R194用户10项行为及10场AI通过；R192重跑仅一项脉冲测试NameError已静态修正待再跑。
+
+- 2026-10-04 Phase H新增亚历山大R194：源194、保存Q001–003及Q004–010推断先锁JSON/XLSX；`excel_roster.py`实现声明锁次数的远程2×5逐段飓风、普攻完成强制合法换位、本人非伤害技能免疫、友方非技能搬运重置、动态5×5友军魔免。`engine/core.py`扩展独立动作选择与魔免光环读取；`rooms/ai.py`正式结果评分及强制换位估值；前端列换位对象，房间超时选合法默认对象。`AlexanderBehaviorTests`静态编写，用户运行`detail_test_all_wujiangs.py --targets excel_r194 --regression-filter AlexanderBehaviorTests --out reports/new-alexander-20261004`。公开池77名，R194动态待验。
+
+- 2026-10-04 R192用户报告：`reports/new-andrew-20261003`中10项行为8过/1失败/1错误，10场AI零高信号及动作错误，咆哮4次、轮转日志3次。两项失败归因测试驱动遗漏伤后选择、短范夹具误用范14士兵，`AndrewBehaviorTests`已静态修正，R192动态验收仍待重跑。30条无有效影响为信息级，安德鲁归属6条均系穿刺没有有效候选。详见修复记录。
+
+- 2026-10-04 BP 禁选顺序：随机先手队 A 与 B 在 3v3 按 A禁2/B禁2/A选2/B选2/B禁1/A禁1/B选1/A选1（各禁3、选3）。用户明确 5v5 为 A禁2/B禁2/A选2/B选2/B禁2/A禁2/B选2/A选2/A禁1/B禁1/A选1/B选1（各禁5、选5）。`GameRoom._bp_sequence()` 为顺序来源，`BPRoomBehaviorTests` 验证双规模全序列、交接和预算；玩家规则见 `docs/武将游戏规则.md`。
+
+- 2026-10-03 Phase H新增安德鲁（R192）：源192与保存R192-Q001=b、R192-Q002–005推断先锁JSON/XLSX。`excel_roster.py`中`GladiatorRoarSkill/Status`通过`engine/core.py`结算前改向钩处理敌方11×11内明确单体受体、范不足则原动作已付款失败；`BattleRotationSkill`在每次实际损血后的通用伤害选择流程中选择合法队友换位，含独立场地伤害，盾挡不触发。`rooms/ai.py`正式预演咆哮与轮转选择，`static/tactical/vfx.js`等展示轮转选择。`AndrewBehaviorTests`为本批定向场景；由用户运行 `detail_test_all_wujiangs.py --targets excel_r192 --regression-filter AndrewBehaviorTests --out reports/new-andrew-20261003`，报告保留全日志。公开池暂76名，R192静态完成、动态待验。
+
+- 2026-10-03 召唤首回合、树共格与隐身AI：`engine/core.py` 对直接 `add_unit` 的默认召唤物设当回合待命，明写即动者保留例外；世界之种/树根不能借2号根即动。`static/core/net.js` 与 `static/tactical/battle-ui.js` 把共格武将置于地形上方并优先点选，`styles.css` 和键盘输入支持点击/聚焦。`rooms/ai.py` 仅在本回合无后续有效破隐动作、仍有有益普通移动时考虑通用隐身。规则、设计基线、行为场景和修复记录同步；动态测试由用户执行。
+
+- 2026-10-03 BP 连局：`GameRoom.restart_lobby` 在有效 BP 房间清理旧战斗/临时 AI 席位后直接 `_begin_bp`，保留队长、规模、等级上限、胜场显示和累计胜场；每局重抽首选队。失效席位/队长才退回大厅。终局与大厅按钮文案改为“进入下一局 BP”，`BPRoomBehaviorTests` 覆盖两局累计。
+
+- 2026-10-02 审判之石与选将悬停：`excel_roster.py` 将撞敌爆破排入单次可连锁范围效果，伤害数值5走守值/护盾公式，结算后石自毁；`rooms/ai.py` 排除爆破覆盖妖精王本人的落点。`static/tactical/hero-hover.js` 为普通选将与BP显示可避边的完整武将资料。规则及设计基线、定向行为场景已同步。
+
+- 2026-10-02 骑乘界面与跟随确认：骑手在坐骑上层显示独立可点选、可聚焦标记；重叠格本身默认选择坐骑。坐骑移动时战斗引擎等量带动骑手，骑手的普通移动步数和次数不增加；摩托马及龙坐骑定向场景已验证。
+
+- 2026-10-02 Phase H新增恢复：R191拉克艾鲁/R195贝斯特罗里源设计与R191/R195-Q001=b先锁`docs/武将设计思想.json`及Excel；`excel_roster.py`新增共同多格合法换位、实伤/使用后两种条件与友方位移增益，`rooms/ai.py`正式预演净伤和双方站位；`tests/test_behavior.py::NewGladiatorBehaviorTests`记录定向场景。`all_hero_deep_audit.py --targets excel_r191,excel_r195 --regression-filter NewGladiatorBehaviorTests`只运行本批场景与AI审计，报告写入`--out`目录。动态测试由用户执行，静态实施不等于验收；公开池暂75名。
+
+- 2026-10-01 导弹通用规则澄清：翡翠的 `MissileSkill` 保留两本人轮内三次窗口；所有其他纯名称“导弹”经 `CommonMissileSkill` 使用免费两本人轮冷却。Excel 旧生成数据仍将这些片段标为非通用，`excel_roster.py` 按最新规则显式识别，未来重生数据须同步来源分类；`static/tactical/targeting.js` 显示冷却频率。规则见 `docs/通用技能和特性说明.md`，行为见 `tests/test_behavior.py`，归因见 `docs/武将实现经验与修复记录.md`。
+
+- 2026-10-01 BP 轮换修复：`static/core/render.js` 的大厅轮询签名纳入 BP 状态，保证另一队队长在禁选进度变化后重绘；`static/tactical/bp-ui.js` 为禁将和选将加入等级筛选并保留合法等级预算提示。跨队交接与筛选由 `tests/test_behavior.py` 场景覆盖。
+
+- 2026-10-01 BP 赛前补充：`GameRoom` 按 3v3/5v5 保存可配置等级上限 15/25，禁选逐步校验预算及未来可完成性；胜场在房间 BP 对局间累计，赛前开关仅控制显示。设置经 `/api/rooms/bp/settings` 与房间设置弹窗提交，BP 界面显示等级预算和可选胜场；规则与场景测试同步更新。
+
 - 2026-10-01 BP 自定义房间模式：`src/wujiang/tactical/rooms/multiplayer.py` 保存队长、3v3/5v5、随机首选队、禁选记录、控制权与自动 AI 席位；`src/wujiang/tactical/api.py` 暴露 BP 接口；`static/tactical/bp-ui.js` 展示禁选与分配；规则见 `docs/武将游戏规则.md`，场景覆盖见 `tests/test_behavior.py`。
 
 - 2026-09-30 third-round full validation archived at `reports/all-hero-deep-audit/third-repair-validation-20260930/`: all three remaining hero-line regressions SR3-040–042 passed, no new failures. 1841 tests have 13 fail/13 error/9 skip; all 26 failures/errors belong to the independent strategic/army lane. 730 hero AI matches again have zero high-signal findings, action errors, candidate-filtered records, and generation gaps. The same 15 informational 500-action limits remain; traces advance 68–191 of the formal 200 hero turns without action errors. Third-round 73-hero repair scope meets its dynamic exit gate; keep long-game quality observation separate from proven defects and full-project green status.
@@ -374,6 +400,7 @@ The codebase was reorganised by domain on 2026-08-27. Every phase record further
 - Durable cannot-act rule: `不能行动` means the unit cannot normal move, cannot basic attack, cannot use active skills, and cannot use passive chain skills.
 - Durable split-movement rule: `没有移动次数限制` means a unit may split normal movement into any number of normal moves, but total normal movement distance in that turn still cannot exceed current speed.
 - Durable ordered-path rule: normal movement submits a full ordered adjacent-cell path. Within the current speed budget it may turn, backtrack, return to its origin, and repeat cells. A pass-through trigger counts entry into a unit footprint; continuous overlap across several cells of a multi-cell unit is one crossing, and a new crossing requires fully leaving that footprint before re-entry.
+- Durable passage-damage rule: `穿人有伤害` is generic. Finish movement first, then queue one fixed-cell damage and independent chain window per recorded footprint entry, in path order. Repeated entries into one cell remain separate windows while a hostile occupies it; after Evasion leaves that cell, later instances no longer ask that unit to react and hit only current occupants. Zerozaki's `穿人魔+0.5` is a separate trait, granted per completed crossing even if a later hit misses, is shielded, or destroys the target.
 - Durable extra-move-count rule: `每回合移动次数 +1` grants one extra normal-move action per turn; each normal move is still separately capped by current speed.
 - Durable round-duration rule: if docs/rules say an integer `持续 N 轮` for a unit status or integer-round local effect, count it on the affected unit's or owner's own round boundary, not on every global hero turn. Half-round effects such as `1.5轮` / `2.5轮` still need explicit per-skill handling.
 - Durable passive-count rule for n-v-n: passive/reaction skills written as `每回合最多 X 次` reset separately in each opposing hero turn, not once per whole round. Mana-costed passives still pay cost on each use. Free passives such as Ion Shield follow the same per-opponent-turn reset; Quantum Shield additionally keeps its own round-based lockout rule.

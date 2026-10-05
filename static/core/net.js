@@ -207,12 +207,20 @@ export function toggleSidebarPanel(panel) {
 
 export function activeOccupantAt(x, y) {
   const occupants = unitsAtCell(x, y);
-  return occupants.find((unit) => !unitIsStealthed(unit)) || occupants[0] || null;
+  return primaryVisibleOccupant(occupants);
 }
 
 export function visibleUnitAt(x, y) {
   const occupants = unitsAtCell(x, y);
-  return occupants.find((unit) => !unitIsStealthed(unit)) || occupants[0] || null;
+  return primaryVisibleOccupant(occupants);
+}
+
+function primaryVisibleOccupant(occupants) {
+  const visible = occupants.filter((unit) => !unitIsStealthed(unit));
+  return visible.find((unit) => unit.ridden_by_unit_id
+    && visible.some((rider) => rider.id === unit.ridden_by_unit_id))
+    || visible.find((unit) => !unit.standable_terrain)
+    || visible[0] || occupants[0] || null;
 }
 
 export function unitsAtCell(x, y) {
@@ -223,6 +231,7 @@ export function unitsAtCell(x, y) {
 
 export function unitsCanOverlapOnBoard(left, right) {
   if (!left || !right || left.id === right.id) return false;
+  if (Boolean(left.standable_terrain) !== Boolean(right.standable_terrain)) return true;
   return left.mounted_on_unit_id === right.id
     || right.mounted_on_unit_id === left.id
     || left.ridden_by_unit_id === right.id
@@ -233,6 +242,7 @@ export function unitsCanOverlapOnBoard(left, right) {
 
 export function boardPieceZIndex(unit) {
   if (!unit) return 6;
+  if (unit.standable_terrain) return 4;
   if (unit.ridden_by_unit_id) return 5;
   if (unit.mounted_on_unit_id) return 7;
   return 6;

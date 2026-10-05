@@ -464,6 +464,14 @@
             <span>BP每队武将数</span>
             <select id="bp-team-size-select" class="select"><option value="3">3v3</option><option value="5">5v5</option></select>
           </label>
+          <label id="bp-level-cap-control" class="field hidden" for="bp-level-cap-input">
+            <span>每队总等级上限</span>
+            <input id="bp-level-cap-input" class="input" type="number" min="1" max="50" step="1" value="15" />
+          </label>
+          <label id="bp-win-count-control" class="field field--switch hidden" for="bp-show-win-count">
+            <span>显示双方胜场数</span>
+            <input id="bp-show-win-count" type="checkbox" checked />
+          </label>
           <label id="room-hero-limit-switch" class="field field--switch" for="room-hero-limit-enabled">
             <span class="field__label">限定武将数量</span>
             <input id="room-hero-limit-enabled" type="checkbox" />
@@ -541,7 +549,7 @@
       </div>
     </div>
 
-    <!-- 选将。每一行是一张标签：名字、等级、攻守速范魔。技能和特性点进去才看。 -->
+    <!-- 选将。紧凑名单支持悬停快速查看技能和特性，点击可固定打开详情。 -->
     <div id="hero-picker" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="hero-picker-title">
       <div class="modal-card modal-card--wide">
         <div class="modal-card__head">

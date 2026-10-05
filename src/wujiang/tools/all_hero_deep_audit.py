@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import time
+import traceback
 from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -77,10 +78,13 @@ def current_batch_output_dir(codes: Iterable[str]) -> Path:
     return DEFAULT_CURRENT_OUTPUT_ROOT / label
 
 
-def run_consolidated_regression(run_dir: Path) -> dict[str, Any]:
-    """Run the complete ordinary test suite and preserve its output without blocking the AI audit."""
-    command = [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py", "-v"]
-    print("[regression] running the complete tests directory before hero simulations...", flush=True)
+def run_consolidated_regression(run_dir: Path, *, regression_filter: str | None = None) -> dict[str, Any]:
+    """Preserve verbose test output without blocking the selected hero AI audit."""
+    command = [sys.executable, "-m", "unittest", "discover", "-s", "tests",
+               "-p", "test_behavior.py" if regression_filter else "test_*.py", "-v"]
+    if regression_filter:
+        command.extend(["-k", regression_filter])
+    print(f"[regression] running {'focused behavior scenarios' if regression_filter else 'the complete tests directory'} before hero simulations...", flush=True)
     started = time.perf_counter()
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
@@ -107,6 +111,10 @@ def run_consolidated_regression(run_dir: Path) -> dict[str, Any]:
     duration_seconds = round(time.perf_counter() - started, 3)
     (run_dir / "regression_tests.log").write_text(output, encoding="utf-8")
     ran_match = re.search(r"Ran\s+(\d+)\s+tests?\s+in\s+([0-9.]+)s", output)
+    if regression_filter and (ran_match is None or int(ran_match.group(1)) == 0):
+        output += f"\nFocused regression selected zero tests for filter {regression_filter!r}.\n"
+        (run_dir / "regression_tests.log").write_text(output, encoding="utf-8")
+        return_code = return_code or 2
     result_lines = re.findall(r"^(OK(?:\s+\([^\n]+\))?|FAILED\s+\([^\n]+\))$", output, flags=re.MULTILINE)
     skipped_tests = [
         {"test": match.group(1), "reason": match.group(2)}
@@ -520,6 +528,7 @@ def run_all_hero_deep_audit(
     output_dir: Path | str | None = None,
     design_path: Path = DEFAULT_DESIGN_PATH,
     resume: bool = False,
+    regression_filter: str | None = None,
 ) -> Path:
     target_codes = [str(code) for code in targets]
     public_codes = set(public_hero_codes())
@@ -530,7 +539,7 @@ def run_all_hero_deep_audit(
         raise ValueError(f"Unknown or non-public target hero code(s): {', '.join(unknown_codes)}")
     run_dir = Path(output_dir) if output_dir is not None else default_output_dir(seed)
     run_dir.mkdir(parents=True, exist_ok=True)
-    regression = run_consolidated_regression(run_dir)
+    regression = run_consolidated_regression(run_dir, regression_filter=regression_filter)
     base = run_per_hero_ai_debug(
         target_codes,
         seed=seed,
@@ -604,6 +613,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--design", type=Path, default=DEFAULT_DESIGN_PATH)
     parser.add_argument("--review-state", type=Path, default=DEFAULT_REVIEW_STATE_PATH)
+    parser.add_argument("--regression-filter", default=None,
+                        help="Run only matching behavior tests (unittest -k) before auditing --targets; all output stays in the report.")
     parser.add_argument("--resume", action="store_true", help="Reuse completed match folders under --out after interruption.")
     parser.add_argument("--summarize-only", action="store_true", help="Index saved results and current Git changes without running tests or matches.")
     args = parser.parse_args(argv)
@@ -612,6 +623,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         parser.error("--current and --targets cannot be used together")
     if args.current and args.limit is not None:
         parser.error("--current already selects the current review batch; do not combine it with --limit")
+    if args.regression_filter and not args.targets:
+        parser.error("--regression-filter requires explicit --targets so the focused run names its complete hero batch")
 
     targets = load_current_hero_codes(args.review_state) if args.current else (
         parse_roster(args.targets) if args.targets else public_hero_codes()
@@ -628,21 +641,34 @@ def main(argv: Optional[list[str]] = None) -> int:
             parser.error(f"Cannot summarize saved results: {exc}")
         print(f"saved results indexed (no tests run): {packet}")
         return 0
-    run_dir = run_all_hero_deep_audit(
-        targets,
-        seed=args.seed,
-        matches_per_hero=args.matches_per_hero,
-        max_steps=args.max_steps,
-        difficulty=args.difficulty,
-        output_dir=output_dir,
-        design_path=args.design,
-        resume=args.resume,
-    )
+    try:
+        run_dir = run_all_hero_deep_audit(
+            targets,
+            seed=args.seed,
+            matches_per_hero=args.matches_per_hero,
+            max_steps=args.max_steps,
+            difficulty=args.difficulty,
+            output_dir=output_dir,
+            design_path=args.design,
+            resume=args.resume,
+            regression_filter=args.regression_filter,
+        )
+    except Exception:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        failure_log = output_dir / "fatal_error.log"
+        failure_log.write_text(traceback.format_exc(), encoding="utf-8")
+        print(f"deep audit stopped; full error saved to {failure_log}", file=sys.stderr)
+        return 1
     if args.current:
         print(f"current review batch only: {', '.join(targets)}")
     print(f"deep audit complete: {run_dir}")
     print(f"open {run_dir / 'regression_tests.log'} for the complete ordinary test output")
     print(f"open {run_dir / 'review_packet.md'} first")
+    if args.regression_filter:
+        overview = read_json(run_dir / "deep_audit_overview.json")
+        match_summary = read_json(run_dir / "summary.json")
+        if not overview["regression"]["passed"] or any(match.get("error") for match in match_summary["matches"]):
+            return 1
     return 0
 
 

@@ -105,12 +105,15 @@ class ActionMiss(ActionError):
 
 class DamageChoiceRequired(Exception):
     def __init__(self, *, unit_id: str, action_name: str, damage: float,
-                 event_index: int, stats: list[str]) -> None:
+                 event_index: int, stats: list[str] | None = None,
+                 kind: str = "stat", options: list[str] | None = None) -> None:
         self.unit_id = unit_id
         self.action_name = action_name
         self.damage = damage
         self.event_index = event_index
-        self.stats = stats
+        self.stats = stats or []
+        self.kind = kind
+        self.options = options or []
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,6 +207,12 @@ class BattleComponent(ABC):
         return None
 
     def blocks_direct_effects(self) -> bool:
+        return False
+
+    def blocks_skill_non_damage_effects(self) -> bool:
+        return False
+
+    def grants_magic_immunity_to(self, battle: "Battle", unit: "Unit") -> bool:
         return False
 
     def projected_trait_for(self, battle: "Battle", unit: "Unit") -> Optional["Trait"]:
@@ -1523,6 +1532,28 @@ class Unit(ABC):
     def direct_effects_blocked(self) -> bool:
         return not getattr(self, "_paying_skill_cost", False) and any(component.blocks_direct_effects() for component in self.iter_components())
 
+    def skill_non_damage_effects_blocked(self) -> bool:
+        return any(component.blocks_skill_non_damage_effects() for component in self.iter_components())
+
+    @property
+    def magic_immunity(self) -> bool:
+        if getattr(self, "_base_magic_immunity", False):
+            return True
+        battle_ref = getattr(self, "_battle_ref", None)
+        battle = battle_ref() if battle_ref is not None else None
+        if battle is None or not self.alive or self.banished or self.position is None:
+            return False
+        return any(
+            trait.grants_magic_immunity_to(battle, self)
+            for source in battle.all_units()
+            if source.alive and not source.banished and source.position is not None
+            for trait in source.traits
+        )
+
+    @magic_immunity.setter
+    def magic_immunity(self, value: bool) -> None:
+        self._base_magic_immunity = bool(value)
+
     def gain_mana(self, amount: float) -> float:
         if self.direct_effects_blocked():
             return 0.0
@@ -2193,6 +2224,11 @@ class Battle:
             raise ActionError("目标位置已被占用。")
         unit.position = position
         unit._battle_ref = weakref.ref(self)
+        if unit.is_summon and not unit.can_act_on_entry_turn and self.current_turn_unit() is not None:
+            # Direct add_unit summons follow the same entry-turn delay as summon_unit.
+            # Explicit entry-action exceptions set can_act_on_entry_turn before placement.
+            unit.turn_ready = False
+            unit.can_act_on_entry_turn = True
         if unit.is_summon and not hasattr(unit, "original_weather_race"):
             parent = self.units.get(unit.summoner_id or "")
             unit.original_weather_race = getattr(parent, "original_weather_race", parent.race if parent else unit.race)
@@ -2865,6 +2901,10 @@ class Battle:
 
     def path_crossing_units(self, mover: Unit, path: list[Position]) -> list[Unit]:
         """Return an event each time the path enters a unit after fully leaving it."""
+        return [unit for unit, _ in self.path_crossing_events(mover, path)]
+
+    def path_crossing_events(self, mover: Unit, path: list[Position]) -> list[tuple[Unit, Position]]:
+        """Return the recipient and entered body cell for each distinct passage."""
         if len(path) < 2:
             return []
         by_id: dict[str, Unit] = {}
@@ -2884,11 +2924,14 @@ class Battle:
             }
 
         previous_overlaps = overlapping_ids(path[0])
-        crossed: list[Unit] = []
+        crossed: list[tuple[Unit, Position]] = []
         for anchor in path[1:]:
             current_overlaps = overlapping_ids(anchor)
-            crossed.extend(unit for unit_id, unit in by_id.items()
-                           if unit_id in current_overlaps - previous_overlaps)
+            mover_cells = set(self.unit_cells_at(mover, anchor))
+            for unit_id, unit in by_id.items():
+                if unit_id in current_overlaps - previous_overlaps:
+                    entered_cell = min(bodies[unit_id] & mover_cells, key=lambda cell: (cell.y, cell.x))
+                    crossed.append((unit, entered_cell))
             previous_overlaps = current_overlaps
         return crossed
 
@@ -3016,7 +3059,7 @@ class Battle:
         if not occupants:
             return None
         visible = [unit for unit in occupants if not unit.is_stealthed()]
-        return visible[0] if visible else occupants[0]
+        return next((unit for unit in visible if not getattr(unit, "standable_terrain", False)), None) or (visible[0] if visible else occupants[0])
 
     def selectable_unit_at(
         self,
@@ -3033,7 +3076,7 @@ class Battle:
                 ok, _ = self.unit_can_be_selected(preferred, actor=actor, ignore_stealth=ignore_stealth)
                 if ok:
                     return preferred
-        for unit in occupants:
+        for unit in sorted(occupants, key=lambda candidate: bool(getattr(candidate, "standable_terrain", False))):
             ok, _ = self.unit_can_be_selected(unit, actor=actor, ignore_stealth=ignore_stealth)
             if ok:
                 return unit
@@ -3535,6 +3578,8 @@ class Battle:
             raise ActionError("附着期间不能独立移动。")
         if unit.direct_effects_blocked() and (forced or (via_skill and self.resolving_action is not None and self.resolving_action.actor_id != unit.unit_id)):
             raise ActionError(f"{unit.name} 不受外部位移效果影响。")
+        if unit.skill_non_damage_effects_blocked() and via_skill:
+            raise ActionError(f"{unit.name} 不受技能位移效果影响。")
         if via_skill and getattr(unit, "standable_terrain", False):
             raise ActionError("地形单位不受技能位移效果影响。")
         carried_rider = self.rider_for(unit)
@@ -3632,6 +3677,8 @@ class Battle:
                 component.on_unit_moved(self, ctx)
         self.enforce_sandstorm_stealth_rules()
         self.cleanup_dead_units()
+        if self.resolving_action is None and self.pending_chain is None:
+            self.advance_followup_actions()
         return ctx
 
     def validate_target(
@@ -5218,6 +5265,8 @@ class Battle:
         return options
 
     def shield_auto_blocks_chain(self, unit: Unit, queued_action: QueuedAction) -> bool:
+        if queued_action.payload.get("pass_through_damage"):
+            return False
         recipient = self.effect_recipient(unit)
         anti_pierce = any(component.ignores_incoming_piercing for component in recipient.iter_components())
         actor = self.units.get(queued_action.actor_id)
@@ -5407,6 +5456,11 @@ class Battle:
             self._draining_followup_actions = False
 
     def present_reaction_window_or_resolve(self, queued_action: QueuedAction) -> None:
+        if queued_action.payload.get("refresh_cell_targets"):
+            actor = self.units.get(queued_action.actor_id)
+            targets = self.effect_units_at_cells(queued_action.target_cells)
+            queued_action.target_unit_ids = [unit.unit_id for unit in targets]
+            queued_action.hostile = actor is not None and any(unit.player_id != actor.player_id for unit in targets)
         if queued_action.payload.get("separate_attack_segments"):
             actor = self.units.get(queued_action.actor_id)
             if actor is None or not actor.alive or actor.banished:
@@ -5500,6 +5554,20 @@ class Battle:
                         tags=set(payload.get("tags", [])),
                     )
                 )
+            self.check_win_condition()
+            return
+        if effect_code == "pass_through_damage":
+            cells = self.payload_positions(payload, "cells")
+            for unit in self.effect_units_at_cells(cells):
+                self.resolve_damage(DamageContext(
+                    source=actor,
+                    target=unit,
+                    attack_power=float(payload.get("attack_power", 0)),
+                    is_skill=False,
+                    from_field_effect=True,
+                    action_name=queued_action.display_name,
+                    tags={"movement", "pass_through_damage"},
+                ))
             self.check_win_condition()
             return
         if effect_code == "banish":
@@ -5605,8 +5673,26 @@ class Battle:
                 self._separate_attack_sequences.pop(queued_action.payload.get("declaration_id"), None)
                 self.log(f"【{queued_action.display_name}】未能结算，因为行动者已不在战场。")
                 return
+            if queued_action.action_type in {"attack", "skill"}:
+                for observer in list(self.all_units()):
+                    for component in list(observer.iter_components()):
+                        redirect = getattr(component, "redirect_queued_action", None)
+                        if callable(redirect):
+                            redirect(self, queued_action)
             self.emit_visual_event_for_queued_action(actor, queued_action)
             payload = queued_action.payload
+            if payload.get("action_failed_by_target_redirect"):
+                if queued_action.action_type == "attack":
+                    actor.attacks_used += int(payload.get("attack_cost", 1))
+                    actor.actions_taken_this_turn.append("attack")
+                    actor.consume_attack_attempt_buffs(self)
+                    actor.notify_basic_attack_finished(self, payload, [], missed=True)
+                elif queued_action.action_type == "skill":
+                    skill = actor.get_skill(payload["skill_code"])
+                    skill.finalize_use(self, actor)
+                    actor.actions_taken_this_turn.append(f"skill:{skill.code}")
+                self.log_public_event(f"{actor.name} 的【{queued_action.display_name}】改向后范不足，动作失败。", source=actor)
+                return
             if queued_action.action_type == "move":
                 destination = Position(int(payload["x"]), int(payload["y"]))
                 path = self.payload_positions(payload, "path")
@@ -5914,11 +6000,16 @@ class Battle:
         pending = self.pending_damage_choice
         if pending is not None:
             if payload.get("type") != "damage_choice" or payload.get("unit_id") != pending["unit_id"]:
-                raise ActionError("请先决定拉奥是否抵消这次伤害。")
-            stat = str(payload.get("stat_name") or "")
-            if stat != "decline" and stat not in pending["stats"]:
-                raise ActionError("请选择一项可降低的能力，或放弃抵消。")
-            decisions = [*pending["decisions"], stat]
+                raise ActionError("请先完成本次伤害选择。")
+            if pending.get("kind") in {"rotation", "attack_swap", "formation"}:
+                choice = str(payload.get("target_unit_id") or "")
+                if (choice == "decline" and pending.get("kind") in {"attack_swap", "formation"}) or (choice != "decline" and choice not in pending["options"]):
+                    raise ActionError("请选择当前提示中的合法对象与落点。")
+            else:
+                choice = str(payload.get("stat_name") or "")
+                if choice != "decline" and choice not in pending["stats"]:
+                    raise ActionError("请选择一项可降低的能力，或放弃抵消。")
+            decisions = [*pending["decisions"], choice]
             self.pending_damage_choice = None
             try:
                 self._perform_action_with_damage_choices(pending["action_payload"], decisions)
@@ -5954,10 +6045,12 @@ class Battle:
             self.pending_damage_choice = {
                 "prompt_id": f"damage-{next(_id_counter)}",
                 "unit_id": required.unit_id,
+                "kind": required.kind,
                 "action_name": required.action_name,
                 "damage": required.damage,
                 "event_index": required.event_index,
                 "stats": required.stats,
+                "options": required.options,
                 "action_payload": deepcopy(payload),
                 "decisions": list(decisions),
             }
@@ -5981,6 +6074,8 @@ class Battle:
         if event_index < len(decisions):
             stat = decisions[event_index]
             return stat if stat in stats else None
+        if getattr(self, "_damage_choice_probe_default", False):
+            return None
         amount = ctx.raw_damage if ctx.raw_damage is not None else self.damage_rule.calculate_damage(
             ctx.attack_power, ctx.target.stat("defense")
         )
@@ -5991,6 +6086,65 @@ class Battle:
             damage=round(min(float(ctx.target.current_hp), float(ctx.target.damage_fraction_after_limits(amount))), 4),
             event_index=event_index,
             stats=list(stats),
+        )
+
+    def damage_rotation_choice(self, ctx: DamageContext, options: list[str]) -> Optional[str]:
+        if not getattr(self, "_damage_choice_active", False) or getattr(self, "_ai_probe_active", False):
+            return None
+        event_index = int(getattr(self, "_damage_choice_event_index", 0))
+        self._damage_choice_event_index = event_index + 1
+        decisions = getattr(self, "_damage_choice_decisions", [])
+        if event_index < len(decisions):
+            choice = decisions[event_index]
+            return choice if choice in options else None
+        if getattr(self, "_damage_choice_probe_default", False):
+            return None
+        raise DamageChoiceRequired(
+            unit_id=ctx.target.unit_id,
+            action_name=("未知伤害" if ctx.source is not None and ctx.source.is_stealthed()
+                         and ctx.source.player_id != ctx.target.player_id else ctx.action_name),
+            damage=round(float(ctx.actual_damage), 4),
+            event_index=event_index,
+            kind="rotation",
+            options=list(options),
+        )
+
+    def attack_swap_choice(self, actor: Unit, options: list[str]) -> Optional[str]:
+        if not getattr(self, "_damage_choice_active", False) or getattr(self, "_ai_probe_active", False):
+            return options[0] if options else None
+        event_index = int(getattr(self, "_damage_choice_event_index", 0))
+        self._damage_choice_event_index = event_index + 1
+        decisions = getattr(self, "_damage_choice_decisions", [])
+        if event_index < len(decisions):
+            choice = decisions[event_index]
+            return choice if choice in options else None
+        if getattr(self, "_damage_choice_probe_default", False):
+            return options[0] if options else None
+        raise DamageChoiceRequired(
+            unit_id=actor.unit_id,
+            action_name="普攻换位",
+            damage=0,
+            event_index=event_index,
+            kind="attack_swap",
+            options=list(options),
+        )
+
+    def formation_placement_choice(self, actor: Unit, options: list[str], index: int) -> Optional[str]:
+        if not options:
+            return None
+        if not getattr(self, "_damage_choice_active", False) or getattr(self, "_ai_probe_active", False):
+            return options[0]
+        event_index = int(getattr(self, "_damage_choice_event_index", 0))
+        self._damage_choice_event_index = event_index + 1
+        decisions = getattr(self, "_damage_choice_decisions", [])
+        if event_index < len(decisions):
+            choice = decisions[event_index]
+            return choice if choice in options else None
+        if getattr(self, "_damage_choice_probe_default", False):
+            return options[0]
+        raise DamageChoiceRequired(
+            unit_id=actor.unit_id, action_name=f"剑斗布阵第{index}位", damage=0,
+            event_index=event_index, kind="formation", options=list(options),
         )
 
     def finish_destroyed_active_turn_if_idle(self) -> None:
@@ -6353,7 +6507,8 @@ class Battle:
             "pending_chain": self.pending_chain.to_public_dict(self) if self.pending_chain else None,
             "pending_respawn": respawn_prompt.to_public_dict() if respawn_prompt else None,
             "pending_damage_choice": (
-                {key: damage_prompt[key] for key in ("unit_id", "action_name", "damage", "event_index", "stats")}
+                {**{key: damage_prompt[key] for key in ("unit_id", "action_name", "damage", "event_index", "stats")},
+                 "kind": damage_prompt.get("kind", "stat"), "options": damage_prompt.get("options", [])}
                 if damage_prompt is not None else None
             ),
             "logs": self.logs,

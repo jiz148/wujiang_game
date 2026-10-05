@@ -1,6 +1,10 @@
 import { $ } from '../core/dom.js';
 import { state } from '../core/state.js';
 import { bpAssign, bpChoose, setBpCaptain } from './room-api.js';
+import { bindHeroHover, hideHeroHover, showHeroHover } from './hero-hover.js';
+
+let draftLevelFilter = 'all';
+let draftFilterRoomId = '';
 
 function element(tag, text, className = '') {
   const node = document.createElement(tag);
@@ -25,7 +29,7 @@ function teamName(team) {
 
 function addCaptainControls(panel, bp, seats) {
   panel.append(element('h3', '赛前设置'));
-  panel.append(element('p', `${bp.team_size}v${bp.team_size} · 两队都指定真人队长，所有真人准备后自动进入禁选。`));
+  panel.append(element('p', `${bp.team_size}v${bp.team_size} · 每队总等级不超过 ${bp.level_cap}。两队都指定真人队长，所有真人准备后自动进入禁选。`));
   for (const team of [1, 2]) {
     const row = element('div', '', 'bp-row');
     row.append(element('strong', `${teamName(team)}队长`));
@@ -37,6 +41,7 @@ function addCaptainControls(panel, bp, seats) {
       candidates.forEach((seat) => select.append(option(seat.player_id, seat.name || `席位 ${seat.player_id}`)));
       select.value = String(bp.captains?.[team] || '');
       select.addEventListener('change', () => {
+        select.blur();
         if (select.value) void setBpCaptain(team, Number(select.value));
       });
       row.append(select);
@@ -45,6 +50,9 @@ function addCaptainControls(panel, bp, seats) {
       row.append(element('span', captain?.name || '待指定'));
     }
     panel.append(row);
+  }
+  if (!state.room.configuration_ready && state.room.start_blocker) {
+    panel.append(element('p', state.room.start_blocker, 'bp-error'));
   }
 }
 
@@ -56,18 +64,64 @@ function addDraftControls(panel, bp) {
   const captain = (state.room.seats || []).find((seat) => seat.player_id === captainId);
   panel.append(element('p', `当前由 ${captain?.name || teamName(bp.current_team_id) + '队长'} 操作。首选队：${teamName(bp.first_pick_team)}。`));
   if (Number(state.room.viewer_player_id) === captainId) {
+    if (draftFilterRoomId !== state.room.room_id) {
+      draftFilterRoomId = state.room.room_id;
+      draftLevelFilter = 'all';
+    }
     const used = new Set((bp.actions || []).map((action) => action.hero_code));
     const choices = (state.heroes || []).filter((hero) => !used.has(hero.code))
       .sort((left, right) => left.name.localeCompare(right.name, 'zh'));
+    const remaining = Number(bp.level_cap || 0) - Number(bp.total_levels?.[bp.current_team_id] || 0);
     const row = element('div', '', 'bp-row');
+    const levelSelect = document.createElement('select');
+    levelSelect.className = 'select';
+    levelSelect.dataset.bpLevelFilter = 'true';
+    levelSelect.setAttribute('aria-label', '按武将等级筛选');
+    levelSelect.append(option('all', '全部等级'));
+    const levels = [...new Set(choices.map((hero) => Number(hero.level)))].sort((left, right) => left - right);
+    levels.forEach((level) => levelSelect.append(option(level, `Lv ${level}`)));
+    if (draftLevelFilter !== 'all' && !levels.includes(Number(draftLevelFilter))) draftLevelFilter = 'all';
+    levelSelect.value = draftLevelFilter;
     const select = document.createElement('select');
     select.className = 'select';
-    choices.forEach((hero) => select.append(option(hero.code, hero.name)));
+    select.dataset.bpHeroChoice = 'true';
+    select.setAttribute('aria-label', `${kind}武将`);
     const button = element('button', `确认${kind}`, 'primary');
     button.type = 'button';
-    button.disabled = choices.length === 0;
+    const refreshChoices = () => {
+      const visible = choices.filter((hero) => levelSelect.value === 'all' || Number(hero.level) === Number(levelSelect.value));
+      const legal = visible.filter((hero) => kind === '禁用' || Number(hero.level) <= remaining);
+      select.replaceChildren();
+      visible.forEach((hero) => {
+        const item = option(hero.code, `${hero.name} · Lv ${hero.level}`);
+        item.disabled = kind === '选取' && Number(hero.level) > remaining;
+        select.append(item);
+      });
+      select.value = legal.length ? legal[0].code : '';
+      button.disabled = legal.length === 0;
+    };
+    levelSelect.addEventListener('change', () => {
+      draftLevelFilter = levelSelect.value;
+      refreshChoices();
+      hideHeroHover();
+    });
+    select.addEventListener('change', () => {
+      const hero = choices.find((item) => item.code === select.value);
+      if (hero) showHeroHover(hero, select);
+    });
+    select.addEventListener('mouseenter', () => {
+      const hero = choices.find((item) => item.code === select.value);
+      if (hero) showHeroHover(hero, select);
+    });
+    select.addEventListener('focus', () => {
+      const hero = choices.find((item) => item.code === select.value);
+      if (hero) showHeroHover(hero, select);
+    });
+    select.addEventListener('mouseleave', () => hideHeroHover(select));
+    select.addEventListener('blur', () => hideHeroHover(select));
+    refreshChoices();
     button.addEventListener('click', () => { if (select.value) void bpChoose(select.value); });
-    row.append(select, button);
+    row.append(levelSelect, select, button);
     panel.append(row);
   }
 }
@@ -82,7 +136,13 @@ function addAssignmentControls(panel, bp, seats) {
     const teammates = seats.filter((seat) => seat.team_id === team && seat.is_human);
     for (const code of bp.picks?.[team] || []) {
       const row = element('div', '', 'bp-row');
-      row.append(element('strong', heroName(code)));
+      const name = element('strong', heroName(code));
+      const hero = (state.heroes || []).find((item) => item.code === code);
+      if (hero) {
+        name.tabIndex = 0;
+        bindHeroHover(name, hero);
+      }
+      row.append(name);
       const assigned = bp.assignments?.[code];
       const canEdit = teammates.some((seat) => seat.player_id === viewer)
         && (viewer === captain || assigned == null || assigned === 'ai' || Number(assigned) === viewer);
@@ -94,6 +154,7 @@ function addAssignmentControls(panel, bp, seats) {
           .forEach((seat) => select.append(option(seat.player_id, seat.name || `席位 ${seat.player_id}`)));
         select.value = assigned == null ? '' : String(assigned);
         select.addEventListener('change', () => {
+          select.blur();
           if (select.value) void bpAssign(code, select.value);
         });
         row.append(select);
@@ -110,21 +171,33 @@ export function renderBpPanel() {
   const panel = $('bp-panel');
   if (!panel) return;
   const room = state.room;
-  const visible = room?.mode === 'bp' && (room.status === 'lobby' || room.status === 'bp');
+  const visible = room?.mode === 'bp' && (room.status === 'lobby' || room.status === 'bp' || room.status === 'finished');
   panel.classList.toggle('hidden', !visible);
-  if (!visible) return;
-  if (panel.contains(document.activeElement) && document.activeElement?.tagName === 'SELECT') return;
+  if (!visible) {
+    hideHeroHover();
+    return;
+  }
+  const phaseKey = JSON.stringify([room.room_id, room.status, room.viewer_player_id, room.viewer_is_host, room.configuration_ready, room.start_blocker, room.bp, room.seats]);
+  if (panel.dataset.bpPhaseKey === phaseKey) return;
+  panel.dataset.bpPhaseKey = phaseKey;
+  hideHeroHover();
   panel.replaceChildren();
   const bp = room.bp || {};
   const seats = room.seats || [];
+  if (bp.show_win_count && bp.wins) {
+    panel.append(element('div', `胜场　红队 ${bp.wins[1] || 0} : ${bp.wins[2] || 0} 蓝队`, 'bp-score'));
+  }
   if (room.status === 'lobby') addCaptainControls(panel, bp, seats);
-  else {
+  else if (room.status === 'bp') {
+    panel.append(element('p', `等级预算　红队 ${bp.total_levels?.[1] || 0}/${bp.level_cap}　·　蓝队 ${bp.total_levels?.[2] || 0}/${bp.level_cap}`));
     if (bp.phase === 'draft') addDraftControls(panel, bp);
     else addAssignmentControls(panel, bp, seats);
     const history = element('div', '', 'bp-history');
     history.append(element('h4', '禁选记录'));
     (bp.actions || []).forEach((action) => history.append(element('span',
-      `${teamName(action.team_id)}${action.kind === 'ban' ? '禁' : '选'} ${action.hero_name}`, 'bp-chip')));
+      `${teamName(action.team_id)}${action.kind === 'ban' ? '禁' : '选'} ${action.hero_name} Lv ${action.hero_level}`, 'bp-chip')));
     panel.append(history);
+  } else {
+    panel.append(element('p', `本局选将等级　红队 ${bp.total_levels?.[1] || 0}/${bp.level_cap}　·　蓝队 ${bp.total_levels?.[2] || 0}/${bp.level_cap}`));
   }
 }

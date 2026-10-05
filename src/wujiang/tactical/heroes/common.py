@@ -1067,6 +1067,7 @@ class MultiTargetChainShieldSkill(Skill):
             for unit in battle.effect_units(battle.player_units(actor.player_id))
             if unit.position is not None
             and not battle.effect_recipient(unit).direct_effects_blocked()
+            and not battle.effect_recipient(unit).skill_non_damage_effects_blocked()
             and actor.position is not None
             and battle.unit_target_in_range_and_line(actor, unit, actor.targeting_range())
         ]
@@ -1210,7 +1211,7 @@ class MultiTargetChainShieldSkill(Skill):
 
     def apply_shields(self, battle: Battle, actor: HeroUnit, targets: list[HeroUnit]) -> None:
         for target in battle.effect_units(targets):
-            if target.direct_effects_blocked():
+            if target.direct_effects_blocked() or target.skill_non_damage_effects_blocked():
                 continue
             if battle.destroy_clone_for_skill_effect(target, source=actor, action_name=self.name):
                 continue

@@ -325,7 +325,7 @@ async function restartRoomDraft() {
       applyRoomPayload(payload, { preserveScreen: false });
       render();
     }
-    reportRoomError(error.error || "同配置再战准备失败。");
+    reportRoomError(error.error || (state.room?.mode === "bp" ? "下一局 BP 准备失败。" : "同配置再战准备失败。"));
   }
 }
 
@@ -520,6 +520,9 @@ async function postBpAction(action, fields) {
 }
 
 export const setBpTeamSize = (teamSize) => postBpAction("team-size", {team_size: teamSize});
+export const setBpSettings = ({teamSize, levelCap, showWinCount}) => postBpAction("settings", {
+  team_size: teamSize, level_cap: levelCap, show_win_count: showWinCount,
+});
 export const setBpCaptain = (teamId, seatId) => postBpAction("captain", {team_id: teamId, seat_id: seatId});
 export const bpChoose = (heroCode) => postBpAction("choose", {hero_code: heroCode});
 export const bpAssign = (heroCode, controller) => postBpAction("assign", {hero_code: heroCode, controller});
@@ -1323,7 +1326,7 @@ export function onActionClick(action) {
   if (!canInteract()) return;
   if (action.kind === "damage_choice") {
     performAction({ type: "damage_choice", unit_id: state.battle.pending_damage_choice.unit_id,
-      stat_name: action.stat_name });
+      stat_name: action.stat_name, target_unit_id: action.target_unit_id });
     return;
   }
   state.sidebarExpanded = "command";

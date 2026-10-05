@@ -1857,6 +1857,7 @@ class BattleSmokeTests(unittest.TestCase):
                 ],
             }
         )
+        resolve_pending_chain(battle)
 
         self.assertEqual(zero.position, Position(1, 2))
         self.assertEqual(zero.current_mana, 1.0)
@@ -1900,14 +1901,24 @@ class BattleSmokeTests(unittest.TestCase):
         bard.position = Position(4, 1)
         bard.max_health = 10
         bard.current_hp = 10
+        bard.add_status(StatModifierStatus("高守", defense_delta=2))
         oberon.current_mana = 5
         battle.perform_action({"type": "skill", "unit_id": oberon.unit_id, "skill_code": "judgment_stone", "x": 2, "y": 1})
         resolve_pending_chain(battle)
         stone = next(unit for unit in battle.player_units(1) if getattr(unit, "hero_code", "") == "judgment_stone")
 
+        with self.assertRaises(ActionError):
+            battle.move_unit(stone, oberon.position)
+        self.assertTrue(oberon.alive)
+
         battle.move_unit(stone, bard.position)
 
-        self.assertEqual(bard.current_hp, 5)
+        self.assertIsNotNone(battle.pending_chain)
+        self.assertEqual(battle.pending_chain.queued_action.payload["effect_code"], "judgment_stone_explosion")
+        self.assertIn(bard.unit_id, battle.pending_chain.options_by_unit)
+        self.assertEqual(bard.current_hp, 10)
+        resolve_pending_chain(battle)
+        self.assertEqual(bard.current_hp, 9.75)
         self.assertFalse(stone.alive)
 
     def test_judgment_stone_first_cast_each_turn_is_free_then_costs_half_mana(self) -> None:

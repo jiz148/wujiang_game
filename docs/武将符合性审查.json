@@ -1,22 +1,27 @@
 {
   "schema_version": 2,
-  "review_process": "2026-09-06用户调整：连续分批完成全部已开发武将及AI的设计优先检查修改；保留测试用例和静态检查，中途不运行测试、不等待逐批签收，全部完成后统一测试。",
+  "review_process": "原73名设计优先检查修改及第三轮武将线动态复测已完成。2026-10-02用户授权新增武将：每批先锁源设计，再实现战斗、AI、前端和行为场景；助手不运行动态测试，由用户执行仅覆盖新增批次的命令，报告保存在共享工作区。",
   "validation_policy": {
-    "mode": "awaiting_final_consolidated_validation",
-    "scope": "当前73名已开发公开武将及其AI；不扩展未开发武将",
+    "mode": "new_hero_batch_user_validation",
+    "scope": "原73名武将线第三轮动态复测已通过；R191/R195及R194定向审计已由用户完成；R192剩一项测试夹具待复测，R193静态实施待用户验证",
     "per_batch_test_gate": false,
-    "final_command": "python detail_test_all_wujiangs.py",
-    "user_override_date": "2026-09-06"
+    "final_command": "python detail_test_all_wujiangs.py --targets excel_r193 --regression-filter SektoruBehaviorTests --out reports/new-sektoru-20261005",
+    "user_override_date": "2026-10-05"
   },
   "current_hero_codes": [
-    "excel_r379"
+    "excel_r193"
   ],
   "developed_hero_inspection_progress": {
     "definition": "完成新设计优先流程：独立记录并锁定设计初衷，随后对照审查战斗实现、武将专属与通用AI、测试，并完成所有必要修改；用户复测签收单独统计",
-    "developed_public_total": 73,
-    "inspected_and_modified": 73,
+    "developed_public_total": 78,
+    "inspected_and_modified": 78,
     "remaining_to_inspect_and_modify": 0,
     "inspected_and_modified_codes": [
+      "excel_r193",
+      "excel_r194",
+      "excel_r192",
+      "excel_r191",
+      "excel_r195",
       "excel_r379",
       "excel_r352",
       "excel_r337",
@@ -91,12 +96,72 @@
       "excel_r291",
       "excel_r356"
     ],
-    "remaining_set_rule": "当前73名公开池全部完成源设计优先检查修改；0名待查，全部73名等待统一动态验证。",
-    "focused_retest_accepted": 3,
-    "awaiting_consolidated_test": 73,
-    "awaiting_consolidated_test_definition": "全部本轮已检查修改武将仍参加最后统一回归，历史签收3名也计入；该值不表示已动态验证。"
+    "remaining_set_rule": "原73名第三轮武将线动态复测通过；R191/R195/R194定向验证通过；R192测试夹具再修正待复测；R193设计优先静态实施完成待用户。",
+    "focused_retest_accepted": 76,
+    "awaiting_consolidated_test": 2,
+    "awaiting_consolidated_test_definition": "R192用户再次报告仅一项测试夹具NameError、已静态修正待复测；R193静态实施待定向报告。R194的10项行为与10场AI审计已通过。"
   },
   "heroes": [
+    {
+      "code": "excel_r193", "name": "剑斗兽。塞克托鲁", "batch": "H1-new-20261005",
+      "design_baseline": "docs/武将设计思想.json#excel_r193", "baseline_locked_at": "2026-10-05",
+      "review_status": "源193、通用规则与源272水波炮注解先锁设计；原本无专属实现，现完成战斗、AI、前端和场景静态对照，待用户定向报告。",
+      "acceptance_status": "pending_focused_user_validation",
+      "items": [
+        {"layer": "战斗/水波炮与魂技", "requirement": "远程2×2双方技能伤害；周围双方攻魔+1，三轮增益及冷却", "evidence": "原R193无专属实现；现WaterWaveCannonSkill复用远程龙息，GladiatorSoulSkill冻结邻域、逐受体普通防御与同源状态刷新。", "verdict": "静态实施待验证", "severity": "P1", "planned_change": "用户定向报告核对双方受体与期限", "status": "待用户报告"},
+        {"layer": "战斗/协同布阵", "requirement": "其他友军实际搬运本人后攻魔+1、重置魂技、两名不同单位合法移到周围", "evidence": "SektoruMovedByAllyTrait按来源识别真实位移，复用动作回滚的两次公开选择并每步重验；多格和骑乘合法性筛选。", "verdict": "静态实施待验证", "severity": "P1", "planned_change": "用户定向报告核对触发和落点", "status": "待用户报告"},
+        {"layer": "AI/前端/测试", "requirement": "双方净值、双目标落点、公开选择与生命周期行为场景", "evidence": "AI用正式技能净值与搬运提示回放评分；前端列目标及具体落点，房间超时合法兜底；SektoruBehaviorTests覆盖源关键边界。", "verdict": "静态实施待验证", "severity": "P1", "planned_change": "用户运行R193专用报告命令", "status": "待用户报告"}
+      ],
+      "audit_evidence": "源规则独立推演后对照：原本无本将专属战斗/AI/前端/测试实现；已新增各层与静态检查，动态审计由用户执行。"
+    },
+    {
+      "code": "excel_r194", "name": "剑斗兽。亚历山大", "batch": "H1-new-20261004",
+      "design_baseline": "docs/武将设计思想.json#excel_r194", "baseline_locked_at": "2026-10-04",
+      "review_status": "源194及保存答案先锁设计；用户R194定向报告10项行为全过、10场AI零高信号与动作错误，变硬无有效候选符合本人免疫基线。",
+      "acceptance_status": "focused_validation_passed",
+      "items": [
+        {"layer": "战斗/飓风", "requirement": "范内横竖2×5、附近友方数定多段，各段独立连锁并按原格双方受体结算", "evidence": "AlexanderHurricaneSkill锁原格和声明时友军数，逐段排队；用户10项行为与10场AI报告通过，飓风10次。", "verdict": "定向验证通过", "severity": "P1", "planned_change": "已接逐段结算", "status": "定向通过"},
+        {"layer": "战斗/普攻换位与友方搬运", "requirement": "完成普攻后合法多格换位；友方非技能位移刷新攻守并重置飓风", "evidence": "共用多格双落点算法和普攻完成后必选提示，非技能友方位移刷新攻守及重置；用户10项行为通过，10场AI普攻/换位各12次。", "verdict": "定向验证通过", "severity": "P1", "planned_change": "已接换位与重置", "status": "定向通过"},
+        {"layer": "防护/AI/前端/测试", "requirement": "本人仅免非伤害技能效果、动态保护周围其他友军，AI逐段净值与强制换位、前端后攻击选人", "evidence": "自身变硬/保护因免疫不可用；AlexanderBehaviorTests十项通过，10场AI无高信号/动作错误，未用变硬符合基线。", "verdict": "定向验证通过", "severity": "P1", "planned_change": "已接前端与AI", "status": "定向通过"}
+      ],
+      "audit_evidence": "reports/new-alexander-20261004：10项行为全过，10场AI均有结局、零高信号/动作错误；战斗飓风10次、普攻12次、换位12次。变硬未用是自身非伤害技能免疫所致，不是有效候选遗漏。"
+    },
+    {
+      "code": "excel_r192", "name": "剑斗兽。安德鲁", "batch": "H1-new-20261003",
+      "design_baseline": "docs/武将设计思想.json#excel_r192", "baseline_locked_at": "2026-10-03",
+      "review_status": "源192与R192-Q001=b及新问卷推断先锁；首轮两项夹具修正后，用户再报告9项通过、1项NameError；脉冲计数夹具已修正待复跑。",
+      "acceptance_status": "pending_focused_user_validation",
+      "items": [
+        {"layer": "战斗/咆哮", "requirement": "仅敌回合一次，守+1，11×11明确单体对象改向；到本人范不足时原动作失败", "evidence": "新增GladiatorRoarSkill/Status与Battle结算前受体改向钩；保留原动作付款和冻结区域，敌英雄回合末失效。", "verdict": "静态实施，待动态验证", "severity": "P1", "planned_change": "已接正式连锁和射程失败", "status": "待用户本批报告"},
+        {"layer": "战斗/轮转与位移特性", "requirement": "每次真实损血后可选己方单位合法换位；其他己方效果位移后守魔各+1跨下本人轮", "evidence": "BattleRotationSkill在实际伤害回调提出可拒绝的队友选择，正式动作回滚重演；独立场地伤害也触发，盾挡和死亡不触发。复用多格换位；AndrewMovedByAllyTrait按位移来源刷新守魔状态。", "verdict": "静态实施，待动态验证", "severity": "P1", "planned_change": "已接每次实伤后换位和特性", "status": "待用户本批报告"},
+        {"layer": "AI/前端/测试", "requirement": "敌动作反应可选、承伤后轮转选队友、AI比较原/新受体及队友风险", "evidence": "前端伤害选择展示全部合法友方单位与放弃项；AI回滚重演本动作，比较不换和每名队友的净损及最终站位；AndrewBehaviorTests覆盖攻技、盾挡、逐段场地伤害、AI回滚。", "verdict": "静态实施，待动态验证", "severity": "P1", "planned_change": "已接本批定向报告命令", "status": "待用户本批报告"}
+      ],
+      "audit_evidence": "reports/new-andrew-20261003：10项行为8过、1失败、1错误，10场AI零高信号与动作错误；reports/new-andrew-retest-20261004：9项通过、1项测试中pulse未定义。现夹具明确实例并计数，动态待再跑。"
+    },
+    {
+      "code": "excel_r191", "name": "剑斗兽。拉克艾鲁", "batch": "H1-new-20261002",
+      "design_baseline": "docs/武将设计思想.json#excel_r191", "baseline_locked_at": "2026-10-02",
+      "review_status": "源191/R191-Q001=b先锁JSON/XLSX；战斗、AI、前端与行为场景完成对照；用户本批13项行为和20场AI审计通过。",
+      "acceptance_status": "focused_validation_passed",
+      "items": [
+        {"layer": "战斗/力爪", "requirement": "两格破魔真实伤害后才交换，冻结旧格，后段落空不回滚", "evidence": "GladiatorSwapSkill与合法双落点先查后提交；用户定向行为场景通过。", "verdict": "定向验证通过", "severity": "P1", "planned_change": "已接共享技能与多格交换", "status": "定向通过"},
+        {"layer": "特性/友方位移", "requirement": "其他己方单位效果位移后攻/魔能力值各+1，跨下本人轮到期", "evidence": "位移事件识别来源并刷新同名状态，到期裁剪魔；用户定向行为场景通过。", "verdict": "定向验证通过", "severity": "P1", "planned_change": "已接状态与来源判定", "status": "定向通过"},
+        {"layer": "AI/前端/测试", "requirement": "先选队友再选两格；AI用真实伤害、友损和换位后双方站位评分", "evidence": "choice_pattern交互、正式结算回滚评分；13项行为通过，R191十场AI零高信号与动作错误。", "verdict": "定向验证通过", "severity": "P1", "planned_change": "已接定向报告命令", "status": "定向通过"}
+      ],
+      "audit_evidence": "reports/new-gladiators-20261002：13项行为全过、本人10场AI零高信号/动作错误，所有技能有实际选用；定向动态通过。"
+    },
+    {
+      "code": "excel_r195", "name": "剑斗兽。贝斯特罗里", "batch": "H1-new-20261002",
+      "design_baseline": "docs/武将设计思想.json#excel_r195", "baseline_locked_at": "2026-10-02",
+      "review_status": "源195/R195-Q001=b先锁JSON/XLSX；战斗、AI、前端与行为场景完成对照；用户本批13项行为和20场AI审计通过。",
+      "acceptance_status": "focused_validation_passed",
+      "items": [
+        {"layer": "战斗/暴风", "requirement": "八方向五格双方技能伤害，使用后无伤也交换，冻结旧格", "evidence": "GladiatorSwapSkill与合法双落点先查后提交；用户定向行为场景通过。", "verdict": "定向验证通过", "severity": "P1", "planned_change": "已接共享技能与多格交换", "status": "定向通过"},
+        {"layer": "特性/友方位移", "requirement": "其他己方单位效果位移后持久魔能力值+1，本轮两次普通移动", "evidence": "独立位移事件增长容量，双移动状态只刷新不叠次数；用户定向行为场景通过。", "verdict": "定向验证通过", "severity": "P1", "planned_change": "已接永久资源与一轮行动状态", "status": "定向通过"},
+        {"layer": "AI/前端/测试", "requirement": "先选队友再选五格；无伤纯换位也可有AI收益", "evidence": "choice_pattern交互，AI按正式结算比较换位净值；13项行为通过，R195十场AI零高信号与动作错误。", "verdict": "定向验证通过", "severity": "P1", "planned_change": "已接定向报告命令", "status": "定向通过"}
+      ],
+      "audit_evidence": "reports/new-gladiators-20261002：13项行为全过、本人10场AI零高信号/动作错误，所有技能有实际选用；一场500步未决已推进162/200正式回合，属观察项。"
+    },
     {
       "code": "excel_r379",
       "name": "妖仙。菊",
@@ -2599,12 +2664,12 @@
         },
         {
           "layer": "战斗/爆破",
-          "requirement": "石终点碰敌单次固定5伤害，范围受体去重。",
-          "evidence": "现有on_unit_moved只查最终位置符合；raw5符合持久文档，但遍历units_at_cells未effect_recipient去重，嵌套移动可重入；字段from_field_effect保留特性伤害边界。",
-          "verdict": "已检查并修正，保留修改前证据",
+          "requirement": "石终点碰敌后先给敌方连锁，随后以伤害数值5按通用防御结算固定5×5范围实际受体，最后石自毁。",
+          "evidence": "历史记录曾接受raw5固定扣血；2026-10-02用户明确纠正。旧on_unit_moved直接resolve_damage并传raw_damage=5，既跳过连锁又直接扣生命；保留此旧实现证据以说明修复来源。",
+          "verdict": "2026-10-02按新澄清检查并修正，保留修改前证据",
           "severity": "P1",
-          "planned_change": "加单次爆破标记和实际受体去重，保留固定5/场地特性结算。",
-          "status": "已修改，待最终统一动态验证"
+          "planned_change": "单次撞击排入可连锁范围效果，按攻值5而非raw5逐受体结算，原撞击格固定并在结算后自毁；AI排除爆破覆盖召唤者的落点。",
+          "status": "已修改，定向场景通过；待完整项目回归验证"
         },
         {
           "layer": "AI",
@@ -3998,5 +4063,5 @@
       ]
     }
   ],
-  "updated_at": "2026-09-26"
+  "updated_at": "2026-10-04"
 }

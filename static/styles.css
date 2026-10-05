@@ -5358,6 +5358,40 @@ button.strategy-map-node,
   font-size: var(--fs-sm);
 }
 
+.hero-hover {
+  position: fixed;
+  z-index: 250;
+  width: min(340px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  padding: var(--s-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-3);
+  background: var(--surface-1);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  color: var(--text-1);
+  pointer-events: none;
+}
+
+.hero-hover__title {
+  display: block;
+  margin-bottom: var(--s-2);
+  font-size: var(--fs-md);
+}
+
+.hero-hover__row {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: var(--s-2);
+  padding: 4px 0;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.hero-hover__label {
+  color: var(--text-3);
+}
+
 .battle-screen .arena,
 body.battle-mode .battle-screen .arena {
   display: flex;
@@ -6273,6 +6307,16 @@ body.battle-mode .cell {
   justify-self: stretch;
 }
 
+.board-piece.is-terrain-occupant {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.board-piece.is-terrain-occupant:focus-visible {
+  outline: 3px solid var(--range);
+  outline-offset: 2px;
+}
+
 .piece.is-in-cell {
   position: absolute;
   inset: 0;
@@ -6483,6 +6527,44 @@ body.battle-mode .piece-name {
 .board.is-large-board .piece-name {
   font-size: 8px;
   line-height: 1.05;
+}
+
+.board-piece.is-mounted-rider {
+  width: min(72%, 48px);
+  height: min(72%, 48px);
+  min-width: 24px;
+  min-height: 24px;
+  padding: 2px;
+  gap: 0;
+  place-self: start end;
+  align-self: start;
+  justify-self: end;
+  pointer-events: auto;
+  cursor: pointer;
+  filter: drop-shadow(0 2px 4px rgba(18, 28, 40, 0.5));
+}
+
+.board-piece.is-mounted-rider .mana-pips {
+  display: none;
+}
+
+.board-piece.is-mounted-rider .piece-ring {
+  width: 100%;
+  padding: 2px;
+}
+
+.board-piece.is-mounted-rider .piece-core {
+  padding: 2px;
+}
+
+.board-piece.is-mounted-rider .piece-name {
+  font-size: 8px;
+  line-height: 1;
+}
+
+.board-piece.is-mounted-rider:focus-visible {
+  outline: 3px solid var(--range);
+  outline-offset: 2px;
 }
 
 .piece-icon {
@@ -8862,3 +8944,5 @@ body.battle-mode .logs .log {
 .bp-row .select { min-width: 11rem; max-width: 25rem; }
 .bp-history { margin-top: var(--s-3); }
 .bp-chip { display: inline-block; margin: 0.2rem; padding: 0.3rem 0.55rem; border-radius: 999px; background: var(--surface-2); }
+.bp-score { font-weight: 700; color: var(--accent-hi); margin-bottom: var(--s-2); }
+.bp-panel .bp-error { color: var(--danger); }

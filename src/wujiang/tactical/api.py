@@ -705,7 +705,11 @@ def _post_bp_room_action(ctx: RequestContext, action: str) -> None:
     token = str(payload.get("player_token") or "")
     try:
         room = ROOMS.get_room(room_id)
-        if action == "team-size":
+        if action == "settings":
+            room.set_bp_settings(token, team_size=payload.get("team_size"),
+                                 level_cap=payload.get("level_cap"),
+                                 show_win_count=payload.get("show_win_count"))
+        elif action == "team-size":
             room.set_bp_team_size(token, payload.get("team_size"))
         elif action == "captain":
             room.set_bp_captain(token, payload.get("team_id"), payload.get("seat_id"))
@@ -727,6 +731,11 @@ def _post_bp_room_action(ctx: RequestContext, action: str) -> None:
 @post("/api/rooms/bp/team-size")
 def post_rooms_bp_team_size(ctx: RequestContext) -> None:
     _post_bp_room_action(ctx, "team-size")
+
+
+@post("/api/rooms/bp/settings")
+def post_rooms_bp_settings(ctx: RequestContext) -> None:
+    _post_bp_room_action(ctx, "settings")
 
 
 @post("/api/rooms/bp/captain")

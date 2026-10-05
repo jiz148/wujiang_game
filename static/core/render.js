@@ -116,6 +116,8 @@ function lobbySyncSignature() {
     start_blocker: room.start_blocker,
     viewer_player_id: room.viewer_player_id,
     roomError: state.roomError,
+    // 禁选进度不会改变席位或房间状态；另一队队长仍须收到重绘。
+    bp: room.mode === "bp" ? room.bp : null,
     seats: (room.seats || []).map((seat) => [
       seat.player_id,
       seat.name,

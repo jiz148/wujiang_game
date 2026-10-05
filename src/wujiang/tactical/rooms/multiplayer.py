@@ -7,7 +7,9 @@ import secrets
 import threading
 import time
 import zlib
+from collections import Counter
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, Optional
 
 from wujiang.tactical.engine.army import (
@@ -806,6 +808,10 @@ class GameRoom:
         self.random_roster_size = DEFAULT_RANDOM_ROSTER_SIZE
         self.hero_limit = 0
         self.bp_team_size = 3
+        self.bp_level_caps = {3: 15, 5: 25}
+        self.bp_show_win_count = True
+        self.bp_wins = {1: 0, 2: 0}
+        self.bp_counted_match_ids: set[str] = set()
         self.bp_captains: dict[int, int] = {}
         self.bp_first_pick_team: Optional[int] = None
         self.bp_actions: list[dict[str, Any]] = []
@@ -863,6 +869,14 @@ class GameRoom:
             self.turn_limit_winner = 2
         if not hasattr(self, "bp_team_size"):
             self.bp_team_size = 3
+        if not hasattr(self, "bp_level_caps"):
+            self.bp_level_caps = {3: 15, 5: 25}
+        if not hasattr(self, "bp_show_win_count"):
+            self.bp_show_win_count = True
+        if not hasattr(self, "bp_wins"):
+            self.bp_wins = {1: 0, 2: 0}
+        if not hasattr(self, "bp_counted_match_ids"):
+            self.bp_counted_match_ids = set()
         if not hasattr(self, "bp_captains"):
             self.bp_captains = {}
         if not hasattr(self, "bp_first_pick_team"):
@@ -902,8 +916,18 @@ class GameRoom:
         }
 
     def touch(self) -> None:
+        self._record_bp_win_if_finished()
         self.version += 1
         self.updated_at = time.time()
+
+    def _record_bp_win_if_finished(self) -> None:
+        match_id = self.current_match_id
+        if (self.mode != "bp" or self.status != "finished" or self.battle is None
+                or self.battle.winner not in TEAM_IDS or not match_id
+                or match_id in self.bp_counted_match_ids):
+            return
+        self.bp_wins[self.battle.winner] = self.bp_wins.get(self.battle.winner, 0) + 1
+        self.bp_counted_match_ids.add(match_id)
 
     def invalidate_readiness(self) -> None:
         for seat in self.seats.values():
@@ -922,6 +946,28 @@ class GameRoom:
                 self.bp_team_size = team_size
                 self.invalidate_readiness()
                 self.touch()
+
+    def set_bp_settings(self, token: str, *, team_size: Any, level_cap: Any, show_win_count: Any) -> None:
+        with self._lock:
+            self.require_host(token)
+            if self.status != "lobby" or self.mode != "bp":
+                raise RoomError("只能在BP模式大厅修改赛前设置。")
+            if str(team_size) not in {"3", "5"}:
+                raise RoomError("BP模式只支持3v3或5v5。")
+            size = int(team_size)
+            if isinstance(level_cap, bool) or not str(level_cap).isdigit() or not 1 <= int(level_cap) <= 50:
+                raise RoomError("每队总等级上限必须为1到50的整数。")
+            if not isinstance(show_win_count, bool):
+                raise RoomError("胜场显示设置无效。")
+            cap = int(level_cap)
+            if (size == self.bp_team_size and cap == self.bp_level_caps[size]
+                    and show_win_count == self.bp_show_win_count):
+                return
+            self.bp_team_size = size
+            self.bp_level_caps[size] = cap
+            self.bp_show_win_count = show_win_count
+            self.invalidate_readiness()
+            self.touch()
 
     def set_bp_captain(self, token: str, team_id: Any, seat_id: Any) -> None:
         with self._lock:
@@ -942,15 +988,64 @@ class GameRoom:
         if first not in TEAM_IDS:
             return []
         other = 3 - first
-        teams = [other] * 3 + [first] * 3
-        if self.bp_team_size == 3:
-            picks = [first, first, other, other, first, other]
+        sequence = ([("ban", first)] * 2 + [("ban", other)] * 2
+                    + [("pick", first)] * 2 + [("pick", other)] * 2)
+        if self.bp_team_size == 5:
+            sequence += ([("ban", other)] * 2 + [("ban", first)] * 2
+                         + [("pick", other)] * 2 + [("pick", first)] * 2
+                         + [("ban", first), ("ban", other),
+                            ("pick", first), ("pick", other)])
         else:
-            picks = [first, first, other, other, first, first, other, other, other, first]
-        return [("ban", team) for team in teams] + [("pick", team) for team in picks]
+            sequence += [("ban", other), ("ban", first),
+                         ("pick", other), ("pick", first)]
+        return sequence
 
     def _bp_picks(self, team_id: int) -> list[str]:
         return [action["hero_code"] for action in self.bp_actions if action["kind"] == "pick" and action["team_id"] == team_id]
+
+    def _bp_level_cap(self) -> int:
+        return int(self.bp_level_caps.get(self.bp_team_size, self.bp_team_size * 5))
+
+    def _bp_total_level(self, team_id: int, actions: Optional[list[dict[str, Any]]] = None) -> int:
+        known = hero_lookup()
+        return sum(int(action.get("level", known.get(action["hero_code"], {}).get("level", 0)))
+                   for action in (self.bp_actions if actions is None else actions)
+                   if action["kind"] == "pick" and action["team_id"] == team_id)
+
+    def _bp_draft_feasible(self, actions: list[dict[str, Any]]) -> bool:
+        known = hero_lookup()
+        used = {action["hero_code"] for action in actions}
+        available_levels = sorted(int(hero["level"]) for code, hero in known.items() if code not in used)
+        needs = tuple(self.bp_team_size - sum(action["kind"] == "pick" and action["team_id"] == team
+                                                for action in actions) for team in TEAM_IDS)
+        budgets = tuple(self._bp_level_cap() - self._bp_total_level(team, actions) for team in TEAM_IDS)
+        if any(need < 0 or budget < 0 for need, budget in zip(needs, budgets)):
+            return False
+        if len(available_levels) < sum(needs):
+            return False
+        if any(sum(available_levels[:need]) > budget for need, budget in zip(needs, budgets)):
+            return False
+        if sum(available_levels[:sum(needs)]) > sum(budgets):
+            return False
+        counts = Counter(available_levels)
+        levels = tuple(sorted(counts))
+
+        @lru_cache(maxsize=None)
+        def can_fill(index: int, red_needed: int, blue_needed: int, red_budget: int, blue_budget: int) -> bool:
+            if red_needed == blue_needed == 0:
+                return True
+            if index == len(levels):
+                return False
+            level = levels[index]
+            count = counts[level]
+            for red_count in range(min(count, red_needed, red_budget // level), -1, -1):
+                for blue_count in range(min(count - red_count, blue_needed, blue_budget // level), -1, -1):
+                    if can_fill(index + 1, red_needed - red_count, blue_needed - blue_count,
+                                red_budget - level * red_count, blue_budget - level * blue_count):
+                        return True
+            return False
+
+        return can_fill(0, needs[0], needs[1], budgets[0], budgets[1])
 
     def _bp_phase(self) -> str:
         if self.status != "bp":
@@ -975,7 +1070,13 @@ class GameRoom:
                 raise RoomError("所选武将不存在。")
             if any(action["hero_code"] == hero_code for action in self.bp_actions):
                 raise RoomError("该武将已经被禁用或选走。")
-            self.bp_actions.append({"kind": kind, "team_id": team, "hero_code": hero_code})
+            level = int(hero_lookup()[hero_code]["level"])
+            if kind == "pick" and self._bp_total_level(team) + level > self._bp_level_cap():
+                raise RoomError(f"{team_name(team)}选将总等级不能超过{self._bp_level_cap()}。")
+            candidate = {"kind": kind, "team_id": team, "hero_code": hero_code, "level": level}
+            if not self._bp_draft_feasible([*self.bp_actions, candidate]):
+                raise RoomError("这次禁选会使双方无法在等级上限内补齐阵容，请换一名武将。")
+            self.bp_actions.append(candidate)
             self.touch()
 
     def bp_assign(self, token: str, hero_code: str, controller: Any) -> None:
@@ -1042,6 +1143,11 @@ class GameRoom:
         known = hero_lookup()
         return {
             "team_size": self.bp_team_size,
+            "level_cap": self._bp_level_cap(),
+            "level_caps": dict(self.bp_level_caps),
+            "show_win_count": self.bp_show_win_count,
+            "wins": dict(self.bp_wins) if self.bp_show_win_count else None,
+            "total_levels": {team: self._bp_total_level(team) for team in TEAM_IDS},
             "captains": dict(self.bp_captains),
             "phase": self._bp_phase(),
             "first_pick_team": self.bp_first_pick_team,
@@ -1049,7 +1155,10 @@ class GameRoom:
             "step_count": len(sequence),
             "current_kind": step[0] if step else None,
             "current_team_id": step[1] if step else None,
-            "actions": [{**action, "hero_name": known.get(action["hero_code"], {}).get("name", action["hero_code"])} for action in self.bp_actions],
+            "actions": [{**action,
+                         "hero_name": known.get(action["hero_code"], {}).get("name", action["hero_code"]),
+                         "hero_level": action.get("level", known.get(action["hero_code"], {}).get("level", 0))}
+                        for action in self.bp_actions],
             "picks": {team: self._bp_picks(team) for team in TEAM_IDS},
             "assignments": dict(self.bp_assignments),
         }
@@ -1312,6 +1421,10 @@ class GameRoom:
         if action_type == "respawn_select":
             return "重新出现"
         if action_type == "damage_choice":
+            if payload.get("target_unit_id"):
+                if "@" in str(payload.get("target_unit_id") or ""):
+                    return "剑斗布阵"
+                return "战斗轮转" if payload.get("target_unit_id") != "decline" else "保持位置"
             return "能力抵消" if payload.get("stat_name") != "decline" else "承受伤害"
         if action_type == "end_turn":
             return "结束回合"
@@ -1590,7 +1703,9 @@ class GameRoom:
             if self.battle.pending_damage_choice is not None:
                 prompt = self.battle.pending_damage_choice
                 unit = self.battle.get_unit(prompt["unit_id"])
-                return {"type": "damage_choice", "unit_id": unit.unit_id, "stat_name": "decline"}, "ai_damage_fallback", unit
+                return {"type": "damage_choice", "unit_id": unit.unit_id,
+                        "stat_name": "decline", "target_unit_id": (prompt["options"][0]
+                        if prompt.get("kind") in {"attack_swap", "formation"} else "decline")}, "ai_damage_fallback", unit
             if self.battle.pending_chain is not None:
                 current_unit_id = self.battle.pending_chain.current_unit_id()
                 reactor = self.battle.get_unit(current_unit_id) if current_unit_id else None
@@ -1679,7 +1794,9 @@ class GameRoom:
             if seat is None or not seat.is_ai_controlled:
                 return False
             prompt = self.battle.pending_damage_choice
-            self._perform_battle_action({"type": "damage_choice", "unit_id": prompt["unit_id"], "stat_name": "decline"}, reason="ai_damage_fallback")
+            self._perform_battle_action({"type": "damage_choice", "unit_id": prompt["unit_id"],
+                                         "stat_name": "decline", "target_unit_id": (prompt["options"][0]
+                                         if prompt.get("kind") in {"attack_swap", "formation"} else "decline")}, reason="ai_damage_fallback")
             return True
         if self.battle.pending_chain is not None:
             if seat is None or not seat.is_ai_controlled:
@@ -1753,6 +1870,7 @@ class GameRoom:
         self._record_replay_step(reason)
         if self.battle.winner is not None:
             self.status = "finished"
+            self._record_bp_win_if_finished()
             self._ensure_replay_saved()
         after_stale_count = int(getattr(self.battle, "stale_queued_action_count", 0))
         stale_queued_action = after_stale_count > before_stale_count or any(
@@ -1796,6 +1914,7 @@ class GameRoom:
         if steps > 0:
             self.simulation_last_advanced_at = time.time()
         self.status = "finished" if self.battle and self.battle.winner is not None else "battle"
+        self._record_bp_win_if_finished()
         return steps
 
     def create_host(self, player_name: str, *, account_user_id: Optional[int] = None) -> tuple[int, str]:
@@ -1932,6 +2051,8 @@ class GameRoom:
             if next_mode == self.mode:
                 return
             self.mode = next_mode
+            self.bp_wins = {1: 0, 2: 0}
+            self.bp_counted_match_ids = set()
             self.bp_captains = {}
             self.bp_first_pick_team = None
             self.bp_actions = []
@@ -2379,8 +2500,12 @@ class GameRoom:
             prompt = self.battle.pending_damage_choice
             if prompt is None:
                 return False
-            payload = {"type": "damage_choice", "unit_id": prompt["unit_id"], "stat_name": "decline"}
-            action_label = "自动承受伤害"
+            payload = {"type": "damage_choice", "unit_id": prompt["unit_id"],
+                       "stat_name": "decline", "target_unit_id": (prompt["options"][0]
+                       if prompt.get("kind") in {"attack_swap", "formation"} else "decline")}
+            action_label = ("自动剑斗布阵" if prompt.get("kind") == "formation" else
+                            "自动交换位置" if prompt.get("kind") == "attack_swap" else
+                            "自动保持位置" if prompt.get("kind") == "rotation" else "自动承受伤害")
         elif prompt_kind == "respawn":
             prompt = self.battle.current_respawn_prompt()
             if prompt is None:
@@ -2562,6 +2687,8 @@ class GameRoom:
                     return f"请先为{team_name(team_id)}指定真人队长。"
             if len(hero_lookup()) < 6 + 2 * self.bp_team_size:
                 return "可用武将不足，无法完成本局BP。"
+            if not self._bp_draft_feasible([]):
+                return f"当前武将库无法满足每队总等级{self._bp_level_cap()}的上限。"
             return None
         if self.mode == "random":
             for team_id in TEAM_IDS:
@@ -2712,6 +2839,7 @@ class GameRoom:
             self.require_host(token)
             if self.status != "finished":
                 raise RoomError("åªæœ‰å¯¹å±€ç»“æŸåŽï¼Œæ‰èƒ½é‡æ–°å¼€å§‹é€‰å°†ã€‚")
+            self._record_bp_win_if_finished()
             self._ensure_replay_saved()
             self.battle = None
             self.replay = None
@@ -2734,10 +2862,16 @@ class GameRoom:
             self.bp_actions = []
             self.bp_assignments = {}
             for seat in self.seats.values():
-                seat.ready = False
+                if self.mode != "bp":
+                    seat.ready = False
                 seat.ai_takeover = False
                 if self.mode == "bp":
                     seat.clear_roster()
+            if self.mode == "bp":
+                if self._configuration_blocker() is None:
+                    self._begin_bp()
+                else:
+                    self.invalidate_readiness()
             self.touch()
 
     def _resolve_ai_until_human_input(self, max_steps: Optional[int] = None) -> int:
@@ -2818,7 +2952,9 @@ class GameRoom:
                     break
                 if self.battle.pending_damage_choice is not None:
                     prompt = self.battle.pending_damage_choice
-                    self._perform_battle_action({"type": "damage_choice", "unit_id": prompt["unit_id"], "stat_name": "decline"}, reason="ai_damage_fallback")
+                    self._perform_battle_action({"type": "damage_choice", "unit_id": prompt["unit_id"],
+                                                  "stat_name": "decline", "target_unit_id": (prompt["options"][0]
+                                                  if prompt.get("kind") in {"attack_swap", "formation"} else "decline")}, reason="ai_damage_fallback")
                     steps += 1
                 elif self.battle.pending_chain is not None:
                     self._perform_battle_action({"type": "chain_skip"}, reason="ai_chain_fallback")
@@ -2842,6 +2978,7 @@ class GameRoom:
                     steps += 1
             safety += 1
         self.status = "finished" if self.battle and self.battle.winner is not None else "battle"
+        self._record_bp_win_if_finished()
         return steps
 
     def resolve_ai_until_human_input(self) -> int:

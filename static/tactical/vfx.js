@@ -75,6 +75,40 @@ export function displayActions() {
   if (isGameOver()) return [];
   if (isDamageChoiceMode()) {
     const prompt = state.battle.pending_damage_choice;
+    if (prompt.kind === "formation") {
+      return (prompt.options || []).map((option, index) => {
+        const [unitId, cell] = option.split("@");
+        const [x, y] = cell.split(",").map(Number);
+        return {
+          code: `formation_${index}`, name: `将${unitById(unitId)?.name || "单位"}移至（${x + 1},${y + 1}）`,
+          kind: "damage_choice", target_unit_id: option, timing: "reaction", available: true,
+          description: "塞克托鲁受友方搬运后布阵；请选择目标与其合法落点。",
+          preview: { cells: [{ x, y }], target_unit_ids: [unitId], requires_target: false },
+        };
+      });
+    }
+    if (prompt.kind === "attack_swap") {
+      return (prompt.options || []).map((unitId) => ({
+        code: `attack_swap_${unitId}`, name: `与${unitById(unitId)?.name || "友军"}交换`, kind: "damage_choice",
+        target_unit_id: unitId, timing: "reaction", available: true,
+        description: "亚历山大普攻已完成；选择一名友军交换位置。",
+        preview: { cells: [], target_unit_ids: [unitId], requires_target: false },
+      }));
+    }
+    if (prompt.kind === "rotation") {
+      return [
+        ...(prompt.options || []).map((unitId) => ({
+          code: `damage_rotation_${unitId}`, name: `与${unitById(unitId)?.name || "友军"}轮转`, kind: "damage_choice",
+          target_unit_id: unitId, timing: "reaction", available: true,
+          description: "安德鲁已实际损血；选择这名友军交换位置。",
+          preview: { cells: [], target_unit_ids: [unitId], requires_target: false },
+        })),
+        { code: "damage_rotation_decline", name: "保持位置", kind: "damage_choice",
+          target_unit_id: "decline", timing: "reaction", available: true,
+          description: "放弃这次战斗轮转。",
+          preview: { cells: [], target_unit_ids: [], requires_target: false } },
+      ];
+    }
     const labels = { attack: "攻", defense: "守", speed: "速", attack_range: "范" };
     return [
       ...(prompt.stats || []).map((stat) => ({

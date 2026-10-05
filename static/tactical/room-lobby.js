@@ -5,14 +5,14 @@
 // 哪、带了谁"才是这一页真正要回答的问题。
 //
 // 现在页面上只留席位。设置是开局前调一次的东西，选将是一次挑完就走的动作，
-// 两者都点开才出现。武将名单也只给名字和等级：够用来找人；看数值和技能再点开
-// 详情。一上来就摊开全部档案，等于什么都没突出。
+// 两者都点开才出现。武将名单保留紧凑行，悬停可快速看完整资料，点击可固定打开详情。
 import { $ } from '../core/dom.js';
 import { fetchJson, hasRoom, viewerPlayerId } from '../core/net.js';
 import { render } from '../core/render.js';
 import { state } from '../core/state.js';
-import { applyRoomPayload, autoConfigureRoom, availableRoomModes, isRandomRoomMode, reportRoomError, selectRoomHero, setBpTeamSize, setRandomRosterSize, setRoomBoardSize, setRoomHeroLimit, setRoomMode, setRoomSeatCount, setRoomTurnTimeout } from '../tactical/room-api.js';
+import { applyRoomPayload, autoConfigureRoom, availableRoomModes, isRandomRoomMode, reportRoomError, selectRoomHero, setBpSettings, setRandomRosterSize, setRoomBoardSize, setRoomHeroLimit, setRoomMode, setRoomSeatCount, setRoomTurnTimeout } from '../tactical/room-api.js';
 import { randomRoomRosterSize, seatHeroCount, seatIdentityLabel, setRoomEditSeat } from '../tactical/targeting.js';
+import { bindHeroHover, hideHeroHover } from './hero-hover.js';
 
 function heroByCode(code) {
   return (state.heroes || []).find((hero) => hero.code === code) || null;
@@ -94,6 +94,9 @@ export function openRoomSetup() {
     seatCount: String(state.room.seat_count || 2),
     randomRosterSize: String(randomRoomRosterSize()),
     bpTeamSize: String(state.room.bp?.team_size || 3),
+    bpLevelCap: String(state.room.bp?.level_cap || 15),
+    bpLevelCaps: {...(state.room.bp?.level_caps || {3: 15, 5: 25})},
+    bpShowWinCount: state.room.bp?.show_win_count !== false,
     heroLimitEnabled: currentLimit > 0,
     heroLimit: String(currentLimit > 0 ? currentLimit : 5),
     turnTimeout: String(Number(state.room.turn_timeout_seconds ?? 0)),
@@ -213,6 +216,8 @@ export async function confirmRoomSetup() {
   const nextSeatCount = draft.seatCount;
   const nextRosterSize = draft.randomRosterSize;
   const nextBpTeamSize = Number(draft.bpTeamSize) === 5 ? 5 : 3;
+  const nextBpLevelCap = Math.max(1, Math.min(50, Number.parseInt(draft.bpLevelCap, 10) || nextBpTeamSize * 5));
+  const nextBpShowWinCount = Boolean(draft.bpShowWinCount);
   const nextHeroLimit = draft.heroLimitEnabled
     ? Math.max(1, Math.min(20, Number.parseInt(draft.heroLimit, 10) || 1))
     : 0;
@@ -223,8 +228,12 @@ export async function confirmRoomSetup() {
   if (isRandomRoomMode() && Number(nextRosterSize) !== randomRoomRosterSize()) {
     await setRandomRosterSize(nextRosterSize);
   }
-  if (state.room?.mode === "bp" && nextBpTeamSize !== Number(state.room?.bp?.team_size || 3)) {
-    await setBpTeamSize(nextBpTeamSize);
+  if (state.room?.mode === "bp" && (
+    nextBpTeamSize !== Number(state.room?.bp?.team_size || 3)
+    || nextBpLevelCap !== Number(state.room?.bp?.level_cap || 15)
+    || nextBpShowWinCount !== Boolean(state.room?.bp?.show_win_count)
+  )) {
+    await setBpSettings({teamSize: nextBpTeamSize, levelCap: nextBpLevelCap, showWinCount: nextBpShowWinCount});
   }
   if (state.room?.mode !== "bp" && nextHeroLimit !== Number(state.room?.hero_limit || 0)) await setRoomHeroLimit(nextHeroLimit);
   const nextTurnTimeout = [0, 30, 60, 120].includes(Number.parseInt(draft.turnTimeout, 10))
@@ -285,6 +294,12 @@ export function renderRoomSetupDialog() {
   $("bp-team-size-control")?.classList.toggle("hidden", draft.mode !== "bp");
   const bpSizeSelect = $("bp-team-size-select");
   if (bpSizeSelect && document.activeElement !== bpSizeSelect) bpSizeSelect.value = draft.bpTeamSize;
+  $("bp-level-cap-control")?.classList.toggle("hidden", draft.mode !== "bp");
+  const bpLevelCap = $("bp-level-cap-input");
+  if (bpLevelCap && document.activeElement !== bpLevelCap) bpLevelCap.value = draft.bpLevelCap;
+  $("bp-win-count-control")?.classList.toggle("hidden", draft.mode !== "bp");
+  const bpShowWins = $("bp-show-win-count");
+  if (bpShowWins) bpShowWins.checked = Boolean(draft.bpShowWinCount);
   if (randomInput && document.activeElement !== randomInput) {
     randomInput.value = draft.randomRosterSize;
   }
@@ -401,8 +416,16 @@ function renderHeroPickerRosters(seat) {
 function renderHeroPickerList(seat) {
   const list = $("hero-picker-list");
   if (!list) return;
-  list.replaceChildren();
   const heroes = heroPickerList();
+  const signature = JSON.stringify([
+    seat.player_id,
+    seatAtHeroLimit(seat),
+    heroes.map((hero) => [hero.code, seatHeroCount(seat, hero.code)]),
+  ]);
+  if (list.dataset.heroPickerSignature === signature) return;
+  list.dataset.heroPickerSignature = signature;
+  hideHeroHover();
+  list.replaceChildren();
   if (!heroes.length) {
     const empty = document.createElement("p");
     empty.className = "hero-picker__empty";
@@ -431,6 +454,7 @@ function renderHeroPickerList(seat) {
     stats.textContent = heroStatLine(hero);
     tag.append(name, level, stats);
     tag.addEventListener("click", () => openHeroDetail(hero.code));
+    bindHeroHover(tag, hero);
 
     const counter = document.createElement("div");
     counter.className = "hero-row__counter";
@@ -466,6 +490,7 @@ export function renderHeroPicker() {
   modal.classList.toggle("hidden", !open);
   modal.setAttribute("aria-hidden", open ? "false" : "true");
   if (!open) {
+    hideHeroHover();
     state.heroPickerSeatId = null;
     return;
   }
