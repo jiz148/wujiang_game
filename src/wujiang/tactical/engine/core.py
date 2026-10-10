@@ -21,6 +21,7 @@ from wujiang.tactical.engine.army import (
     resolve_army_phase,
     with_army_turn_slots,
 )
+from wujiang.tactical.heroes.weather_descriptions import hero_weather_effect_text
 
 
 @contextmanager
@@ -302,6 +303,17 @@ class BattleComponent(ABC):
         damage_contexts: list["DamageContext"],
         missed: bool,
     ) -> None:
+        return None
+
+    def on_any_basic_attack_finished(
+        self, battle: "Battle", actor: "Unit", payload: dict[str, Any],
+        damage_contexts: list["DamageContext"], missed: bool,
+    ) -> None:
+        """Observe a completed basic attack after its recipient effects have settled."""
+        return None
+
+    def on_skill_effect_finished(self, battle: "Battle", queued_action: "QueuedAction") -> None:
+        """Observe one completed skill that actually affected this component's owner."""
         return None
 
     def on_target_action_declared(self, battle: "Battle", actor: "Unit", action_type: str, payload: dict[str, Any]) -> None:
@@ -1361,6 +1373,14 @@ class Unit(ABC):
         if not hasattr(status, "is_skill_effect"):
             action = battle.resolving_action if battle is not None else None
             status.is_skill_effect = action is None or action.action_type in {"skill", "reaction_skill", "skill_effect"}
+        action = battle.resolving_action if battle is not None else None
+        if (action is not None and action.action_type in {"skill", "reaction_skill", "skill_effect"}
+                and status.duration is not None and not getattr(status, "chess_duration_extended", False)):
+            caster = battle.units.get(action.actor_id)
+            bonus = int(getattr(caster, "chess_duration_bonus", 0)) if caster is not None and source is caster else 0
+            if bonus:
+                status.duration += bonus
+                status.chess_duration_extended = True
         if source is not None:
             status.source_player_id = source.player_id
         if any(not component.accepts_status(status) for component in self.iter_components()):
@@ -1467,6 +1487,9 @@ class Unit(ABC):
         for component in list(self.iter_components()):
             component.on_basic_attack_finished(battle, self, payload, damage_contexts, missed)
         battle.notify_field_basic_attack_finished(self, payload, damage_contexts, missed=missed)
+        for unit in list(battle.all_units()):
+            for component in list(unit.iter_components()):
+                component.on_any_basic_attack_finished(battle, self, payload, damage_contexts, missed)
 
     def consume_attack_attempt_buffs(self, battle: "Battle") -> None:
         for status in list(self.statuses):
@@ -1774,6 +1797,7 @@ class Unit(ABC):
             "standable_terrain": bool(getattr(self, "standable_terrain", False)),
             "raw_skill_text": self.raw_skill_text,
             "raw_trait_text": self.raw_trait_text,
+            "weather_effect_text": hero_weather_effect_text(self),
             "skills": [skill.to_public_dict(battle) for skill in self.skills],
             "traits": [trait.to_public_dict(battle) for trait in [*self.traits, *self.projected_traits()]],
             "statuses": [status.to_public_dict(battle) for status in self.statuses],
@@ -1830,11 +1854,15 @@ class Battle:
         self.completed_turns = 0
         self._log_suppression_depth = 0
         self._draining_followup_actions = False
+        self._pending_end_turn_after_followups = False
+        self._processed_any_turn_end_choices: set[tuple[str, str]] = set()
         self.visual_events: list[VisualEvent] = []
         self._next_visual_event_id = 1
         self.stale_queued_action_count = 0
         self._next_action_resolution_token = 1
         self._current_action_resolution_token: Optional[int] = None
+        self._skill_effect_receipts: dict[int, set[str]] = {}
+        self._skill_effect_declaration_receipts: dict[str, set[str]] = {}
         self.resolving_action: Optional[QueuedAction] = None
         self.combat_stats: dict[str, dict[str, Any]] = {}
         self.summary_events: list[dict[str, Any]] = []
@@ -2405,6 +2433,40 @@ class Battle:
             player_id = self.army_turn_player_id()
             if player_id is not None:
                 resolve_army_phase(self, player_id)
+            self.resolve_turn_end()
+            return
+        else:
+            self._processed_any_turn_end_choices.clear()
+            hero = self.current_turn_unit()
+            if hero is not None and hero.alive and not hero.banished:
+                for component in list(hero.iter_components()):
+                    before_end = getattr(component, "on_before_owner_turn_end", None)
+                    if callable(before_end) and before_end(self):
+                        if self.pending_chain is not None or self.pending_followup_actions:
+                            self._pending_end_turn_after_followups = True
+                            self.advance_followup_actions()
+                            return
+                        break
+        self.finish_any_turn_end_choices()
+
+    def finish_any_turn_end_choices(self) -> None:
+        """Run optional hero-turn hooks before the shared turn-end cleanup."""
+        if self.winner is None:
+            for unit in list(self.all_units()):
+                if not unit.alive or unit.banished or unit.position is None:
+                    continue
+                for component in list(unit.iter_components()):
+                    hook = getattr(component, "on_before_any_turn_end", None)
+                    key = (unit.unit_id, component.name)
+                    if not callable(hook) or key in self._processed_any_turn_end_choices:
+                        continue
+                    self._processed_any_turn_end_choices.add(key)
+                    hook(self)
+                    if self.pending_chain is not None or self.pending_followup_actions:
+                        self._pending_end_turn_after_followups = True
+                        self.advance_followup_actions()
+                        return
+        self._processed_any_turn_end_choices.clear()
         self.resolve_turn_end()
 
     def is_army_turn(self) -> bool:
@@ -2637,6 +2699,25 @@ class Battle:
             return
         attempts = 0
         while attempts < len(self.turn_order_unit_ids):
+            # Dead slots can be skipped below. Check at each candidate so a
+            # skipped final slot cannot give either side an extra action.
+            chess_cap = int(getattr(self, "chess_round_cap", 0) or 0)
+            if chess_cap and self.round_number > chess_cap:
+                from wujiang.tactical.rooms.autochess import chess_timeout_result
+                self.cleanup_dead_units()
+                if self.winner is not None:
+                    return
+                result = chess_timeout_result(self)
+                self.chess_timeout_result = result
+                self.winner = int(result["winner"])
+                self.win_reason_code = "chess_timeout"
+                self.win_reason_text = f"自走棋进行 {chess_cap} 个完整战斗轮后，按{result['criterion']}判定玩家 {self.winner} 获胜。"
+                self.log(self.win_reason_text)
+                self._append_summary_event("match_end", actor_unit_id=None, actor_name="系统",
+                                           actor_player_id=self.winner, target_name="",
+                                           action_name="自走棋超时判定", amount=0)
+                self._emit_replay_checkpoint("match_end")
+                return
             hero_id = self.current_turn_slot_unit_id()
             army_player_id = parse_army_slot(hero_id)
             if army_player_id is not None:
@@ -3698,6 +3779,7 @@ class Battle:
         ignore_targeting_restrictions: bool = False,
         resolve_defenses: bool = True,
         damage_target: bool = False,
+        record_effect_on_validation: bool = True,
         tags: Optional[set[str]] = None,
     ) -> TargetContext:
         target = self.effect_recipient(target)
@@ -3798,7 +3880,15 @@ class Battle:
                 ctx.destroyed_as_clone = True
                 ctx.cancelled = True
                 ctx.reason = "分身已因技能效果消散。"
+            if (record_effect_on_validation and not ctx.cancelled
+                    and not target.skill_non_damage_effects_blocked()):
+                self.record_skill_effect(target)
         return ctx
+
+    def record_skill_effect(self, target: Unit) -> None:
+        token = self._current_action_resolution_token
+        if token is not None:
+            self._skill_effect_receipts.setdefault(token, set()).add(target.unit_id)
 
     def resolve_damage(self, ctx: DamageContext) -> DamageContext:
         ctx.target = self.effect_recipient(ctx.target)
@@ -4001,6 +4091,8 @@ class Battle:
                     component.on_after_damage(self, ctx)
             for component in list(ctx.target.iter_components()):
                 component.on_after_damage(self, ctx)
+            if ctx.is_skill and not ctx.cancelled and ctx.actual_damage > 0 and ctx.target.alive:
+                self.record_skill_effect(ctx.target)
             if not ctx.target.alive:
                 self.record_defeat_summary(ctx.source, ctx.target, ctx.action_name)
             notify_confirmed_destruction()
@@ -4041,6 +4133,10 @@ class Battle:
             exempt = any(component.permits_immune_heal(ctx) for component in ctx.target.iter_components())
             ctx.target.heal_fraction(ctx.amount, ignore_effect_immunity=exempt)
             gained = round(ctx.target.current_hp - old_hp, 4)
+            if (gained > 0 and action is not None
+                    and action.action_type in {"skill", "reaction_skill", "skill_effect"}
+                    and not action.payload.get("from_field_effect")):
+                self.record_skill_effect(ctx.target)
             self.record_heal_summary(ctx, gained)
             self.log_public_event(
                 f"{ctx.target.name} 回复了 {gained} 点生命。",
@@ -4842,6 +4938,7 @@ class Battle:
                 queued_payload.pop(key, None)
             queued_payload.pop("attack_cells", None)
             queued_payload.pop("single_hit_per_recipient", None)
+            queued_payload.pop("allow_empty_attack_cell", None)
             queued_payload.pop("nuclear_rush_landing", None)
             queued_payload.pop("nuclear_rush_declared", None)
             queued_payload.pop("basic_attack_cancelled", None)
@@ -4857,7 +4954,8 @@ class Battle:
             forced_target = self.forced_basic_attack_target(actor)
             if forced_target is not None and forced_target.player_id == actor.player_id:
                 queued_payload["forced_allied_attack_target_id"] = forced_target.unit_id
-            separate = any(component.separate_basic_attack_windows for component in actor.iter_components())
+            separate = (not queued_payload.get("allow_empty_attack_cell")
+                        and any(component.separate_basic_attack_windows for component in actor.iter_components()))
             if separate and queued_payload.get("attack_variant") != "allied_heal":
                 queued_payload.pop("attack_cells", None)
                 primary = self.effect_recipient(self.get_unit(str(payload.get("target_unit_id") or "")))
@@ -4907,7 +5005,7 @@ class Battle:
                         if not structure_hit_by_impact(self, unit, impact):
                             continue
                     target_units.append(unit)
-                if not target_units:
+                if not target_units and not queued_payload.get("allow_empty_attack_cell"):
                     raise ActionError("攻击区域内没有有效目标。")
                 if separate:
                     target_units.sort(key=lambda unit: (unit.unit_id != primary.unit_id, unit.position.y, unit.position.x, unit.unit_id))
@@ -5298,14 +5396,18 @@ class Battle:
         return True
 
     def reaction_affected_units(self, queued_action: QueuedAction) -> list[Unit]:
-        actor = self.get_unit(queued_action.actor_id)
+        actor = self.units.get(queued_action.actor_id)
+        if actor is None or not actor.alive or actor.banished:
+            return []
         affected: list[Unit] = []
         seen: set[str] = set()
         for unit_id in queued_action.target_unit_ids:
             if unit_id in seen:
                 continue
             seen.add(unit_id)
-            unit = self.get_unit(unit_id)
+            unit = self.units.get(unit_id)
+            if unit is None or not unit.alive or unit.banished:
+                continue
             if unit.player_id == actor.player_id:
                 continue
             if not self.target_can_chain_against(unit, queued_action):
@@ -5373,6 +5475,8 @@ class Battle:
         cells = list(target_cells or [])
         resolved_payload = dict(payload or {})
         resolved_payload["effect_code"] = effect_code
+        if self.resolving_action is not None:
+            resolved_payload.setdefault("declaration_id", self.resolving_action.payload.get("declaration_id"))
         if actor.position is not None:
             resolved_payload.setdefault("declared_source_x", actor.position.x)
             resolved_payload.setdefault("declared_source_y", actor.position.y)
@@ -5420,6 +5524,8 @@ class Battle:
         ignore_magic_immunity: bool = False,
         cannot_evade: bool = False,
         tags: Optional[set[str]] = None,
+        exclude_actor: bool = False,
+        refresh_cell_targets: bool = False,
         segment_index: Optional[int] = None,
         segment_count: Optional[int] = None,
     ) -> None:
@@ -5431,6 +5537,8 @@ class Battle:
             "ignore_magic_immunity": ignore_magic_immunity,
             "cannot_evade": cannot_evade,
             "tags": sorted(tags or set()),
+            "exclude_actor": exclude_actor,
+            "refresh_cell_targets": refresh_cell_targets,
         }
         if raw_damage is not None:
             payload["raw_damage"] = raw_damage
@@ -5454,6 +5562,10 @@ class Battle:
                 self.present_reaction_window_or_resolve(self.pending_followup_actions.popleft())
         finally:
             self._draining_followup_actions = False
+        if (self._pending_end_turn_after_followups and self.pending_chain is None
+                and not self.pending_followup_actions):
+            self._pending_end_turn_after_followups = False
+            self.finish_any_turn_end_choices()
 
     def present_reaction_window_or_resolve(self, queued_action: QueuedAction) -> None:
         if queued_action.payload.get("refresh_cell_targets"):
@@ -5473,8 +5585,10 @@ class Battle:
             window = self.create_reaction_window(queued_action)
             if window is None:
                 if queued_action.speed < 3 and queued_action.hostile and queued_action.target_unit_ids:
-                    target_names = "、".join(self.get_unit(unit_id).name for unit_id in queued_action.target_unit_ids)
-                    self.log(f"{target_names} 没有可用的更快连锁，【{queued_action.display_name}】直接结算。")
+                    target_names = "、".join(unit.name for unit_id in queued_action.target_unit_ids
+                                            if (unit := self.units.get(unit_id)) is not None and unit.alive)
+                    if target_names:
+                        self.log(f"{target_names} 没有可用的更快连锁，【{queued_action.display_name}】直接结算。")
                 self.resolve_queued_action(queued_action)
                 self.advance_followup_actions()
                 return
@@ -5538,6 +5652,8 @@ class Battle:
                 self.log(f"【{queued_action.display_name}】没有有效结算范围。")
                 return
             for unit in self.effect_units_at_cells(cells):
+                if payload.get("exclude_actor") and unit.unit_id == actor.unit_id:
+                    continue
                 self.resolve_damage(
                     DamageContext(
                         source=actor,
@@ -5558,7 +5674,14 @@ class Battle:
             return
         if effect_code == "pass_through_damage":
             cells = self.payload_positions(payload, "cells")
-            for unit in self.effect_units_at_cells(cells):
+            crossed_id = payload.get("crossed_unit_id")
+            if crossed_id is None:
+                recipients = self.effect_units_at_cells(cells)
+            else:
+                crossed = self.units.get(str(crossed_id))
+                recipients = ([crossed] if crossed is not None and
+                              any(cell in self.unit_cells(crossed) for cell in cells) else [])
+            for unit in recipients:
                 self.resolve_damage(DamageContext(
                     source=actor,
                     target=unit,
@@ -5653,7 +5776,24 @@ class Battle:
         self._current_action_resolution_token = resolution_token
         try:
             self._resolve_queued_action(queued_action)
+            receipts = self._skill_effect_receipts.pop(resolution_token, set())
+            segment_count = int(queued_action.payload.get("segment_count") or 1)
+            segment_index = int(queued_action.payload.get("segment_index") or 1)
+            declaration_id = str(queued_action.payload.get("declaration_id") or "")
+            if declaration_id and segment_count > 1:
+                pending_receipts = self._skill_effect_declaration_receipts.setdefault(declaration_id, set())
+                pending_receipts.update(receipts)
+                if segment_index < segment_count:
+                    receipts = set()
+                else:
+                    receipts = self._skill_effect_declaration_receipts.pop(declaration_id, set())
+            for unit_id in sorted(receipts):
+                recipient = self.units.get(unit_id)
+                if recipient is not None and recipient.alive and not recipient.banished:
+                    for component in list(recipient.iter_components()):
+                        component.on_skill_effect_finished(self, queued_action)
         finally:
+            self._skill_effect_receipts.pop(resolution_token, None)
             # One-effect defenses remain through all hooks, then expire even without a reaction window.
             declaration_id = queued_action.payload.get("declaration_id")
             for unit in {unit.unit_id: unit for unit in [*self.all_units(), *self.destroyed_units]}.values():
@@ -6001,7 +6141,7 @@ class Battle:
         if pending is not None:
             if payload.get("type") != "damage_choice" or payload.get("unit_id") != pending["unit_id"]:
                 raise ActionError("请先完成本次伤害选择。")
-            if pending.get("kind") in {"rotation", "attack_swap", "formation"}:
+            if pending.get("kind") in {"rotation", "attack_swap", "formation", "optional_swap", "optional_placement", "end_dash", "electronic_teleport"}:
                 choice = str(payload.get("target_unit_id") or "")
                 if (choice == "decline" and pending.get("kind") in {"attack_swap", "formation"}) or (choice != "decline" and choice not in pending["options"]):
                     raise ActionError("请选择当前提示中的合法对象与落点。")
@@ -6147,6 +6287,23 @@ class Battle:
             event_index=event_index, kind="formation", options=list(options),
         )
 
+    def optional_position_choice(self, actor: Unit, options: list[str], *,
+                                 action_name: str, kind: str) -> Optional[str]:
+        if not options:
+            return None
+        if not getattr(self, "_damage_choice_active", False) or getattr(self, "_ai_probe_active", False):
+            return None
+        event_index = int(getattr(self, "_damage_choice_event_index", 0))
+        self._damage_choice_event_index = event_index + 1
+        decisions = getattr(self, "_damage_choice_decisions", [])
+        if event_index < len(decisions):
+            choice = decisions[event_index]
+            return choice if choice in options else None
+        if getattr(self, "_damage_choice_probe_default", False):
+            return None
+        raise DamageChoiceRequired(unit_id=actor.unit_id, action_name=action_name, damage=0,
+                                   event_index=event_index, kind=kind, options=list(options))
+
     def finish_destroyed_active_turn_if_idle(self) -> None:
         if (
             self.winner is not None
@@ -6161,7 +6318,8 @@ class Battle:
         active_unit = self.units.get(active_unit_id)
         if active_unit is not None and active_unit.alive:
             return
-        self.resolve_turn_end(auto_started=True)
+        self._processed_any_turn_end_choices.clear()
+        self.finish_any_turn_end_choices()
 
     def _perform_action(self, payload: dict[str, Any]) -> None:
         if self.winner is not None:

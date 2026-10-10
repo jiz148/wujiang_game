@@ -8942,7 +8942,58 @@ body.battle-mode .logs .log {
 .bp-panel p { margin: 0.4rem 0 0.8rem; color: var(--text-2); }
 .bp-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); margin: 0.5rem 0; }
 .bp-row .select { min-width: 11rem; max-width: 25rem; }
+.bp-content { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 340px); grid-template-areas: 'main details'; gap: var(--s-3); align-items: start; }
+.bp-content__main { grid-area: main; min-width: 0; }
+.bp-hero-details { grid-area: details; position: sticky; top: var(--s-3); min-width: 0; max-height: min(70vh, 640px); overflow-y: auto; padding: var(--s-3); border: 1px solid var(--line-strong); border-radius: var(--r-3); background: var(--surface-2); }
+.bp-hero-details h4 { margin-top: 0; }
+.bp-hero-details .hero-hover__row { grid-template-columns: 40px minmax(0, 1fr); }
+.bp-hero-picker { position: relative; min-width: 11rem; max-width: 25rem; flex: 1 1 14rem; }
+.bp-hero-picker__summary { cursor: pointer; padding: 0.55rem 0.7rem; border: 1px solid var(--line); border-radius: var(--r-2); background: var(--surface-2); }
+.bp-hero-picker__summary:focus-visible, .bp-hero-picker__option:focus-visible, .bp-chip:focus-visible { outline: 2px solid var(--accent-hi); outline-offset: 2px; }
+.bp-hero-picker__menu { position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; right: 0; max-height: min(45vh, 360px); overflow-y: auto; padding: 4px; border: 1px solid var(--line-strong); border-radius: var(--r-2); background: var(--surface-1); box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3); }
+.bp-hero-picker:not([open]) .bp-hero-picker__menu { display: none; }
+.bp-hero-picker__option { display: block; width: 100%; padding: 0.45rem 0.6rem; border: 0; border-radius: var(--r-2); background: transparent; color: var(--text-1); text-align: left; cursor: pointer; }
+.bp-hero-picker__option:hover, .bp-hero-picker__option:focus-visible { background: var(--surface-2); }
+.bp-hero-picker__option.is-unavailable { color: var(--text-3); cursor: help; }
+.bp-auto-bans { margin: var(--s-2) 0 var(--s-3); padding: var(--s-2) var(--s-3); border: 1px solid var(--line-strong); border-radius: var(--r-2); background: var(--surface-2); }
+.bp-auto-bans h4 { margin-top: 0; }
+.bp-auto-bans__group { margin: 0.35rem 0; }
+.bp-auto-bans__group summary { cursor: pointer; }
+.bp-auto-bans__names { margin-top: var(--s-2); }
 .bp-history { margin-top: var(--s-3); }
 .bp-chip { display: inline-block; margin: 0.2rem; padding: 0.3rem 0.55rem; border-radius: 999px; background: var(--surface-2); }
+.bp-chip[data-bp-history-hero], .bp-chip[data-bp-auto-ban-hero] { cursor: help; }
 .bp-score { font-weight: 700; color: var(--accent-hi); margin-bottom: var(--s-2); }
 .bp-panel .bp-error { color: var(--danger); }
+@media (max-width: 760px) {
+  .bp-content { grid-template-columns: minmax(0, 1fr); grid-template-areas: 'details' 'main'; }
+  .bp-hero-details { max-height: 42vh; z-index: 10; }
+}
+.autochess-panel { display: grid; gap: 1rem; margin-top: 1rem; }
+.autochess-panel.hidden { display: none; }
+.autochess-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: .5rem; }
+.autochess-heading h2 { margin: 0; }
+.autochess-standing-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: .4rem; }
+.autochess-standing-list > div, .autochess-piece, .autochess-shop, .autochess-standings, .autochess-deployment, .autochess-matches, .autochess-history, .autochess-synergies { padding: .7rem; border: 1px solid var(--border, #8c806f); border-radius: .6rem; }
+.autochess-self { font-weight: 700; }
+.autochess-shop-row, .autochess-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin: .5rem 0; }
+.autochess-shop-row button { flex: 1 1 8rem; min-height: 44px; }
+.autochess-layout { display: grid; grid-template-columns: minmax(15rem, 1fr) minmax(16rem, 1fr); gap: 1rem; }
+.autochess-pieces { display: grid; align-content: start; gap: .4rem; }
+.autochess-piece.is-selected { outline: 2px solid #ca9c3c; }
+.autochess-piece > button { width: 100%; text-align: left; }
+.autochess-equipment { display: grid; gap: .35rem; }
+.autochess-equipment-row { display: flex; gap: .5rem; justify-content: space-between; align-items: center; font-size: .82rem; }
+.autochess-equipment-row span { min-width: 0; overflow-wrap: anywhere; }
+.autochess-synergies p { margin: .25rem 0; }
+.autochess-synergy-active { font-weight: 650; color: var(--accent-hi); }
+.autochess-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .2rem; }
+.autochess-cell { aspect-ratio: 1; min-width: 0; padding: .1rem; font-size: .75rem; }
+.autochess-cell.is-occupied { background: #4f6a86; color: white; }
+.autochess-observer-grid { display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); max-width: 660px; gap: 2px; }
+.autochess-observer-cell { aspect-ratio: 1; display: grid; place-items: center; background: #413e39; color: #eee; font-size: .72rem; }
+.autochess-observer-cell.side-1 { background: #84423f; }
+.autochess-observer-cell.side-2 { background: #3c6085; }
+.autochess-battle-log { max-height: 12rem; overflow: auto; font-size: .82rem; }
+.autochess-battle-log p, .autochess-history p { margin: .2rem 0; }
+@media (max-width: 760px) { .autochess-layout { grid-template-columns: 1fr; } }

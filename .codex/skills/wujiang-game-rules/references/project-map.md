@@ -2,6 +2,22 @@
 
 Update this file after every new gameplay requirement or code change in `wujiang_game`. Keep entries concise and durable; do not paste full docs.
 
+- 2026-10-09 并行自走棋首版：规则与数值在 `docs/自走棋模式规则.md`；`rooms/autochess.py` 管 4/8 人经营、商店/合成/预算/布阵、AI 备战、配对、经济/淘汰及观战数据，`multiplayer.py` 复用账号房间并持久化，`engine/core.py` 完整战斗轮超时判定，`api.py` 操作接口，`static/tactical/autochess-ui.js` 界面。`data/装备.xlsx` 经 `rooms/equipment.py` 读取，`rooms/equipment_effects.py` 接入战斗，5 金每轮限抽一件、每将三件；`rooms/synergy.py` 实现职业/属性/种族 3/6 档羁绊；`tests/test_behavior.py::AutoChessBehaviorTests` 定向场景，动态验证由用户执行。
+
+- 2026-10-08 BP 系统禁等级：`GameRoom._begin_bp()` 从仍可完成完整禁选与双方等级预算的组合里随机取两个不同等级，所有该级武将本局不可手动禁/选，不计入队长禁选步骤；`_bp_draft_feasible` 排除系统禁级，`_bp_choice_error` 对禁将和选将均验算完成性，公开 `auto_banned_levels` 与当前 `legal_levels`。连局重抽并持久化，BP UI 显示可展开的系统禁将名单及资料，并提前标记无法补齐阵容的候选。`BPRoomBehaviorTests` 覆盖等级1/2禁后等级10不可禁选、抽签可行性、UI与房间存档。
+
+- 2026-10-08 BP 武将资料框：`static/tactical/bp-ui.js` 在禁选/分配阶段固定显示共用资料框；原生武将下拉改为可逐项悬停的名单，等级超限项仍可看资料但不可选，禁选记录及分配姓名也绑定同一框。`hero-hover.js` 共用资料字段，`styles.css` 宽窄屏保持可见；`BPRoomBehaviorTests` 覆盖候选项、记录、分配名、预算和筛选。
+
+- 2026-10-08 定向结果：R10/R12/R21行为场景102/103通过，唯一双屏障测试用吟游诗人默认守4与屏障龙守4相等，未满足个人减伤严格小于条件；夹具显式改来源守3，生产减伤正确；用户单项复测1/1通过，电子龙别名/屏障主测试再次1/1通过。103项按首轮102项加唯一修正项累计通过，未在夹具修正后全量重跑。
+
+- 2026-10-08 定向澄清：红衣`无限`为全场任选单格，每次仅结算该格，允许空格落空；后端、排队受体、前端格点击和AI单格估值同步，旧群攻预期废止。牛鬼AI优先能兑现技能的`室王`，`神山`留濒死/可信致命威胁。万魔殿与天空圣域均有天气效果，不是占位。电子屏障龙2026-10-08明确自身光环-1、低守来源直接攻技个人另-1，两条可叠至-2；此前自身机甲光环-2及上轮总计固定-1的两种误释均废止。行为场景待用户运行。
+
+- 2026-10-07 Phase H R221/R222：源221/222和保存R222-Q001=a先锁JSON/XLSX设计，后在`heroes/excel_roster.py`实现全图旧3×3卫星炮、跨真实武将轮末电子龙可选瞬移、固定2×2工厂的原身份机甲修复；通用`engine/core.py`轮末预钩及分段范围失效受体保护，`rooms/ai.py`双方净值/落位/己方尸体评分，前端选位及超时放弃。`NewBatch221222`静态场景待用户运行，公开池84。R215已由用户定向签收；R219旧报告两次疾走次段失效受体动作错误已静态修正待新目录复测。
+
+- 2026-10-06 Phase H R215/R219：源215/219、保存R215-Q001=a/R219-Q001=b先锁JSON/XLSX独立设计，再实现UesugiFlashSkill/UesugiEndDashTrait与BirdDashSkill/BirdSoulSkill/BirdSkillMoveBoostTrait。engine/core.py在轮末穿行伤害连锁期间延迟切回合，逐段锁定真实经过受体并允许离开经过格避伤；rooms/ai.py重演敌友伤害和位置，按可接敌/被威胁程度折价换位增益；vfx.js列合法终点。NewBatch215219专场仅静态编写，用户运行定向命令。R196固定敌血夹具已修待复测，R197独立签收；公开池82。
+
+- 2026-10-06 Phase H R196/R197：先锁源196/197及保存R196-Q001=b/Q002=a，再实现斯巴达克斯大招先强化后冻结7×7双方伤害、技能实际收效后可选换位、其他友军真实搬运后的双攻/魔增长/大招重置；大石本体3×3、中石2×2、小石1×1，敌方普攻完成后按实际受体一次裂变。共享`engine/core.py`以动作收效回执触发换位，`rooms/ai.py`评估友伤、落点与喂石；`battle-ui.js`悬停展示中石完整占格。`NewBatch196197`筛选本批场景，动态仅由用户运行；公开池暂80名。R193用户报告6/7场景通过，唯一错误是测试夹具误入R194变量，已移除待复测。
+
 - 2026-10-05 Phase H新增塞克托鲁R193：源193、源272水波炮注解和Q001–007推断先锁JSON/XLSX；`excel_roster.py`实现远程2×2水波炮、3轮身体外双方剑斗之魂、友方搬运的攻魔/重置/双单位布阵。`engine/core.py`复用动作回滚选择，AI正式结果/落点评分，前端列布阵目标和格子，房间超时选合法项；`SektoruBehaviorTests`待用户定向跑。公开池暂78名。R194用户10项行为及10场AI通过；R192重跑仅一项脉冲测试NameError已静态修正待再跑。
 
 - 2026-10-04 Phase H新增亚历山大R194：源194、保存Q001–003及Q004–010推断先锁JSON/XLSX；`excel_roster.py`实现声明锁次数的远程2×5逐段飓风、普攻完成强制合法换位、本人非伤害技能免疫、友方非技能搬运重置、动态5×5友军魔免。`engine/core.py`扩展独立动作选择与魔免光环读取；`rooms/ai.py`正式结果评分及强制换位估值；前端列换位对象，房间超时选合法默认对象。`AlexanderBehaviorTests`静态编写，用户运行`detail_test_all_wujiangs.py --targets excel_r194 --regression-filter AlexanderBehaviorTests --out reports/new-alexander-20261004`。公开池77名，R194动态待验。
@@ -462,9 +478,9 @@ The codebase was reorganised by domain on 2026-08-27. Every phase record further
   - `src/wujiang/heroes/registry.py`: random-mode spawn uses `entry_footprint_*` so mounted-entry heroes reserve mount space.
   - `static/app.js`: board targeting for attack variants, attack direction choice UI, mounted overlap-aware movement highlighting, mounted rendering order with rider above mount, and sidebar panels that must remain manually expandable even while waiting on the opponent or a chain.
 - Mana stat is both spawn mana and mana cap. Current mana clamps to `Unit.max_mana()`.
-- `Skill.timing == "instant"` is now live. Instant skills can be used as normal skills during the owner's own turn, and can also be used by the waiting side during an opposing hero's turn. They keep chain speed `3` and do not count as `performed_active_skill`.
+- `Skill.timing == "instant"` is live. Instant skills can be used during the owner's own turn unless their own text limits them to the opposing turn, and can be used directly during an opposing turn or in an existing chain window. No default self-impact trigger applies; only explicit skill text such as `在……时` or a named situation adds a trigger condition. They have chain speed `3`, which the opponent cannot counter-chain, and do not count as `performed_active_skill`.
 - `StatusEffect.tick_scope` supports `owner_turn_start`, `owner_turn_end`, and `any_turn_end`. Use `owner_turn_start` for integer-round statuses that should expire at the owner's next-round boundary instead of after every global turn.
-- Viewer battle state may expose `active_units` to the waiting player when that player has available instant skills, and `GameRoom.perform_action(...)` allows those instant-skill payloads to bypass the normal `input_player` gate after seat and skill legality checks.
+- Viewer battle state may expose `active_units` to a waiting player with a legal instant skill. `GameRoom.perform_action(...)` allows that skill to bypass the normal `input_player` gate after seat and skill legality checks; an existing chain window instead uses `chain_react`.
 - `Battle.peek_next_turn_unit()` computes the next alive non-summon hero in the fixed turn ring, and `Battle.to_public_dict()` exposes `next_turn_unit_id`, `next_turn_unit_name`, and `next_turn_player_id` for frontend turn-preview UI.
 - `BattleFieldEffect.on_turn_start(...)` is available for start-of-owner-round cleanup or triggers on local fields that should not use global `duration` countdowns.
 - Multi-seat implementation note: keep battle `player_id` team-based when possible, but model room seats and seat-owned hero control separately in the room layer. Active-turn permissions should be seat-owned, while same-team support reactions remain allowed across seats.
@@ -490,6 +506,7 @@ The codebase was reorganised by domain on 2026-08-27. Every phase record further
 - `Battle.current_action_resolution_token` identifies the one queued action currently being resolved. Every effect, damage hook, and follow-up executed inside that declaration sees the same token; a nested queued declaration receives its own token and the outer token is restored afterward. Traits whose contract says "once per declared action" must deduplicate by this token rather than by log text, effect name, target count, or action-history length. `Battle.record_rule_trigger_summary(...)` is the reusable audit hook for recording such triggers with the current token. Cat Uncle uses it for structured `rule_trigger` evidence; the match audit treats more than one Cat retaliation event sharing one token as high-signal `duplicate_once_per_action_trigger`, while distinct nested-action tokens remain legal.
 - Weather is represented as a `BattleFieldEffect` with `weather_name`; use `battle.unit_in_weather(name, unit)` for unit-specific effects because weather may be local, and `battle.has_weather(name)` only means some weather effect of that name exists. Full-board weather effects set `global_weather = True`; local weather effects must return concrete `affected_cells`.
 - Same-name weather does not stack. If a unit/cell is covered by multiple weather effects with the same `weather_name`, including local plus global weather, damage and restrictions are applied once.
+- Weather description source: `data/武将yoo.xlsx` latest-hero column M now supplies an explicit effect for every weather-related source hero. `tools/sync_weather_descriptions.py` regenerates `src/wujiang/tactical/heroes/weather_effects_data.py` and `docs/武将天气效果清单.md`; roster, lobby, hover, and battle details expose `weather_effect_text`. Audit as of 2026-10-09: five source-table weather types are implemented (沙尘, 大雪崩, 万魔殿, 天空圣域, 湿地草原), plus two extra weather types (无常之雾, 王者的看破); the other 20 source-table types and four extra types remain design-only. Do not treat source-table text as proof of battle implementation.
 - Some skills now use a first-use-started shared use window instead of plain cooldown or per-turn count. `WindowChargeSkill` in `src/wujiang/heroes/common.py` tracks a total use pool over N owner rounds, decremented on the owning hero's own turn start; leftover uses expire when the window ends, and UI labels should read from `window_*` public fields instead of only `max_uses_per_turn`.
 - Multi-target wall reactions validate target count before resource prepayment. This matters for free multi-target wall variants such as `离子盾` and `量子盾`, and also avoids post-prepay validation failures on older wall skills.
 - When a hostile queued action goes through a reaction window, the original queued payload now records whether the opponent reacted at all via `payload["enemy_reacted"]`. Hero-local traits can use that during final skill resolution without re-inspecting the chain window.
@@ -551,7 +568,7 @@ The codebase was reorganised by domain on 2026-08-27. Every phase record further
   - Stance is a dynamic visible local field; it does not protect Jade, only blocks damage, and lasts from after Jade's current turn ends until Jade's next own turn starts.
   - Reactive Overclock checks damaging skills after enemy chain resolution; if any original enemy target took no damage, that skill gains +1 permanent future use from Jade's next own turn, once per turn per skill.
 - N:
-  - `磁力波` is the first formal instant skill: a range-based, edge-truncated `3*3` current-attack area skill paid with 2 mana points, usable once in each hero turn, including the opponent's current turn.
+  - `磁力波` is the first formal instant skill: a range-based, edge-truncated `3*3` current-attack area skill paid with 2 mana points, usable once in each hero turn, including the opponent's current turn without a self-impact trigger.
   - `攻击魔力点+1` triggers on every basic-attack declaration, even if the later damage is blocked or the declared target cell ends up empty.
   - `每回合开始时决定攻击数=魔+1` snapshots once at own turn start using `floor(current_mana) + 1`; mid-turn mana changes do not alter that turn's attack cap.
   - `魔无上限` means both current mana and displayed mana cap are unbounded for N.

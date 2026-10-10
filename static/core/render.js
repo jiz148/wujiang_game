@@ -118,6 +118,7 @@ function lobbySyncSignature() {
     roomError: state.roomError,
     // 禁选进度不会改变席位或房间状态；另一队队长仍须收到重绘。
     bp: room.mode === "bp" ? room.bp : null,
+    autochess_version: room.mode === "autochess" ? room.autochess?.version : null,
     seats: (room.seats || []).map((seat) => [
       seat.player_id,
       seat.name,

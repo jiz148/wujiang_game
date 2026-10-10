@@ -3,20 +3,27 @@
   "review_process": "原73名设计优先检查修改及第三轮武将线动态复测已完成。2026-10-02用户授权新增武将：每批先锁源设计，再实现战斗、AI、前端和行为场景；助手不运行动态测试，由用户执行仅覆盖新增批次的命令，报告保存在共享工作区。",
   "validation_policy": {
     "mode": "new_hero_batch_user_validation",
-    "scope": "原73名武将线第三轮动态复测已通过；R191/R195及R194定向审计已由用户完成；R192剩一项测试夹具待复测，R193静态实施待用户验证",
+    "scope": "原73名第三轮复测通过；R191/R195/R194/R197/R215定向通过；R192/R193/R196夹具及R219疾走已修待复测；R221/R222静态实施待用户验证",
     "per_batch_test_gate": false,
-    "final_command": "python detail_test_all_wujiangs.py --targets excel_r193 --regression-filter SektoruBehaviorTests --out reports/new-sektoru-20261005",
+    "final_command": "python detail_test_all_wujiangs.py --targets excel_r221,excel_r222 --regression-filter NewBatch221222 --out reports/new-batch-221222-20261007",
     "user_override_date": "2026-10-05"
   },
   "current_hero_codes": [
-    "excel_r193"
+    "excel_r221",
+    "excel_r222"
   ],
   "developed_hero_inspection_progress": {
     "definition": "完成新设计优先流程：独立记录并锁定设计初衷，随后对照审查战斗实现、武将专属与通用AI、测试，并完成所有必要修改；用户复测签收单独统计",
-    "developed_public_total": 78,
-    "inspected_and_modified": 78,
+    "developed_public_total": 84,
+    "inspected_and_modified": 84,
     "remaining_to_inspect_and_modify": 0,
     "inspected_and_modified_codes": [
+      "excel_r221",
+      "excel_r222",
+      "excel_r215",
+      "excel_r219",
+      "excel_r196",
+      "excel_r197",
       "excel_r193",
       "excel_r194",
       "excel_r192",
@@ -96,23 +103,71 @@
       "excel_r291",
       "excel_r356"
     ],
-    "remaining_set_rule": "原73名第三轮武将线动态复测通过；R191/R195/R194定向验证通过；R192测试夹具再修正待复测；R193设计优先静态实施完成待用户。",
-    "focused_retest_accepted": 76,
-    "awaiting_consolidated_test": 2,
-    "awaiting_consolidated_test_definition": "R192用户再次报告仅一项测试夹具NameError、已静态修正待复测；R193静态实施待定向报告。R194的10项行为与10场AI审计已通过。"
+    "remaining_set_rule": "原73名第三轮复测通过；R191/R195/R194/R197/R215定向通过；R192/R193/R196/R219待复测；R221/R222新增静态待验证。",
+    "focused_retest_accepted": 78,
+    "awaiting_consolidated_test": 6,
+    "awaiting_consolidated_test_definition": "R192/R193/R196夹具、R219失效受体已静态修正待复测；R221/R222新实现等待用户定向报告。"
   },
   "heroes": [
     {
+      "code": "excel_r221", "name": "电子龙", "batch": "H4-new-20261007", "design_baseline": "docs/武将设计思想.json#excel_r221", "baseline_locked_at": "2026-10-07", "review_status": "源221独立设计先锁；战斗、AI、前端及定向场景已静态实施，待用户动态验证。", "acceptance_status": "pending_focused_user_validation", "audit_evidence": "源表221与R221-Q001–004；NewBatch221222ElectronicDragonBehaviorTests；仅静态检查，待用户报告。",
+      "items": [
+        {"layer": "战斗/卫星加农炮", "requirement": "零魔每本人轮一次，全场任意3×3旧格双方伤害与连锁", "evidence": "SatelliteCannonSkill全图裁边预览、旧格元数据及逐实际受体范围排队。", "verdict": "静态实施待验证", "severity": "P1", "planned_change": "用户定向报告核验", "status": "待用户报告"},
+        {"layer": "战斗/轮末瞬移", "requirement": "每个真实英雄回合末可放弃或瞬移至己方单位完整外邻合法格", "evidence": "ElectronicDragonTeleportTrait与共享轮末预钩子，选位和落地连锁完成后才推进。", "verdict": "静态实施待验证", "severity": "P1", "planned_change": "用户定向报告核验", "status": "待用户报告"},
+        {"layer": "AI/界面/场景", "requirement": "全场友敌净值与轮末安全落点、原格预览和逐英雄轮末场景", "evidence": "AI正式回放范围净值并比较留位；前端展示可选落点与放弃；NewBatch221222定向场景。", "verdict": "静态实施待验证", "severity": "P1", "planned_change": "用户专用报告核验", "status": "待用户报告"}
+      ]
+    },
+    {
+      "code": "excel_r222", "name": "电子修理工厂", "batch": "H4-new-20261007", "design_baseline": "docs/武将设计思想.json#excel_r222", "baseline_locked_at": "2026-10-07", "review_status": "源222及保存R222-Q001=a独立设计先锁；2×2、真机甲修复、AI与前端场景已静态实施，待用户动态验证。", "acceptance_status": "pending_focused_user_validation", "audit_evidence": "源表222、保存占格答案a及R222-Q002–005；NewBatch221222RepairFactoryBehaviorTests；仅静态检查。",
+      "items": [
+        {"layer": "战斗/占格与修复", "requirement": "2×2工厂，每本人轮一次修复已破坏真机甲武将，完整合法外邻落位", "evidence": "通用占4格按保存答案固定2×2；ElectronicRepairSkill筛真机甲尸体并验证完整外邻落位。", "verdict": "静态实施待验证", "severity": "P1", "planned_change": "用户定向报告核验", "status": "待用户报告"},
+        {"layer": "战斗/满状态生命周期", "requirement": "原身份/阵营/轮序，满生命魔力、保留永久进度及额度、当回合待命", "evidence": "原对象回场、不改原所属及轮槽，满生命魔力、清临时状态但保留永久进度；回场待命。", "verdict": "静态实施待验证", "severity": "P1", "planned_change": "用户定向报告核验", "status": "待用户报告"},
+        {"layer": "AI/界面/场景", "requirement": "区分己敌修复价值、合法尸体与完整落格、公开预览及生命周期场景", "evidence": "AI仅给己方真实修复正值并回滚评分；复用复活对象+落格选择界面；NewBatch221222场景。", "verdict": "静态实施待验证", "severity": "P1", "planned_change": "用户专用报告核验", "status": "待用户报告"}
+      ]
+    },
+    {
+      "code": "excel_r215", "name": "军神。上衫", "batch": "H3-new-20261006", "design_baseline": "docs/武将设计思想.json#excel_r215", "baseline_locked_at": "2026-10-06", "review_status": "源215及保存R215-Q001=a独立设计先锁；用户报告六项定向行为通过、十场AI零高信号和动作错误，独立定向签收。", "acceptance_status": "focused_user_validated", "audit_evidence": "reports/new-batch-215219-20261006：R215六项行为及十场AI零高信号/动作错误。",
+      "items": [
+        {"layer": "战斗/一闪", "requirement": "前五旧格破魔伤害、合法第六格位移、三轮冷却", "evidence": "用户报告一闪旧格、落点、冷却场景通过。", "verdict": "定向通过", "severity": "P1", "planned_change": "无", "status": "已签收"},
+        {"layer": "战斗/轮末穿行", "requirement": "可选直线恰六格、每次穿人攻-1逐段结算", "evidence": "R215-Q001=a；用户报告轮末选择、逐穿过受体及离格不转伤场景通过。", "verdict": "定向通过", "severity": "P1", "planned_change": "无", "status": "已签收"},
+        {"layer": "AI/前端/测试", "requirement": "真实敌友净值、合法线路与落点、定向行为", "evidence": "六项行为通过，十场AI零高信号/动作错误。", "verdict": "定向通过", "severity": "P1", "planned_change": "无", "status": "已签收"}
+      ]
+    },
+    {
+      "code": "excel_r219", "name": "正义盟军。次时代鸟人", "batch": "H3-new-20261006", "design_baseline": "docs/武将设计思想.json#excel_r219", "baseline_locked_at": "2026-10-06", "review_status": "源219及保存R219-Q001=b先锁；用户报告七项行为通过，但十场AI两次疾走次段因首段击败目标而动作错误；分段实时受体及共用失效目标保护已静态修复待复测。", "acceptance_status": "pending_focused_user_validation", "audit_evidence": "reports/new-batch-215219-20261006：R219七项行为通过、seed 20260845/20260847同源疾走次段错误；修复后新增首段致命场景。",
+      "items": [
+        {"layer": "战斗/疾走", "requirement": "八方向范3旧线、两次独立伤害、付费/免费两档", "evidence": "七项旧场景通过；AI实战两次首段击败目标后次段使用失效受体报错，已改每段重查原格并跳过失效连锁受体。", "verdict": "报告定位生产缺陷，静态修正待复测", "severity": "P0", "planned_change": "新目录复跑同批定向与AI审计", "status": "待定向复测"},
+        {"layer": "战斗/鸟人之魂", "requirement": "双方多格合法换位、免费档破魔、真实技能位移翻倍", "evidence": "R219-Q001=b；BirdSoulSkill双档，免费档破盾但仍受魔免/回避；技能真实移动后同名攻守倍增。", "verdict": "静态实施待验证", "severity": "P1", "planned_change": "用户定向报告核验", "status": "待用户报告"},
+        {"layer": "AI/前端/测试", "requirement": "分档资源、两段结果、换位位置净值与定向行为", "evidence": "免费/付费动作分列，AI回放双方伤害与落点；NewBatch215219BirdBehaviorTests覆盖费用、护盾、位移及无污染。", "verdict": "静态实施待验证", "severity": "P1", "planned_change": "用户定向报告核验", "status": "待用户报告"}
+      ]
+    },
+    {
+      "code": "excel_r196", "name": "剑斗兽。斯巴达克斯", "batch": "H2-new-20261005", "design_baseline": "docs/武将设计思想.json#excel_r196", "baseline_locked_at": "2026-10-05", "review_status": "用户报告9项8过；精兵撤步使1项固定受伤断言失效，夹具已静态修正待复测。10场AI零高信号。", "acceptance_status": "pending_focused_user_validation", "audit_evidence": "reports/new-batch-196197-20261006；20场共零高信号，R196一项测试夹具已改，待新目录复测。",
+      "items": [
+        {"layer": "战斗/大招", "requirement": "先攻守+1、冻结身体外7×7双方伤害、后可移一友军；¥原生每场一次", "evidence": "EarthShatterSkill先强化、锁原格排队对双方伤害；用户报告本项相邻行为通过。", "verdict": "已按报告核对", "severity": "P1", "planned_change": "修正夹具后复测提示场景", "status": "待定向复测"},
+        {"layer": "战斗/换位与协同", "requirement": "技能实际影响后合法多格换位；其他友军真实搬运后双攻、魔增长和大招重置", "evidence": "用户报告相邻协同与无效效果场景通过；固定敌血夹具已改。", "verdict": "已按报告核对", "severity": "P1", "planned_change": "修正夹具后复测提示场景", "status": "待定向复测"},
+        {"layer": "AI/前端/测试", "requirement": "双方净值、可选换位与搬运、可观察资源及定向行为场景", "evidence": "10场AI零高信号/动作错误；9项行为8过，1项夹具固定敌血已改。", "verdict": "AI定向通过，场景待复测", "severity": "P1", "planned_change": "用户新目录复跑", "status": "待定向复测"}
+      ]
+    },
+    {
+      "code": "excel_r197", "name": "大石块人", "batch": "H2-new-20261005", "design_baseline": "docs/武将设计思想.json#excel_r197", "baseline_locked_at": "2026-10-05", "review_status": "源197先锁后实现；用户报告8项行为全过、10场AI零动作错误及高信号，定向签收。", "acceptance_status": "focused_user_validated", "audit_evidence": "reports/new-batch-196197-20261006：R197八项场景全过、10场AI审计零高信号。",
+      "items": [
+        {"layer": "战斗/体型与主动召唤", "requirement": "本体3×3、两轮中石2×2、中石本人轮一次小石1×1、初生禁动", "evidence": "用户R197八项行为全过，包含完整落格、召唤额度、初生待命和级联。", "verdict": "定向通过", "severity": "P1", "planned_change": "无", "status": "已签收"},
+        {"layer": "战斗/受击裂变", "requirement": "敌方真实普攻后大/中石各生下一层，按受体去重并受存活与完整落格约束", "evidence": "用户行为场景验证盾挡、非普攻、己方攻击、无空间和多格一次裂变。", "verdict": "定向通过", "severity": "P1", "planned_change": "无", "status": "已签收"},
+        {"layer": "AI/前端/测试", "requirement": "多格选位、空间净值、不会喂石、合法预览及定向行为场景", "evidence": "用户10场AI零高信号/动作错误，8项行为全过；审计信息项不归本将生产缺陷。", "verdict": "定向通过", "severity": "P1", "planned_change": "无", "status": "已签收"}
+      ]
+    },
+    {
       "code": "excel_r193", "name": "剑斗兽。塞克托鲁", "batch": "H1-new-20261005",
       "design_baseline": "docs/武将设计思想.json#excel_r193", "baseline_locked_at": "2026-10-05",
-      "review_status": "源193、通用规则与源272水波炮注解先锁设计；原本无专属实现，现完成战斗、AI、前端和场景静态对照，待用户定向报告。",
+      "review_status": "源193、通用规则与源272水波炮注解先锁设计；用户报告7项场景6过、1项测试夹具NameError；误入R194变量行已移除待复测。",
       "acceptance_status": "pending_focused_user_validation",
       "items": [
         {"layer": "战斗/水波炮与魂技", "requirement": "远程2×2双方技能伤害；周围双方攻魔+1，三轮增益及冷却", "evidence": "原R193无专属实现；现WaterWaveCannonSkill复用远程龙息，GladiatorSoulSkill冻结邻域、逐受体普通防御与同源状态刷新。", "verdict": "静态实施待验证", "severity": "P1", "planned_change": "用户定向报告核对双方受体与期限", "status": "待用户报告"},
         {"layer": "战斗/协同布阵", "requirement": "其他友军实际搬运本人后攻魔+1、重置魂技、两名不同单位合法移到周围", "evidence": "SektoruMovedByAllyTrait按来源识别真实位移，复用动作回滚的两次公开选择并每步重验；多格和骑乘合法性筛选。", "verdict": "静态实施待验证", "severity": "P1", "planned_change": "用户定向报告核对触发和落点", "status": "待用户报告"},
         {"layer": "AI/前端/测试", "requirement": "双方净值、双目标落点、公开选择与生命周期行为场景", "evidence": "AI用正式技能净值与搬运提示回放评分；前端列目标及具体落点，房间超时合法兜底；SektoruBehaviorTests覆盖源关键边界。", "verdict": "静态实施待验证", "severity": "P1", "planned_change": "用户运行R193专用报告命令", "status": "待用户报告"}
       ],
-      "audit_evidence": "源规则独立推演后对照：原本无本将专属战斗/AI/前端/测试实现；已新增各层与静态检查，动态审计由用户执行。"
+      "audit_evidence": "源规则先锁后实施；reports/new-sektoru-20261005：10场AI零高信号/动作错误，7项场景6过、1项测试夹具NameError；夹具已静态修正待复测。"
     },
     {
       "code": "excel_r194", "name": "剑斗兽。亚历山大", "batch": "H1-new-20261004",

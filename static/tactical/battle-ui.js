@@ -540,6 +540,7 @@ export function renderBoard() {
     : [];
   const aiPreviewKeys = positionsToSet(aiPreviewCells);
   const aiCurrentKey = aiPreviewCells.length ? positionKey(aiPreviewCells[aiPreviewCells.length - 1]) : "";
+  const placementSize = Number(selectedAction()?.preview?.placement_size || 1);
   const boardWidth = state.battle.board.width;
   const cellAt = [];
 
@@ -578,6 +579,7 @@ export function renderBoard() {
       const cellLabels = [`第 ${y + 1} 行，第 ${x + 1} 列`];
       cellLabels.push(occupant ? `${occupant.name}，队伍 ${occupant.player_id}` : "空格");
       if (preview.cellKeys.has(key)) cellLabels.push("可选范围");
+      if (placementSize > 1 && preview.cellKeys.has(key)) cellLabels.push(`落点将占用 ${placementSize}×${placementSize} 格`);
       if (occupant && preview.targetIds.has(occupant.id)) cellLabels.push("可选目标");
       if (unitOccupiedCells(selected).some((cellPosition) => cellPosition.x === x && cellPosition.y === y)) cellLabels.push("当前选择");
       if (cellEffects.length) cellLabels.push(`战场状态：${cellEffects.map((effect) => effect.name).join("、")}`);
@@ -612,6 +614,29 @@ export function renderBoard() {
 
       cellAt[y * boardWidth + x] = cell;
       board.append(cell);
+    }
+  }
+
+  if (placementSize > 1) {
+    const showPlacement = (anchor) => {
+      for (const cell of cellAt) cell.classList.remove("is-footprint-destination");
+      for (let dy = 0; dy < placementSize; dy += 1) {
+        for (let dx = 0; dx < placementSize; dx += 1) {
+          cellAt[(anchor.y + dy) * boardWidth + anchor.x + dx]?.classList.add("is-footprint-destination");
+        }
+      }
+    };
+    for (const anchor of selectedAction()?.preview?.cells || []) {
+      const cell = cellAt[Number(anchor.y) * boardWidth + Number(anchor.x)];
+      if (!cell) continue;
+      cell.addEventListener("pointerenter", () => showPlacement(anchor));
+      cell.addEventListener("focus", () => showPlacement(anchor));
+      cell.addEventListener("pointerleave", () => {
+        for (const boardCell of cellAt) boardCell.classList.remove("is-footprint-destination");
+      });
+      cell.addEventListener("blur", () => {
+        for (const boardCell of cellAt) boardCell.classList.remove("is-footprint-destination");
+      });
     }
   }
 
@@ -1179,6 +1204,7 @@ export function renderSelectedCard() {
       <div class="statline"><strong>特性</strong> ${traits}</div>
       <div class="statline"><strong>原始技能</strong> ${unit.raw_skill_text || "无"}</div>
       <div class="statline"><strong>原始特性</strong> ${unit.raw_trait_text || "无"}</div>
+      ${unit.weather_effect_text ? `<div class="statline"><strong>天气效果</strong> ${unit.weather_effect_text}</div>` : ""}
     </div>
   `;
 }
@@ -1484,8 +1510,16 @@ export function renderChainPanel() {
     const prompt = state.battle.pending_damage_choice;
     if (caption) caption.textContent = prompt.kind === "attack_swap"
       ? "亚历山大的普攻已完成，请选择一名有合法落点的友军交换位置。"
+      : prompt.kind === "electronic_teleport"
+        ? "电子龙可在本武将回合结束前瞬移到己方单位周围的合法位置，或保持原位。"
+      : prompt.kind === "end_dash"
+        ? "军神轮末可选一条合法六格穿行路线，或原地结束回合。"
       : prompt.kind === "formation"
         ? `塞克托鲁的${prompt.action_name}：选择一个在场单位及其相邻合法落点。`
+      : prompt.kind === "optional_swap"
+        ? "斯巴达克斯受到技能影响；可选一名友军换位，或保持位置。"
+      : prompt.kind === "optional_placement"
+        ? "天崩地裂已结算；可选一名友军搬到斯巴达克斯身边，或放弃。"
       : prompt.kind === "rotation"
         ? `安德鲁因【${prompt.action_name}】实际损失 ${prompt.damage} 点生命。选择友军战斗轮转，或保持位置。`
         : `拉奥将受到 ${prompt.damage} 点【${prompt.action_name}】伤害，请选择能力抵消或承受伤害。`;

@@ -7,6 +7,7 @@ from typing import Callable, Sequence
 from wujiang.tactical.engine.army import is_army_soldier
 from wujiang.tactical.engine.core import Battle, Position
 from wujiang.tactical.heroes.excel_roster import EXCEL_HERO_REGISTRY, IMPLEMENTED_EXCEL_HERO_CODES
+from wujiang.tactical.heroes.weather_descriptions import hero_weather_effect_text
 from wujiang.tactical.heroes.first_five import Bard, DarkHuman, EliteSoldier, Ellie, FireFuneral
 from wujiang.tactical.heroes.next_five import BloodEater, Chanter, DoomlightDragon, DragonRider, ElementHunter, ErasureApostle, Jade, Li, Masamune, N, RockGod, SoulWraith, UndeadKingLina
 from wujiang.tactical.heroes.strategy_soldiers import (
@@ -97,6 +98,7 @@ def list_heroes() -> list[dict[str, object]]:
                 "stats": unit.base_stats.to_dict(),
                 "raw_skill_text": unit.raw_skill_text,
                 "raw_trait_text": unit.raw_trait_text,
+                "weather_effect_text": hero_weather_effect_text(unit),
             }
         )
     return result

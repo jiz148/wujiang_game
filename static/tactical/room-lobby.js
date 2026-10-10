@@ -213,7 +213,7 @@ export async function confirmRoomSetup() {
     return;
   }
   const nextMode = draft.mode;
-  const nextSeatCount = draft.seatCount;
+  const nextSeatCount = nextMode === "autochess" ? (Number(draft.seatCount) === 8 ? 8 : 4) : draft.seatCount;
   const nextRosterSize = draft.randomRosterSize;
   const nextBpTeamSize = Number(draft.bpTeamSize) === 5 ? 5 : 3;
   const nextBpLevelCap = Math.max(1, Math.min(50, Number.parseInt(draft.bpLevelCap, 10) || nextBpTeamSize * 5));
@@ -235,18 +235,18 @@ export async function confirmRoomSetup() {
   )) {
     await setBpSettings({teamSize: nextBpTeamSize, levelCap: nextBpLevelCap, showWinCount: nextBpShowWinCount});
   }
-  if (state.room?.mode !== "bp" && nextHeroLimit !== Number(state.room?.hero_limit || 0)) await setRoomHeroLimit(nextHeroLimit);
+  if (!["bp", "autochess"].includes(state.room?.mode) && nextHeroLimit !== Number(state.room?.hero_limit || 0)) await setRoomHeroLimit(nextHeroLimit);
   const nextTurnTimeout = [0, 30, 60, 120].includes(Number.parseInt(draft.turnTimeout, 10))
     ? Number.parseInt(draft.turnTimeout, 10)
     : 0;
-  if (nextTurnTimeout !== Number(state.room?.turn_timeout_seconds ?? 0)) await setRoomTurnTimeout(nextTurnTimeout);
+  if (state.room?.mode !== "autochess" && nextTurnTimeout !== Number(state.room?.turn_timeout_seconds ?? 0)) await setRoomTurnTimeout(nextTurnTimeout);
   const clampBoard = (value) => Math.max(6, Math.min(100, Number.parseInt(value, 10) || 10));
   const nextWidth = clampBoard(draft.boardWidth);
   const nextHeight = clampBoard(draft.boardHeight);
-  if (
+  if (state.room?.mode !== "autochess" && (
     nextWidth !== Number(state.room?.board_width || 10)
     || nextHeight !== Number(state.room?.board_height || 10)
-  ) {
+  )) {
     await setRoomBoardSize(nextWidth, nextHeight);
   }
   render();
@@ -283,9 +283,10 @@ export function renderRoomSetupDialog() {
   }
   const seatCountInput = $("room-seat-count-input");
   if (seatCountInput) {
-    seatCountInput.min = String(state.room.seat_count_min || 2);
-    seatCountInput.max = String(state.room.seat_count_max || 6);
-    if (document.activeElement !== seatCountInput) seatCountInput.value = draft.seatCount;
+    seatCountInput.min = draft.mode === "autochess" ? "4" : "2";
+    seatCountInput.max = draft.mode === "autochess" ? "8" : "6";
+    seatCountInput.step = draft.mode === "autochess" ? "4" : "1";
+    if (document.activeElement !== seatCountInput) seatCountInput.value = draft.mode === "autochess" && Number(draft.seatCount) !== 8 ? "4" : draft.seatCount;
   }
   // 随机模式才有"每队随机几个"可言，标准模式下这一项没有意义。
   const randomControl = $("random-roster-size-control");
@@ -307,8 +308,10 @@ export function renderRoomSetupDialog() {
   if (limitEnabled) limitEnabled.checked = Boolean(draft.heroLimitEnabled);
   const limitControl = $("room-hero-limit-control");
   const limitInput = $("room-hero-limit-input");
-  limitControl?.classList.toggle("hidden", draft.mode === "bp" || !draft.heroLimitEnabled);
-  $("room-hero-limit-switch")?.classList.toggle("hidden", draft.mode === "bp");
+  limitControl?.classList.toggle("hidden", ["bp", "autochess"].includes(draft.mode) || !draft.heroLimitEnabled);
+  $("room-hero-limit-switch")?.classList.toggle("hidden", ["bp", "autochess"].includes(draft.mode));
+  $("room-turn-timeout-select")?.closest("label")?.classList.toggle("hidden", draft.mode === "autochess");
+  $("room-board-width-input")?.closest(".field")?.classList.toggle("hidden", draft.mode === "autochess");
   if (limitInput && document.activeElement !== limitInput) {
     limitInput.value = draft.heroLimit;
   }
@@ -577,4 +580,5 @@ export function renderHeroDetail() {
   );
   appendDetailLine(body, "技能", hero.raw_skill_text || "无");
   appendDetailLine(body, "特性", hero.raw_trait_text || "无");
+  if (hero.weather_effect_text) appendDetailLine(body, "天气效果", hero.weather_effect_text);
 }

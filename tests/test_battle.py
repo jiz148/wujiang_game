@@ -360,8 +360,8 @@ class BattleSmokeTests(unittest.TestCase):
         reduced = battle.resolve_damage(
             DamageContext(source=enemy, target=barrier, attack_power=0, raw_damage=3, is_skill=True, action_name="测试伤害")
         )
-        self.assertEqual(reduced.raw_damage, 0)
-        self.assertEqual(barrier.current_hp, 5)
+        self.assertEqual(reduced.raw_damage, 1)
+        self.assertEqual(barrier.current_hp, 4)
 
         second_barrier = create_hero("excel_r225", 1)
         battle.add_unit(second_barrier, Position(2, 2))
@@ -6740,7 +6740,6 @@ class NTests(unittest.TestCase):
         attacker.position = Position(5, 4)
         caster.position = Position(4, 4)
         caster.mana_points = 2
-
         battle.perform_action(
             {
                 "type": "skill",

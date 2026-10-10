@@ -75,17 +75,66 @@ export function displayActions() {
   if (isGameOver()) return [];
   if (isDamageChoiceMode()) {
     const prompt = state.battle.pending_damage_choice;
-    if (prompt.kind === "formation") {
-      return (prompt.options || []).map((option, index) => {
+    if (prompt.kind === "electronic_teleport") {
+      return [
+        ...(prompt.options || []).map((option, index) => {
+          const [x, y] = option.split(",").map(Number);
+          return { code: `electronic_teleport_${index}`, name: `瞬移至（${x + 1},${y + 1}）`,
+            kind: "damage_choice", target_unit_id: option, timing: "reaction", available: true,
+            description: "电子龙可在任一武将回合结束前瞬移到己方单位周围的合法位置。",
+            preview: { cells: [{ x, y }], target_unit_ids: [], requires_target: false } };
+        }),
+        { code: "electronic_teleport_decline", name: "保持位置", kind: "damage_choice",
+          target_unit_id: "decline", timing: "reaction", available: true,
+          description: "放弃这次轮末瞬移。", preview: { cells: [], target_unit_ids: [], requires_target: false } },
+      ];
+    }
+    if (prompt.kind === "end_dash") {
+      return [
+        ...(prompt.options || []).map((option, index) => {
+          const [x, y] = option.split(",").map(Number);
+          return { code: `end_dash_${index}`, name: `轮末穿行至（${x + 1},${y + 1}）`,
+            kind: "damage_choice", target_unit_id: option, timing: "reaction", available: true,
+            description: "军神可在本人轮末沿直线恰六格穿人移动，之后逐次伤及实际穿过的双方单位。",
+            preview: { cells: [{ x, y }], target_unit_ids: [], requires_target: false } };
+        }),
+        { code: "end_dash_decline", name: "原地结束回合", kind: "damage_choice",
+          target_unit_id: "decline", timing: "reaction", available: true,
+          description: "放弃本轮轮末穿行。", preview: { cells: [], target_unit_ids: [], requires_target: false } },
+      ];
+    }
+    if (prompt.kind === "formation" || prompt.kind === "optional_placement") {
+      const choices = (prompt.options || []).map((option, index) => {
         const [unitId, cell] = option.split("@");
         const [x, y] = cell.split(",").map(Number);
         return {
-          code: `formation_${index}`, name: `将${unitById(unitId)?.name || "单位"}移至（${x + 1},${y + 1}）`,
+          code: `placement_${index}`, name: `将${unitById(unitId)?.name || "单位"}移至（${x + 1},${y + 1}）`,
           kind: "damage_choice", target_unit_id: option, timing: "reaction", available: true,
-          description: "塞克托鲁受友方搬运后布阵；请选择目标与其合法落点。",
+          description: prompt.kind === "formation" ? "塞克托鲁受友方搬运后布阵；请选择目标与其合法落点。" : "天崩地裂后可以搬运一名友军至合法相邻格。",
           preview: { cells: [{ x, y }], target_unit_ids: [unitId], requires_target: false },
         };
       });
+      if (prompt.kind === "optional_placement") choices.push({
+        code: "optional_placement_decline", name: "不搬运友军", kind: "damage_choice",
+        target_unit_id: "decline", timing: "reaction", available: true,
+        description: "放弃这次天崩地裂搬运。",
+        preview: { cells: [], target_unit_ids: [], requires_target: false },
+      });
+      return choices;
+    }
+    if (prompt.kind === "optional_swap") {
+      return [
+        ...(prompt.options || []).map((unitId) => ({
+          code: `optional_swap_${unitId}`, name: `与${unitById(unitId)?.name || "友军"}交换`,
+          kind: "damage_choice", target_unit_id: unitId, timing: "reaction", available: true,
+          description: "斯巴达克斯真正受技能影响后，可选择友军换位。",
+          preview: { cells: [], target_unit_ids: [unitId], requires_target: false },
+        })),
+        { code: "optional_swap_decline", name: "保持位置", kind: "damage_choice",
+          target_unit_id: "decline", timing: "reaction", available: true,
+          description: "放弃这次技能影响后的换位。",
+          preview: { cells: [], target_unit_ids: [], requires_target: false } },
+      ];
     }
     if (prompt.kind === "attack_swap") {
       return (prompt.options || []).map((unitId) => ({

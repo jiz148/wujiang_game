@@ -759,7 +759,7 @@ class WindSandSkill(Skill):
         super().__init__(
             "wind_sand",
             "风沙",
-            "普通技能：每回合最多 1 次，远程选择 2*4 或 4*2 区域；按当前攻造成伤害，若范围内有单位则天气变为沙尘一轮。",
+            "普通技能：每回合最多 1 次，远程选择 2*4 或 4*2 区域；按当前攻造成伤害，若范围内有单位则全场沙尘持续到自己下个回合开始。沙尘使土属性单位免受天气伤害，飞行单位每个自己的回合末失去1/8生命，其他单位失去1/16生命；范围内不能隐身且回避距离-1。",
             max_uses_per_turn=1,
             target_mode="cell",
         )
@@ -1091,7 +1091,7 @@ class RockGodSandstormAura(BattleFieldEffect):
     weather_name = "沙尘"
 
     def __init__(self, owner_unit_id: str) -> None:
-        super().__init__("岩神沙尘", "岩神每个占用格周围 9*9 的局部沙尘天气。", duration=None)
+        super().__init__("岩神沙尘", "岩神每个占用格周围 9*9 的局部沙尘：土属性单位免受天气伤害，飞行单位每个自己的回合末失去1/8生命，其他单位失去1/16生命；范围内不能隐身且回避距离-1。", duration=None)
         self.owner_unit_id = owner_unit_id
         self.owner_unit_ids = {owner_unit_id}
 

@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import copy
+import os
 import pickle
 import random
 import secrets
 import threading
 import time
 import zlib
+from pathlib import Path
 from collections import Counter
 from dataclasses import dataclass, field
 from functools import lru_cache
+from itertools import combinations
 from typing import Any, Optional
 
 from wujiang.tactical.engine.army import (
@@ -48,7 +51,7 @@ ROOM_CODE_LENGTH = 6
 DEFAULT_ROOM_MODE = "classic"
 DEFAULT_RANDOM_ROSTER_SIZE = 1
 MIN_ROOM_SEAT_COUNT = 2
-MAX_ROOM_SEAT_COUNT = 6
+MAX_ROOM_SEAT_COUNT = 8
 MIN_ROOM_HERO_LIMIT = 1
 MAX_ROOM_HERO_LIMIT = 20
 AUTO_CONFIGURE_COUNT_MIN = 1
@@ -90,7 +93,11 @@ ROOM_MODES: dict[str, dict[str, str]] = {
     },
     "bp": {
         "name": "BP模式",
-        "description": "队长轮流禁选武将，再由队员分配控制权，支持 3v3 和 5v5。",
+        "description": "每局随机禁用两个等级的全部武将，队长再轮流禁选并分配控制权，支持 3v3 和 5v5。",
+    },
+    "autochess": {
+        "name": "自走棋",
+        "description": "4 人或 8 人经营阵容、自动战斗，最后存活者获胜。",
     },
 }
 
@@ -814,9 +821,11 @@ class GameRoom:
         self.bp_counted_match_ids: set[str] = set()
         self.bp_captains: dict[int, int] = {}
         self.bp_first_pick_team: Optional[int] = None
+        self.bp_auto_banned_levels: tuple[int, ...] = ()
         self.bp_actions: list[dict[str, Any]] = []
         self.bp_assignments: dict[str, int | str] = {}
         self.bp_virtual_seat_ids: list[int] = []
+        self.autochess = None
         self.board_width = DEFAULT_BOARD_WIDTH
         self.board_height = DEFAULT_BOARD_HEIGHT
         self.turn_timeout_seconds = DEFAULT_TURN_TIMEOUT_SECONDS
@@ -824,7 +833,7 @@ class GameRoom:
         self.turn_limit_winner = 2
         self.default_ai_difficulty = DEFAULT_AI_DIFFICULTY
         self.host_player_id = 1
-        self.seats = self._build_seats(normalize_room_seat_count(seat_count))
+        self.seats = self._build_seats(4 if self.mode == "autochess" else normalize_room_seat_count(seat_count))
         self.army_orders_by_team = default_army_orders()
         self._reset_random_quotas_to_defaults()
         self.battle: Optional[Battle] = None
@@ -847,10 +856,15 @@ class GameRoom:
         self.created_at = time.time()
         self.updated_at = self.created_at
         self._lock = threading.RLock()
+        if self.mode == "autochess":
+            from wujiang.tactical.rooms.autochess import AutoChessState
+            self.autochess = AutoChessState(4)
 
     def __getstate__(self) -> dict[str, Any]:
         state = dict(self.__dict__)
         state.pop("_lock", None)
+        state.pop("_bp_pair_cache", None)
+        state.pop("_bp_legal_cache", None)
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
@@ -881,12 +895,16 @@ class GameRoom:
             self.bp_captains = {}
         if not hasattr(self, "bp_first_pick_team"):
             self.bp_first_pick_team = None
+        if not hasattr(self, "bp_auto_banned_levels"):
+            self.bp_auto_banned_levels = ()
         if not hasattr(self, "bp_actions"):
             self.bp_actions = []
         if not hasattr(self, "bp_assignments"):
             self.bp_assignments = {}
         if not hasattr(self, "bp_virtual_seat_ids"):
             self.bp_virtual_seat_ids = []
+        if not hasattr(self, "autochess"):
+            self.autochess = None
         self._lock = threading.RLock()
 
     def checkpoint_bytes(self) -> bytes:
@@ -919,6 +937,8 @@ class GameRoom:
         self._record_bp_win_if_finished()
         self.version += 1
         self.updated_at = time.time()
+        if self.mode == "autochess":
+            ROOMS.persist(self)
 
     def _record_bp_win_if_finished(self) -> None:
         match_id = self.current_match_id
@@ -1012,16 +1032,20 @@ class GameRoom:
                    for action in (self.bp_actions if actions is None else actions)
                    if action["kind"] == "pick" and action["team_id"] == team_id)
 
-    def _bp_draft_feasible(self, actions: list[dict[str, Any]]) -> bool:
+    def _bp_draft_feasible(self, actions: list[dict[str, Any]],
+                           *, banned_levels: Optional[tuple[int, ...]] = None) -> bool:
         known = hero_lookup()
         used = {action["hero_code"] for action in actions}
-        available_levels = sorted(int(hero["level"]) for code, hero in known.items() if code not in used)
+        excluded = set(self.bp_auto_banned_levels if banned_levels is None else banned_levels)
+        available_levels = sorted(int(hero["level"]) for code, hero in known.items()
+                                  if code not in used and int(hero["level"]) not in excluded)
         needs = tuple(self.bp_team_size - sum(action["kind"] == "pick" and action["team_id"] == team
                                                 for action in actions) for team in TEAM_IDS)
         budgets = tuple(self._bp_level_cap() - self._bp_total_level(team, actions) for team in TEAM_IDS)
         if any(need < 0 or budget < 0 for need, budget in zip(needs, budgets)):
             return False
-        if len(available_levels) < sum(needs):
+        required_steps = 2 * self.bp_team_size + (6 if self.bp_team_size == 3 else 10)
+        if len(available_levels) < max(sum(needs), required_steps - len(actions)):
             return False
         if any(sum(available_levels[:need]) > budget for need, budget in zip(needs, budgets)):
             return False
@@ -1047,12 +1071,74 @@ class GameRoom:
 
         return can_fill(0, needs[0], needs[1], budgets[0], budgets[1])
 
+    def _bp_feasible_level_pairs(self) -> list[tuple[int, int]]:
+        counts = Counter(int(hero["level"]) for hero in hero_lookup().values())
+        key = (self.bp_team_size, self._bp_level_cap(), tuple(sorted(counts.items())))
+        cached = getattr(self, "_bp_pair_cache", None)
+        if cached and cached[0] == key:
+            return cached[1]
+        pairs = [pair for pair in combinations(sorted(counts), 2)
+                 if self._bp_draft_feasible([], banned_levels=pair)]
+        self._bp_pair_cache = (key, pairs)
+        return pairs
+
+    def _bp_choice_error(self, kind: str, team: int, hero_code: str) -> Optional[str]:
+        known = hero_lookup()
+        hero = known.get(hero_code)
+        if hero is None:
+            return "所选武将不存在。"
+        level = int(hero["level"])
+        if level in self.bp_auto_banned_levels:
+            return "该等级已被系统禁用。"
+        if any(action["hero_code"] == hero_code for action in self.bp_actions):
+            return "该武将已经被禁用或选走。"
+        if kind == "pick" and self._bp_total_level(team) + level > self._bp_level_cap():
+            return f"{team_name(team)}选将总等级不能超过{self._bp_level_cap()}。"
+        if kind == "ban" and not any(
+            len(self._bp_picks(candidate_team)) < self.bp_team_size
+            and self._bp_draft_feasible([*self.bp_actions, {"kind": "pick", "team_id": candidate_team,
+                                                            "hero_code": hero_code, "level": level}])
+            for candidate_team in TEAM_IDS
+        ):
+            return "该武将的等级选后无法补齐阵容，不能禁用。"
+        candidate = {"kind": kind, "team_id": team, "hero_code": hero_code, "level": level}
+        if not self._bp_draft_feasible([*self.bp_actions, candidate]):
+            return "这次禁选会使双方无法在等级上限内补齐阵容，请换一名武将。"
+        return None
+
+    def _bp_legal_levels(self) -> list[int]:
+        sequence = self._bp_sequence()
+        if self.status != "bp" or len(self.bp_actions) >= len(sequence):
+            return []
+        kind, team = sequence[len(self.bp_actions)]
+        key = (self.bp_team_size, self._bp_level_cap(), self.bp_auto_banned_levels,
+               self.bp_first_pick_team, kind, team,
+               tuple((action["kind"], action["team_id"], action["hero_code"])
+                     for action in self.bp_actions))
+        cached = getattr(self, "_bp_legal_cache", None)
+        if cached and cached[0] == key:
+            return cached[1]
+        used = {action["hero_code"] for action in self.bp_actions}
+        representative = {}
+        for code, hero in hero_lookup().items():
+            level = int(hero["level"])
+            if code not in used and level not in self.bp_auto_banned_levels:
+                representative.setdefault(level, code)
+        legal = [level for level, code in sorted(representative.items())
+                 if self._bp_choice_error(kind, team, code) is None]
+        self._bp_legal_cache = (key, legal)
+        return legal
+
     def _bp_phase(self) -> str:
         if self.status != "bp":
             return "closed"
         return "draft" if len(self.bp_actions) < len(self._bp_sequence()) else "assign"
 
     def _begin_bp(self) -> None:
+        pairs = self._bp_feasible_level_pairs()
+        if not pairs:
+            raise RoomError("当前武将库无法在随机禁用两个等级后完成BP。")
+        self.bp_auto_banned_levels = secrets.choice(pairs)
         self.bp_first_pick_team = secrets.choice(TEAM_IDS)
         self.bp_actions = []
         self.bp_assignments = {}
@@ -1066,16 +1152,11 @@ class GameRoom:
             kind, team = self._bp_sequence()[len(self.bp_actions)]
             if self.bp_captains.get(team) != seat.player_id:
                 raise RoomError("当前轮到另一队队长操作。")
-            if hero_code not in hero_lookup():
-                raise RoomError("所选武将不存在。")
-            if any(action["hero_code"] == hero_code for action in self.bp_actions):
-                raise RoomError("该武将已经被禁用或选走。")
+            error = self._bp_choice_error(kind, team, hero_code)
+            if error is not None:
+                raise RoomError(error)
             level = int(hero_lookup()[hero_code]["level"])
-            if kind == "pick" and self._bp_total_level(team) + level > self._bp_level_cap():
-                raise RoomError(f"{team_name(team)}选将总等级不能超过{self._bp_level_cap()}。")
             candidate = {"kind": kind, "team_id": team, "hero_code": hero_code, "level": level}
-            if not self._bp_draft_feasible([*self.bp_actions, candidate]):
-                raise RoomError("这次禁选会使双方无法在等级上限内补齐阵容，请换一名武将。")
             self.bp_actions.append(candidate)
             self.touch()
 
@@ -1151,6 +1232,8 @@ class GameRoom:
             "captains": dict(self.bp_captains),
             "phase": self._bp_phase(),
             "first_pick_team": self.bp_first_pick_team,
+            "auto_banned_levels": list(self.bp_auto_banned_levels),
+            "legal_levels": self._bp_legal_levels(),
             "step_index": index,
             "step_count": len(sequence),
             "current_kind": step[0] if step else None,
@@ -1927,6 +2010,12 @@ class GameRoom:
 
     def join(self, player_name: str, *, account_user_id: Optional[int] = None) -> tuple[int, str]:
         with self._lock:
+            if self.mode == "autochess" and account_user_id is not None:
+                existing_account = next((seat for seat in self.seats.values()
+                                         if seat.is_human and seat.account_user_id == account_user_id), None)
+                if existing_account is not None and existing_account.token:
+                    existing_account.mark_seen()
+                    return existing_account.player_id, existing_account.token
             if self.status != "lobby":
                 existing = self.seat_for_name(player_name)
                 if existing is not None:
@@ -1953,6 +2042,10 @@ class GameRoom:
             if self.status != "lobby":
                 raise RoomError("只有在大厅中才能调整席位数。")
             next_count = normalize_room_seat_count(seat_count)
+            if self.mode == "autochess" and next_count not in (4, 8):
+                raise RoomError("自走棋席位数只能为 4 或 8。")
+            if self.mode != "autochess" and next_count > 6:
+                raise RoomError("该模式最多 6 个席位。")
             current_count = len(self.seats)
             if next_count == current_count:
                 return
@@ -1970,6 +2063,9 @@ class GameRoom:
                     )
             if self.mode == "random":
                 self._reset_random_quotas_to_defaults()
+            if self.mode == "autochess":
+                from wujiang.tactical.rooms.autochess import AutoChessState
+                self.autochess = AutoChessState(next_count)
             self.invalidate_readiness()
             self.touch()
 
@@ -2050,11 +2146,26 @@ class GameRoom:
             next_mode = normalize_room_mode(mode)
             if next_mode == self.mode:
                 return
+            if next_mode == "autochess" and len(self.seats) > 4 and len(self.seats) != 8:
+                raise RoomError("请先调整到 4 人或 8 人房间。")
+            previous_mode = self.mode
             self.mode = next_mode
+            if next_mode == "autochess":
+                for player_id in range(len(self.seats) + 1, 5):
+                    self.seats[player_id] = PlayerSeat(player_id=player_id, team_id=default_team_for_seat(player_id))
+                if len(self.seats) not in (4, 8):
+                    raise RoomError("请先调整到 4 人或 8 人房间。")
+                from wujiang.tactical.rooms.autochess import AutoChessState
+                self.autochess = AutoChessState(len(self.seats))
+            else:
+                self.autochess = None
+                if previous_mode == "autochess":
+                    ROOMS._chess_path(self.room_id).unlink(missing_ok=True)
             self.bp_wins = {1: 0, 2: 0}
             self.bp_counted_match_ids = set()
             self.bp_captains = {}
             self.bp_first_pick_team = None
+            self.bp_auto_banned_levels = ()
             self.bp_actions = []
             self.bp_assignments = {}
             for seat in self.seats.values():
@@ -2388,6 +2499,7 @@ class GameRoom:
             if self.status == "bp":
                 self.status = "lobby"
                 self.bp_first_pick_team = None
+                self.bp_auto_banned_levels = ()
                 self.bp_actions = []
                 self.bp_assignments = {}
             leaving_player_id = seat.player_id
@@ -2505,6 +2617,9 @@ class GameRoom:
                        if prompt.get("kind") in {"attack_swap", "formation"} else "decline")}
             action_label = ("自动剑斗布阵" if prompt.get("kind") == "formation" else
                             "自动交换位置" if prompt.get("kind") == "attack_swap" else
+                            "自动放弃可选换位或搬运" if prompt.get("kind") in {"optional_swap", "optional_placement"} else
+                            "自动放弃电子龙瞬移" if prompt.get("kind") == "electronic_teleport" else
+                            "自动放弃轮末穿行" if prompt.get("kind") == "end_dash" else
                             "自动保持位置" if prompt.get("kind") == "rotation" else "自动承受伤害")
         elif prompt_kind == "respawn":
             prompt = self.battle.current_respawn_prompt()
@@ -2648,7 +2763,7 @@ class GameRoom:
                 "configuration_ready": self._configuration_blocker() is None,
                 "start_blocker": self._start_blocker(),
                 "human_ready_count": self.human_ready_count(),
-                "can_rematch": self.status == "finished" and public_launch_context(self).get("allow_rematch", True),
+                "can_rematch": self.mode != "autochess" and self.status == "finished" and public_launch_context(self).get("allow_rematch", True),
                 "launch_context": public_launch_context(self),
                 "postgame": build_postgame_summary(
                     self.battle,
@@ -2659,6 +2774,8 @@ class GameRoom:
             }
 
     def _start_blocker(self) -> Optional[str]:
+        if self.mode == "autochess":
+            return None if self.status == "lobby" else "自走棋已开局。"
         if self.mode == "bp" and self.status == "bp":
             return self._bp_assignment_blocker()
         blocker = self._configuration_blocker()
@@ -2670,6 +2787,8 @@ class GameRoom:
         return None
 
     def _configuration_blocker(self) -> Optional[str]:
+        if self.mode == "autochess":
+            return None if self.status == "lobby" else "自走棋已开局。"
         if self.mode == "bp" and self.status == "bp":
             return self._bp_assignment_blocker()
         if self.battle is not None:
@@ -2685,10 +2804,8 @@ class GameRoom:
                 captain = self.seats.get(self.bp_captains.get(team_id, -1))
                 if captain is None or not captain.is_human or captain.team_id != team_id:
                     return f"请先为{team_name(team_id)}指定真人队长。"
-            if len(hero_lookup()) < 6 + 2 * self.bp_team_size:
-                return "可用武将不足，无法完成本局BP。"
-            if not self._bp_draft_feasible([]):
-                return f"当前武将库无法满足每队总等级{self._bp_level_cap()}的上限。"
+            if not self._bp_feasible_level_pairs():
+                return f"当前武将库无法在随机禁用两个等级后满足每队总等级{self._bp_level_cap()}的上限。"
             return None
         if self.mode == "random":
             for team_id in TEAM_IDS:
@@ -2759,6 +2876,17 @@ class GameRoom:
 
     def start_battle(self, token: str, *, require_confirmation: bool = False) -> None:
         with self._lock:
+            if self.mode == "autochess":
+                self.require_host(token)
+                if self.status != "lobby" or self.autochess is None:
+                    raise RoomError("自走棋已经开局。")
+                for seat in self.seats.values():
+                    if not seat.occupied:
+                        seat.set_ai()
+                self.autochess.start()
+                self.status = "preparation"
+                self.touch()
+                return
             if require_confirmation:
                 self.require_host(token)
             else:
@@ -2859,6 +2987,7 @@ class GameRoom:
                 self.seats.pop(seat_id, None)
             self.bp_virtual_seat_ids = []
             self.bp_first_pick_team = None
+            self.bp_auto_banned_levels = ()
             self.bp_actions = []
             self.bp_assignments = {}
             for seat in self.seats.values():
@@ -3165,6 +3294,8 @@ class GameRoom:
 
     def serialize_state(self, viewer_token: Optional[str] = None, *, base_url: Optional[str] = None) -> dict[str, Any]:
         with self._lock:
+            if self.mode == "autochess" and self.autochess is not None:
+                return self._autochess_serialize(viewer_token, base_url=base_url)
             viewer = self.seat_for_token(viewer_token)
             if self.battle is not None and self.battle.winner is None:
                 self._advance_simulation_due()
@@ -3252,6 +3383,71 @@ class GameRoom:
                 "battle": battle_state,
             }
 
+    def _autochess_serialize(self, viewer_token: Optional[str], *, base_url: Optional[str]) -> dict[str, Any]:
+        if self.autochess is None:
+            raise RoomError("自走棋状态不存在。")
+        if self.autochess.tick(self.seats):
+            self.status = self.autochess.phase
+            self.touch()
+        viewer = self.seat_for_token(viewer_token)
+        viewer_id = viewer.player_id if viewer else None
+        catalog = hero_lookup()
+        chess = self.autochess.public(viewer_id, self.seats)
+        room_state = {
+            "room_id": self.room_id, "match_id": self.current_match_id,
+            "status": self.status, "mode": "autochess", "mode_name": "自走棋",
+            "mode_description": ROOM_MODES["autochess"]["description"],
+            "experience_kind": "autochess", "launch_context": public_launch_context(self),
+            "available_modes": room_mode_list_payload(), "version": self.version,
+            "created_at": self.created_at, "updated_at": self.updated_at,
+            "invite_path": self.invite_path(), "invite_url": self.invite_url(base_url),
+            "host_player_id": self.host_player_id,
+            "viewer_player_id": viewer_id, "viewer_team_id": None,
+            "viewer_name": viewer.name if viewer else None,
+            "viewer_is_host": viewer_id == self.host_player_id,
+            "seat_count": len(self.seats), "seat_count_min": 4, "seat_count_max": 8,
+            "occupied_seat_count": self.occupied_seat_count(),
+            "human_seat_count": self.human_seat_count(), "ai_seat_count": self.ai_seat_count(),
+            "is_full": all(seat.occupied for seat in self.seats.values()),
+            "can_start": self.status == "lobby", "configuration_ready": self.status == "lobby",
+            "start_blocker": None if self.status == "lobby" else "自走棋已开局。",
+            "can_rematch": False, "hero_limit": 0,
+            "board_width": 10, "board_height": 10, "turn_timeout_seconds": 0,
+            "seats": [seat.to_public_dict(catalog, self.host_player_id) for seat in self.seats.values()],
+            "autochess": chess, "bp": None,
+        }
+        return {"heroes": heroes_catalog(), "room": room_state, "battle": None}
+
+    def autochess_action(self, token: str, action: str, payload: dict[str, Any]) -> None:
+        with self._lock:
+            seat = self.require_seat(token)
+            chess = self.autochess
+            if self.mode != "autochess" or chess is None:
+                raise RoomError("当前不是自走棋房间。")
+            actions = {
+                "buy": lambda: chess.buy(seat.player_id, int(payload.get("slot", -1))),
+                "reroll": lambda: chess.reroll(seat.player_id),
+                "level_up": lambda: chess.level_up(seat.player_id),
+                "upgrade": lambda: chess.choose_upgrade(seat.player_id, str(payload.get("piece_id") or ""), str(payload.get("stat") or "")),
+                "place": lambda: chess.place(seat.player_id, str(payload.get("piece_id") or ""),
+                                               int(payload["x"]) if payload.get("x") is not None else None,
+                                               int(payload["y"]) if payload.get("y") is not None else None),
+                "sell": lambda: chess.sell(seat.player_id, str(payload.get("piece_id") or "")),
+                "draw_equipment": lambda: chess.draw_equipment(seat.player_id),
+                "equip": lambda: chess.equip(seat.player_id, str(payload.get("piece_id") or ""), str(payload.get("code") or "")),
+                "unequip": lambda: chess.unequip(seat.player_id, str(payload.get("piece_id") or ""), str(payload.get("code") or "")),
+                "ready": lambda: chess.ready(seat.player_id),
+            }
+            if action not in actions:
+                raise RoomError("未知自走棋操作。")
+            try:
+                actions[action]()
+            except (TypeError, ValueError, KeyError) as exc:
+                raise RoomError("自走棋操作参数无效。") from exc
+            chess.tick(self.seats)
+            self.status = chess.phase
+            self.touch()
+
 
     def surrender(self, token: str) -> None:
         with self._lock:
@@ -3291,8 +3487,26 @@ class RoomRegistry:
     def _generate_room_id(self) -> str:
         while True:
             room_id = "".join(secrets.choice(ROOM_CODE_ALPHABET) for _ in range(ROOM_CODE_LENGTH))
-            if room_id not in self._rooms:
+            if room_id not in self._rooms and not self._chess_path(room_id).exists():
                 return room_id
+
+    @staticmethod
+    def _chess_path(room_id: str) -> Path:
+        normalized = normalize_room_id(room_id)
+        if len(normalized) != 6 or not normalized.isascii() or not normalized.isalnum():
+            raise RoomError("房间编号无效。")
+        configured = os.environ.get("WUJIANG_AUTOCHESS_DIR")
+        directory = Path(configured) if configured else Path(__file__).resolve().parents[4] / "var" / "autochess"
+        return directory / f"{normalized}.room"
+
+    def persist(self, room: GameRoom) -> None:
+        if room.mode != "autochess":
+            return
+        path = self._chess_path(room.room_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_bytes(room.checkpoint_bytes())
+        temporary.replace(path)
 
     def create_room(
         self,
@@ -3305,6 +3519,7 @@ class RoomRegistry:
             room = GameRoom(self._generate_room_id(), mode=mode)
             player_id, token = room.create_host(player_name, account_user_id=account_user_id)
             self._rooms[room.room_id] = room
+            self.persist(room)
             return room, player_id, token
 
     def create_preconfigured_battle_room(
@@ -3369,6 +3584,13 @@ class RoomRegistry:
         normalized = normalize_room_id(room_id)
         with self._lock:
             room = self._rooms.get(normalized)
+            if room is None:
+                path = self._chess_path(normalized)
+                if path.exists():
+                    room = GameRoom.from_checkpoint_bytes(path.read_bytes())
+                    if room.mode != "autochess":
+                        raise RoomError("房间存档模式无效。")
+                    self._rooms[normalized] = room
         if room is None:
             raise RoomError("房间不存在，可能是房间码输错了。")
         return room
@@ -3395,6 +3617,8 @@ class RoomRegistry:
                 raise RoomError("房间不存在，可能是房间码输错了。")
             room.require_host(token)
             del self._rooms[normalized]
+            if room.mode == "autochess":
+                self._chess_path(normalized).unlink(missing_ok=True)
 
     def leave_room(self, room_id: str, token: str) -> tuple[bool, int]:
         normalized = normalize_room_id(room_id)
@@ -3402,14 +3626,28 @@ class RoomRegistry:
             room = self._rooms.get(normalized)
             if room is None:
                 raise RoomError("房间不存在，可能是房间码输错了。")
+            if room.mode == "autochess" and room.status != "lobby":
+                seat = room.require_seat(token)
+                return False, seat.player_id
             leaving_player_id = room.leave(token)
             deleted = room.human_seat_count() == 0
             if deleted:
                 del self._rooms[normalized]
+                if room.mode == "autochess":
+                    self._chess_path(normalized).unlink(missing_ok=True)
             return deleted, leaving_player_id
 
     def list_rooms(self, *, base_url: Optional[str] = None) -> list[dict[str, Any]]:
         with self._lock:
+            for path in self._chess_path("ABCDEF").parent.glob("*.room"):
+                if path.stem in self._rooms:
+                    continue
+                try:
+                    restored = GameRoom.from_checkpoint_bytes(path.read_bytes())
+                    if restored.mode == "autochess" and restored.room_id == path.stem:
+                        self._rooms[restored.room_id] = restored
+                except (OSError, RoomError):
+                    continue
             rooms = list(self._rooms.values())
         rooms.sort(key=lambda room: room.updated_at, reverse=True)
         return [

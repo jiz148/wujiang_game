@@ -20,6 +20,24 @@ export function hideHeroHover(anchor = null) {
   activeAnchor = null;
 }
 
+function heroDetailNodes(hero) {
+  const title = document.createElement('strong');
+  title.className = 'hero-hover__title';
+  title.textContent = `${hero.name} · Lv ${hero.level}`;
+  return [
+    title,
+    detail('定位', [hero.role, hero.attribute, hero.race].filter(Boolean).join(' / ')),
+    detail('数值', `攻 ${hero.stats?.attack ?? 0} · 守 ${hero.stats?.defense ?? 0} · 速 ${hero.stats?.speed ?? 0} · 范 ${hero.stats?.attack_range ?? 0} · 魔 ${hero.stats?.mana ?? 0}`),
+    detail('技能', hero.raw_skill_text),
+    detail('特性', hero.raw_trait_text),
+    ...(hero.weather_effect_text ? [detail('天气效果', hero.weather_effect_text)] : []),
+  ];
+}
+
+export function renderHeroDetails(container, hero) {
+  container.replaceChildren(...heroDetailNodes(hero));
+}
+
 export function showHeroHover(hero, anchor) {
   if (!hero || !anchor || !anchor.isConnected) return;
   hideHeroHover();
@@ -27,16 +45,7 @@ export function showHeroHover(hero, anchor) {
   const card = document.createElement('aside');
   card.className = 'hero-hover';
   card.setAttribute('role', 'tooltip');
-  const title = document.createElement('strong');
-  title.className = 'hero-hover__title';
-  title.textContent = `${hero.name} · Lv ${hero.level}`;
-  card.append(
-    title,
-    detail('定位', [hero.role, hero.attribute, hero.race].filter(Boolean).join(' / ')),
-    detail('数值', `攻 ${hero.stats?.attack ?? 0} · 守 ${hero.stats?.defense ?? 0} · 速 ${hero.stats?.speed ?? 0} · 范 ${hero.stats?.attack_range ?? 0} · 魔 ${hero.stats?.mana ?? 0}`),
-    detail('技能', hero.raw_skill_text),
-    detail('特性', hero.raw_trait_text),
-  );
+  card.append(...heroDetailNodes(hero));
   document.body.append(card);
   hoverCard = card;
   const anchorRect = anchor.getBoundingClientRect();

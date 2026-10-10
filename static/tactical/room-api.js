@@ -1074,7 +1074,7 @@ export async function startRoomBattle() {
       }),
     });
     applyRoomPayload(payload);
-    setScreen("battle", { renderAfter: false });
+    setScreen(state.room?.mode === "autochess" ? "draft" : "battle", { renderAfter: false });
     render();
   } catch (error) {
     const payload = error.state || null;
