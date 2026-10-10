@@ -5,14 +5,14 @@
 // 哪、带了谁"才是这一页真正要回答的问题。
 //
 // 现在页面上只留席位。设置是开局前调一次的东西，选将是一次挑完就走的动作，
-// 两者都点开才出现。武将名单也只给名字和等级：够用来找人；看数值和技能再点开
-// 详情。一上来就摊开全部档案，等于什么都没突出。
+// 两者都点开才出现。武将名单保留紧凑行，悬停可快速看完整资料，点击可固定打开详情。
 import { $ } from '../core/dom.js';
 import { fetchJson, hasRoom, viewerPlayerId } from '../core/net.js';
 import { render } from '../core/render.js';
 import { state } from '../core/state.js';
-import { applyRoomPayload, autoConfigureRoom, availableRoomModes, isRandomRoomMode, reportRoomError, selectRoomHero, setBpTeamSize, setRandomRosterSize, setRoomBoardSize, setRoomHeroLimit, setRoomMode, setRoomSeatCount, setRoomTurnTimeout } from '../tactical/room-api.js';
+import { applyRoomPayload, autoConfigureRoom, availableRoomModes, isRandomRoomMode, reportRoomError, selectRoomHero, setBpSettings, setRandomRosterSize, setRoomBoardSize, setRoomHeroLimit, setRoomMode, setRoomSeatCount, setRoomTurnTimeout } from '../tactical/room-api.js';
 import { randomRoomRosterSize, seatHeroCount, seatIdentityLabel, setRoomEditSeat } from '../tactical/targeting.js';
+import { bindHeroHover, hideHeroHover } from './hero-hover.js';
 
 function heroByCode(code) {
   return (state.heroes || []).find((hero) => hero.code === code) || null;
@@ -94,6 +94,9 @@ export function openRoomSetup() {
     seatCount: String(state.room.seat_count || 2),
     randomRosterSize: String(randomRoomRosterSize()),
     bpTeamSize: String(state.room.bp?.team_size || 3),
+    bpLevelCap: String(state.room.bp?.level_cap || 15),
+    bpLevelCaps: {...(state.room.bp?.level_caps || {3: 15, 5: 25})},
+    bpShowWinCount: state.room.bp?.show_win_count !== false,
     heroLimitEnabled: currentLimit > 0,
     heroLimit: String(currentLimit > 0 ? currentLimit : 5),
     turnTimeout: String(Number(state.room.turn_timeout_seconds ?? 0)),
@@ -210,9 +213,11 @@ export async function confirmRoomSetup() {
     return;
   }
   const nextMode = draft.mode;
-  const nextSeatCount = draft.seatCount;
+  const nextSeatCount = nextMode === "autochess" ? (Number(draft.seatCount) === 8 ? 8 : 4) : draft.seatCount;
   const nextRosterSize = draft.randomRosterSize;
   const nextBpTeamSize = Number(draft.bpTeamSize) === 5 ? 5 : 3;
+  const nextBpLevelCap = Math.max(1, Math.min(50, Number.parseInt(draft.bpLevelCap, 10) || nextBpTeamSize * 5));
+  const nextBpShowWinCount = Boolean(draft.bpShowWinCount);
   const nextHeroLimit = draft.heroLimitEnabled
     ? Math.max(1, Math.min(20, Number.parseInt(draft.heroLimit, 10) || 1))
     : 0;
@@ -223,21 +228,25 @@ export async function confirmRoomSetup() {
   if (isRandomRoomMode() && Number(nextRosterSize) !== randomRoomRosterSize()) {
     await setRandomRosterSize(nextRosterSize);
   }
-  if (state.room?.mode === "bp" && nextBpTeamSize !== Number(state.room?.bp?.team_size || 3)) {
-    await setBpTeamSize(nextBpTeamSize);
+  if (state.room?.mode === "bp" && (
+    nextBpTeamSize !== Number(state.room?.bp?.team_size || 3)
+    || nextBpLevelCap !== Number(state.room?.bp?.level_cap || 15)
+    || nextBpShowWinCount !== Boolean(state.room?.bp?.show_win_count)
+  )) {
+    await setBpSettings({teamSize: nextBpTeamSize, levelCap: nextBpLevelCap, showWinCount: nextBpShowWinCount});
   }
-  if (state.room?.mode !== "bp" && nextHeroLimit !== Number(state.room?.hero_limit || 0)) await setRoomHeroLimit(nextHeroLimit);
+  if (!["bp", "autochess"].includes(state.room?.mode) && nextHeroLimit !== Number(state.room?.hero_limit || 0)) await setRoomHeroLimit(nextHeroLimit);
   const nextTurnTimeout = [0, 30, 60, 120].includes(Number.parseInt(draft.turnTimeout, 10))
     ? Number.parseInt(draft.turnTimeout, 10)
     : 0;
-  if (nextTurnTimeout !== Number(state.room?.turn_timeout_seconds ?? 0)) await setRoomTurnTimeout(nextTurnTimeout);
+  if (state.room?.mode !== "autochess" && nextTurnTimeout !== Number(state.room?.turn_timeout_seconds ?? 0)) await setRoomTurnTimeout(nextTurnTimeout);
   const clampBoard = (value) => Math.max(6, Math.min(100, Number.parseInt(value, 10) || 10));
   const nextWidth = clampBoard(draft.boardWidth);
   const nextHeight = clampBoard(draft.boardHeight);
-  if (
+  if (state.room?.mode !== "autochess" && (
     nextWidth !== Number(state.room?.board_width || 10)
     || nextHeight !== Number(state.room?.board_height || 10)
-  ) {
+  )) {
     await setRoomBoardSize(nextWidth, nextHeight);
   }
   render();
@@ -274,9 +283,10 @@ export function renderRoomSetupDialog() {
   }
   const seatCountInput = $("room-seat-count-input");
   if (seatCountInput) {
-    seatCountInput.min = String(state.room.seat_count_min || 2);
-    seatCountInput.max = String(state.room.seat_count_max || 6);
-    if (document.activeElement !== seatCountInput) seatCountInput.value = draft.seatCount;
+    seatCountInput.min = draft.mode === "autochess" ? "4" : "2";
+    seatCountInput.max = draft.mode === "autochess" ? "8" : "6";
+    seatCountInput.step = draft.mode === "autochess" ? "4" : "1";
+    if (document.activeElement !== seatCountInput) seatCountInput.value = draft.mode === "autochess" && Number(draft.seatCount) !== 8 ? "4" : draft.seatCount;
   }
   // 随机模式才有"每队随机几个"可言，标准模式下这一项没有意义。
   const randomControl = $("random-roster-size-control");
@@ -285,6 +295,12 @@ export function renderRoomSetupDialog() {
   $("bp-team-size-control")?.classList.toggle("hidden", draft.mode !== "bp");
   const bpSizeSelect = $("bp-team-size-select");
   if (bpSizeSelect && document.activeElement !== bpSizeSelect) bpSizeSelect.value = draft.bpTeamSize;
+  $("bp-level-cap-control")?.classList.toggle("hidden", draft.mode !== "bp");
+  const bpLevelCap = $("bp-level-cap-input");
+  if (bpLevelCap && document.activeElement !== bpLevelCap) bpLevelCap.value = draft.bpLevelCap;
+  $("bp-win-count-control")?.classList.toggle("hidden", draft.mode !== "bp");
+  const bpShowWins = $("bp-show-win-count");
+  if (bpShowWins) bpShowWins.checked = Boolean(draft.bpShowWinCount);
   if (randomInput && document.activeElement !== randomInput) {
     randomInput.value = draft.randomRosterSize;
   }
@@ -292,8 +308,10 @@ export function renderRoomSetupDialog() {
   if (limitEnabled) limitEnabled.checked = Boolean(draft.heroLimitEnabled);
   const limitControl = $("room-hero-limit-control");
   const limitInput = $("room-hero-limit-input");
-  limitControl?.classList.toggle("hidden", draft.mode === "bp" || !draft.heroLimitEnabled);
-  $("room-hero-limit-switch")?.classList.toggle("hidden", draft.mode === "bp");
+  limitControl?.classList.toggle("hidden", ["bp", "autochess"].includes(draft.mode) || !draft.heroLimitEnabled);
+  $("room-hero-limit-switch")?.classList.toggle("hidden", ["bp", "autochess"].includes(draft.mode));
+  $("room-turn-timeout-select")?.closest("label")?.classList.toggle("hidden", draft.mode === "autochess");
+  $("room-board-width-input")?.closest(".field")?.classList.toggle("hidden", draft.mode === "autochess");
   if (limitInput && document.activeElement !== limitInput) {
     limitInput.value = draft.heroLimit;
   }
@@ -401,8 +419,16 @@ function renderHeroPickerRosters(seat) {
 function renderHeroPickerList(seat) {
   const list = $("hero-picker-list");
   if (!list) return;
-  list.replaceChildren();
   const heroes = heroPickerList();
+  const signature = JSON.stringify([
+    seat.player_id,
+    seatAtHeroLimit(seat),
+    heroes.map((hero) => [hero.code, seatHeroCount(seat, hero.code)]),
+  ]);
+  if (list.dataset.heroPickerSignature === signature) return;
+  list.dataset.heroPickerSignature = signature;
+  hideHeroHover();
+  list.replaceChildren();
   if (!heroes.length) {
     const empty = document.createElement("p");
     empty.className = "hero-picker__empty";
@@ -431,6 +457,7 @@ function renderHeroPickerList(seat) {
     stats.textContent = heroStatLine(hero);
     tag.append(name, level, stats);
     tag.addEventListener("click", () => openHeroDetail(hero.code));
+    bindHeroHover(tag, hero);
 
     const counter = document.createElement("div");
     counter.className = "hero-row__counter";
@@ -466,6 +493,7 @@ export function renderHeroPicker() {
   modal.classList.toggle("hidden", !open);
   modal.setAttribute("aria-hidden", open ? "false" : "true");
   if (!open) {
+    hideHeroHover();
     state.heroPickerSeatId = null;
     return;
   }
@@ -552,4 +580,5 @@ export function renderHeroDetail() {
   );
   appendDetailLine(body, "技能", hero.raw_skill_text || "无");
   appendDetailLine(body, "特性", hero.raw_trait_text || "无");
+  if (hero.weather_effect_text) appendDetailLine(body, "天气效果", hero.weather_effect_text);
 }

@@ -38,7 +38,7 @@ export function render() {
   }
 
   if (isGameOver()) clearActionSelection();
-  document.body.classList.toggle("battle-mode", state.screen === "battle");
+  document.body.classList.toggle("battle-mode", state.screen === "battle" || state.screen === "autochess");
   ensureDraftSelection();
   ensureSelectedUnit();
   const preserveRoomConfig = isRoomConfigControlActive();
@@ -116,6 +116,9 @@ function lobbySyncSignature() {
     start_blocker: room.start_blocker,
     viewer_player_id: room.viewer_player_id,
     roomError: state.roomError,
+    // 禁选进度不会改变席位或房间状态；另一队队长仍须收到重绘。
+    bp: room.mode === "bp" ? room.bp : null,
+    autochess_version: room.mode === "autochess" ? room.autochess?.version : null,
     seats: (room.seats || []).map((seat) => [
       seat.player_id,
       seat.name,

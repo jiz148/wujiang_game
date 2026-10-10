@@ -208,6 +208,10 @@
         </section>
       </section>
 
+      <section id="autochess-screen" class="screen battle-screen autochess-screen hidden" aria-label="自走棋战场">
+        <div id="autochess-panel" class="autochess-panel hidden"></div>
+      </section>
+
       <section id="battle-screen" class="screen battle-screen hidden" aria-labelledby="battle-screen-title">
         <h2 id="battle-screen-title" class="visually-hidden">战场</h2>
         <p id="board-caption" class="visually-hidden"></p>
@@ -454,7 +458,7 @@
           </label>
           <label class="field" for="room-seat-count-input">
             <span class="field__label">席位数</span>
-            <input id="room-seat-count-input" class="input" type="number" min="2" max="6" step="1" value="2" />
+            <input id="room-seat-count-input" class="input" type="number" min="2" max="8" step="1" value="2" />
           </label>
           <label id="random-roster-size-control" class="field hidden" for="random-roster-size-input">
             <span class="field__label">每队随机武将数</span>
@@ -463,6 +467,14 @@
           <label id="bp-team-size-control" class="field hidden" for="bp-team-size-select">
             <span>BP每队武将数</span>
             <select id="bp-team-size-select" class="select"><option value="3">3v3</option><option value="5">5v5</option></select>
+          </label>
+          <label id="bp-level-cap-control" class="field hidden" for="bp-level-cap-input">
+            <span>每队总等级上限</span>
+            <input id="bp-level-cap-input" class="input" type="number" min="1" max="50" step="1" value="15" />
+          </label>
+          <label id="bp-win-count-control" class="field field--switch hidden" for="bp-show-win-count">
+            <span>显示双方胜场数</span>
+            <input id="bp-show-win-count" type="checkbox" checked />
           </label>
           <label id="room-hero-limit-switch" class="field field--switch" for="room-hero-limit-enabled">
             <span class="field__label">限定武将数量</span>
@@ -541,7 +553,7 @@
       </div>
     </div>
 
-    <!-- 选将。每一行是一张标签：名字、等级、攻守速范魔。技能和特性点进去才看。 -->
+    <!-- 选将。紧凑名单支持悬停快速查看技能和特性，点击可固定打开详情。 -->
     <div id="hero-picker" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="hero-picker-title">
       <div class="modal-card modal-card--wide">
         <div class="modal-card__head">

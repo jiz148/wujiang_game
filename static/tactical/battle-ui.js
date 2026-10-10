@@ -1,7 +1,7 @@
 // Battle screen rendering: board, units, action panel and log.
 import { $ } from '../core/dom.js';
 import { applyBoardCamera, boardBasePixels, clampBoardZoom } from '../core/events.js';
-import { activeBundles, allUnits, backstepFollowUpTargetIds, boardPieceZIndex, boardUnits, bundleFor, canInteract, currentRespawnPrompt, hasBattle, hasRoom, hoveredUnit, inspectBoardUnit, inspectedUnit, isAiTakeover, isChainMode, isDamageChoiceMode, isGameOver, isReplayMode, isRespawnMode, selectedUnit, stagedBackstepRetreatCell, stagedTarget, unitById, unitFootprintBounds, unitHasLargeFootprint, unitOccupiedCells, unitsAtCell, viewerPlayerId, viewerTeamId } from '../core/net.js';
+import { activeBundles, activeOccupantAt, allUnits, backstepFollowUpTargetIds, boardPieceZIndex, boardUnits, bundleFor, canInteract, currentRespawnPrompt, hasBattle, hasRoom, hoveredUnit, inspectBoardUnit, inspectedUnit, isAiTakeover, isChainMode, isDamageChoiceMode, isGameOver, isReplayMode, isRespawnMode, selectedUnit, stagedBackstepRetreatCell, stagedTarget, unitById, unitFootprintBounds, unitHasLargeFootprint, unitOccupiedCells, unitsAtCell, viewerPlayerId, viewerTeamId } from '../core/net.js';
 import { render } from '../core/render.js';
 import { applyScreen } from '../core/router.js';
 import { state, ui } from '../core/state.js';
@@ -540,6 +540,7 @@ export function renderBoard() {
     : [];
   const aiPreviewKeys = positionsToSet(aiPreviewCells);
   const aiCurrentKey = aiPreviewCells.length ? positionKey(aiPreviewCells[aiPreviewCells.length - 1]) : "";
+  const placementSize = Number(selectedAction()?.preview?.placement_size || 1);
   const boardWidth = state.battle.board.width;
   const cellAt = [];
 
@@ -557,7 +558,7 @@ export function renderBoard() {
       const unitsHere = boardUnits().filter(
         (unit) => unit.position && unitOccupiedCells(unit).some((cellPosition) => cellPosition.x === x && cellPosition.y === y),
       );
-      const occupant = unitsHere.find((unit) => !unit.banished) || unitsHere[0] || null;
+      const occupant = activeOccupantAt(x, y) || unitsHere.find((unit) => !unit.banished) || unitsHere[0] || null;
       const ghostUnits = unitsHere.filter((unit) => unit.banished);
 
       const key = `${x},${y}`;
@@ -578,6 +579,7 @@ export function renderBoard() {
       const cellLabels = [`第 ${y + 1} 行，第 ${x + 1} 列`];
       cellLabels.push(occupant ? `${occupant.name}，队伍 ${occupant.player_id}` : "空格");
       if (preview.cellKeys.has(key)) cellLabels.push("可选范围");
+      if (placementSize > 1 && preview.cellKeys.has(key)) cellLabels.push(`落点将占用 ${placementSize}×${placementSize} 格`);
       if (occupant && preview.targetIds.has(occupant.id)) cellLabels.push("可选目标");
       if (unitOccupiedCells(selected).some((cellPosition) => cellPosition.x === x && cellPosition.y === y)) cellLabels.push("当前选择");
       if (cellEffects.length) cellLabels.push(`战场状态：${cellEffects.map((effect) => effect.name).join("、")}`);
@@ -615,6 +617,29 @@ export function renderBoard() {
     }
   }
 
+  if (placementSize > 1) {
+    const showPlacement = (anchor) => {
+      for (const cell of cellAt) cell.classList.remove("is-footprint-destination");
+      for (let dy = 0; dy < placementSize; dy += 1) {
+        for (let dx = 0; dx < placementSize; dx += 1) {
+          cellAt[(anchor.y + dy) * boardWidth + anchor.x + dx]?.classList.add("is-footprint-destination");
+        }
+      }
+    };
+    for (const anchor of selectedAction()?.preview?.cells || []) {
+      const cell = cellAt[Number(anchor.y) * boardWidth + Number(anchor.x)];
+      if (!cell) continue;
+      cell.addEventListener("pointerenter", () => showPlacement(anchor));
+      cell.addEventListener("focus", () => showPlacement(anchor));
+      cell.addEventListener("pointerleave", () => {
+        for (const boardCell of cellAt) boardCell.classList.remove("is-footprint-destination");
+      });
+      cell.addEventListener("blur", () => {
+        for (const boardCell of cellAt) boardCell.classList.remove("is-footprint-destination");
+      });
+    }
+  }
+
   const marchTraces = ensureArmyMarchPlayback();
   boardUnits()
     .filter((unit) => unit.position && !unit.banished)
@@ -628,6 +653,7 @@ export function renderBoard() {
       const bounds = unitFootprintBounds(unit);
       const occupied = unitOccupiedCells(unit);
       const largeFootprint = unitHasLargeFootprint(unit);
+      const mountedRider = Boolean(unit.mounted_on_unit_id);
       const marchCell = armyMarchCellForUnit(unit, marchTraces);
       const placeX = marchCell ? Number(marchCell.x) : bounds.minX;
       const placeY = marchCell ? Number(marchCell.y) : bounds.minY;
@@ -647,12 +673,17 @@ export function renderBoard() {
         `
         : "";
       const kind = soldierKindOf(unit);
+      const standingOnTerrain = !largeFootprint && unitsAtCell(placeX, placeY).some(
+        (other) => other.id !== unit.id && other.standable_terrain,
+      );
       const piece = document.createElement("div");
       piece.className = [
         "piece",
         "board-piece",
         `player-${unit.player_id}`,
         largeFootprint ? "is-footprint" : "",
+        mountedRider ? "is-mounted-rider" : "",
+        standingOnTerrain ? "is-terrain-occupant" : "",
         isStealthed ? "is-stealthed" : "",
         kind ? "is-soldier" : "is-hero",
         kind === "arrow_tower" ? "is-structure is-arrow-tower" : "",
@@ -660,6 +691,22 @@ export function renderBoard() {
         kind === "cannon" && siegeReloadState(unit) === "ready" ? "is-loaded" : "",
       ].filter(Boolean).join(" ");
       piece.dataset.unitId = unit.id;
+      if (mountedRider || standingOnTerrain) {
+        piece.title = `${mountedRider ? "骑手：" : ""}${unit.name}（点击选择）`;
+        piece.setAttribute?.("role", "button");
+        piece.setAttribute?.("aria-label", `选择${mountedRider ? "骑手 " : ""}${unit.name}`);
+        piece.tabIndex = 0;
+        piece.addEventListener("pointerenter", (event) => {
+          state.hoveredUnitId = unit.id;
+          state.hoverPointer = { x: event.clientX, y: event.clientY };
+          renderHoverCard();
+        });
+        piece.addEventListener("pointerleave", () => {
+          state.hoveredUnitId = "";
+          state.hoverPointer = null;
+          renderHoverCard();
+        });
+      }
       piece.dataset.footprintWidth = String(bounds.width);
       piece.dataset.footprintHeight = String(bounds.height);
       if (unit.position || marchCell) {
@@ -681,7 +728,7 @@ export function renderBoard() {
           ${manaPipsMarkup(unit)}
         </div>`}
       `;
-      const host = !largeFootprint ? cellAt[placeY * boardWidth + placeX] : null;
+      const host = !largeFootprint && !mountedRider && !standingOnTerrain ? cellAt[placeY * boardWidth + placeX] : null;
       if (host) {
         piece.classList.add("is-in-cell");
         host.classList.add("has-unit");
@@ -1157,6 +1204,7 @@ export function renderSelectedCard() {
       <div class="statline"><strong>特性</strong> ${traits}</div>
       <div class="statline"><strong>原始技能</strong> ${unit.raw_skill_text || "无"}</div>
       <div class="statline"><strong>原始特性</strong> ${unit.raw_trait_text || "无"}</div>
+      ${unit.weather_effect_text ? `<div class="statline"><strong>天气效果</strong> ${unit.weather_effect_text}</div>` : ""}
     </div>
   `;
 }
@@ -1460,7 +1508,21 @@ export function renderChainPanel() {
   }
   if (isDamageChoiceMode()) {
     const prompt = state.battle.pending_damage_choice;
-    if (caption) caption.textContent = `拉奥将受到 ${prompt.damage} 点【${prompt.action_name}】伤害，请选择能力抵消或承受伤害。`;
+    if (caption) caption.textContent = prompt.kind === "attack_swap"
+      ? "亚历山大的普攻已完成，请选择一名有合法落点的友军交换位置。"
+      : prompt.kind === "electronic_teleport"
+        ? "电子龙可在本武将回合结束前瞬移到己方单位周围的合法位置，或保持原位。"
+      : prompt.kind === "end_dash"
+        ? "军神轮末可选一条合法六格穿行路线，或原地结束回合。"
+      : prompt.kind === "formation"
+        ? `塞克托鲁的${prompt.action_name}：选择一个在场单位及其相邻合法落点。`
+      : prompt.kind === "optional_swap"
+        ? "斯巴达克斯受到技能影响；可选一名友军换位，或保持位置。"
+      : prompt.kind === "optional_placement"
+        ? "天崩地裂已结算；可选一名友军搬到斯巴达克斯身边，或放弃。"
+      : prompt.kind === "rotation"
+        ? `安德鲁因【${prompt.action_name}】实际损失 ${prompt.damage} 点生命。选择友军战斗轮转，或保持位置。`
+        : `拉奥将受到 ${prompt.damage} 点【${prompt.action_name}】伤害，请选择能力抵消或承受伤害。`;
     skipBtn?.classList.add("hidden");
     hideBar();
     return;
@@ -1633,6 +1695,8 @@ export function renderGameOverOverlay() {
       rematch.textContent = state.battle.winner === 1 ? "再次开始教学" : "从检查点重试";
     } else if (state.room?.experience_kind === "quick_ai") {
       rematch.textContent = "同阵容再来一局";
+    } else if (state.room?.mode === "bp") {
+      rematch.textContent = state.room?.viewer_is_host ? "进入下一局 BP" : "等待房主开启下一局 BP";
     } else {
       rematch.textContent = state.room?.viewer_is_host ? "同配置再来一局" : "等待房主再开一局";
     }

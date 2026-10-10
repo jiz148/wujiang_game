@@ -818,6 +818,8 @@ class SelfBuffSkill(Skill):
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         self.apply_to_self(battle, actor)
+        if not actor.skill_non_damage_effects_blocked():
+            battle.record_skill_effect(actor)
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
         return {
@@ -1067,6 +1069,7 @@ class MultiTargetChainShieldSkill(Skill):
             for unit in battle.effect_units(battle.player_units(actor.player_id))
             if unit.position is not None
             and not battle.effect_recipient(unit).direct_effects_blocked()
+            and not battle.effect_recipient(unit).skill_non_damage_effects_blocked()
             and actor.position is not None
             and battle.unit_target_in_range_and_line(actor, unit, actor.targeting_range())
         ]
@@ -1210,11 +1213,12 @@ class MultiTargetChainShieldSkill(Skill):
 
     def apply_shields(self, battle: Battle, actor: HeroUnit, targets: list[HeroUnit]) -> None:
         for target in battle.effect_units(targets):
-            if target.direct_effects_blocked():
+            if target.direct_effects_blocked() or target.skill_non_damage_effects_blocked():
                 continue
             if battle.destroy_clone_for_skill_effect(target, source=actor, action_name=self.name):
                 continue
             target.add_temporary_shields(self.shield_amount)
+            battle.record_skill_effect(target)
             battle.log(f"{target.name} 获得了 {self.shield_amount} 层临时护盾。")
 
     def react(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any], queued_action: QueuedAction) -> None:
@@ -1338,7 +1342,8 @@ class DrainManaSkill(Skill):
         ensure_enemy(actor, target)
         if not battle.is_declared_resolution(actor, payload, {"skill"}):
             ensure_distance(actor, target, actor.targeting_range())
-        target_ctx = battle.validate_target(actor, target, action_name="吸魔", is_skill=True, is_hostile=True)
+        target_ctx = battle.validate_target(actor, target, action_name="吸魔", is_skill=True,
+                                            is_hostile=True, record_effect_on_validation=False)
         if target_ctx.cancelled:
             battle.log(target_ctx.reason)
             return
@@ -1347,6 +1352,8 @@ class DrainManaSkill(Skill):
             return
         lost = target.drain_mana(1.0)
         actor.gain_mana(lost)
+        if lost > 0:
+            battle.record_skill_effect(target)
         battle.log(f"{actor.name} 吸取了 {target.name} 的 {lost} 点魔力。")
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
@@ -1529,6 +1536,7 @@ class KnockbackSkill(Skill):
     def react(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any], queued_action: QueuedAction) -> None:
         center = battle.reaction_proxy_target(actor, queued_action) or actor
         center.shields += 1
+        battle.record_skill_effect(center)
         battle.log(f"{center.name} 通过震开获得了 1 层护盾。")
         if center.position is None:
             return
@@ -1758,7 +1766,8 @@ class HealSkill(Skill):
             battle.resolve_damage(DamageContext(source=actor, target=target, attack_power=0, raw_damage=0.25,
                                                 is_skill=True, action_name="回血反转", tags={"skill", "heal_reversal"}))
             return
-        ctx = battle.validate_target(actor, target, action_name=self.name, is_skill=True, is_hostile=False)
+        ctx = battle.validate_target(actor, target, action_name=self.name, is_skill=True,
+                                     is_hostile=False, record_effect_on_validation=False)
         if not ctx.cancelled:
             battle.heal(HealContext(source=actor, target=target, amount=0.25, action_name="回血"))
 

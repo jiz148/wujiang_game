@@ -759,7 +759,7 @@ class WindSandSkill(Skill):
         super().__init__(
             "wind_sand",
             "风沙",
-            "普通技能：每回合最多 1 次，远程选择 2*4 或 4*2 区域；按当前攻造成伤害，若范围内有单位则天气变为沙尘一轮。",
+            "普通技能：每回合最多 1 次，远程选择 2*4 或 4*2 区域；按当前攻造成伤害，若范围内有单位则全场沙尘持续到自己下个回合开始。沙尘使土属性单位免受天气伤害，飞行单位每个自己的回合末失去1/8生命，其他单位失去1/16生命；范围内不能隐身且回避距离-1。",
             max_uses_per_turn=1,
             target_mode="cell",
         )
@@ -1091,7 +1091,7 @@ class RockGodSandstormAura(BattleFieldEffect):
     weather_name = "沙尘"
 
     def __init__(self, owner_unit_id: str) -> None:
-        super().__init__("岩神沙尘", "岩神每个占用格周围 9*9 的局部沙尘天气。", duration=None)
+        super().__init__("岩神沙尘", "岩神每个占用格周围 9*9 的局部沙尘：土属性单位免受天气伤害，飞行单位每个自己的回合末失去1/8生命，其他单位失去1/16生命；范围内不能隐身且回避距离-1。", duration=None)
         self.owner_unit_id = owner_unit_id
         self.owner_unit_ids = {owner_unit_id}
 
@@ -2746,32 +2746,9 @@ class JadeMachineGunSkill(DeclaredAreaSkillMixin, MachineGunSkill):
         )
 
 
-class MissileSkill(DeclaredAreaSkillMixin, WindowChargeSkill):
-    def __init__(self) -> None:
-        super().__init__(
-            "missile",
-            "导弹",
-            "普通技能：每 2 轮最多 3 次，远程选择 2*2 区域；按当前攻造成伤害。",
-            window_rounds=2,
-            window_uses=3,
-            target_mode="cell",
-        )
-
+class MissileAreaMixin(DeclaredAreaSkillMixin):
     def patterns(self, battle: Battle, actor: HeroUnit) -> list[list[Position]]:
         return remote_rectangle_patterns(battle, actor, 2, 2)
-
-    def on_owner_turn_start(self, battle: Battle) -> None:
-        Skill.on_owner_turn_start(self, battle)
-
-    def on_any_turn_end(self, battle: Battle, ended_player_id: int) -> None:
-        Skill.on_any_turn_end(self, battle, ended_player_id)
-        if self.owner is not None and battle.unit_belongs_to_current_turn(self.owner) and self.window_is_active():
-            self.window_remaining_turns = max(0, self.window_remaining_turns - 1)
-            if self.window_remaining_turns == 0:
-                self.window_remaining_uses = 0
-
-    def chosen_cells(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
-        return super().chosen_cells(battle, actor, payload)
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         cells = self.chosen_cells(battle, actor, payload)
@@ -2800,6 +2777,41 @@ class MissileSkill(DeclaredAreaSkillMixin, WindowChargeSkill):
 
     def get_target_units_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[HeroUnit]:
         return battle.effect_units_at_cells(self.chosen_cells(battle, actor, payload))  # type: ignore[return-value]
+
+
+class MissileSkill(MissileAreaMixin, WindowChargeSkill):
+    """Jade's unique three-use window."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "missile",
+            "导弹",
+            "普通技能：每 2 轮最多 3 次，远程选择 2*2 区域；按当前攻造成伤害。",
+            window_rounds=2,
+            window_uses=3,
+            target_mode="cell",
+        )
+
+    def on_owner_turn_start(self, battle: Battle) -> None:
+        Skill.on_owner_turn_start(self, battle)
+
+    def on_any_turn_end(self, battle: Battle, ended_player_id: int) -> None:
+        Skill.on_any_turn_end(self, battle, ended_player_id)
+        if self.owner is not None and battle.unit_belongs_to_current_turn(self.owner) and self.window_is_active():
+            self.window_remaining_turns = max(0, self.window_remaining_turns - 1)
+            if self.window_remaining_turns == 0:
+                self.window_remaining_uses = 0
+
+
+class CommonMissileSkill(MissileAreaMixin, Skill):
+    def __init__(self) -> None:
+        super().__init__(
+            "missile",
+            "导弹",
+            "通用普通技能：0 魔，每 2 轮使用 1 次；远程选择 2*2 区域，按当前攻造成伤害。",
+            cooldown_turns=2,
+            target_mode="cell",
+        )
 
 
 class IonShieldSkill(MultiTargetChainShieldSkill):

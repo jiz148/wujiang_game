@@ -89,10 +89,11 @@ export function applyRoomPayload(payload, { preserveScreen = false } = {}) {
   const previousScreen = state.screen;
   const previousBoardKey = state.battle ? `${state.battle.board.width}x${state.battle.board.height}` : "";
   const previousRoomId = state.room?.room_id || "";
+  const previousChessPhase = state.room?.autochess?.phase || "";
   const previousBattle = state.liveBattle;
   // 拿到了新的房间状态，说明上一条失败已经翻篇了。
   state.roomError = "";
-  state.heroes = payload.heroes || [];
+  if (Array.isArray(payload.heroes)) state.heroes = payload.heroes;
   if (payload.rooms) {
     state.rooms = payload.rooms;
   }
@@ -181,6 +182,11 @@ export function applyRoomPayload(payload, { preserveScreen = false } = {}) {
     && Boolean(state.room?.viewer_player_id)
     && (!hadBattle || previousScreen === "battle");
   syncScreen({ preferBattle: autoEnterBattle || (preserveScreen && previousScreen === "battle") });
+  if (state.room?.mode === "autochess" && state.room.autochess?.phase !== "lobby" &&
+      previousScreen === "draft" &&
+      (previousRoomId !== state.room.room_id || previousChessPhase === "lobby")) {
+    setScreen("autochess", { renderAfter: false });
+  }
   syncSelectedUnitAfterStateChange();
   syncBattleVfxState({ hadBattle, boardChanged: Boolean(state.liveBattle) && nextBoardKey !== previousBoardKey });
   const previousVisualEventId = maxVisualEventId(previousBattle?.visual_events || []);
@@ -325,7 +331,7 @@ async function restartRoomDraft() {
       applyRoomPayload(payload, { preserveScreen: false });
       render();
     }
-    reportRoomError(error.error || "同配置再战准备失败。");
+    reportRoomError(error.error || (state.room?.mode === "bp" ? "下一局 BP 准备失败。" : "同配置再战准备失败。"));
   }
 }
 
@@ -520,6 +526,9 @@ async function postBpAction(action, fields) {
 }
 
 export const setBpTeamSize = (teamSize) => postBpAction("team-size", {team_size: teamSize});
+export const setBpSettings = ({teamSize, levelCap, showWinCount}) => postBpAction("settings", {
+  team_size: teamSize, level_cap: levelCap, show_win_count: showWinCount,
+});
 export const setBpCaptain = (teamId, seatId) => postBpAction("captain", {team_id: teamId, seat_id: seatId});
 export const bpChoose = (heroCode) => postBpAction("choose", {hero_code: heroCode});
 export const bpAssign = (heroCode, controller) => postBpAction("assign", {hero_code: heroCode, controller});
@@ -1071,7 +1080,7 @@ export async function startRoomBattle() {
       }),
     });
     applyRoomPayload(payload);
-    setScreen("battle", { renderAfter: false });
+    setScreen(state.room?.mode === "autochess" ? "autochess" : "battle", { renderAfter: false });
     render();
   } catch (error) {
     const payload = error.state || null;
@@ -1323,7 +1332,7 @@ export function onActionClick(action) {
   if (!canInteract()) return;
   if (action.kind === "damage_choice") {
     performAction({ type: "damage_choice", unit_id: state.battle.pending_damage_choice.unit_id,
-      stat_name: action.stat_name });
+      stat_name: action.stat_name, target_unit_id: action.target_unit_id });
     return;
   }
   state.sidebarExpanded = "command";

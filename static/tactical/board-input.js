@@ -278,6 +278,16 @@ export function onBoardClick(x, y, occupant) {
   }
 
   if (action.kind === "attack") {
+    if (action.preview?.cell_targeted_attack) {
+      performAction({
+        type: "attack",
+        unit_id: state.selectedUnitId,
+        x,
+        y,
+        ...stagedAttackActionPayload(action),
+      });
+      return;
+    }
     const targetUnitId = attackTargetIdAtCell(action, x, y, occupant);
     if (!targetUnitId) {
       explainInvalidBoardChoice(action, occupant);

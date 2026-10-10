@@ -552,6 +552,7 @@ export function actionLimitLabel(action) {
     }
     return base;
   }
+  if (Number(action.cooldown_turns) > 0) return `每${trimNumber(action.cooldown_turns)}轮一次`;
   if (action.max_uses_per_turn == null) return "每回合次数不限";
   return `每回合最多 ${action.max_uses_per_turn} 次`;
 }

@@ -168,13 +168,20 @@ def get_rooms_state(ctx: RequestContext) -> None:
             )
             return
     if auth_user is not None and not room.seat_for_token(player_token):
-        checkpoint = campaign_runtime.STRATEGY_STORE.battle_checkpoint(room.room_id)
-        if checkpoint is not None and auth_user.user_id in checkpoint.participant_user_ids:
-            campaign_runtime.STRATEGY_STORE.get_campaign_for_user(checkpoint.campaign_id, auth_user.user_id)
-            recovered_token = strategy_room_token_for_user(room, auth_user.user_id)
-            if recovered_token:
-                player_token = recovered_token
+        if room.mode == "autochess":
+            restored_seat = next((seat for seat in room.seats.values()
+                                  if seat.is_human and seat.account_user_id == auth_user.user_id), None)
+            if restored_seat is not None and restored_seat.token:
+                player_token = restored_seat.token
                 recovered = True
+        else:
+            checkpoint = campaign_runtime.STRATEGY_STORE.battle_checkpoint(room.room_id)
+            if checkpoint is not None and auth_user.user_id in checkpoint.participant_user_ids:
+                campaign_runtime.STRATEGY_STORE.get_campaign_for_user(checkpoint.campaign_id, auth_user.user_id)
+                recovered_token = strategy_room_token_for_user(room, auth_user.user_id)
+                if recovered_token:
+                    player_token = recovered_token
+                    recovered = True
     response = room_state_with_strategy_sync(
         room,
         player_token,
@@ -705,7 +712,11 @@ def _post_bp_room_action(ctx: RequestContext, action: str) -> None:
     token = str(payload.get("player_token") or "")
     try:
         room = ROOMS.get_room(room_id)
-        if action == "team-size":
+        if action == "settings":
+            room.set_bp_settings(token, team_size=payload.get("team_size"),
+                                 level_cap=payload.get("level_cap"),
+                                 show_win_count=payload.get("show_win_count"))
+        elif action == "team-size":
             room.set_bp_team_size(token, payload.get("team_size"))
         elif action == "captain":
             room.set_bp_captain(token, payload.get("team_id"), payload.get("seat_id"))
@@ -729,6 +740,11 @@ def post_rooms_bp_team_size(ctx: RequestContext) -> None:
     _post_bp_room_action(ctx, "team-size")
 
 
+@post("/api/rooms/bp/settings")
+def post_rooms_bp_settings(ctx: RequestContext) -> None:
+    _post_bp_room_action(ctx, "settings")
+
+
 @post("/api/rooms/bp/captain")
 def post_rooms_bp_captain(ctx: RequestContext) -> None:
     _post_bp_room_action(ctx, "captain")
@@ -742,6 +758,29 @@ def post_rooms_bp_choose(ctx: RequestContext) -> None:
 @post("/api/rooms/bp/assign")
 def post_rooms_bp_assign(ctx: RequestContext) -> None:
     _post_bp_room_action(ctx, "assign")
+
+
+@post("/api/rooms/autochess/action")
+def post_rooms_autochess_action(ctx: RequestContext) -> None:
+    handler = ctx.handler
+    payload = ctx.payload
+    room_id = str(payload.get("room_id") or "")
+    player_token = str(payload.get("player_token") or "")
+    try:
+        room = ROOMS.get_room(room_id)
+        if room.mode != "autochess":
+            raise RoomError("当前不是自走棋房间。")
+        seat = room.require_seat(player_token)
+        if (seat.account_user_id is not None and
+                (ctx.auth_user is None or seat.account_user_id != ctx.auth_user.user_id)):
+            raise RoomError("该席位属于另一个登录账号。")
+        room.autochess_action(player_token, str(payload.get("action") or ""), payload)
+    except RoomError as exc:
+        json_response(handler, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        return
+    json_response(handler, HTTPStatus.OK,
+                  room.serialize_state(player_token, base_url=request_base_url(handler),
+                                       advance_chess=False))
 
 
 @post("/api/rooms/set-default-ai-difficulty")
