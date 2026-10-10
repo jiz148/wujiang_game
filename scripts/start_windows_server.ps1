@@ -200,6 +200,7 @@ function Start-QuickTunnel([string]$ExecutablePath, [int]$PortNumber) {
     $process = Start-Process -FilePath $ExecutablePath `
         -ArgumentList $arguments `
         -PassThru `
+        -WindowStyle Hidden `
         -RedirectStandardOutput $stdoutPath `
         -RedirectStandardError $stderrPath
 

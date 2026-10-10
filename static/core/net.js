@@ -20,9 +20,15 @@ export async function fetchJson(url, options = {}) {
       headers,
       signal: rest.signal || controller?.signal,
     });
-    const payload = await response.json();
+    const raw = await response.text();
+    let payload;
+    try {
+      payload = raw ? JSON.parse(raw) : {};
+    } catch {
+      payload = {error: `服务器返回了无法读取的响应（HTTP ${response.status}）。`};
+    }
     if (!response.ok) {
-      throw payload;
+      throw payload?.error ? payload : {error: `请求未完成（HTTP ${response.status}）。`};
     }
     return payload;
   } catch (error) {

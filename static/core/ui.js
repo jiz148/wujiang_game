@@ -54,6 +54,7 @@ export function setScreen(screen, { renderAfter = true } = {}) {
   }
   let next;
   if (screen === "battle") next = hasBattle() ? "battle" : "draft";
+  else if (screen === "autochess") next = state.room?.mode === "autochess" ? "autochess" : "draft";
   else if (SCREENS.includes(screen)) next = screen;
   else next = "draft";
   state.screen = next;
@@ -67,7 +68,8 @@ export function syncScreen({ preferBattle = false } = {}) {
   if (requested) {
     const target = routeTarget(requested);
     // 地址请求进战斗，但手上没有战斗时不能空落一屏。
-    if (target.screen === "battle" && !hasBattle()) {
+    if ((target.screen === "battle" && !hasBattle()) ||
+        (target.screen === "autochess" && state.room?.mode !== "autochess")) {
       state.screen = roomQueryId() ? "draft" : "menu";
       return;
     }
@@ -78,7 +80,9 @@ export function syncScreen({ preferBattle = false } = {}) {
   // 轮询每几秒就会走到这里。菜单和登录门是玩家主动停留的位置，没有明确的
   // 地址请求时不能把它们冲掉，否则玩家会被反复弹回大厅。
   if (state.screen === "menu" || state.screen === "gate") return;
-  if (preferBattle && hasBattle()) {
+  if (state.room?.mode === "autochess" && state.room?.autochess?.phase !== "lobby") {
+    state.screen = "autochess";
+  } else if (preferBattle && hasBattle()) {
     state.screen = "battle";
   } else if (roomQueryId()) {
     state.screen = "draft";

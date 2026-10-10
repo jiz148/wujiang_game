@@ -89,10 +89,11 @@ export function applyRoomPayload(payload, { preserveScreen = false } = {}) {
   const previousScreen = state.screen;
   const previousBoardKey = state.battle ? `${state.battle.board.width}x${state.battle.board.height}` : "";
   const previousRoomId = state.room?.room_id || "";
+  const previousChessPhase = state.room?.autochess?.phase || "";
   const previousBattle = state.liveBattle;
   // 拿到了新的房间状态，说明上一条失败已经翻篇了。
   state.roomError = "";
-  state.heroes = payload.heroes || [];
+  if (Array.isArray(payload.heroes)) state.heroes = payload.heroes;
   if (payload.rooms) {
     state.rooms = payload.rooms;
   }
@@ -181,6 +182,11 @@ export function applyRoomPayload(payload, { preserveScreen = false } = {}) {
     && Boolean(state.room?.viewer_player_id)
     && (!hadBattle || previousScreen === "battle");
   syncScreen({ preferBattle: autoEnterBattle || (preserveScreen && previousScreen === "battle") });
+  if (state.room?.mode === "autochess" && state.room.autochess?.phase !== "lobby" &&
+      previousScreen === "draft" &&
+      (previousRoomId !== state.room.room_id || previousChessPhase === "lobby")) {
+    setScreen("autochess", { renderAfter: false });
+  }
   syncSelectedUnitAfterStateChange();
   syncBattleVfxState({ hadBattle, boardChanged: Boolean(state.liveBattle) && nextBoardKey !== previousBoardKey });
   const previousVisualEventId = maxVisualEventId(previousBattle?.visual_events || []);
@@ -1074,7 +1080,7 @@ export async function startRoomBattle() {
       }),
     });
     applyRoomPayload(payload);
-    setScreen(state.room?.mode === "autochess" ? "draft" : "battle", { renderAfter: false });
+    setScreen(state.room?.mode === "autochess" ? "autochess" : "battle", { renderAfter: false });
     render();
   } catch (error) {
     const payload = error.state || null;

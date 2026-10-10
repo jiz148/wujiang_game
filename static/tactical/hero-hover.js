@@ -31,6 +31,11 @@ function heroDetailNodes(hero) {
     detail('技能', hero.raw_skill_text),
     detail('特性', hero.raw_trait_text),
     ...(hero.weather_effect_text ? [detail('天气效果', hero.weather_effect_text)] : []),
+    ...(hero.entry_companion ? [detail('开场召唤', hero.entry_companion)] : []),
+    ...((hero.synergies || []).map((item) => detail(
+      `${item.category_name}羁绊 · ${item.name}`,
+      `3名：${item.first}；6名：${item.second}`,
+    ))),
   ];
 }
 

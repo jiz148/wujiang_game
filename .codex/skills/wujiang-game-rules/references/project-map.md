@@ -2,7 +2,8 @@
 
 Update this file after every new gameplay requirement or code change in `wujiang_game`. Keep entries concise and durable; do not paste full docs.
 
-- 2026-10-09 并行自走棋首版：规则与数值在 `docs/自走棋模式规则.md`；`rooms/autochess.py` 管 4/8 人经营、商店/合成/预算/布阵、AI 备战、配对、经济/淘汰及观战数据，`multiplayer.py` 复用账号房间并持久化，`engine/core.py` 完整战斗轮超时判定，`api.py` 操作接口，`static/tactical/autochess-ui.js` 界面。`data/装备.xlsx` 经 `rooms/equipment.py` 读取，`rooms/equipment_effects.py` 接入战斗，5 金每轮限抽一件、每将三件；`rooms/synergy.py` 实现职业/属性/种族 3/6 档羁绊；`tests/test_behavior.py::AutoChessBehaviorTests` 定向场景，动态验证由用户执行。
+- 2026-10-09 并行自走棋首版：规则与数值在 `docs/自走棋模式规则.md`；`rooms/autochess.py` 管 4/8 人经营、商店/预算/布阵、AI 备战、配对、经济/淘汰及观战数据，`multiplayer.py` 复用账号房间并持久化，`engine/core.py` 完整战斗轮超时判定，`api.py` 操作接口，`static/tactical/autochess-ui.js` 界面。`data/装备.xlsx` 经 `rooms/equipment.py` 读取，`rooms/equipment_effects.py` 接入战斗，5 金每轮限抽一件、每将三件；`rooms/synergy.py` 实现职业/属性/种族 3/6 档羁绊；`tests/test_behavior.py::AutoChessBehaviorTests` 定向场景，动态验证由用户执行。2026-10-09 体验修正：商店和后备席共用 `hero-hover.js` 展示武将与三类 3/6 档羁绊；`#autochess` 独立全屏路由在备战和交战都显示完整 10×10 标准战场、真实占格及开场坐骑提示；服务端公开当前与下一级按现有武将等级可上场人数上限。每次买已拥有的同名将直接强化所选或优先场上个体并待选一项能力 +1；不再等三张合成。开战阶段分批建立战场和推进 AI，每次只发送精简观战快照、定期持久化，操作响应不附带额外模拟；非 JSON、超时和网络错误显示具体原因。`resolve_ai_until_human_input` 公共包装已接受 `max_steps`。
+- 2026-10-09 运行入口：`start_windows_server.bat` 从 `C:\Users\jiz14\TeamGH\wujiang_game` 加载代码；在 Codex worktree 实施的功能必须同步到该主目录后重启脚本才会出现在与朋友共享的公网页面。`scripts/start_windows_server.ps1` 的隧道后台进程使用隐藏窗口，启动器本身仍显示公网地址。
 
 - 2026-10-08 BP 系统禁等级：`GameRoom._begin_bp()` 从仍可完成完整禁选与双方等级预算的组合里随机取两个不同等级，所有该级武将本局不可手动禁/选，不计入队长禁选步骤；`_bp_draft_feasible` 排除系统禁级，`_bp_choice_error` 对禁将和选将均验算完成性，公开 `auto_banned_levels` 与当前 `legal_levels`。连局重抽并持久化，BP UI 显示可展开的系统禁将名单及资料，并提前标记无法补齐阵容的候选。`BPRoomBehaviorTests` 覆盖等级1/2禁后等级10不可禁选、抽签可行性、UI与房间存档。
 

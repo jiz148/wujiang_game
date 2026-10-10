@@ -933,11 +933,12 @@ class GameRoom:
             for player_id in range(1, seat_count + 1)
         }
 
-    def touch(self) -> None:
+    def touch(self, *, persist_chess: bool = True) -> None:
         self._record_bp_win_if_finished()
         self.version += 1
         self.updated_at = time.time()
-        if self.mode == "autochess":
+        if self.mode == "autochess" and persist_chess:
+            self._last_chess_persist_at = self.updated_at
             ROOMS.persist(self)
 
     def _record_bp_win_if_finished(self) -> None:
@@ -3110,9 +3111,9 @@ class GameRoom:
         self._record_bp_win_if_finished()
         return steps
 
-    def resolve_ai_until_human_input(self) -> int:
+    def resolve_ai_until_human_input(self, max_steps: Optional[int] = None) -> int:
         with self._lock:
-            return self._resolve_ai_until_human_input()
+            return self._resolve_ai_until_human_input(max_steps=max_steps)
 
     def run_ai_simulation_to_end(self, *, max_steps: int = 5000) -> int:
         with self._lock:
@@ -3292,10 +3293,11 @@ class GameRoom:
                 ),
             }
 
-    def serialize_state(self, viewer_token: Optional[str] = None, *, base_url: Optional[str] = None) -> dict[str, Any]:
+    def serialize_state(self, viewer_token: Optional[str] = None, *, base_url: Optional[str] = None,
+                        advance_chess: bool = True) -> dict[str, Any]:
         with self._lock:
             if self.mode == "autochess" and self.autochess is not None:
-                return self._autochess_serialize(viewer_token, base_url=base_url)
+                return self._autochess_serialize(viewer_token, base_url=base_url, advance=advance_chess)
             viewer = self.seat_for_token(viewer_token)
             if self.battle is not None and self.battle.winner is None:
                 self._advance_simulation_due()
@@ -3383,12 +3385,16 @@ class GameRoom:
                 "battle": battle_state,
             }
 
-    def _autochess_serialize(self, viewer_token: Optional[str], *, base_url: Optional[str]) -> dict[str, Any]:
+    def _autochess_serialize(self, viewer_token: Optional[str], *, base_url: Optional[str],
+                             advance: bool = True) -> dict[str, Any]:
         if self.autochess is None:
             raise RoomError("自走棋状态不存在。")
-        if self.autochess.tick(self.seats):
+        prior_phase = self.autochess.phase
+        if advance and self.autochess.tick(self.seats):
             self.status = self.autochess.phase
-            self.touch()
+            should_persist = (self.autochess.phase != prior_phase or
+                              time.time() - float(getattr(self, "_last_chess_persist_at", 0)) >= 5)
+            self.touch(persist_chess=should_persist)
         viewer = self.seat_for_token(viewer_token)
         viewer_id = viewer.player_id if viewer else None
         catalog = hero_lookup()
@@ -3416,7 +3422,7 @@ class GameRoom:
             "seats": [seat.to_public_dict(catalog, self.host_player_id) for seat in self.seats.values()],
             "autochess": chess, "bp": None,
         }
-        return {"heroes": heroes_catalog(), "room": room_state, "battle": None}
+        return {"room": room_state, "battle": None}
 
     def autochess_action(self, token: str, action: str, payload: dict[str, Any]) -> None:
         with self._lock:
@@ -3425,7 +3431,8 @@ class GameRoom:
             if self.mode != "autochess" or chess is None:
                 raise RoomError("当前不是自走棋房间。")
             actions = {
-                "buy": lambda: chess.buy(seat.player_id, int(payload.get("slot", -1))),
+                "buy": lambda: chess.buy(seat.player_id, int(payload.get("slot", -1)),
+                                          str(payload.get("piece_id") or "") or None),
                 "reroll": lambda: chess.reroll(seat.player_id),
                 "level_up": lambda: chess.level_up(seat.player_id),
                 "upgrade": lambda: chess.choose_upgrade(seat.player_id, str(payload.get("piece_id") or ""), str(payload.get("stat") or "")),
@@ -3444,7 +3451,7 @@ class GameRoom:
                 actions[action]()
             except (TypeError, ValueError, KeyError) as exc:
                 raise RoomError("自走棋操作参数无效。") from exc
-            chess.tick(self.seats)
+            chess.tick(self.seats, action_budget=0, prepare_budget=0)
             self.status = chess.phase
             self.touch()
 

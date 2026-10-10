@@ -8,7 +8,7 @@
 // 供样式按屏幕收敛 chrome（例如登录门不显示顶栏）。
 import { state } from './state.js';
 
-export const SCREENS = ["gate", "menu", "draft", "battle"];
+export const SCREENS = ["gate", "menu", "draft", "battle", "autochess"];
 
 const DEFAULT_SCREEN = "draft";
 
@@ -28,6 +28,7 @@ const ROUTE_TITLES = {
 
 export function routeTitle(screen = state.screen, flow = state.homeFlow) {
   if (screen === "battle") return "战场";
+  if (screen === "autochess") return "自走棋战场";
   if (screen === "draft") return ROUTE_TITLES[flow] || "武将";
   return "武将";
 }
@@ -35,6 +36,7 @@ export function routeTitle(screen = state.screen, flow = state.homeFlow) {
 /** 地址栏的 hash（不含 #）。draft 屏交由当前流程命名。 */
 export function screenRoute(screen = state.screen, flow = state.homeFlow) {
   if (screen === "battle") return "battle";
+  if (screen === "autochess") return "autochess";
   if (screen === "menu") return "menu";
   if (screen === "gate") return "";
   return FLOWS.includes(flow) ? flow : "menu";
@@ -44,6 +46,7 @@ export function screenRoute(screen = state.screen, flow = state.homeFlow) {
 export function routeTarget(route) {
   const name = String(route || "").replace("#", "");
   if (name === "battle") return { screen: "battle", flow: "" };
+  if (name === "autochess") return { screen: "autochess", flow: "" };
   if (FLOWS.includes(name)) return { screen: "draft", flow: name };
   return { screen: "menu", flow: "" };
 }
@@ -61,7 +64,7 @@ export function applyScreen() {
     document.body.classList.toggle(`screen-${name}`, name === active);
   }
   // 登录门与主菜单是全屏接管的，不带房间/战斗那套顶栏工具。
-  document.body.classList.toggle("battle-mode", active === "battle");
+  document.body.classList.toggle("battle-mode", active === "battle" || active === "autochess");
   document.body.classList.toggle("chrome-hidden", active === "gate" || active === "menu");
   // 战役进行中会把外壳锁成一屏（见 body.campaign-mode）。开关由 renderStrategyPanel
   // 打开，但它只在 draft 屏跑得到；离开这一屏必须在这里关掉，否则主菜单会继承

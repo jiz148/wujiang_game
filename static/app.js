@@ -71,9 +71,11 @@ window.addEventListener("DOMContentLoaded", async () => {
       refreshState({ preserveScreen: false });
       return;
     }
+    const inAutoChessRound = state.room?.mode === "autochess" &&
+      ["preparation", "battle"].includes(state.room?.autochess?.phase);
     const delay = document.hidden
-      ? 5000
-      : (ui.pollBackoffMs || (state.room?.status === "battle" ? 800 : 1500));
+      ? (inAutoChessRound ? 1500 : 5000)
+      : (ui.pollBackoffMs || (state.room?.status === "battle" || inAutoChessRound ? 800 : 1500));
     if (now < ui.nextRoomPollAt) return;
     ui.nextRoomPollAt = now + delay;
     refreshState();

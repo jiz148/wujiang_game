@@ -38,7 +38,7 @@ export function render() {
   }
 
   if (isGameOver()) clearActionSelection();
-  document.body.classList.toggle("battle-mode", state.screen === "battle");
+  document.body.classList.toggle("battle-mode", state.screen === "battle" || state.screen === "autochess");
   ensureDraftSelection();
   ensureSelectedUnit();
   const preserveRoomConfig = isRoomConfigControlActive();

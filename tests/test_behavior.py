@@ -28584,7 +28584,7 @@ class AutoChessBehaviorTests(unittest.TestCase):
             self.assertEqual(restored.autochess.players[1].equipment_inventory,
                              room.autochess.players[1].equipment_inventory)
 
-    def test_shop_budget_merging_upgrade_and_large_body(self):
+    def test_shop_budget_immediate_upgrade_and_large_body(self):
         from wujiang.tactical.rooms.autochess import AutoChessState, ChessPiece, hero_catalog
         from wujiang.tactical.rooms.multiplayer import RoomError
         chess = AutoChessState(4, seed=17)
@@ -28598,9 +28598,8 @@ class AutoChessBehaviorTests(unittest.TestCase):
         first = player.pieces[0]
         chess.place(1, first.id, 0, 0)
         self.assertEqual(chess._budget_used(player), 1)
-        for _ in range(2):
-            player.shop[0] = cheap
-            chess.buy(1, 0)
+        player.shop[0] = cheap
+        chess.buy(1, 0)
         self.assertEqual(len(player.pieces), 1)
         self.assertEqual(player.pieces[0].star, 2)
         self.assertEqual(player.pieces[0].pending_upgrades, 1)
@@ -28608,6 +28607,16 @@ class AutoChessBehaviorTests(unittest.TestCase):
             chess.ready(1)
         chess.choose_upgrade(1, first.id, "attack")
         self.assertEqual(first.upgrades["attack"], 1)
+        self.assertEqual(first.x, 0)
+        player.shop[0] = cheap
+        chess.buy(1, 0, first.id)
+        self.assertEqual((len(player.pieces), first.star, first.pending_upgrades), (1, 3, 1))
+        chess.choose_upgrade(1, first.id, "defense")
+        player.shop[0] = cheap
+        chess.buy(1, 0)
+        self.assertEqual((len(player.pieces), first.star, first.pending_upgrades), (1, 3, 1))
+        chess.choose_upgrade(1, first.id, "speed")
+        self.assertEqual(first.upgrades, {"attack": 1, "defense": 1, "speed": 1})
         huge_code = next((code for code in catalog if len(__import__("wujiang.tactical.heroes.registry", fromlist=["entry_footprint_offsets"]).entry_footprint_offsets(
             __import__("wujiang.tactical.heroes.registry", fromlist=["create_hero"]).create_hero(code, 1))) > 1), None)
         if huge_code:
@@ -28720,3 +28729,87 @@ class AutoChessBehaviorTests(unittest.TestCase):
         self.assertIn("布阵", source)
         self.assertIn("场上羁绊", source)
         self.assertIn("本轮已抽装备", source)
+        self.assertIn("autochess-countdown", source)
+        self.assertIn("renderSelectedHero", source)
+        self.assertIn("autochess-battle-board board", source)
+        self.assertIn("全员确认或倒计时结束后自动开战", source)
+        self.assertIn("autochess-board-pieces board-pieces", source)
+        self.assertIn("强化成功，请在武将卡片中选择一项能力", source)
+        self.assertIn('id="autochess-screen"', (STATIC_ROOT / "index.html").read_text(encoding="utf-8"))
+        self.assertIn('setScreen(state.room?.mode === "autochess" ? "autochess"',
+                      frontend_module("events.js"))
+
+    def test_preparation_starts_when_everyone_ready_or_deadline_passes(self):
+        from types import SimpleNamespace
+        from wujiang.tactical.rooms.autochess import AutoChessState
+
+        seats = {seat_id: SimpleNamespace(is_ai=False) for seat_id in range(1, 5)}
+        chess = AutoChessState(4, seed=22)
+        chess.start()
+        with mock.patch.object(chess, "_begin_battles") as begin:
+            for seat_id in range(1, 5):
+                chess.ready(seat_id)
+            chess.tick(seats, now=chess.deadline_at - 1)
+            begin.assert_called_once_with()
+
+        chess = AutoChessState(4, seed=22)
+        chess.start()
+        with mock.patch.object(chess, "_ai_prepare", side_effect=lambda seat_id: chess.ready(seat_id)) as prepare, \
+                mock.patch.object(chess, "_begin_battles") as begin:
+            chess.tick(seats, now=chess.deadline_at + 1, prepare_budget=4)
+            self.assertEqual(prepare.call_count, 4)
+            begin.assert_called_once_with()
+
+    def test_auto_battle_advances_in_bounded_steps(self):
+        from types import SimpleNamespace
+        from wujiang.tactical.rooms.autochess import AutoChessState, ChessMatch
+
+        chess = AutoChessState(4, seed=24)
+        chess.phase = "battle"
+        first = SimpleNamespace(battle=SimpleNamespace(winner=None),
+                                resolve_ai_until_human_input=mock.Mock(return_value=1))
+        second = SimpleNamespace(battle=SimpleNamespace(winner=None),
+                                 resolve_ai_until_human_input=mock.Mock(return_value=1))
+        chess.matches = [ChessMatch(1, 2, runner=first), ChessMatch(3, 4, runner=second)]
+        chess.tick({}, action_budget=2)
+        first.resolve_ai_until_human_input.assert_called_once_with(max_steps=1)
+        second.resolve_ai_until_human_input.assert_called_once_with(max_steps=1)
+
+    def test_observer_snapshot_only_sends_board_bodies_and_recent_logs(self):
+        from wujiang.tactical.engine.core import Battle, Position
+        from wujiang.tactical.heroes.registry import create_hero
+        from wujiang.tactical.rooms.autochess import battle_observer_snapshot
+
+        battle = Battle(width=10, height=10)
+        battle.add_unit(create_hero("ellie", 1), Position(0, 0))
+        battle.logs = [str(index) for index in range(20)]
+        snapshot = battle_observer_snapshot(battle)
+        self.assertEqual(snapshot["board"], {"width": 10, "height": 10})
+        self.assertEqual(len(snapshot["logs"]), 12)
+        self.assertEqual(len(snapshot["units"]), 1)
+        self.assertEqual(set(snapshot), {"board", "round_number", "winner", "units", "logs"})
+
+    def test_player_sees_capacity_hero_synergies_and_mounted_entry_shape(self):
+        from types import SimpleNamespace
+        from wujiang.tactical.rooms.autochess import AutoChessState, ChessPiece, _footprint, hero_catalog
+
+        chess = AutoChessState(4, seed=23)
+        chess.start()
+        catalog = hero_catalog()
+        codes = [next(code for code, hero in catalog.items() if hero["level"] == level)
+                 for level in (1, 3, 5)]
+        player = chess.players[1]
+        player.pieces = [ChessPiece(str(index), code) for index, code in enumerate(codes)]
+        player.shop[0] = "dragon_rider"
+        seats = {seat_id: SimpleNamespace(name=f"席位{seat_id}", is_ai=False)
+                 for seat_id in range(1, 5)}
+        view = chess.public(1, seats)
+        own = view["players"][0]
+        self.assertEqual((own["budget"], own["roster_capacity"], own["next_roster_capacity"]), (6, 2, 3))
+        dragon = view["hero_previews"]["dragon_rider"]
+        self.assertIn("龙", dragon["entry_companion"])
+        self.assertEqual({(dx, dy) for dx, dy in _footprint("dragon_rider")},
+                         {(0, 0), (1, 0), (0, 1), (1, 1)})
+        self.assertEqual({item["category"] for item in dragon["synergies"]},
+                         {"role", "attribute", "race"})
+        self.assertIn("3名", frontend_module("autochess-ui.js") + frontend_module("hero-hover.js"))

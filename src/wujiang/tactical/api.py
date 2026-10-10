@@ -779,7 +779,8 @@ def post_rooms_autochess_action(ctx: RequestContext) -> None:
         json_response(handler, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         return
     json_response(handler, HTTPStatus.OK,
-                  room.serialize_state(player_token, base_url=request_base_url(handler)))
+                  room.serialize_state(player_token, base_url=request_base_url(handler),
+                                       advance_chess=False))
 
 
 @post("/api/rooms/set-default-ai-difficulty")

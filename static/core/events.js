@@ -277,7 +277,7 @@ export function bindEvents() {
   window.addEventListener("resize", () => {
     scheduleBoardOverlayRender();
   });
-  $("room-battle").addEventListener("click", () => setScreen("battle"));
+  $("room-battle").addEventListener("click", () => setScreen(state.room?.mode === "autochess" ? "autochess" : "battle"));
   $("return-room-lobby")?.addEventListener("click", () => exitBattle());
   $("ai-takeover-toggle")?.addEventListener("click", () => toggleAiTakeover());
   $("ai-hero-style")?.addEventListener("change", (event) => {
@@ -1243,7 +1243,9 @@ export function renderRoomPanels() {
     deleteRoomBtn.classList.toggle("hidden", !state.room.viewer_is_host);
     deleteRoomBtn.disabled = !state.room.viewer_is_host;
     copyInvite.classList.remove("hidden");
-    roomBattle.classList.toggle("hidden", !hasBattle());
+    roomBattle.classList.toggle("hidden", !hasBattle() && state.room.mode !== "autochess");
+    roomBattle.disabled = !hasBattle() && state.room.mode !== "autochess";
+    roomBattle.textContent = state.room.mode === "autochess" ? "进入自走棋战场" : "进入战场";
     roomBattle.classList.add("primary", "room-battle-btn");
     roomBattle.classList.remove("ghost");
     if (toggleReady) toggleReady.classList.add("hidden");
@@ -1304,8 +1306,10 @@ export function renderRoomPanels() {
   deleteRoomBtn.classList.toggle("hidden", !state.room.viewer_is_host);
   deleteRoomBtn.disabled = !state.room.viewer_is_host;
   copyInvite.classList.toggle("hidden", !state.room.invite_url);
-  roomBattle.classList.toggle("hidden", !hasBattle());
-  roomBattle.disabled = !hasBattle();
+  const canEnterChess = state.room.mode === "autochess" && state.room.status !== "lobby";
+  roomBattle.classList.toggle("hidden", !hasBattle() && !canEnterChess);
+  roomBattle.disabled = !hasBattle() && !canEnterChess;
+  roomBattle.textContent = canEnterChess ? "进入自走棋战场" : "进入战场";
   roomBattle.classList.add("primary", "room-battle-btn");
   roomBattle.classList.remove("ghost");
   if (toggleReady) {

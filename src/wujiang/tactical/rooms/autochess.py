@@ -18,7 +18,7 @@ from wujiang.tactical.heroes.registry import (
 )
 from wujiang.tactical.rooms.equipment import load_equipment_catalog
 from wujiang.tactical.rooms.equipment_effects import EquipmentStatus
-from wujiang.tactical.rooms.synergy import SynergyStatus, synergy_counts
+from wujiang.tactical.rooms.synergy import CATEGORY_LABELS, SynergyStatus, synergy_counts, synergy_description
 
 
 @dataclass(frozen=True)
@@ -69,6 +69,26 @@ def _footprint(code: str) -> tuple[tuple[int, int], ...]:
     return tuple(entry_footprint_offsets(create_hero(code, 1)))
 
 
+@lru_cache(maxsize=None)
+def _entry_companion(code: str) -> str:
+    unit = create_hero(code, 1)
+    return next((trait.description for trait in unit.traits
+                 if trait.name == "骑士开场坐骑"), "")
+
+
+def _hero_preview(hero: dict[str, Any]) -> dict[str, Any]:
+    preview = dict(hero)
+    preview["synergies"] = [
+        {"category": category, "category_name": label,
+         "name": str(hero[category]),
+         "first": synergy_description(category, str(hero[category]), 1),
+         "second": synergy_description(category, str(hero[category]), 2)}
+        for category, label in CATEGORY_LABELS.items()
+    ]
+    preview["entry_companion"] = _entry_companion(str(hero["code"]))
+    return preview
+
+
 def hero_cost(level: int) -> int:
     return max(1, min(5, (int(level) + 1) // 2))
 
@@ -106,6 +126,22 @@ def chess_timeout_result(battle: Battle) -> dict[str, Any]:
             "scores": {1: left, 2: right}}
 
 
+def battle_observer_snapshot(battle: Battle) -> dict[str, Any]:
+    """Only the fields used by the read-only chess board; avoid action previews."""
+    units = []
+    for unit in battle.all_units():
+        if not unit.alive or unit.position is None or unit.banished:
+            continue
+        units.append({"id": unit.unit_id, "name": unit.name, "player_id": unit.player_id,
+                      "position": unit.position.to_dict(), "alive": True, "banished": False,
+                      "occupied_cells": [cell.to_dict() for cell in battle.unit_cells(unit)],
+                      "hp": unit.current_hp, "max_hp": unit.max_health,
+                      "is_mount": unit.is_mount})
+    return {"board": {"width": battle.width, "height": battle.height},
+            "round_number": battle.round_number, "winner": battle.winner,
+            "units": units, "logs": battle.logs[-12:]}
+
+
 @dataclass
 class ChessPiece:
     id: str
@@ -124,7 +160,8 @@ class ChessPiece:
                 "star": self.star, "upgrades": dict(self.upgrades),
                 "pending_upgrades": self.pending_upgrades, "x": self.x, "y": self.y,
                 "equipment": list(self.equipment),
-                "footprint": _footprint(self.code)}
+                "footprint": _footprint(self.code),
+                "entry_companion": _entry_companion(self.code)}
 
 
 @dataclass
@@ -172,6 +209,7 @@ class AutoChessState:
         self.history: list[dict[str, Any]] = []
         self.champion: int | None = None
         self.last_mirror: int | None = None
+        self.next_match_cursor = 0
         self.version = 0
 
     def _change(self) -> None:
@@ -248,6 +286,16 @@ class AutoChessState:
         catalog = hero_catalog()
         return sum(int(catalog[piece.code]["level"]) for piece in player.fielded())
 
+    def _roster_capacity(self, player: ChessPlayer, budget: int) -> int:
+        levels = sorted(int(hero_catalog()[piece.code]["level"]) for piece in player.pieces)
+        used = count = 0
+        for level in levels:
+            if used + level > budget:
+                break
+            used += level
+            count += 1
+        return count
+
     def _can_place(self, player: ChessPlayer, piece: ChessPiece, x: int, y: int) -> bool:
         catalog = hero_catalog()
         used = self._budget_used(player) - (int(catalog[piece.code]["level"]) if piece.x is not None else 0)
@@ -266,24 +314,7 @@ class AutoChessState:
                 return False
         return True
 
-    def _merge(self, player: ChessPlayer, code: str) -> None:
-        for star in (1, 2):
-            while True:
-                group = [piece for piece in player.pieces if piece.code == code and piece.star == star]
-                if len(group) < 3:
-                    break
-                group.sort(key=lambda piece: (piece.x is None, -len(piece.equipment)))
-                keeper = group[0]
-                for consumed in group[1:3]:
-                    for stat, amount in consumed.upgrades.items():
-                        keeper.upgrades[stat] = keeper.upgrades.get(stat, 0) + amount
-                    keeper.pending_upgrades += consumed.pending_upgrades
-                    player.equipment_inventory.extend(consumed.equipment)
-                    player.pieces.remove(consumed)
-                keeper.star += 1
-                keeper.pending_upgrades += 1
-
-    def buy(self, seat_id: int, slot: int) -> None:
+    def buy(self, seat_id: int, slot: int, target_piece_id: str | None = None) -> None:
         player = self._preparing(seat_id)
         if not 0 <= slot < len(player.shop) or player.shop[slot] is None:
             _error("商店格无可购买武将。")
@@ -291,14 +322,23 @@ class AutoChessState:
         price = hero_cost(hero_catalog()[code]["level"])
         if player.gold < price:
             _error("金币不足。")
+        owned = [piece for piece in player.pieces if piece.code == code]
+        if target_piece_id:
+            target = self._piece(player, target_piece_id)
+            if target.code != code:
+                _error("所选强化目标与商店武将不同。")
+        else:
+            target = min(owned, key=lambda piece: (piece.x is None, -piece.star)) if owned else None
         bench_full = len([piece for piece in player.pieces if piece.x is None]) >= self.config.bench_capacity
-        merge_possible = sum(1 for piece in player.pieces if piece.code == code and piece.star == 1) >= 2
-        if bench_full and not merge_possible:
+        if bench_full and target is None:
             _error("后备席已满，请先上场或出售武将。")
         player.gold -= price
         player.shop[slot] = None
-        player.pieces.append(ChessPiece(secrets.token_hex(5), code))
-        self._merge(player, code)
+        if target is None:
+            player.pieces.append(ChessPiece(secrets.token_hex(5), code))
+        else:
+            target.star = min(3, target.star + 1)
+            target.pending_upgrades += 1
         self._change()
 
     def reroll(self, seat_id: int) -> None:
@@ -394,7 +434,7 @@ class AutoChessState:
     def ready(self, seat_id: int) -> None:
         player = self._preparing(seat_id)
         if any(piece.pending_upgrades for piece in player.pieces):
-            _error("请先为升星武将选择能力值。")
+            _error("请先为强化武将选择能力值。")
         player.ready = True
         self._change()
 
@@ -508,7 +548,11 @@ class AutoChessState:
     def _begin_battles(self) -> None:
         self.phase = "battle"
         self.deadline_at = None
-        for match in self.matches:
+        self.next_match_cursor = 0
+        self._change()
+
+    def _advance_match(self, match: ChessMatch) -> None:
+        if match.runner is None:
             match.runner = self._create_match_battle(match)
             if match.runner is None:
                 left_count = len(self.players[match.left].fielded())
@@ -517,7 +561,14 @@ class AutoChessState:
                         else self.rng.choice((1, 2)))
                 match.result = {"winner": side, "damage": max(1, left_count if side == 1 else right_count),
                                 "criterion": "empty_board", "scores": {}}
-        self._change()
+            self._change()
+            return
+        steps = match.runner.resolve_ai_until_human_input(max_steps=1)
+        if steps:
+            self._change()
+        if match.runner.battle.winner is not None:
+            self._settle_match(match)
+            self._change()
 
     def _settle_match(self, match: ChessMatch) -> None:
         battle = match.runner.battle if match.runner else None
@@ -593,39 +644,42 @@ class AutoChessState:
             self._begin_round()
         self._change()
 
-    def tick(self, seats: dict[int, Any], *, now: float | None = None, action_budget: int = 8) -> bool:
+    def tick(self, seats: dict[int, Any], *, now: float | None = None,
+             action_budget: int = 2, prepare_budget: int = 1) -> bool:
         before = self.version
         if self.phase == "preparation":
             due = (now if now is not None else time.time()) >= (self.deadline_at or float("inf"))
-            if due:
-                for seat_id in self._living():
-                    if not self.players[seat_id].ready:
-                        self._ai_prepare(seat_id)
-            else:
-                for seat_id in self._living():
-                    if seats[seat_id].is_ai and not self.players[seat_id].ready:
-                        self._ai_prepare(seat_id)
+            prepared = 0
+            for seat_id in self._living():
+                if prepared >= prepare_budget:
+                    break
+                if not self.players[seat_id].ready and (due or seats[seat_id].is_ai):
+                    self._ai_prepare(seat_id)
+                    prepared += 1
             if all(self.players[seat_id].ready for seat_id in self._living()):
                 self._begin_battles()
-        if self.phase == "battle":
-            for match in self.matches:
-                if match.result is not None:
-                    continue
-                runner = match.runner
-                if runner is None:
-                    continue
-                steps = runner.resolve_ai_until_human_input(max_steps=action_budget)
-                if steps:
-                    self._change()
-                if runner.battle.winner is not None:
-                    self._settle_match(match)
-                    self._change()
+        if self.phase == "battle" and action_budget > 0:
+            for _ in range(action_budget):
+                unfinished = [match for match in self.matches if match.result is None]
+                if not unfinished:
+                    break
+                index = getattr(self, "next_match_cursor", 0) % len(self.matches)
+                for offset in range(len(self.matches)):
+                    candidate = self.matches[(index + offset) % len(self.matches)]
+                    if candidate.result is None:
+                        match = candidate
+                        self.next_match_cursor = (index + offset + 1) % len(self.matches)
+                        break
+                self._advance_match(match)
             if all(match.result is not None for match in self.matches):
                 self._finish_round()
         return self.version != before
 
     def public(self, viewer_id: int | None, seats: dict[int, Any]) -> dict[str, Any]:
         catalog = hero_catalog()
+        viewer = self.players.get(viewer_id) if viewer_id is not None else None
+        visible_codes = ({piece.code for piece in viewer.pieces} |
+                         {code for code in viewer.shop if code}) if viewer else set()
         players = []
         for seat_id, player in self.players.items():
             seat = seats[seat_id]
@@ -644,16 +698,21 @@ class AutoChessState:
                                "equipment_inventory": list(player.equipment_inventory),
                                "equipment_drawn_this_round": player.equipment_drawn_round == self.round_number,
                                "budget": self.config.level_budgets[player.level - 1],
-                               "budget_used": self._budget_used(player)})
+                               "budget_used": self._budget_used(player),
+                               "roster_capacity": self._roster_capacity(player, self.config.level_budgets[player.level - 1]),
+                               "next_roster_capacity": (self._roster_capacity(player, self.config.level_budgets[player.level])
+                                                        if player.level < len(self.config.level_budgets) else None)})
             players.append(public)
         battles = []
         for index, match in enumerate(self.matches):
             battle = match.runner.battle if match.runner else None
             battles.append({"index": index, "left": match.left, "right": match.right,
                             "mirror": match.mirror, "result": match.result,
-                            "battle": battle.to_public_dict() if battle is not None else None})
+                            "battle": battle_observer_snapshot(battle) if battle is not None else None})
         return {"phase": self.phase, "round": self.round_number, "deadline_at": self.deadline_at,
+                "server_time": time.time(),
                 "seat_count": self.seat_count, "players": players, "matches": battles,
+                "hero_previews": {code: _hero_preview(catalog[code]) for code in visible_codes},
                 "history": self.history[-8:], "champion": self.champion,
                 "viewer_id": viewer_id, "version": self.version,
                 "equipment_available": bool(EQUIPMENT_CATALOG),
