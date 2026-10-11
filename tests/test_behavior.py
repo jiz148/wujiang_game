@@ -8193,17 +8193,17 @@ class CombatBehaviorTests(unittest.TestCase):
         turn_order_codes = [battle.get_unit(unit_id).hero_code for unit_id in battle.turn_order_unit_ids]
         self.assertEqual(
             turn_order_codes,
-            ["undead_king_lina", "dark_human", "jade", "fire_funeral", "doomlight_dragon", "bard"],
+            ["bard", "doomlight_dragon", "dark_human", "undead_king_lina", "fire_funeral", "jade"],
         )
 
-        # When the bard slot comes later in the ring but the bard has already been destroyed
-        end_turns(battle, 4)
+        # When the ring returns to the bard's first slot after its destruction
+        end_turns(battle, 5)
         battle.remove_unit(bard)
         battle.perform_action({"type": "end_turn"})
 
         # Then the fixed slot is skipped without reordering the rest of the ring
         self.assertIn(bard.unit_id, battle.turn_order_unit_ids)
-        self.assertEqual(battle.current_turn_unit().hero_code, "undead_king_lina")
+        self.assertEqual(battle.current_turn_unit().hero_code, "doomlight_dragon")
         self.assertEqual(battle.round_number, 2)
         battle.perform_action({"type": "end_turn"})
         self.assertEqual(battle.current_turn_unit().hero_code, "dark_human")
@@ -28813,3 +28813,391 @@ class AutoChessBehaviorTests(unittest.TestCase):
         self.assertEqual({item["category"] for item in dragon["synergies"]},
                          {"role", "attribute", "race"})
         self.assertIn("3名", frontend_module("autochess-ui.js") + frontend_module("hero-hover.js"))
+
+
+class NewBatch223TurnOrderBehaviorTests(unittest.TestCase):
+    """Every ordinary match freezes low level, high speed, high attack initiative."""
+
+    def test_level_precedes_speed_and_sides_still_interleave(self):
+        battle = create_battle(["dark_human", "bard"], ["undead_king_lina", "doomlight_dragon"])
+        codes = [battle.get_unit(unit_id).hero_code for unit_id in battle.turn_order_unit_ids]
+        self.assertEqual(codes, ["bard", "doomlight_dragon", "dark_human", "undead_king_lina"])
+        self.assertEqual(battle.current_turn_unit().hero_code, "bard")
+
+    def test_speed_then_attack_break_same_level_ties(self):
+        from wujiang.tactical.heroes.registry import sort_units_for_classic
+
+        bard = create_hero("bard", 1)
+        fire = create_hero("fire_funeral", 1)
+        bard.level = fire.level
+        bard.base_stats.speed = fire.base_stats.speed + 1
+        self.assertIs(sort_units_for_classic([fire, bard])[0], bard)
+        bard.base_stats.speed = fire.base_stats.speed
+        self.assertIs(sort_units_for_classic([fire, bard])[0], fire)
+
+    def test_single_hero_match_uses_same_initiative_rule(self):
+        battle = create_battle("undead_king_lina", "bard")
+        self.assertEqual([battle.get_unit(unit_id).hero_code for unit_id in battle.turn_order_unit_ids],
+                         ["bard", "undead_king_lina"])
+        self.assertEqual(battle.active_player, 2)
+
+
+class NewBatch223ElectronicWingBehaviorTests(unittest.TestCase):
+    """Source-locked R223: attachment, permanent shot cost, lifecycle, and AI."""
+
+    def fixture(self):
+        battle = create_battle(["excel_r223", "excel_r221"], "elite_soldier")
+        battle.width, battle.height = 12, 10
+        wing = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r223")
+        host = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r221")
+        enemy = primary_hero(battle, 2)
+        wing.position, host.position, enemy.position = Position(1, 3), Position(3, 3), Position(6, 3)
+        battle.active_player = wing.player_id
+        battle._exclusive_turn_unit_id = wing.unit_id
+        wing.turn_ready = True
+        for unit in (wing, host, enemy):
+            unit.max_health = unit.current_hp = 10
+        return battle, wing, host, enemy
+
+    def test_registry_common_tools_and_split_movement_budget(self):
+        battle, wing, _, _ = self.fixture()
+        self.assertTrue({"machine_gun", "missile", "ion_shield", "electronic_fusion"}.issubset(wing.skill_map()))
+        self.assertTrue(wing.has_flying)
+        self.assertGreater(wing.normal_move_actions_per_turn(), 10)
+        wing.normal_move_steps_used = 4
+        self.assertEqual(wing.remaining_normal_move_distance(battle), 1)
+
+    def test_fusion_filters_factory_and_accepts_clone_name_then_leaves_grid(self):
+        battle, wing, host, _ = self.fixture()
+        factory = create_hero("excel_r222", 1)
+        factory.position = Position(2, 5)
+        battle.units[factory.unit_id] = factory
+        clone = create_hero("excel_r221", 1)
+        clone.is_clone = True
+        clone.position = Position(1, 4)
+        battle.units[clone.unit_id] = clone
+        skill = wing.get_skill("electronic_fusion")
+        targets = {unit.unit_id for unit in skill.valid_hosts(battle, wing)}
+        self.assertIn(host.unit_id, targets)
+        self.assertIn(clone.unit_id, targets)
+        self.assertNotIn(factory.unit_id, targets)
+        before = (host.stat("attack"), host.stat("defense"), host.stat("attack_range"))
+        skill.execute(battle, wing, {"target_unit_id": host.unit_id})
+        self.assertIsNone(wing.position)
+        self.assertEqual(wing.equipped_to_id, host.unit_id)
+        self.assertFalse(wing.can_take_turn_actions(battle))
+        self.assertEqual((host.stat("attack"), host.stat("defense"), host.stat("attack_range")),
+                         tuple(value + 1 for value in before))
+        self.assertTrue(host.has_flying)
+        self.assertEqual(len([skill for skill in host.action_skills()
+                              if skill.code.startswith("fusion_piercing_shot__")]), 1)
+        self.assertTrue(any(skill["code"].startswith("fusion_piercing_shot__")
+                            for skill in host.to_public_dict(battle)["skills"]))
+
+    def test_shot_pays_persistent_stat_first_and_queues_fixed_piercing_damage(self):
+        battle, wing, host, enemy = self.fixture()
+        wing.get_skill("electronic_fusion").execute(battle, wing, {"target_unit_id": host.unit_id})
+        battle._exclusive_turn_unit_id = host.unit_id
+        host.turn_ready = True
+        shot = next(skill for skill in host.action_skills() if skill.code.startswith("fusion_piercing_shot__"))
+        payload = {"choice_code": "defense", "cells": [enemy.position.to_dict()]}
+        old_defense = host.base_stats.defense
+        self.assertTrue(shot.can_use(battle, host, payload)[0])
+        shot.execute(battle, host, payload)
+        self.assertEqual(host.base_stats.defense, old_defense - 1)
+        queued = battle.pending_followup_actions[-1]
+        self.assertEqual(queued.payload["attack_power"], 4)
+        self.assertTrue(queued.payload["ignore_shield"])
+        self.assertEqual(queued.target_cells, [enemy.position])
+        self.assertEqual(shot.max_uses_per_turn, 1)
+
+    def test_shot_stat_cost_remains_paid_when_target_leaves_declared_cell(self):
+        battle, wing, host, enemy = self.fixture()
+        wing.get_skill("electronic_fusion").execute(battle, wing, {"target_unit_id": host.unit_id})
+        shot = next(skill for skill in host.action_skills() if skill.code.startswith("fusion_piercing_shot__"))
+        declared = enemy.position
+        payload = {"choice_code": "attack_range", "cells": [declared.to_dict()]}
+        old_range = host.base_stats.attack_range
+        shot.prepay_resources(battle, host, payload)
+        self.assertEqual(host.base_stats.attack_range, old_range - 1)
+        enemy.position = Position(7, 3)
+        shot.execute(battle, host, {**payload, "resources_prepaid": True})
+        self.assertEqual(host.base_stats.attack_range, old_range - 1)
+        self.assertEqual(battle.pending_followup_actions[-1].target_cells, [declared])
+
+    def test_detach_reverts_buff_and_host_death_destroys_attached_wing(self):
+        battle, wing, host, _ = self.fixture()
+        baseline = (host.stat("attack"), host.stat("defense"), host.stat("attack_range"))
+        fusion = wing.get_skill("electronic_fusion")
+        fusion.execute(battle, wing, {"target_unit_id": host.unit_id})
+        detach = next(skill for skill in host.action_skills() if skill.code.startswith("electronic_unfuse__"))
+        cell = detach.available_cells(battle, host)[0]
+        detach.execute(battle, host, cell.to_dict())
+        self.assertEqual(wing.position, cell)
+        self.assertIsNone(wing.equipped_to_id)
+        self.assertEqual((host.stat("attack"), host.stat("defense"), host.stat("attack_range")), baseline)
+        self.assertFalse(host.has_flying)
+        fusion.execute(battle, wing, {"target_unit_id": host.unit_id})
+        host.alive = False
+        battle.remove_unit(host)
+        self.assertFalse(wing.alive)
+        self.assertNotIn(wing.unit_id, battle.units)
+        self.assertIn(wing, battle.destroyed_units)
+
+    def test_clone_host_survives_equipment_and_two_wings_stack_independently(self):
+        battle, wing, _, _ = self.fixture()
+        clone = create_hero("excel_r221", 1)
+        clone.is_clone = True
+        battle.add_unit(clone, Position(2, 4))
+        wing.get_skill("electronic_fusion").execute(battle, wing, {"target_unit_id": clone.unit_id})
+        self.assertTrue(clone.alive)
+        self.assertEqual(wing.equipped_to_id, clone.unit_id)
+        wing2 = create_hero("excel_r223", 1)
+        battle.add_unit(wing2, Position(3, 4))
+        baseline = clone.stat("attack")
+        wing2.get_skill("electronic_fusion").execute(battle, wing2, {"target_unit_id": clone.unit_id})
+        self.assertEqual(clone.stat("attack"), baseline + 1)
+        self.assertEqual(len([skill for skill in clone.action_skills()
+                              if skill.code.startswith("fusion_piercing_shot__")]), 2)
+        clone.alive = False
+        battle.remove_unit(clone)
+        self.assertFalse(wing.alive)
+        self.assertFalse(wing2.alive)
+
+    def test_equipped_hero_turn_slot_is_skipped_until_detached(self):
+        battle, wing, host, _ = self.fixture()
+        wing.get_skill("electronic_fusion").execute(battle, wing, {"target_unit_id": host.unit_id})
+        battle._exclusive_turn_unit_id = None
+        battle.turn_slot_index = battle.turn_order_unit_ids.index(wing.unit_id)
+        battle.start_current_turn()
+        self.assertNotEqual(battle.current_turn_unit(), wing)
+        self.assertIn(wing.unit_id, battle.turn_order_unit_ids)
+
+    def test_ai_fusion_and_shot_scoring_leave_real_state_untouched(self):
+        from wujiang.tactical.rooms.ai import score_skill_payload
+
+        battle, wing, host, enemy = self.fixture()
+        enemy.position = Position(5, 3)
+        enemy.base_stats.defense = 1
+        profile = difficulty_profile("standard")
+        fusion = wing.get_skill("electronic_fusion")
+        action = {"code": fusion.code, "target_mode": "unit", "preview": fusion.preview(battle, wing)}
+        payload = {"type": "skill", "unit_id": wing.unit_id, "skill_code": fusion.code,
+                   "target_unit_id": host.unit_id}
+        before = (wing.position, host.stat("attack"), wing.equipped_to_id if hasattr(wing, "equipped_to_id") else None)
+        score = score_skill_payload(battle, wing, action, payload, profile, instant_only=False)
+        self.assertGreater(score, 0)
+        self.assertEqual((wing.position, host.stat("attack"), getattr(wing, "equipped_to_id", None)), before)
+        fusion.execute(battle, wing, payload)
+        battle._exclusive_turn_unit_id = host.unit_id
+        host.turn_ready = True
+        shot = next(skill for skill in host.action_skills() if skill.code.startswith("fusion_piercing_shot__"))
+        shot_action = {"code": shot.code, "target_mode": "cell", "preview": shot.preview(battle, host)}
+        shot_payload = {"type": "skill", "unit_id": host.unit_id, "skill_code": shot.code,
+                        "choice_code": "defense", "cells": [enemy.position.to_dict()]}
+        before = (host.base_stats.defense, host.current_mana, enemy.current_hp, enemy.shields)
+        score = score_skill_payload(battle, host, shot_action, shot_payload, profile, instant_only=False)
+        self.assertGreater(score, 0)
+        self.assertEqual((host.base_stats.defense, host.current_mana, enemy.current_hp, enemy.shields), before)
+
+
+class NewBatch238240242HellBehaviorTests(unittest.TestCase):
+    """Source-locked free windows, true death, chosen rebirth, and optional sacrifice."""
+
+    def fixture(self, code: str, *, ally_code: str | None = None):
+        own = [code, ally_code] if ally_code else code
+        battle = create_battle(own, "elite_soldier")
+        battle.width, battle.height = 12, 9
+        actor = next(unit for unit in battle.hero_units(1) if unit.hero_code == code)
+        enemy = primary_hero(battle, 2)
+        actor.position, enemy.position = Position(2, 3), Position(7, 3)
+        if ally_code:
+            ally = next(unit for unit in battle.hero_units(1) if unit.unit_id != actor.unit_id)
+            ally.position = Position(3, 5)
+        else:
+            ally = None
+        return battle, actor, ally, enemy
+
+    def skill_kill(self, battle, actor, enemy):
+        actor.current_hp = 0.25
+        battle.resolve_damage(DamageContext(source=enemy, target=actor, attack_power=10,
+                                            is_skill=True, action_name="测试法术", tags={"skill"}))
+        self.assertFalse(actor.alive)
+        self.assertIn(actor.unit_id, battle.hell_rebirth_unit_ids)
+        self.assertIsNone(battle.winner)
+
+    def enemy_end(self, battle, enemy):
+        battle.turn_slot_index = battle.turn_order_unit_ids.index(enemy.unit_id)
+        battle.active_turn_unit_id = enemy.unit_id
+        battle.active_player = enemy.player_id
+        enemy.turn_ready = True
+        battle.perform_action({"type": "end_turn"})
+        return battle.current_respawn_prompt()
+
+    def test_three_heroes_register_paid_and_strict_zero_mana_windows(self):
+        for code in ("excel_r238", "excel_r240", "excel_r242"):
+            with self.subTest(code=code):
+                battle, actor, _, enemy = self.fixture(code)
+                self.assertTrue({"hell_spear", "hell_spear_free", "hell_pressure",
+                                 "hell_pressure_free"}.issubset(actor.skill_map()))
+                free_spear = actor.get_skill("hell_spear_free")
+                self.assertFalse(free_spear.can_use(battle, actor, {})[0])
+                actor.current_mana = 0.5
+                self.assertFalse(free_spear.can_use(battle, actor, {})[0])
+                actor.current_mana = 0
+                self.assertTrue(free_spear.can_use(battle, actor, {})[0])
+                self.assertEqual((free_spear.mana_cost, free_spear.cooldown_turns), (0, 2))
+                self.assertEqual(actor.get_skill("hell_pressure_free").timing, "passive")
+                self.assertEqual(actor.get_skill("hell_spear").mana_cost, 1.5)
+                self.assertEqual(actor.get_skill("hell_pressure").mana_cost, 1)
+
+    def test_skill_death_waits_for_enemy_end_and_rebirth_preserves_original_slot(self):
+        for code in ("excel_r238", "excel_r240"):
+            with self.subTest(code=code):
+                battle, actor, _, enemy = self.fixture(code)
+                original_id, original_slot = actor.unit_id, battle.turn_order_unit_ids.index(actor.unit_id)
+                self.skill_kill(battle, actor, enemy)
+                self.assertIsNone(battle.current_respawn_prompt())
+                prompt = self.enemy_end(battle, enemy)
+                self.assertIsNotNone(prompt)
+                self.assertEqual((prompt.kind, prompt.unit_id), ("hell_rebirth", original_id))
+                self.assertTrue(prompt.options)
+                self.assertTrue(all(any(cell.distance_to(body) == 1 for anchor in battle.all_units()
+                                        for body in battle.unit_cells(anchor)) for cell in prompt.options))
+                cell = prompt.options[0]
+                battle.perform_action({"type": "respawn_select", "unit_id": original_id,
+                                       "x": cell.x, "y": cell.y})
+                self.assertIs(battle.units[original_id], actor)
+                self.assertEqual((actor.position, actor.current_mana, actor.current_hp),
+                                 (cell, 0, actor.max_health))
+                self.assertEqual(battle.turn_order_unit_ids[original_slot], original_id)
+                self.assertNotIn(original_id, battle.hell_rebirth_unit_ids)
+
+    def test_basic_death_does_not_schedule_rebirth(self):
+        for code in ("excel_r238", "excel_r240"):
+            with self.subTest(code=code):
+                battle, actor, _, enemy = self.fixture(code)
+                actor.current_hp = 0.25
+                battle.resolve_damage(DamageContext(source=enemy, target=actor, attack_power=10,
+                                                    is_skill=False, action_name="普攻", tags={"attack"}))
+                self.assertNotIn(actor.unit_id, battle.hell_rebirth_unit_ids)
+                self.assertEqual(battle.winner, 2)
+
+    def test_baki_three_owner_turns_pierce_basic_but_not_spear(self):
+        battle, actor, _, enemy = self.fixture("excel_r238")
+        actor.current_mana = 0
+        trait = next(trait for trait in actor.traits if trait.name == "地狱再临")
+        trait.on_hell_rebirth(battle)
+        status = actor.get_status("地狱再临·普攻破魔")
+        self.assertIsNotNone(status)
+        enemy.shields = 2
+        ctx = DamageContext(source=actor, target=enemy, attack_power=actor.stat("attack"),
+                            is_skill=False, action_name="普攻", tags={"attack"})
+        status.on_before_damage(battle, ctx)
+        self.assertTrue(ctx.ignore_shield)
+        skill_ctx = DamageContext(source=actor, target=enemy, attack_power=actor.stat("attack"),
+                                  is_skill=True, action_name="魔枪", tags={"skill", "attack"})
+        status.on_before_damage(battle, skill_ctx)
+        self.assertFalse(skill_ctx.ignore_shield)
+        for remaining in (2, 1, 0):
+            actor.finish_turn(battle)
+            self.assertEqual(status.duration, remaining)
+        self.assertFalse(actor.has_status("地狱再临·普攻破魔"))
+
+    def test_lanzi_heals_on_own_start_and_only_adds_one_basic_attack(self):
+        battle, actor, _, _ = self.fixture("excel_r240")
+        trait = next(trait for trait in actor.traits if trait.name == "地狱再临")
+        trait.on_hell_rebirth(battle)
+        actor.current_hp = 0.5
+        actor.refresh_for_turn(battle)
+        self.assertEqual(actor.current_hp, 0.75)
+        self.assertEqual(actor.attack_actions_per_turn(), 2)
+        self.assertEqual(actor.get_skill("hell_spear_free").max_uses_per_turn, 1)
+        for _ in range(3):
+            actor.finish_turn(battle)
+        self.assertEqual(actor.attack_actions_per_turn(), 1)
+
+    def test_no_landing_retries_without_cloning_dead_hero(self):
+        battle, actor, _, enemy = self.fixture("excel_r238")
+        self.skill_kill(battle, actor, enemy)
+        battle.width, battle.height = 2, 1
+        enemy.position = Position(0, 0)
+        battle.blocked_cells = {(1, 0)}
+        battle.advance_hell_rebirths(enemy.player_id)
+        self.assertIsNone(battle.current_respawn_prompt())
+        self.assertIn(actor.unit_id, battle.hell_rebirth_unit_ids)
+        self.assertEqual(sum(unit.unit_id == actor.unit_id for unit in battle.destroyed_units), 1)
+        battle.blocked_cells.clear()
+        battle.advance_hell_rebirths(enemy.player_id)
+        self.assertEqual(battle.current_respawn_prompt().kind, "hell_rebirth")
+
+    def test_sika_basic_death_can_sacrifice_named_ally_and_trigger_its_skill_rebirth(self):
+        battle, actor, ally, enemy = self.fixture("excel_r242", ally_code="excel_r238")
+        actor.current_hp = 0.25
+        battle._damage_choice_active = True
+        battle._damage_choice_decisions = [ally.unit_id]
+        battle._damage_choice_event_index = 0
+        battle.resolve_damage(DamageContext(source=enemy, target=actor, attack_power=10,
+                                            is_skill=False, action_name="普攻", tags={"attack"}))
+        self.assertFalse(actor.alive)
+        self.assertFalse(ally.alive)
+        self.assertNotIn(actor.unit_id, battle.hell_rebirth_unit_ids)
+        self.assertIn(ally.unit_id, battle.hell_rebirth_unit_ids)
+        self.assertIsNone(battle.winner)
+
+    def test_sika_skill_death_rebirth_offers_optional_sacrifice(self):
+        battle, actor, ally, enemy = self.fixture("excel_r242", ally_code="excel_r240")
+        self.skill_kill(battle, actor, enemy)
+        prompt = self.enemy_end(battle, enemy)
+        self.assertEqual(prompt.kind, "hell_rebirth")
+        cell = prompt.options[0]
+        battle.perform_action({"type": "respawn_select", "unit_id": actor.unit_id,
+                               "x": cell.x, "y": cell.y})
+        self.assertEqual(battle.pending_damage_choice["kind"], "hell_sacrifice")
+        self.assertIn(ally.unit_id, battle.pending_damage_choice["options"])
+        battle.perform_action({"type": "damage_choice", "unit_id": actor.unit_id,
+                               "target_unit_id": "decline"})
+        self.assertTrue(actor.alive)
+        self.assertTrue(ally.alive)
+        self.assertEqual(actor.current_mana, 0)
+
+    def test_sika_sacrifice_respects_ordinary_skill_defenses(self):
+        for defense in ("shield", "magic_immunity", "dodge"):
+            with self.subTest(defense=defense):
+                battle, actor, ally, _ = self.fixture("excel_r242", ally_code="excel_r238")
+                if defense == "shield":
+                    ally.shields = 1
+                elif defense == "magic_immunity":
+                    ally.magic_immunity = True
+                else:
+                    ally.dodge_charges = 1
+                battle._damage_choice_active = True
+                battle._damage_choice_decisions = [ally.unit_id]
+                battle._damage_choice_event_index = 0
+                trait = next(trait for trait in actor.traits if trait.name == "赤候牺牲")
+                trait.offer_sacrifice(battle)
+                self.assertTrue(ally.alive)
+                self.assertNotIn(ally.unit_id, battle.hell_rebirth_unit_ids)
+                if defense == "shield":
+                    self.assertEqual(ally.total_shields(), 0)
+                elif defense == "dodge":
+                    self.assertEqual(ally.dodge_charges, 0)
+
+    def test_skill_tagged_field_damage_does_not_trigger_hell_rebirth(self):
+        for code in ("excel_r238", "excel_r240", "excel_r242"):
+            with self.subTest(code=code):
+                battle, actor, _, enemy = self.fixture(code)
+                actor.current_hp = 0.25
+                battle.resolve_damage(DamageContext(source=enemy, target=actor, attack_power=10,
+                                                    is_skill=True, from_field_effect=True,
+                                                    action_name="持续场地", tags={"skill", "field"}))
+                self.assertFalse(actor.alive)
+                self.assertNotIn(actor.unit_id, battle.hell_rebirth_unit_ids)
+
+    def test_ai_declines_healthy_ally_sacrifice_and_frontend_lists_skip(self):
+        from wujiang.tactical.rooms.ai import choose_hell_sacrifice_action
+        battle, actor, ally, _ = self.fixture("excel_r242", ally_code="excel_r238")
+        prompt = {"unit_id": actor.unit_id, "options": [ally.unit_id], "kind": "hell_sacrifice"}
+        self.assertEqual(choose_hell_sacrifice_action(battle, prompt, actor)["target_unit_id"], "decline")
+        self.assertIn("hell_sacrifice_decline", frontend_module("vfx.js"))
+        self.assertIn("hell_rebirth", frontend_module("battle-ui.js"))

@@ -1,5 +1,9 @@
 ﻿# Hero Rule Index
 
+- R238 地狱的尖兵。BAKI（2026-10-10新增，静态待验）：`excel_r238`魔枪/魔压沿通用穿刺/震开，严格0魔时分别每2本人轮免费一次/每敌方武将回合免费一次；技能真正致死，下个敌方武将末原身份0魔选任意活单位合法外邻回场，三本人轮只有普攻破魔。R238-Q001=a；`NewBatch238240242HellBehaviorTests`待用户验证。
+- R240 地狱的番兵。LANZI（2026-10-10新增，静态待验）：`excel_r240`同源0魔枪/压，原通用变硬/锁链；技能死亡合法回场后三本人轮开始自然回血1/4、每本人轮普攻2次，不增技能额度。R240-Q001=a；同批定向场景待用户验证。
+- R242 地狱的赤候。SIKA（2026-10-10新增，静态待验）：`excel_r242`技能死亡在下敌方末回场后可选杀己方显示名含地狱单位或放弃；普攻死亡即时可选牺牲但本人不回场。被选者真实视为技能破坏，可引出其回场链；包含同名召唤/分身。R242-Q001=a/Q002=b；AI默认拒绝无益牺牲，前端列候选及放弃。同批定向场景待用户验证。
+
 - R221 电子龙（2026-10-07新增，静态待验）：`excel_r221`卫星加农炮每本人轮一次、0魔，任意全图裁边3×3冻结旧格，对双方实际受体逐范围技能伤害。`ElectronicDragonTeleportTrait`在每个真实武将回合末可选己方单位含本人完整外邻合法格或放弃，位移连锁完成再切回合；AI以实际敌友净伤和留位安全比较。`NewBatch221222ElectronicDragonBehaviorTests`待用户验证。
 
 - R222 电子修理工厂（2026-10-07新增，静态待验）：保存R222-Q001=a固定2×2；`ElectronicRepairSkill`0魔每本人轮一次，在工厂完整外邻修复已破坏的真实机甲武将原对象。生命魔力满、清临时状态，保留原阵营/轮序/永久能力和额度，当回合待命；敌方尸体合法但AI不给正值。`NewBatch221222RepairFactoryBehaviorTests`待用户验证。
@@ -741,3 +745,4 @@ Update this file whenever a hero, skill, trait, or durable gameplay rule changes
 - `quantum_shield`: free passive multi-target wall; up to 3 casts in a usable round across opposing hero turns, and one cast may shield multiple threatened allies until chain end. If used anywhere in that round, the next full round is unavailable and the following round becomes usable again.
 - `plasma_thruster`: straight flying displacement to the fixed 5th cell or to the boundary-truncated last cell in that direction; unavailable while the unit cannot move / cannot use movement skills.
 - `stance`: dynamic visible local anti-damage field that arms on the caster's turn end and lasts through the next enemy turn only.
+- R223 装甲电子翼（2026-10-10新增，静态待验）：`excel_r223`本体飞行、多次正常移动但累计速点受限，机枪/通用导弹/离子盾；`ElectronicFusionSkill`只附着范内己方名字含电子的武将及分身/召唤，不含电子修理工厂。`ElectronicFusionStatus`令翼离场、跳过原轮槽，宿主攻守范各+1并飞行；每翼独立提供`ElectronicFusionShotSkill`（降一项能力1、范3单体固定4破魔、每本人轮一次）及`ElectronicFusionDetachSkill`（宿主外邻合法回场）。宿主死亡级联破坏所有附翼；AI比较融合机会成本、永久射击代价及危险解除。`NewBatch223ElectronicWingBehaviorTests`待用户定向验证。

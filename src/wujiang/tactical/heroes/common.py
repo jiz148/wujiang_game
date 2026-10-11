@@ -1455,7 +1455,7 @@ class PierceSkill(Skill):
                     target=unit,
                     attack_power=actor.stat("attack"),
                     is_skill=True,
-                    action_name="穿刺",
+                    action_name=self.name,
                     area_cell_hits=battle.unit_hit_count_for_cells(unit, cells),
                     tags={"skill", "attack", "pierce"},
                 )

@@ -106,7 +106,10 @@ function renderBoardAlert() {
   if (isRespawnMode()) {
     const prompt = currentRespawnPrompt();
     const unit = unitById(prompt?.unit_id || "");
-    showBoardHint("重新出现", `${unit?.name || "该单位"} 即将重新出现。请点击蓝色高亮的最近可用格子。`);
+    showBoardHint(prompt?.kind === "hell_rebirth" ? "地狱再临" : "重新出现",
+      prompt?.kind === "hell_rebirth"
+        ? `${unit?.name || "该武将"} 将以0魔回场。请点击蓝色高亮的合法相邻格。`
+        : `${unit?.name || "该单位"} 即将重新出现。请点击蓝色高亮的最近可用格子。`);
     return;
   }
 
@@ -1501,14 +1504,18 @@ export function renderChainPanel() {
   if (isRespawnMode()) {
     const prompt = currentRespawnPrompt();
     const unit = unitById(prompt?.unit_id || "");
-    if (caption) caption.textContent = `${unit?.name || "消失单位"} 正等待重新出现。`;
+    if (caption) caption.textContent = prompt?.kind === "hell_rebirth"
+      ? `${unit?.name || "地狱武将"} 正等待选择地狱再临落点。`
+      : `${unit?.name || "消失单位"} 正等待重新出现。`;
     skipBtn?.classList.add("hidden");
     hideBar();
     return;
   }
   if (isDamageChoiceMode()) {
     const prompt = state.battle.pending_damage_choice;
-    if (caption) caption.textContent = prompt.kind === "attack_swap"
+    if (caption) caption.textContent = prompt.kind === "hell_sacrifice"
+      ? "赤候可以技能破坏一名己方地狱单位，或放弃这次牺牲。"
+      : prompt.kind === "attack_swap"
       ? "亚历山大的普攻已完成，请选择一名有合法落点的友军交换位置。"
       : prompt.kind === "electronic_teleport"
         ? "电子龙可在本武将回合结束前瞬移到己方单位周围的合法位置，或保持原位。"

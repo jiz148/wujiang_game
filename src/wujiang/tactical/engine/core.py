@@ -1184,6 +1184,7 @@ class RespawnPrompt:
     player_id: int
     origin: Position
     options: list[Position]
+    kind: str = "banish"
 
     def to_public_dict(self) -> dict[str, Any]:
         return {
@@ -1191,6 +1192,7 @@ class RespawnPrompt:
             "player_id": self.player_id,
             "origin": self.origin.to_dict(),
             "options": [cell.to_dict() for cell in self.options],
+            "kind": self.kind,
         }
 
 
@@ -1798,7 +1800,7 @@ class Unit(ABC):
             "raw_skill_text": self.raw_skill_text,
             "raw_trait_text": self.raw_trait_text,
             "weather_effect_text": hero_weather_effect_text(self),
-            "skills": [skill.to_public_dict(battle) for skill in self.skills],
+            "skills": [skill.to_public_dict(battle) for skill in self.action_skills()],
             "traits": [trait.to_public_dict(battle) for trait in [*self.traits, *self.projected_traits()]],
             "statuses": [status.to_public_dict(battle) for status in self.statuses],
         }
@@ -1817,6 +1819,8 @@ class Battle:
         self.__dict__.setdefault("resolving_action", None)
         self.__dict__.setdefault("_separate_attack_sequences", {})
         self.__dict__.setdefault("pending_damage_choice", None)
+        self.__dict__.setdefault("hell_rebirth_unit_ids", set())
+        self.__dict__.setdefault("_pending_turn_advance_after_hell_rebirth", False)
         # Rebind after checkpoint loading or deepcopy; weak references are not saved.
         for unit in [*self.units.values(), *getattr(self, "destroyed_units", [])]:
             unit._battle_ref = weakref.ref(self)
@@ -1843,6 +1847,8 @@ class Battle:
         self.pending_followup_actions: deque[QueuedAction] = deque()
         self._separate_attack_sequences: dict[str, dict[str, Any]] = {}
         self.pending_respawn_unit_ids: list[str] = []
+        self.hell_rebirth_unit_ids: set[str] = set()
+        self._pending_turn_advance_after_hell_rebirth = False
         self.pending_damage_choice: Optional[dict[str, Any]] = None
         self.turn_order_unit_ids: list[str] = []
         self.turn_slot_index = 0
@@ -2282,6 +2288,17 @@ class Battle:
     def capture_destruction_position(self, unit: Unit) -> None:
         if unit.alive or unit.position is None:
             return
+        action = self.resolving_action
+        skill_death = getattr(unit, "_hell_death_from_damage", None)
+        if hasattr(unit, "_hell_death_from_damage"):
+            delattr(unit, "_hell_death_from_damage")
+        if skill_death is None:
+            skill_death = action is not None and action.action_type in {"skill", "reaction_skill", "skill_effect"}
+        if skill_death:
+            for component in list(unit.iter_components()):
+                callback = getattr(component, "on_hell_forced_skill_death", None)
+                if callable(callback):
+                    callback(self)
         # Damage may temporarily use the declared origin; death belongs to the real body.
         unit.last_position = getattr(unit, "_resolution_actual_position", None) or unit.position
         unit.last_destroyed_cells = unit.footprint_cells_at(unit.last_position)
@@ -2734,7 +2751,8 @@ class Battle:
                 self.check_win_condition()
                 return
             hero = self.units.get(hero_id) if hero_id else None
-            if hero is None or not hero.alive or hero.is_summon or is_army_soldier(hero):
+            if (hero is None or not hero.alive or hero.is_summon or is_army_soldier(hero)
+                    or getattr(hero, "equipped_to_id", None)):
                 self.advance_turn_slot_index()
                 attempts += 1
                 continue
@@ -2775,7 +2793,8 @@ class Battle:
             if parse_army_slot(slot_id) is not None:
                 continue
             hero = self.units.get(slot_id)
-            if hero is None or not hero.alive or hero.is_summon or is_army_soldier(hero):
+            if (hero is None or not hero.alive or hero.is_summon or is_army_soldier(hero)
+                    or getattr(hero, "equipped_to_id", None)):
                 continue
             return hero
         return None
@@ -2811,6 +2830,8 @@ class Battle:
         for unit in self.all_units():
             for component in list(unit.iter_components()):
                 component.on_any_turn_end(self, ending_player)
+        if parse_army_slot(self.current_turn_slot_unit_id()) is None:
+            self.advance_hell_rebirths(ending_player)
         self.enforce_sandstorm_stealth_rules()
         self.cleanup_dead_units()
         if self.winner is not None:
@@ -2840,6 +2861,10 @@ class Battle:
             )
             self._emit_replay_checkpoint("match_end")
             return
+        if self._pending_turn_advance_after_hell_rebirth:
+            if self.current_respawn_prompt() is not None:
+                return
+            self._pending_turn_advance_after_hell_rebirth = False
         self.advance_turn_slot_index()
         self.start_current_turn()
 
@@ -3236,6 +3261,8 @@ class Battle:
                 hero.remove_status(stealth, self)
 
     def respawn_options_for(self, unit: Unit) -> list[Position]:
+        if unit.unit_id in self.hell_rebirth_unit_ids:
+            return self.hell_rebirth_options_for(unit)
         origin = unit.banish_return_position or unit.position
         if origin is None:
             return []
@@ -3260,19 +3287,25 @@ class Battle:
         while self.pending_respawn_unit_ids:
             unit_id = self.pending_respawn_unit_ids[0]
             unit = self.units.get(unit_id)
-            if unit is None or not unit.alive or not unit.banished:
+            hell_rebirth = unit_id in self.hell_rebirth_unit_ids
+            if unit is None and hell_rebirth:
+                unit = next((item for item in self.destroyed_units if item.unit_id == unit_id), None)
+            if unit is None or (not hell_rebirth and (not unit.alive or not unit.banished)):
                 self.pending_respawn_unit_ids.pop(0)
                 continue
-            origin = unit.banish_return_position or unit.position
+            origin = (unit.last_position if hell_rebirth else unit.banish_return_position or unit.position)
             if origin is None:
-                self.pending_respawn_unit_ids.pop(0)
-                continue
+                origin = Position(0, 0) if hell_rebirth else None
+                if origin is None:
+                    self.pending_respawn_unit_ids.pop(0)
+                    continue
             options = self.respawn_options_for(unit)
             if not options:
                 self.pending_respawn_unit_ids.pop(0)
                 self.log(f"{unit.name} 暂时没有可重新出现的空格，将继续等待。")
                 continue
-            return RespawnPrompt(unit.unit_id, unit.player_id, origin, options)
+            return RespawnPrompt(unit.unit_id, unit.player_id, origin, options,
+                                 "hell_rebirth" if hell_rebirth else "banish")
         return None
 
     def restore_banished_unit(self, unit: Unit, destination: Position) -> None:
@@ -3300,12 +3333,73 @@ class Battle:
             self.pending_respawn_unit_ids.append(unit.unit_id)
             self.log(f"{unit.name} 即将重新出现，请选择其落点。")
 
+    def schedule_hell_rebirth(self, unit: Unit) -> None:
+        """Keep a truly destroyed hero's original identity for its next enemy turn end."""
+        if unit.unit_id in self.hell_rebirth_unit_ids:
+            return
+        self.hell_rebirth_unit_ids.add(unit.unit_id)
+        self.log(f"{unit.name} 将在下个敌方武将回合结束时选择回场位置。")
+
+    def hell_rebirth_options_for(self, unit: Unit) -> list[Position]:
+        cells = {cell for anchor in self.all_units()
+                 if anchor.alive and not anchor.banished and anchor.position is not None
+                 for body in self.unit_cells(anchor) for cell in self.neighbors(body)}
+        return sorted((cell for cell in cells if self.can_place_unit(unit, cell, mover=unit)),
+                      key=lambda cell: (cell.y, cell.x))
+
+    def advance_hell_rebirths(self, ended_player_id: int) -> None:
+        pending_bodies = {unit.unit_id: unit for unit in [*self.destroyed_units, *self.all_units()]
+                          if not unit.alive}
+        for unit in pending_bodies.values():
+            if unit.unit_id not in self.hell_rebirth_unit_ids or unit.player_id == ended_player_id:
+                continue
+            if not self.hell_rebirth_options_for(unit):
+                self.log(f"{unit.name} 周围暂无合法回场格，等待下个敌方武将回合结束。")
+                continue
+            if unit.unit_id not in self.pending_respawn_unit_ids:
+                self.pending_respawn_unit_ids.append(unit.unit_id)
+                self.log(f"{unit.name} 的地狱再临已到时，请选择落点。")
+                self._pending_turn_advance_after_hell_rebirth = True
+
+    def restore_hell_rebirth(self, unit: Unit, destination: Position) -> None:
+        if unit.unit_id not in self.hell_rebirth_unit_ids or destination not in self.hell_rebirth_options_for(unit):
+            raise ActionError("地狱再临落点已失效。")
+        for status in list(unit.statuses):
+            if status.duration is not None:
+                unit.remove_status(status, self)
+        unit.alive = True
+        unit.banished = False
+        unit.current_hp = unit.max_health
+        unit.current_mana = 0
+        unit.turn_ready = False
+        unit.can_act_on_entry_turn = True
+        unit.move_used = False
+        unit.normal_move_actions_used = 0
+        unit.normal_move_steps_used = 0
+        unit.attacks_used = 0
+        unit.performed_active_skill = False
+        unit.moved_this_turn = False
+        unit.actions_taken_this_turn = []
+        unit.clear_end_of_turn_shields()
+        unit.position = destination
+        self.destroyed_units = [item for item in self.destroyed_units if item.unit_id != unit.unit_id]
+        self.units[unit.unit_id] = unit
+        self.hell_rebirth_unit_ids.discard(unit.unit_id)
+        self.log(f"{unit.name} 以0魔在 ({destination.x}, {destination.y}) 地狱再临。")
+        for component in list(unit.iter_components()):
+            callback = getattr(component, "on_hell_rebirth", None)
+            if callable(callback):
+                callback(self)
+        self.notify_destroyed_hero_count_changed()
+        self.sync_linked_units()
+
     def advance_respawn_queue(self) -> None:
         while True:
             prompt = self.current_respawn_prompt()
             if prompt is None:
                 return
-            if len(prompt.options) == 1 and prompt.options[0] == prompt.origin:
+            if (prompt.unit_id not in self.hell_rebirth_unit_ids
+                    and len(prompt.options) == 1 and prompt.options[0] == prompt.origin):
                 unit = self.get_unit(prompt.unit_id)
                 self.pending_respawn_unit_ids.pop(0)
                 self.restore_banished_unit(unit, prompt.origin)
@@ -3325,6 +3419,10 @@ class Battle:
 
     def get_unit(self, unit_id: str) -> Unit:
         if unit_id not in self.units:
+            if unit_id in self.hell_rebirth_unit_ids:
+                pending = next((unit for unit in self.destroyed_units if unit.unit_id == unit_id), None)
+                if pending is not None:
+                    return pending
             raise ActionError("找不到目标单位。")
         return self.units[unit_id]
 
@@ -4044,6 +4142,7 @@ class Battle:
                 ctx.raw_damage = 0.0
                 ctx.target.current_hp = 0.0
                 ctx.target.alive = False
+                ctx.target._hell_death_from_damage = bool(ctx.is_skill and not ctx.from_field_effect)
                 self.log_public_event(
                     f"{ctx.target.name} 是分身，只要受到伤害就会直接破坏。",
                     source=ctx.source,
@@ -4094,6 +4193,7 @@ class Battle:
             if ctx.is_skill and not ctx.cancelled and ctx.actual_damage > 0 and ctx.target.alive:
                 self.record_skill_effect(ctx.target)
             if not ctx.target.alive:
+                ctx.target._hell_death_from_damage = bool(ctx.is_skill and not ctx.from_field_effect)
                 self.record_defeat_summary(ctx.source, ctx.target, ctx.action_name)
             notify_confirmed_destruction()
             self.cleanup_dead_units()
@@ -6063,6 +6163,9 @@ class Battle:
             if unit.unit_id not in {destroyed.unit_id for destroyed in self.destroyed_units}:
                 self.destroyed_units.append(unit)
             self.remove_unit(unit)
+        self.hell_rebirth_unit_ids.intersection_update(
+            unit.unit_id for unit in self.destroyed_units if not unit.alive
+        )
         self.sync_linked_units()
         self.notify_destroyed_hero_count_changed()
         self.clear_all_stealth_if_all_heroes_stealthed()
@@ -6117,7 +6220,9 @@ class Battle:
         alive_players = {
             player_id
             for player_id in (1, 2)
-            if any(not bool(getattr(unit, "is_siege_structure", False)) for unit in self.hero_units(player_id))
+            if (any(not bool(getattr(unit, "is_siege_structure", False)) for unit in self.hero_units(player_id))
+                or any(unit.player_id == player_id and unit.unit_id in self.hell_rebirth_unit_ids
+                       for unit in self.destroyed_units))
         }
         if len(alive_players) == 1 and self.units:
             self.winner = alive_players.pop()
@@ -6141,7 +6246,7 @@ class Battle:
         if pending is not None:
             if payload.get("type") != "damage_choice" or payload.get("unit_id") != pending["unit_id"]:
                 raise ActionError("请先完成本次伤害选择。")
-            if pending.get("kind") in {"rotation", "attack_swap", "formation", "optional_swap", "optional_placement", "end_dash", "electronic_teleport"}:
+            if pending.get("kind") in {"rotation", "attack_swap", "formation", "optional_swap", "optional_placement", "end_dash", "electronic_teleport", "hell_sacrifice"}:
                 choice = str(payload.get("target_unit_id") or "")
                 if (choice == "decline" and pending.get("kind") in {"attack_swap", "formation"}) or (choice != "decline" and choice not in pending["options"]):
                     raise ActionError("请选择当前提示中的合法对象与落点。")
@@ -6159,11 +6264,12 @@ class Battle:
             return
         if payload.get("type") == "damage_choice":
             raise ActionError("现在没有待决定的伤害。")
-        if not getattr(self, "_ai_probe_active", False) and any(
+        if not getattr(self, "_ai_probe_active", False) and (any(
             getattr(component, "requires_damage_choice", False)
             for unit in self.all_units() if unit.alive and not unit.banished
             for component in unit.iter_components()
-        ):
+        ) or (payload.get("type") == "respawn_select" and
+              str(payload.get("unit_id") or "") in self.hell_rebirth_unit_ids)):
             self._perform_action_with_damage_choices(payload, [])
             return
         self._perform_action_steps(payload)
@@ -6331,6 +6437,10 @@ class Battle:
             prompt = self.current_respawn_prompt()
             if prompt is None:
                 self.pending_respawn_unit_ids = []
+                if self._pending_turn_advance_after_hell_rebirth:
+                    self._pending_turn_advance_after_hell_rebirth = False
+                    self.advance_turn_slot_index()
+                    self.start_current_turn()
                 return
             if payload.get("unit_id") != prompt.unit_id:
                 raise ActionError("现在需要先处理当前等待重新出现的单位。")
@@ -6341,8 +6451,15 @@ class Battle:
             if not self.can_place_unit(unit, destination, ignore=unit, mover=unit):
                 raise ActionError("该位置已被占用，无法重新出现。")
             self.pending_respawn_unit_ids.pop(0)
-            self.restore_banished_unit(unit, destination)
+            if unit.unit_id in self.hell_rebirth_unit_ids:
+                self.restore_hell_rebirth(unit, destination)
+            else:
+                self.restore_banished_unit(unit, destination)
             self.advance_respawn_queue()
+            if self._pending_turn_advance_after_hell_rebirth and not self.pending_respawn_unit_ids:
+                self._pending_turn_advance_after_hell_rebirth = False
+                self.advance_turn_slot_index()
+                self.start_current_turn()
             return
         if self.pending_chain is not None:
             current_unit_id = self.pending_chain.current_unit_id()
@@ -6586,7 +6703,7 @@ class Battle:
         return {
             "move_targets": move_targets,
             "attack_targets": attack_targets,
-            "skills": [skill.to_public_dict(self) for skill in unit.skills],
+            "skills": [skill.to_public_dict(self) for skill in unit.action_skills()],
             "actions": actions,
             "can_move": can_normal_move,
             "attacks_left": max(unit.attack_actions_per_turn() - unit.attacks_used, 0),
