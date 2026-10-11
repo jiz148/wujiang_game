@@ -89,6 +89,20 @@ export function displayActions() {
           preview: { cells: [], target_unit_ids: [], requires_target: false } },
       ];
     }
+    if (prompt.kind === "hell_death_strike") {
+      return [
+        ...(prompt.options || []).map((unitId) => ({
+          code: `hell_death_strike_${unitId}`, name: `两次反击${unitById(unitId)?.name || "周围单位"}`,
+          kind: "damage_choice", target_unit_id: unitId, timing: "reaction", available: true,
+          description: "刺客技能死亡时选择一名死前周围的单位；两段伤害分别开放防御与连锁。",
+          preview: { cells: [], target_unit_ids: [unitId], requires_target: false },
+        })),
+        { code: "hell_death_strike_decline", name: "放弃死亡反击", kind: "damage_choice",
+          target_unit_id: "decline", timing: "reaction", available: true,
+          description: "放弃刺客这次两段死亡反击。",
+          preview: { cells: [], target_unit_ids: [], requires_target: false } },
+      ];
+    }
     if (prompt.kind === "electronic_teleport") {
       return [
         ...(prompt.options || []).map((option, index) => {

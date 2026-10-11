@@ -459,7 +459,7 @@ class BattleComponent(ABC):
         actor: "Unit",
         payload: Optional[dict[str, Any]] = None,
     ) -> bool:
-        return False
+        return True
 
     def allows_block_counter(self, battle: "Battle", actor: "Unit") -> bool:
         return True
@@ -689,10 +689,17 @@ class Skill(BattleComponent, ABC):
             return False, "该单位暂时不在战场上。"
         if actor.cannot_use_skills:
             return False, "这个单位当前不能使用技能。"
-        for effect in ([] if actor.direct_effects_blocked() else list(battle.field_effects)):
+        for effect in (effect for effect in list(battle.field_effects)
+                       if not actor.direct_effects_blocked()
+                       or getattr(effect, "ignores_direct_effect_immunity", False)):
             blocked, reason = effect.blocks_skill_use(battle, actor, self)
             if blocked:
                 return False, reason
+            payload_check = getattr(effect, "blocks_skill_payload", None)
+            if callable(payload_check):
+                blocked, reason = payload_check(battle, actor, self, payload)
+                if blocked:
+                    return False, reason
         for component in list(actor.iter_components()):
             blocked, reason = component.blocks_skill_use(battle, actor, self)
             if blocked:
@@ -798,7 +805,9 @@ class Skill(BattleComponent, ABC):
             return False, "单位不在战场上。"
         if actor.cannot_use_skills:
             return False, "这个单位当前不能使用技能。"
-        for effect in ([] if actor.direct_effects_blocked() else list(battle.field_effects)):
+        for effect in (effect for effect in list(battle.field_effects)
+                       if not actor.direct_effects_blocked()
+                       or getattr(effect, "ignores_direct_effect_immunity", False)):
             blocked, reason = effect.blocks_skill_use(battle, actor, self)
             if blocked:
                 return False, reason
@@ -831,6 +840,12 @@ class Skill(BattleComponent, ABC):
         ok, reason = self.can_react_to(battle, actor, queued_action)
         if not ok:
             return ok, reason
+        for effect in list(battle.field_effects):
+            payload_check = getattr(effect, "blocks_skill_payload", None)
+            if callable(payload_check):
+                blocked, reason = payload_check(battle, actor, self, payload)
+                if blocked:
+                    return False, reason
         if actor.current_mana + 1e-9 < self.mana_cost_for_payload(battle, actor, payload):
             return False, "魔力不足。"
         return True, ""
@@ -1060,6 +1075,7 @@ class HealContext:
     reason: str = ""
     tags: set[str] = field(default_factory=set)
     effect_source: Optional[BattleComponent] = None
+    actual_heal: float = 0.0
 
 
 @dataclass(slots=True)
@@ -1202,6 +1218,35 @@ class Unit(ABC):
         state.pop("_battle_ref", None)
         return state
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name not in {"current_hp", "current_mana"}:
+            object.__setattr__(self, name, value)
+            return
+        previous = self.__dict__.get(name)
+        battle_ref = self.__dict__.get("_battle_ref")
+        battle = battle_ref() if battle_ref is not None else None
+        modes = getattr(battle, "special_mode_codes", ()) if battle is not None else ()
+        if previous is not None and value != previous and "arena" in modes and self.__dict__.get("banished", False):
+            return
+        if previous is not None and value > previous and battle is not None:
+            if "no_recovery" in modes:
+                return
+        object.__setattr__(self, name, value)
+        if previous is None or value <= previous or battle is None or "healer_attack" not in modes:
+            return
+        gained = round(value - previous, 4)
+        for effect in list(battle.field_effects):
+            if name == "current_hp" and not self.__dict__.get("_inside_battle_heal", False):
+                hook = getattr(effect, "on_direct_heal", None)
+                if callable(hook):
+                    action = battle.resolving_action
+                    origin = battle.units.get(action.actor_id) if action is not None else None
+                    hook(battle, self, gained, source=origin)
+            elif name == "current_mana":
+                hook = getattr(effect, "on_mana_gained", None)
+                if callable(hook):
+                    hook(battle, self, gained)
+
     def __init__(
         self,
         *,
@@ -1329,19 +1374,26 @@ class Unit(ABC):
                     yield projected
 
     def iter_components(self) -> Iterable[BattleComponent]:
-        yield from self.skills
+        battle_ref = getattr(self, "_battle_ref", None)
+        battle = battle_ref() if battle_ref is not None else None
+        if battle is not None and self.banished and "arena" in getattr(battle, "special_mode_codes", ()):
+            return
+        active_skills_only = battle is not None and "real_men" in getattr(battle, "special_mode_codes", ())
+        yield from (skill for skill in self.skills if not active_skills_only or skill.timing == "active")
         yield from self.traits
         seen_skills = {id(skill) for skill in self.skills}
         for status in self.statuses:
             yield status
             for component in status.provided_components():
                 if isinstance(component, Skill):
+                    if active_skills_only and component.timing != "active":
+                        continue
                     if id(component) in seen_skills:
                         continue
                     seen_skills.add(id(component))
                 yield component
         for skill in getattr(self, "_triggered_skill_definitions", {}).values():
-            if id(skill) not in seen_skills:
+            if id(skill) not in seen_skills and (not active_skills_only or skill.timing == "active"):
                 yield skill
         yield from self.projected_traits()
 
@@ -1367,6 +1419,8 @@ class Unit(ABC):
     def add_status(self, status: StatusEffect, *, source: Optional["Unit"] = None) -> None:
         battle_ref = getattr(self, "_battle_ref", None)
         battle = battle_ref() if battle_ref is not None else None
+        if battle is not None and self.banished and "arena" in getattr(battle, "special_mode_codes", ()):
+            return
         if source is None and battle is not None:
             source = battle.units.get(getattr(status, "source_unit_id", ""))
             action = battle.resolving_action
@@ -1385,6 +1439,15 @@ class Unit(ABC):
                 status.chess_duration_extended = True
         if source is not None:
             status.source_player_id = source.player_id
+            if (battle is not None and "soft_persimmon" in getattr(battle, "special_mode_codes", ())
+                    and not hasattr(status, "source_unit_id")):
+                status.source_unit_id = source.unit_id
+        if battle is not None and any(
+            callable(hook := getattr(effect, "blocks_status_application", None))
+            and hook(battle, source, self, status)
+            for effect in battle.field_effects
+        ):
+            return
         if any(not component.accepts_status(status) for component in self.iter_components()):
             return
         if (battle is not None and self.is_clone and getattr(status, "is_skill_effect", False)
@@ -1552,7 +1615,12 @@ class Unit(ABC):
         return round(value, 2)
 
     def clamp_mana(self) -> None:
-        self.current_mana = round(min(max(self.current_mana, 0.0), self.max_mana()), 2)
+        clamped = round(min(max(self.current_mana, 0.0), self.max_mana()), 2)
+        if clamped > self.current_mana:
+            # Correcting an invalid negative balance is not a gameplay recovery.
+            object.__setattr__(self, "current_mana", clamped)
+        else:
+            self.current_mana = clamped
 
     def direct_effects_blocked(self) -> bool:
         return not getattr(self, "_paying_skill_cost", False) and any(component.blocks_direct_effects() for component in self.iter_components())
@@ -1568,6 +1636,8 @@ class Unit(ABC):
         battle = battle_ref() if battle_ref is not None else None
         if battle is None or not self.alive or self.banished or self.position is None:
             return False
+        if "real_men" in getattr(battle, "special_mode_codes", ()):
+            return True
         return any(
             trait.grants_magic_immunity_to(battle, self)
             for source in battle.all_units()
@@ -1582,10 +1652,18 @@ class Unit(ABC):
     def gain_mana(self, amount: float) -> float:
         if self.direct_effects_blocked():
             return 0.0
+        battle_ref = getattr(self, "_battle_ref", None)
+        battle = battle_ref() if battle_ref is not None else None
+        if battle is not None and self.banished and "arena" in getattr(battle, "special_mode_codes", ()):
+            return 0.0
+        if amount > 0 and battle is not None and "no_recovery" in getattr(battle, "special_mode_codes", ()):
+            return 0.0
         before = self.current_mana
-        self.current_mana = round(self.current_mana + amount, 2)
-        self.clamp_mana()
-        return round(self.current_mana - before, 2)
+        requested = round(self.current_mana + amount, 2)
+        maximum = max(self.max_mana(), requested) if self.allow_unbounded_mana else self.max_mana()
+        self.current_mana = round(min(max(requested, 0.0), maximum), 2)
+        gained = round(self.current_mana - before, 2)
+        return gained
 
     def spend_mana(self, amount: float) -> float:
         if self.direct_effects_blocked():
@@ -1593,8 +1671,7 @@ class Unit(ABC):
         if any(getattr(component, "prevents_mana_loss", False) for component in self.iter_components()):
             return 0.0
         before = self.current_mana
-        self.current_mana = round(self.current_mana - amount, 2)
-        self.clamp_mana()
+        self.current_mana = round(max(0.0, self.current_mana - amount), 2)
         return round(before - self.current_mana, 2)
 
     def gain_mana_points(self, amount: float) -> float:
@@ -1641,7 +1718,7 @@ class Unit(ABC):
                 value = trait.modify_received_stat_change(component, stat_name, before, value)
         battle_ref = getattr(self, "_battle_ref", None)
         battle = battle_ref() if battle_ref is not None else None
-        if battle is not None:
+        if battle is not None and not (self.banished and "arena" in getattr(battle, "special_mode_codes", ())):
             for effect in battle.field_effects:
                 value = effect.modify_unit_stat(battle, self, stat_name, value)
         if stat_name in self.stat_minimums:
@@ -1652,18 +1729,32 @@ class Unit(ABC):
         value = int(self.stat("attack_range"))
         for component in self.iter_components():
             value = component.modify_targeting_range(value)
+        battle_ref = getattr(self, "_battle_ref", None)
+        battle = battle_ref() if battle_ref is not None else None
+        if battle is not None and "sympathy" in getattr(battle, "special_mode_codes", ()):
+            if any(self.unit_id in getattr(effect, "_sympathy", {}).get("attack_range", set())
+                   for effect in battle.field_effects):
+                return 1
+        if battle is not None and "true_turn" in getattr(battle, "special_mode_codes", ()):
+            return max(battle.width, battle.height)
         return max(1, value)
 
     def is_enemy_of(self, other: "Unit") -> bool:
         return self.player_id != other.player_id
 
     def heal_fraction(self, amount: float, *, ignore_effect_immunity: bool = False) -> None:
+        battle_ref = getattr(self, "_battle_ref", None)
+        battle = battle_ref() if battle_ref is not None else None
+        if battle is not None and self.banished and "arena" in getattr(battle, "special_mode_codes", ()):
+            return
+        if amount > 0 and battle is not None and "no_recovery" in getattr(battle, "special_mode_codes", ()):
+            return
         if self.direct_effects_blocked() and not ignore_effect_immunity:
             return
         if self.allow_overheal:
             self.current_hp = round(self.current_hp + amount, 4)
-            return
-        self.current_hp = round(min(self.max_health, self.current_hp + amount), 4)
+        else:
+            self.current_hp = round(min(self.max_health, self.current_hp + amount), 4)
 
     def damage_fraction_after_limits(self, amount: float) -> float:
         amount = max(0.0, float(amount))
@@ -2324,6 +2415,13 @@ class Battle:
             del self.units[unit.unit_id]
 
     def add_field_effect(self, effect: BattleFieldEffect, *, source: Unit | None = None) -> None:
+        if ("soft_persimmon" in getattr(self, "special_mode_codes", ())
+                and not getattr(effect, "global_weather", False)
+                and not hasattr(effect, "source_unit_id")):
+            origin = source or (self.units.get(self.resolving_action.actor_id)
+                                if self.resolving_action is not None else None)
+            if origin is not None:
+                effect.source_unit_id = origin.unit_id
         candidates = self.field_effects
         if getattr(effect, "global_weather", False):
             owner = source.player_id if source is not None else getattr(effect, "weather_owner_player_id", None)
@@ -2707,6 +2805,10 @@ class Battle:
         self.turn_slot_index = (self.turn_slot_index + 1) % len(self.turn_order_unit_ids)
         if self.turn_slot_index <= previous_index:
             self.round_number += 1
+            for effect in list(self.field_effects):
+                hook = getattr(effect, "on_round_complete", None)
+                if callable(hook):
+                    hook(self)
         self.turn_number += 1
         self.active_turn_unit_id = self.turn_order_unit_ids[self.turn_slot_index]
 
@@ -2751,7 +2853,8 @@ class Battle:
                 self.check_win_condition()
                 return
             hero = self.units.get(hero_id) if hero_id else None
-            if (hero is None or not hero.alive or hero.is_summon or is_army_soldier(hero)
+            if (hero is None or not hero.alive or ("arena" in getattr(self, "special_mode_codes", ()) and hero.banished)
+                    or hero.is_summon or is_army_soldier(hero)
                     or getattr(hero, "equipped_to_id", None)):
                 self.advance_turn_slot_index()
                 attempts += 1
@@ -2830,6 +2933,10 @@ class Battle:
         for unit in self.all_units():
             for component in list(unit.iter_components()):
                 component.on_any_turn_end(self, ending_player)
+        for effect in list(self.field_effects):
+            hook = getattr(effect, "on_after_any_turn_end", None)
+            if callable(hook):
+                hook(self, ending_player)
         if parse_army_slot(self.current_turn_slot_unit_id()) is None:
             self.advance_hell_rebirths(ending_player)
         self.enforce_sandstorm_stealth_rules()
@@ -3341,10 +3448,15 @@ class Battle:
         self.log(f"{unit.name} 将在下个敌方武将回合结束时选择回场位置。")
 
     def hell_rebirth_options_for(self, unit: Unit) -> list[Position]:
+        enemy_anchors_only = unit.hero_code in {"excel_r239", "excel_r244"}
         cells = {cell for anchor in self.all_units()
                  if anchor.alive and not anchor.banished and anchor.position is not None
+                 and (not enemy_anchors_only or anchor.player_id != unit.player_id)
                  for body in self.unit_cells(anchor) for cell in self.neighbors(body)}
-        return sorted((cell for cell in cells if self.can_place_unit(unit, cell, mover=unit)),
+        extra_legal = next((callback for component in unit.iter_components()
+                            if callable(callback := getattr(component, "hell_rebirth_destination_legal", None))), None)
+        return sorted((cell for cell in cells if self.can_place_unit(unit, cell, mover=unit)
+                       and (extra_legal is None or extra_legal(self, cell))),
                       key=lambda cell: (cell.y, cell.x))
 
     def advance_hell_rebirths(self, ended_player_id: int) -> None:
@@ -3751,6 +3863,9 @@ class Battle:
         forced: bool = False,
     ) -> MoveContext:
         ignore_units = ignore_units or unit.ignore_units_while_moving
+
+        if unit.banished and "arena" in getattr(self, "special_mode_codes", ()):
+            raise ActionError("擂台候场单位不能移动或受到位移效果。")
         if unit.position is None:
             raise ActionError("单位不在战场上。")
         if getattr(unit, "attached_to_unit_id", None):
@@ -4153,6 +4268,10 @@ class Battle:
                 if ctx.source is not None:
                     for component in list(ctx.source.iter_components()):
                         component.on_after_damage(self, ctx)
+                for effect in list(self.field_effects):
+                    hook = getattr(effect, "on_after_source_damage", None)
+                    if callable(hook):
+                        hook(self, ctx)
                 for component in list(ctx.target.iter_components()):
                     component.on_after_damage(self, ctx)
                 notify_confirmed_destruction()
@@ -4188,8 +4307,13 @@ class Battle:
             if ctx.source is not None:
                 for component in list(ctx.source.iter_components()):
                     component.on_after_damage(self, ctx)
-            for component in list(ctx.target.iter_components()):
-                component.on_after_damage(self, ctx)
+            for effect in list(self.field_effects):
+                hook = getattr(effect, "on_after_source_damage", None)
+                if callable(hook):
+                    hook(self, ctx)
+            if "bp_soft_persimmon" not in ctx.tags:
+                for component in list(ctx.target.iter_components()):
+                    component.on_after_damage(self, ctx)
             if ctx.is_skill and not ctx.cancelled and ctx.actual_damage > 0 and ctx.target.alive:
                 self.record_skill_effect(ctx.target)
             if not ctx.target.alive:
@@ -4231,8 +4355,13 @@ class Battle:
                 return ctx
             old_hp = ctx.target.current_hp
             exempt = any(component.permits_immune_heal(ctx) for component in ctx.target.iter_components())
-            ctx.target.heal_fraction(ctx.amount, ignore_effect_immunity=exempt)
+            ctx.target._inside_battle_heal = True
+            try:
+                ctx.target.heal_fraction(ctx.amount, ignore_effect_immunity=exempt)
+            finally:
+                ctx.target.__dict__.pop("_inside_battle_heal", None)
             gained = round(ctx.target.current_hp - old_hp, 4)
+            ctx.actual_heal = gained
             if (gained > 0 and action is not None
                     and action.action_type in {"skill", "reaction_skill", "skill_effect"}
                     and not action.payload.get("from_field_effect")):
@@ -4345,7 +4474,7 @@ class Battle:
         attack_payload["attack_cells"] = [cell.to_dict() for cell in area_cells]
         actor.attacks_used += attack_cost
         actor.actions_taken_this_turn.append("attack")
-        affects_allies = bool(attack_payload.get("friendly_fire")) or any(
+        affects_allies = all(
             component.basic_attack_area_affects_allies(self, actor, attack_payload)
             for component in actor.iter_components()
         )
@@ -4867,6 +4996,8 @@ class Battle:
         return resolved
 
     def basic_attack_resource_allowed(self, actor: Unit, payload: dict[str, Any]) -> tuple[bool, str]:
+        if "real_men" in getattr(self, "special_mode_codes", ()):
+            return False, "真男人模式只能使用主动技能。"
         cost = int(payload.get("attack_cost", 1))
         if cost < 0:
             return False, "普攻次数消耗无效。"
@@ -4925,10 +5056,7 @@ class Battle:
                     return preview
         attack_targets: list[str] = []
         attack_cells: list[dict[str, int]] = []
-        candidates = [] if healing_only else list(self.enemy_units(actor.player_id))
-        candidates.extend(target for target in self.player_units(actor.player_id)
-                          if self.allied_basic_heal_amount(actor, target) > 0
-                          or resolved_payload.get("allow_allied_attack_target"))
+        candidates = list(self.player_units(actor.player_id)) if healing_only else list(self.all_units())
         forced_target = self.forced_basic_attack_target(actor)
         if not healing_only and forced_target is not None and all(unit.unit_id != forced_target.unit_id for unit in candidates):
             candidates.append(forced_target)
@@ -5059,8 +5187,6 @@ class Battle:
             if separate and queued_payload.get("attack_variant") != "allied_heal":
                 queued_payload.pop("attack_cells", None)
                 primary = self.effect_recipient(self.get_unit(str(payload.get("target_unit_id") or "")))
-                if primary.player_id == actor.player_id and (forced_target is None or forced_target.unit_id != primary.unit_id):
-                    raise ActionError("需选择敌方普攻目标。")
                 ok, reason = self.attack_target_allowed(actor, primary, payload=queued_payload)
                 if not ok:
                     raise ActionError(reason)
@@ -5082,7 +5208,7 @@ class Battle:
                     queued_payload["declared_source_x"] = actor.position.x
                     queued_payload["declared_source_y"] = actor.position.y
                 queued_payload["attack_cells"] = [cell.to_dict() for cell in area_cells]
-                affects_allies = bool(queued_payload.get("friendly_fire")) or any(
+                affects_allies = all(
                     component.basic_attack_area_affects_allies(self, actor, queued_payload)
                     for component in actor.iter_components()
                 )
@@ -5105,6 +5231,10 @@ class Battle:
                         if not structure_hit_by_impact(self, unit, impact):
                             continue
                     target_units.append(unit)
+                if separate:
+                    # The spreading effect explicitly targets enemies; the declared primary may be allied.
+                    target_units = [unit for unit in target_units
+                                    if unit.player_id != actor.player_id or unit.unit_id == primary.unit_id]
                 if not target_units and not queued_payload.get("allow_empty_attack_cell"):
                     raise ActionError("攻击区域内没有有效目标。")
                 if separate:
@@ -5497,7 +5627,9 @@ class Battle:
 
     def reaction_affected_units(self, queued_action: QueuedAction) -> list[Unit]:
         actor = self.units.get(queued_action.actor_id)
-        if actor is None or not actor.alive or actor.banished:
+        if actor is None and queued_action.payload.get("after_death_effect"):
+            actor = next((unit for unit in self.destroyed_units if unit.unit_id == queued_action.actor_id), None)
+        if actor is None or (not actor.alive and not queued_action.payload.get("after_death_effect")) or actor.banished:
             return []
         affected: list[Unit] = []
         seen: set[str] = set()
@@ -5670,6 +5802,8 @@ class Battle:
     def present_reaction_window_or_resolve(self, queued_action: QueuedAction) -> None:
         if queued_action.payload.get("refresh_cell_targets"):
             actor = self.units.get(queued_action.actor_id)
+            if actor is None and queued_action.payload.get("after_death_effect"):
+                actor = next((unit for unit in self.destroyed_units if unit.unit_id == queued_action.actor_id), None)
             targets = self.effect_units_at_cells(queued_action.target_cells)
             queued_action.target_unit_ids = [unit.unit_id for unit in targets]
             queued_action.hostile = actor is not None and any(unit.player_id != actor.player_id for unit in targets)
@@ -5680,7 +5814,9 @@ class Battle:
                 return
             state = self._separate_attack_sequences.get(queued_action.payload["declaration_id"], {})
             queued_action.target_unit_ids = [unit.unit_id for unit in self.effect_units_at_cells(queued_action.target_cells)
-                                            if unit.player_id != actor.player_id and unit.unit_id not in state.get("seen", ())]
+                                            if (unit.player_id != actor.player_id or
+                                                int(queued_action.payload.get("separate_attack_index", 0)) == 0)
+                                            and unit.unit_id not in state.get("seen", ())]
         with self.suppress_logs() if self.queued_action_hides_logs(queued_action) else nullcontext():
             window = self.create_reaction_window(queued_action)
             if window is None:
@@ -5837,7 +5973,8 @@ class Battle:
             return
         if actor.can_take_turn_actions(self) and not actor.cannot_attack:
             for target in self.effect_units_at_cells(queued_action.target_cells):
-                if target.player_id == actor.player_id or target.unit_id in state["seen"]:
+                if target.unit_id in state["seen"] or (target.player_id == actor.player_id
+                        and int(payload.get("separate_attack_index", 0)) != 0):
                     continue
                 state["seen"].add(target.unit_id)
                 hit_payload = {**payload, "attack_cells": [], "area_attack": True}
@@ -5908,7 +6045,9 @@ class Battle:
     def _resolve_queued_action(self, queued_action: QueuedAction) -> None:
         with self.suppress_logs() if self.queued_action_hides_logs(queued_action) else nullcontext():
             actor = self.units.get(queued_action.actor_id)
-            if actor is None or not actor.alive or actor.banished:
+            if actor is None and queued_action.payload.get("after_death_effect"):
+                actor = next((unit for unit in self.destroyed_units if unit.unit_id == queued_action.actor_id), None)
+            if actor is None or (not actor.alive and not queued_action.payload.get("after_death_effect")) or actor.banished:
                 self.stale_queued_action_count += 1
                 self._separate_attack_sequences.pop(queued_action.payload.get("declaration_id"), None)
                 self.log(f"【{queued_action.display_name}】未能结算，因为行动者已不在战场。")
@@ -5991,9 +6130,7 @@ class Battle:
                         payload,
                         ignore_stealth=bool(payload.get("ignore_stealth")),
                     )
-                    if target is None or (
-                        target.player_id == actor.player_id and not payload.get("allow_allied_attack_target")
-                    ):
+                    if target is None:
                         actor.attacks_used += attack_cost
                         actor.actions_taken_this_turn.append("attack")
                         actor.consume_attack_attempt_buffs(self)
@@ -6145,6 +6282,10 @@ class Battle:
         self.log(f"{actor.name} 结束了自己的行动。")
 
     def cleanup_dead_units(self) -> None:
+        for effect in list(self.field_effects):
+            hook = getattr(effect, "on_before_dead_cleanup", None)
+            if callable(hook):
+                hook(self)
         while True:
             dead_ids = {unit.unit_id for unit in self.all_units() if not unit.alive}
             chained_summons = [
@@ -6170,6 +6311,10 @@ class Battle:
         self.notify_destroyed_hero_count_changed()
         self.clear_all_stealth_if_all_heroes_stealthed()
         self.check_win_condition()
+        for effect in list(self.field_effects):
+            hook = getattr(effect, "on_after_dead_cleanup", None)
+            if callable(hook):
+                hook(self)
 
     def destroyed_hero_count(self) -> int:
         units = {unit.unit_id: unit for unit in [*self.destroyed_units, *self.all_units()]}
@@ -6246,7 +6391,7 @@ class Battle:
         if pending is not None:
             if payload.get("type") != "damage_choice" or payload.get("unit_id") != pending["unit_id"]:
                 raise ActionError("请先完成本次伤害选择。")
-            if pending.get("kind") in {"rotation", "attack_swap", "formation", "optional_swap", "optional_placement", "end_dash", "electronic_teleport", "hell_sacrifice"}:
+            if pending.get("kind") in {"rotation", "attack_swap", "formation", "optional_swap", "optional_placement", "end_dash", "electronic_teleport", "hell_sacrifice", "hell_death_strike"}:
                 choice = str(payload.get("target_unit_id") or "")
                 if (choice == "decline" and pending.get("kind") in {"attack_swap", "formation"}) or (choice != "decline" and choice not in pending["options"]):
                     raise ActionError("请选择当前提示中的合法对象与落点。")

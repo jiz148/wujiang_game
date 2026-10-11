@@ -9115,11 +9115,19 @@ body.battle-mode .logs .log {
 .bp-auto-bans__group { margin: 0.35rem 0; }
 .bp-auto-bans__group summary { cursor: pointer; }
 .bp-auto-bans__names { margin-top: var(--s-2); }
+.bp-pool-list { margin: .5rem 0; }
+.bp-pool-list summary { cursor: pointer; }
+.bp-pool-list__names { max-height: 12rem; overflow-y: auto; margin-top: .35rem; }
 .bp-history { margin-top: var(--s-3); }
 .bp-chip { display: inline-block; margin: 0.2rem; padding: 0.3rem 0.55rem; border-radius: 999px; background: var(--surface-2); }
 .bp-chip[data-bp-history-hero], .bp-chip[data-bp-auto-ban-hero] { cursor: help; }
 .bp-score { font-weight: 700; color: var(--accent-hi); margin-bottom: var(--s-2); }
 .bp-panel .bp-error { color: var(--danger); }
+.bp-special-modes, .bp-battle-mode { margin: .5rem 0; padding: .65rem .8rem; border: 1px solid var(--accent-hi); border-radius: var(--r-2); background: var(--surface-2); white-space: pre-line; }
+.bp-special-modes h3, .bp-battle-mode p { margin: .2rem 0; }
+.bp-battle-mode { position: relative; z-index: 2; flex: 0 0 auto; max-height: 7rem; overflow-y: auto; }
+.bp-battle-mode:not(.hidden) + .arena { flex: 1 1 auto; height: auto; }
+.cell.is-bp-eternal-zone { box-shadow: inset 0 0 0 2px rgba(111, 219, 168, .65); }
 @media (max-width: 760px) {
   .bp-content { grid-template-columns: minmax(0, 1fr); grid-template-areas: 'details' 'main'; }
   .bp-hero-details { max-height: 42vh; z-index: 10; }

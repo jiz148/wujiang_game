@@ -55,12 +55,50 @@ function createHeroDetails() {
   return { panel, bind, reset, show };
 }
 
-function addAutomaticBans(panel, bp) {
+function addAutomaticBans(panel, bp, details) {
   const levels = (bp.auto_banned_levels || []).map(Number);
   if (!levels.length) return;
-  const row = element('div', '', 'bp-auto');
-  levels.forEach((level) => row.append(element('span', `Lv ${level} 已禁用`, 'bp-auto__chip')));
-  panel.append(row);
+  const section = element('section', '', 'bp-auto-bans');
+  section.append(element('h4', `系统禁用等级：${levels.map((level) => `Lv ${level}`).join('、')}`));
+  section.append(element('p', '这些等级的本局武将不可禁用或选取。'));
+  const pool = bp.hero_pool_codes?.length ? new Set(bp.hero_pool_codes) : null;
+  levels.forEach((level) => {
+    const heroes = (state.heroes || []).filter((hero) => (!pool || pool.has(hero.code)) && Number(hero.level) === level)
+      .sort((left, right) => left.name.localeCompare(right.name, 'zh'));
+    const group = document.createElement('details');
+    group.className = 'bp-auto-bans__group';
+    group.append(element('summary', `Lv ${level} · ${heroes.length} 名武将`));
+    const names = element('div', '', 'bp-auto-bans__names');
+    heroes.forEach((hero) => {
+      const name = element('span', hero.name, 'bp-chip');
+      name.tabIndex = 0;
+      name.dataset.bpAutoBanHero = hero.code;
+      details.bind(name, hero);
+      names.append(name);
+    });
+    group.append(names);
+    section.append(group);
+  });
+  panel.append(section);
+}
+
+function addHeroPool(panel, bp, details) {
+  if (!bp.hero_pool_codes?.length) return;
+  const codes = new Set(bp.hero_pool_codes);
+  const heroes = (state.heroes || []).filter((hero) => codes.has(hero.code))
+    .sort((left, right) => Number(left.level) - Number(right.level) || left.name.localeCompare(right.name, 'zh'));
+  const group = document.createElement('details');
+  group.className = 'bp-pool-list';
+  group.append(element('summary', `查看本局全部 ${bp.hero_pool_codes.length} 名武将`));
+  const names = element('div', '', 'bp-pool-list__names');
+  heroes.forEach((hero) => {
+    const name = element('span', `${hero.name} · Lv ${hero.level}`, 'bp-chip');
+    name.tabIndex = 0;
+    details.bind(name, hero);
+    names.append(name);
+  });
+  group.append(names);
+  panel.append(group);
 }
 
 function heroByCode(code) {
@@ -159,7 +197,8 @@ function heroBoard(bp, details, commit) {
     return kind === "ban" || Number(hero.level) <= remaining;
   };
   const board = element("div", "", "bp-matrix");
-  const heroes = [...(state.heroes || [])].sort((left, right) => (
+  const pool = bp.hero_pool_codes?.length ? new Set(bp.hero_pool_codes) : null;
+  const heroes = (state.heroes || []).filter((hero) => !pool || pool.has(hero.code)).sort((left, right) => (
     Number(left.level) - Number(right.level) || left.name.localeCompare(right.name, "zh")
   ));
   const groups = [];
@@ -233,6 +272,8 @@ function heroBoard(bp, details, commit) {
 
 function renderDraftStage(panel, bp, seats, details) {
   syncBpSelection(bp);
+  addHeroPool(panel, bp, details);
+  addAutomaticBans(panel, bp, details);
   const reviewing = bp.phase === "review";
   const kind = reviewing ? "pick" : (bp.current_kind === "ban" ? "ban" : "pick");
   const stage = element("div", "", "bp-stage");
@@ -326,6 +367,16 @@ export function renderBpPanel() {
   const panel = $('bp-panel');
   if (!panel) return;
   const room = state.room;
+  const battleBanner = typeof document.getElementById === 'function' ? document.getElementById('bp-battle-mode') : null;
+  if (battleBanner) {
+    const modes = room?.mode === 'bp' ? room.bp?.special_modes || [] : [];
+    battleBanner.classList.toggle('hidden', room?.status !== 'battle' || !modes.length);
+    battleBanner.replaceChildren();
+    if (modes.length) {
+      battleBanner.append(element('strong', `本局特殊模式：${modes.map((mode) => mode.name).join(' + ')}`));
+      modes.forEach((mode) => battleBanner.append(element('p', mode.description)));
+    }
+  }
   const inBpFlow = room?.mode === "bp" && room.status === "bp";
   document.body?.classList?.toggle("bp-draft", Boolean(inBpFlow));
   panel.classList.toggle("hidden", !inBpFlow);
@@ -350,6 +401,8 @@ export function renderBpPanel() {
     bp.format,
     bp.current_level,
     bp.wins,
+    bp.hero_pool_codes,
+    bp.special_modes,
     (room.seats || []).map((seat) => [seat.player_id, seat.name, seat.team_id]),
   ]);
   if (panel.dataset.bpPhaseKey === phaseKey) return;
@@ -357,6 +410,16 @@ export function renderBpPanel() {
   hideHeroHover();
   panel.replaceChildren();
   const seats = room.seats || [];
+  if (bp.special_modes?.length) {
+    const modes = element('section', '', 'bp-special-modes');
+    modes.append(element('h3', `本局特殊模式：${bp.special_modes.map((mode) => mode.name).join(' + ')}`));
+    bp.special_modes.forEach((mode) => modes.append(element('p', mode.description)));
+    panel.append(modes);
+  }
+  if (bp.hero_pool_codes?.length) {
+    const levels = Object.entries(bp.hero_pool_levels || {}).map(([level, count]) => `Lv ${level}：${count}`).join(' · ');
+    panel.append(element('p', `本局武将池 ${bp.hero_pool_codes.length} 名｜${levels}`, 'bp-pool-summary'));
+  }
   if (bp.phase === "assign") {
     renderAssign(panel, bp, seats);
     return;

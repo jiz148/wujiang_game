@@ -545,6 +545,9 @@ export function renderBoard() {
   const aiCurrentKey = aiPreviewCells.length ? positionKey(aiPreviewCells[aiPreviewCells.length - 1]) : "";
   const placementSize = Number(selectedAction()?.preview?.placement_size || 1);
   const boardWidth = state.battle.board.width;
+  const eternalZone = state.room?.mode === "bp" && state.room?.bp?.special_modes?.some((mode) => mode.code === "eternal");
+  const eternalLeft = Math.floor((boardWidth - 5) / 2);
+  const eternalTop = Math.floor((state.battle.board.height - 5) / 2);
   const cellAt = [];
 
   for (let y = 0; y < state.battle.board.height; y += 1) {
@@ -568,6 +571,9 @@ export function renderBoard() {
       const terrain = Array.isArray(state.battle?.board?.terrain) ? state.battle.board.terrain : [];
       const isWall = terrain.some((item) => Number(item.x) === x && Number(item.y) === y && item.kind === "wall");
       const cellEffects = fieldCellMap.get(key) || [];
+      const inEternalZone = eternalZone && x >= eternalLeft && x < eternalLeft + 5
+        && y >= eternalTop && y < eternalTop + 5;
+      if (inEternalZone) cell.classList.add("is-bp-eternal-zone");
       if (isWall) cell.classList.add("is-terrain-wall");
       if (preview.cellKeys.has(key)) cell.classList.add("is-preview");
       if (preview.secondaryCellKeys.has(key)) cell.classList.add("is-secondary");
@@ -586,6 +592,7 @@ export function renderBoard() {
       if (occupant && preview.targetIds.has(occupant.id)) cellLabels.push("可选目标");
       if (unitOccupiedCells(selected).some((cellPosition) => cellPosition.x === x && cellPosition.y === y)) cellLabels.push("当前选择");
       if (cellEffects.length) cellLabels.push(`战场状态：${cellEffects.map((effect) => effect.name).join("、")}`);
+      if (inEternalZone) cellLabels.push("永恒轮回战场区域");
       cell.setAttribute?.("aria-label", cellLabels.join("；"));
       if (typeof cell.setAttribute !== "function") cell.ariaLabel = cellLabels.join("；");
 
@@ -1539,6 +1546,8 @@ export function renderChainPanel() {
     const prompt = state.battle.pending_damage_choice;
     if (caption) caption.textContent = prompt.kind === "hell_sacrifice"
       ? "赤候可以技能破坏一名己方地狱单位，或放弃这次牺牲。"
+      : prompt.kind === "hell_death_strike"
+      ? "刺客临死可选周围一名单位连续反击两次，或放弃。"
       : prompt.kind === "attack_swap"
       ? "亚历山大的普攻已完成，请选择一名有合法落点的友军交换位置。"
       : prompt.kind === "electronic_teleport"

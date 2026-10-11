@@ -41,6 +41,7 @@ from wujiang.tactical.heroes.common import (
     HealSkill,
     KnockbackSkill,
     LightWallSkill,
+    InvincibleUntilActionStatus,
     MachineGunSkill,
     MagicWallSkill,
     MagicImmunityStatus,
@@ -7762,11 +7763,11 @@ class GlobalAttackStatus(StatusEffect):
     def basic_attack_payload_metadata(self, battle, actor, payload=None):
         cells = battle.payload_positions(payload or {}, "attack_cells") if (payload or {}).get("queued_resolution") else []
         return {"attack_cells": positions_to_dict(cells or self.basic_attack_area_cells(battle, actor)),
-                "area_attack": True, "single_hit_per_recipient": True, "friendly_fire": False,
+                "area_attack": True, "single_hit_per_recipient": True,
                 "allow_empty_attack_cell": True}
 
     def basic_attack_preview(self, battle, actor, payload=None):
-        targets = [unit for unit in battle.enemy_units(actor.player_id) if battle.unit_can_be_selected(unit, actor=actor)[0]]
+        targets = [unit for unit in battle.all_units() if battle.unit_can_be_selected(unit, actor=actor)[0]]
         cells = [Position(x, y) for y in range(battle.height) for x in range(battle.width)]
         return {"cells": positions_to_dict(cells), "target_unit_ids": [unit.unit_id for unit in targets],
                 "secondary_cells": [], "requires_target": True, "cell_targeted_attack": True}
@@ -7817,6 +7818,9 @@ class FusionCircleAttackTrait(Trait):
     def __init__(self) -> None:
         super().__init__("攻击一周", "普攻同时命中自身外圈全部敌方，每个实际受体一次。")
 
+    def basic_attack_area_affects_allies(self, battle, actor, payload=None):
+        return False
+
     def basic_attack_area_cells(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position] | None:
         if actor.has_status("核冲"):
             return None
@@ -7845,6 +7849,9 @@ class FusionCircleAttackTrait(Trait):
 
 class NuclearRushStatus(StatusEffect):
     DIRECTIONS = DeadlyBowSkill.DIRECTIONS
+
+    def basic_attack_area_affects_allies(self, battle, actor, payload=None):
+        return False
 
     def __init__(self) -> None:
         super().__init__("核冲", "攻 +1；普攻攻击前4格，之后尝试移到声明的第5格；落点不合法仍完成攻击。", duration=None)
@@ -12203,6 +12210,133 @@ class HellPressureSkill(KnockbackSkill):
         return ok, reason
 
 
+class HellOrbSkill(RemoteDragonBreathSkill):
+    def __init__(self, *, free: bool = False) -> None:
+        super().__init__()
+        self.free = free
+        self.code = "hell_orb_free" if free else "hell_orb"
+        self.name = "魔动球（0魔免费）" if free else "魔动球"
+        self.description = ("当前魔恰为0时，每本人轮免费一次远程龙息。" if free
+                            else "沿用远程龙息：2魔，每本人轮最多2次。")
+        if free:
+            self.mana_cost = 0
+            self.max_uses_per_turn = 1
+
+    def can_use(self, battle: Battle, actor: Unit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if ok and self.free and actor.current_mana != 0:
+            return False, "只有当前魔为0时才可免费使用魔动球。"
+        return ok, reason
+
+
+class HellWallSkill(LightWallSkill):
+    def __init__(self, *, free: bool = False) -> None:
+        super().__init__()
+        self.free = free
+        self.code = "hell_wall_free" if free else "hell_wall"
+        self.name = "魔墙（0魔免费）" if free else "魔墙"
+        self.description = ("当前魔恰为0时，每敌方英雄回合免费连锁2次光墙。" if free
+                            else "沿用光墙：每保护一个受影响己方实际受体费1魔。")
+        if free:
+            self.mana_cost = 0
+            self.max_uses_per_turn = 2
+
+    def can_react_to(self, battle: Battle, actor: Unit, queued_action: Any) -> tuple[bool, str]:
+        ok, reason = super().can_react_to(battle, actor, queued_action)
+        if ok and self.free and actor.current_mana != 0:
+            return False, "只有当前魔为0时才可免费使用魔墙。"
+        return ok, reason
+
+
+class HellShuffleSkill(Skill):
+    requires_direct_unit_target_line = False
+
+    def __init__(self) -> None:
+        super().__init__("hell_shuffle", "地狱洗牌",
+                         "大招：每场一次，选择场上己方名字含地狱的单位技能破坏；魔免不能挡，其他普通防御照常。",
+                         max_uses_per_battle=1, target_mode="ally")
+
+    def targets(self, battle: Battle, actor: Unit) -> list[Unit]:
+        return [unit for unit in battle.all_units()
+                if unit.alive and not unit.banished and unit.position is not None
+                and unit.player_id == actor.player_id and "地狱" in unit.name]
+
+    def can_use(self, battle: Battle, actor: Unit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok:
+            return ok, reason
+        if payload and payload.get("target_unit_id") and str(payload["target_unit_id"]) not in {u.unit_id for u in self.targets(battle, actor)}:
+            return False, "只能选择己方名字含地狱的在场单位。"
+        return True, ""
+
+    def execute(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
+        target = payload_target_unit(battle, payload)
+        if target.unit_id not in {unit.unit_id for unit in self.targets(battle, actor)}:
+            raise ActionError("只能选择己方名字含地狱的在场单位。")
+        result = battle.validate_target(actor, target, action_name=self.name, is_skill=True,
+                                        is_hostile=True, ignore_magic_immunity=True,
+                                        ignore_targeting_restrictions=True,
+                                        record_effect_on_validation=False)
+        recipient = result.target
+        if result.cancelled or recipient.skill_non_damage_effects_blocked():
+            battle.log_public_event(result.reason or f"{recipient.name} 未受到地狱洗牌影响。",
+                                    source=actor, target=recipient)
+            return
+        recipient.current_hp = 0
+        recipient.alive = False
+        battle.log_public_event(f"{actor.name} 用地狱洗牌技能破坏了{recipient.name}。",
+                                source=actor, target=recipient)
+        for component in list(recipient.iter_components()):
+            callback = getattr(component, "on_hell_forced_skill_death", None)
+            if callable(callback):
+                callback(battle)
+        battle.cleanup_dead_units()
+
+    def preview(self, battle: Battle, actor: Unit) -> dict[str, Any]:
+        targets = self.targets(battle, actor)
+        return {"cells": positions_to_dict([cell for unit in targets for cell in battle.unit_cells(unit)]),
+                "target_unit_ids": [unit.unit_id for unit in targets],
+                "secondary_cells": [], "requires_target": True}
+
+
+class HellHorseRideableTrait(Trait):
+    def __init__(self) -> None:
+        super().__init__("可乘骑", "乘骑时由地狱马承受伤害和技能效果，骑士仍可替马连锁。")
+
+
+class HellHorseSummon(AbstractHero):
+    hero_code = "hell_horse"
+    hero_name = "地狱马"
+    role = "坐骑"
+    attribute = "暗"
+    race = "兽"
+    level = 1
+    base_stats = Stats(attack=1, defense=4, speed=4, attack_range=1, mana=0)
+    footprint_width = 1
+    footprint_height = 2
+    raw_skill_text = ""
+    raw_trait_text = "可乘骑"
+
+    def __init__(self, player_id: int) -> None:
+        super().__init__(player_id, is_summon=True)
+
+    def build_skills(self) -> list[Skill]:
+        return []
+
+    def build_traits(self) -> list[Trait]:
+        return [HellHorseRideableTrait()]
+
+
+def resolve_hell_death_strike(battle: Battle, actor: Unit, queued_action: Any) -> None:
+    cells = battle.payload_positions(queued_action.payload, "cells")
+    for recipient in battle.effect_units_at_cells(cells):
+        battle.resolve_damage(DamageContext(
+            source=actor, target=recipient, attack_power=float(queued_action.payload["attack_power"]),
+            is_skill=False, from_field_effect=True, action_name=queued_action.display_name,
+            tags={"hell_death_strike", "death_trait"},
+        ))
+
+
 class HellRebirthPierceStatus(StatusEffect):
     def __init__(self) -> None:
         super().__init__("地狱再临·普攻破魔", "再临后3本人轮普攻破魔。", duration=3)
@@ -12259,10 +12393,110 @@ class HellRebirthTrait(Trait):
             status = HellRebirthPierceStatus()
         elif self.hero_code == "excel_r240":
             status = HellRebirthGuardStatus()
+        elif self.hero_code == "excel_r239":
+            shuffle = next((skill for skill in owner.skills if skill.code == "hell_shuffle"), None)
+            if shuffle is not None:
+                shuffle.uses_this_battle = 0
+                battle.log(f"{owner.name} 的地狱洗牌次数已重置。")
         if status is not None:
             status.is_skill_effect = False
             owner.add_status(status, source=owner)
         battle.log(f"{owner.name} 的地狱再临强化开始。")
+
+
+class HellKnightRebirthTrait(HellRebirthTrait):
+    def __init__(self) -> None:
+        super().__init__("excel_r243")
+        self.name = "地狱骑士再临"
+
+    def hell_rebirth_destination_legal(self, battle: Battle, destination: Position) -> bool:
+        owner = self.owner
+        if owner is None:
+            return False
+        horse = HellHorseSummon(owner.player_id)
+        horse.mount_owner_id = owner.unit_id
+        horse.is_mount = True
+        return battle.can_place_unit(horse, destination, mover=horse)
+
+    def on_hell_rebirth(self, battle: Battle) -> None:
+        owner = self.owner
+        if owner is None or owner.position is None:
+            return
+        horse = HellHorseSummon(owner.player_id)
+        horse.mount_owner_id = owner.unit_id
+        horse.is_mount = True
+        battle.summon_unit(horse, owner.position, summoner=owner)
+        battle.set_mounted_state(owner, horse)
+        battle.log_public_event(f"{owner.name} 骑上地狱马再临。", source=owner, target=horse)
+
+
+class HellAssassinRebirthTrait(HellRebirthTrait):
+    requires_damage_choice = True
+
+    def __init__(self) -> None:
+        super().__init__("excel_r244")
+        self.name = "地狱刺客再临"
+
+    def on_after_damage(self, battle: Battle, ctx: DamageContext) -> None:
+        owner = self.owner
+        if (owner is None or ctx.target.unit_id != owner.unit_id or owner.alive
+                or not ctx.is_skill or ctx.from_field_effect):
+            return
+        super().on_after_damage(battle, ctx)
+        self.offer_death_strike(battle)
+
+    def on_hell_forced_skill_death(self, battle: Battle) -> None:
+        super().on_hell_forced_skill_death(battle)
+        self.offer_death_strike(battle)
+
+    def offer_death_strike(self, battle: Battle) -> None:
+        owner = self.owner
+        if owner is None:
+            return
+        if getattr(owner, "_hell_assassin_strike_scheduled", False):
+            return
+        owner._hell_assassin_strike_scheduled = True
+        origin = owner.position or owner.last_position
+        if origin is None:
+            return
+        surrounding = set(battle.neighbors(origin))
+        options = [unit.unit_id for unit in battle.all_units()
+                   if unit.alive and not unit.banished and unit.position is not None
+                   and any(cell in surrounding for cell in battle.unit_cells(unit))]
+        if not options:
+            battle.log(f"{owner.name} 身边没有死亡反击目标。")
+            return
+        selected_id = battle.optional_position_choice(owner, options, action_name="地狱刺客死亡反击",
+                                                      kind="hell_death_strike")
+        selected = battle.units.get(selected_id or "")
+        if selected is None or selected.position is None or not selected.alive:
+            battle.log(f"{owner.name} 放弃了死亡反击。")
+            return
+        cell = next((cell for cell in battle.unit_cells(selected) if cell in surrounding), None)
+        if cell is None:
+            return
+        battle.log_public_event(f"{owner.name} 临死对{selected.name}连续反击两次。",
+                                source=owner, target=selected)
+        for index in range(2):
+            battle.queue_skill_effect_action(
+                actor=owner, display_name=f"地狱刺客死亡反击·{index + 1}",
+                effect_code="hell_death_strike",
+                payload={"after_death_effect": True, "cells": [cell.to_dict()],
+                         "attack_power": owner.stat("attack"), "refresh_cell_targets": True},
+                target_cells=[cell], speed=1, hostile=selected.player_id != owner.player_id,
+                segment_index=index + 1, segment_count=2,
+                effect_resolver=resolve_hell_death_strike,
+            )
+
+    def on_hell_rebirth(self, battle: Battle) -> None:
+        owner = self.owner
+        if owner is None:
+            return
+        owner._hell_assassin_strike_scheduled = False
+        owner.add_status(InvincibleUntilActionStatus(), source=owner)
+        battle.enforce_sandstorm_stealth_rules()
+        battle.clear_all_stealth_if_all_heroes_stealthed()
+        battle.log(f"{owner.name} 隐身地狱再临。")
 
 
 class HellSikaSacrificeTrait(HellRebirthTrait):
@@ -12330,11 +12564,18 @@ def _slug_tail(source_row: int, name: str) -> str:
 def _special_skill_factory(spec: dict[str, Any], fragment: dict[str, Any]) -> Skill | None:
     name = _text(fragment.get("name"))
     source = _text(fragment.get("fragment"))
-    if spec.get("code") in {"excel_r238", "excel_r240", "excel_r242"}:
+    if spec.get("code") in {"excel_r238", "excel_r240", "excel_r242", "excel_r243", "excel_r244"}:
         if name == "魔枪":
             return HellSpearSkill()
         if name == "魔压":
             return HellPressureSkill()
+    if spec.get("code") == "excel_r239":
+        if name == "魔动球":
+            return HellOrbSkill()
+        if name == "魔墙":
+            return HellWallSkill()
+        if name == "地狱洗牌":
+            return HellShuffleSkill()
     if spec.get("code") == "excel_r221" and name == "卫星加农炮":
         return SatelliteCannonSkill()
     if spec.get("code") == "excel_r222" and name == "电子维修":
@@ -12735,6 +12976,12 @@ def _special_trait_factory(spec: dict[str, Any], fragment: dict[str, Any]) -> Tr
         return HellRebirthTrait(spec["code"])
     if spec.get("code") == "excel_r242" and "被技能破坏后" in text:
         return HellSikaSacrificeTrait()
+    if spec.get("code") == "excel_r239" and "被技能破坏后" in text:
+        return HellRebirthTrait("excel_r239")
+    if spec.get("code") == "excel_r243" and "被技能破坏后" in text:
+        return HellKnightRebirthTrait()
+    if spec.get("code") == "excel_r244" and "被技能破坏时" in text:
+        return HellAssassinRebirthTrait()
     if spec.get("code") == "excel_r223" and text == "每回不限制移动次数":
         return ElectronicWingMovementTrait()
     if spec.get("code") == "excel_r221" and "瞬移到任意一个己方单位周围" in text:
@@ -12941,8 +13188,10 @@ def _make_build_skills(spec: dict[str, Any]) -> Callable[[AbstractHero], list[Sk
             skills.append(BoxerBlockCounterSkill())
         if spec.get("code") == "excel_r219":
             skills.extend([BirdDashSkill(free=True), BirdSoulSkill(free=True)])
-        if spec.get("code") in {"excel_r238", "excel_r240", "excel_r242"}:
+        if spec.get("code") in {"excel_r238", "excel_r240", "excel_r242", "excel_r243", "excel_r244"}:
             skills.extend([HellSpearSkill(free=True), HellPressureSkill(free=True)])
+        if spec.get("code") == "excel_r239":
+            skills.extend([HellOrbSkill(free=True), HellWallSkill(free=True)])
         return skills
 
     return build_skills
@@ -13073,8 +13322,11 @@ IMPLEMENTED_EXCEL_HERO_CODES: frozenset[str] = frozenset(
         "excel_r224",
         "excel_r225",
         "excel_r238",
+        "excel_r239",
         "excel_r240",
         "excel_r242",
+        "excel_r243",
+        "excel_r244",
         "excel_r264",
         "excel_r291",
         "excel_r326",

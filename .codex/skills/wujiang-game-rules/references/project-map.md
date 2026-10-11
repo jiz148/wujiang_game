@@ -2,6 +2,12 @@
 
 Update this file after every new gameplay requirement or code change in `wujiang_game`. Keep entries concise and durable; do not paste full docs.
 
+- 2026-10-11 用户确认通用阵营默认：所有武将的普攻、技能、特性在无明确阵营/特殊说明时均影响实际受体双方，单体普攻可合法选己方、区域普攻默认友伤。`engine/core.py` 的单体旧格、范围声明/结算与共同预览不再默认排除友方；原有“只打敌方”武将由组件显式排除。`rooms/ai.py` 的区域受体与友伤评分使用同一判断，特殊支援普攻仍按自身规则。逐将排除项须以源文核对，行为用例和静态检查同步。
+
+- 2026-10-11 Phase H R239/R243/R244：源与保存问卷先分别锁入设计JSON/XLSX。`heroes/excel_roster.py`新增狂王远程龙息/光墙严格0魔双档及仅越魔免的同名洗牌、骑士首次技能死亡后完整1×2地狱马乘骑、刺客技能死亡旧邻单体两段独立反击及隐身回场。`engine/core.py`筛敌方回场锚点、复合落格并允许死体后续效果参与独立连锁；`rooms/ai.py`评估牺牲净收益、真实远程伤害/护墙、坐骑取位及双段反击；前端显示反击/放弃。`NewBatch239243244HellBehaviorTests`待用户运行；公开池91/388，剩余297。R238/R240/R242首报告11项行为通过、30场AI一处R240震开免非伤害技能目标动作错误；共用`KnockbackSkill`已静态补合法性检查。
+
+- 2026-10-11 BP 66 人池与特殊模式：`rooms/multiplayer.py::draw_bp_hero_pool` 从已实现武将中按等级钟形权重及库存上限抽 66 人，系统禁级、完成性、合法候选和 BP 列表均限制在该池，连局重抽并持久化。`rooms/special_modes.py` 转录 `data/特殊规则.xlsx` 18 条，`rooms/special_battle.py` 在 `heroes/registry.py::create_room_battle` 进场与场地效果中执行；`engine/core.py` 提供回复、魔免、行动、轮次与死亡等规则接点，并在伤害来源奖励之后、目标死亡钩之前执行软柿子替死，在其他回合末效果之后执行法师补魔。软柿子清除来源状态/场地/召唤物与个人永久加成；回复反噬按施放者队伍选择目标；同情弱者限制目标范围与真回合制叠加时取 1。擂台候场资源/状态/位移免疫覆盖其召唤物；单挑代表死亡立即判胜；整场规则不受普通效果免疫跳过。`static/tactical/bp-ui.js` 在禁选和战斗均显示本局模式，`battle-ui.js` 标出轮回战场区域。逐项定义见 `docs/BP特殊模式规则.md`，场景见 `tests/test_behavior.py::BPSpecialModeBehaviorTests`。
+
 - 2026-10-10 Phase H R238/R240/R242：源与保存问卷先各自锁JSON/XLSX，再在`heroes/excel_roster.py`接魔枪/魔压付费与严格0魔免费双档、三名技能死亡回场特性；`engine/core.py`从真实死亡记录安排下一敌方英雄末原对象合法选位并暂停轮序，避免待回场即判败；尖兵三轮普攻破魔、番兵三轮回血双攻、赤候可选真实友军技能破坏。`rooms/ai.py`补免费技能、回场及牺牲取舍，`static/tactical/vfx.js`和`battle-ui.js`等展示选择。`NewBatch238240242HellBehaviorTests`待用户定向运行；公开池88/388，剩余300。
 
 - 2026-10-10 通用开局顺序：`heroes/registry.py::start_order_key`改为原生等级升序、当前速降序、当前攻降序，其后保留守/范降序与魔升序、完全相同随机。双方各自排序、比较首名决定先手、交叉排列；单挑入口也使用同一规则。classic/random/多人/BP/自走棋共用排序；开局后不因数值变化重排。教学固定火葬者5级先于艾莉8级，与规则一致。`NewBatch223TurnOrderBehaviorTests`待用户运行；规则见通用规则与武将游戏规则。连锁窗口的反应单位排序仍由其独立规则控制。
@@ -680,6 +686,9 @@ The codebase was reorganised by domain on 2026-08-27. Every phase record further
 - Strategy hero identity is actor-first: each player/AI controls one persistent strategic hero, which may be a lord, remain roaming, found a faction at its current city, or request allegiance to another lord. A roaming player gets a dedicated map workspace and no faction/city commands. Additional faction heroes are obtained through the confirmed city ritual-site random summon rule: the ritual pays 30 city ether and one command point, requires free non-lord office capacity, and binds the summoned hero to that city. Acceptance/allegiance or ritual summoning never grants an office automatically; the lord must appoint an unassigned serving hero as grand general, general, or governor. A campaign-founded faction starts with only its founding lord, and office migration must never synthesize free heroes.
 
 ## Testing Policy
+
+- BP 特殊模式的阵亡判定必须覆盖伤害结算与非伤害途径：统一阵亡清理在移除单位前通知房间规则，处理骤死、软柿子替死与擂台接替；替死者要标记以防递归替死。当前生命与当前魔量的直接增加必须走与回复 API 一致的 BP 禁止回复/回复反噬判定。
+- BP“铁链”跟随应沿开场同队行动顺序继续传递，且不得绕回推动本次最初移动的单位；跟随移动不消耗行动资源。
 
 - Add focused tests for every durable gameplay rule change.
 - After every gameplay, room-flow, or player-visible UI change, add or update at least one behavior scenario that exercises the changed feature from the player's point of view.

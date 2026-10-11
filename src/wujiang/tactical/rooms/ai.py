@@ -88,6 +88,8 @@ MOVE_SKILL_CODES.update({"iron_chain_path", "ghost_step", "frey_quick_flash"})
 MOVE_SKILL_CODES.update({"flash_slash", "bird_soul", "bird_soul_free"})
 AREA_ESCAPE_REACTION_CODES = {"evasion", "backstep_shot", "card_transposition", "shadow_counter", "ghost_step"}
 DAMAGING_SKILL_CODES = {
+    "hell_orb",
+    "hell_orb_free",
     "hell_spear",
     "hell_spear_free",
     "paralyzing_glove",
@@ -184,6 +186,8 @@ CONTROL_SKILL_CODES = {
     "ring_taunt",
 }
 REACTION_SHIELD_CODES = {
+    "hell_wall",
+    "hell_wall_free",
     "magic_wall",
     "magic_shield",
     "light_wall",
@@ -462,6 +466,9 @@ def choose_damage_choice_action(battle: Battle) -> dict[str, Any]:
     if prompt.get("kind") == "hell_sacrifice":
         with ai_enemy_view(battle, unit.player_id):
             return choose_hell_sacrifice_action(battle, prompt, unit)
+    if prompt.get("kind") == "hell_death_strike":
+        with ai_enemy_view(battle, unit.player_id):
+            return choose_hell_death_strike_action(battle, prompt, unit)
     if prompt.get("kind") in {"rotation", "attack_swap", "formation", "optional_swap", "optional_placement"}:
         with ai_enemy_view(battle, unit.player_id):
             return choose_rotation_damage_choice_action(battle, prompt, unit)
@@ -497,6 +504,25 @@ def choose_hell_sacrifice_action(battle: Battle, prompt: dict[str, Any], unit: U
             future_gain -= recipient.current_mana * 12.0
         score = future_gain - immediate_loss
         if score > best[0] + 12.0:
+            best = (score, unit_id)
+    return {"type": "damage_choice", "unit_id": unit.unit_id, "target_unit_id": best[1]}
+
+
+def choose_hell_death_strike_action(battle: Battle, prompt: dict[str, Any], unit: Unit) -> dict[str, Any]:
+    best = (0.0, "decline")
+    for unit_id in prompt.get("options", []):
+        target = battle.units.get(str(unit_id))
+        if target is None or not target.alive:
+            continue
+        recipient = battle.effect_recipient(target)
+        guards = min(2, recipient.total_shields() + recipient.dodge_charges)
+        hits = max(0, 2 - guards)
+        harm = min(recipient.current_hp, hits * battle.damage_rule.calculate_damage(
+            unit.stat("attack"), recipient.stat("defense")))
+        score = (harm * 140.0 + guards * 12.0 + (75.0 if harm >= recipient.current_hp and harm > 0 else 0.0))
+        if recipient.player_id == unit.player_id:
+            score *= -1.4
+        if score > best[0]:
             best = (score, unit_id)
     return {"type": "damage_choice", "unit_id": unit.unit_id, "target_unit_id": best[1]}
 
@@ -1976,7 +2002,8 @@ def attack_effect_units(battle: Battle, actor: Unit, payload: dict[str, Any]) ->
     resolved_payload = battle.resolved_basic_attack_payload(actor, payload)
     if "attack_cells" in resolved_payload:
         return [unit for unit in battle.effect_units_at_cells(battle.payload_positions(resolved_payload, "attack_cells"))
-                if unit.player_id != actor.player_id or resolved_payload.get("friendly_fire")]
+                if unit.player_id != actor.player_id or all(component.basic_attack_area_affects_allies(
+                    battle, actor, resolved_payload) for component in actor.iter_components())]
     target_id = str(payload.get("target_unit_id") or "")
     if target_id:
         target = battle.units.get(target_id)
@@ -2069,7 +2096,8 @@ def score_attack_payload(
         drain_room = max(0.0, actor.max_mana() - actor.current_mana)
         for target in battle.effect_units_at_cells(cells):
             if target.player_id == actor.player_id:
-                if resolved_payload.get("friendly_fire") or any(component.basic_attack_area_affects_allies(battle, actor, resolved_payload) for component in actor.iter_components()):
+                if all(component.basic_attack_area_affects_allies(battle, actor, resolved_payload)
+                       for component in actor.iter_components()):
                     score -= friendly_fire_penalty(target)
                 if forced_target is not None and target.unit_id == forced_target.unit_id:
                     score += 650.0
@@ -2121,6 +2149,10 @@ def score_attack_payload(
         attack_power=attack_power,
         area_cell_hits=hit_count,
     )
+    if target.player_id == actor.player_id:
+        required = required_attack_target(battle, actor)
+        return ((650.0 if required is not None and required.unit_id == target.unit_id else -1000.0)
+                - friendly_fire_penalty(target) - min(expected_damage, target.current_hp) * 120.0)
     score = min(expected_damage, target.current_hp) * 100.0
     if expected_damage >= target.current_hp - 1e-9:
         score += 95.0
@@ -2205,6 +2237,25 @@ def score_skill_payload(
     return score
 
 
+def hell_shuffle_score(battle: Battle, actor: Unit, payload: dict[str, Any]) -> float:
+    target = battle.units.get(str(payload.get("target_unit_id") or ""))
+    if target is None or target.unit_id == actor.unit_id or target.player_id != actor.player_id:
+        return -1000.0
+    recipient = battle.effect_recipient(target)
+    if (not recipient.alive or recipient.total_shields() > 0 or recipient.dodge_charges > 0
+            or recipient.skill_non_damage_effects_blocked()):
+        return -1000.0
+    if recipient.hero_code not in {"excel_r238", "excel_r239", "excel_r240", "excel_r242", "excel_r243", "excel_r244"}:
+        return -1000.0
+    if not battle.hell_rebirth_options_for(recipient):
+        return -1000.0
+    rebirth_value = {"excel_r238": 92.0, "excel_r239": 112.0, "excel_r240": 93.0,
+                     "excel_r242": 70.0, "excel_r243": 115.0, "excel_r244": 102.0}[recipient.hero_code]
+    lost_position = 16.0 if recipient.turn_ready else 0.0
+    current_value = recipient.current_hp * 120.0 + recipient.current_mana * 13.0 + lost_position
+    return rebirth_value - current_value - 22.0
+
+
 def _score_skill_payload(
     battle: Battle,
     actor: Unit,
@@ -2215,6 +2266,8 @@ def _score_skill_payload(
     instant_only: bool,
 ) -> float:
     code = str(action.get("code") or payload.get("skill_code") or "")
+    if code == "hell_shuffle":
+        return hell_shuffle_score(battle, actor, payload)
     if code == "electronic_fusion":
         return electronic_fusion_score(battle, actor, payload, profile)
     if code.startswith("fusion_piercing_shot__"):
@@ -2264,7 +2317,7 @@ def _score_skill_payload(
         return r21_winged_leap_score(battle, actor, payload)
     if code == "missile" or (actor.hero_code in {"excel_r264", "excel_r326"} and code in {"pierce", "remote_pierce"}):
         return reviewed_r18_effect_score(battle, actor, skill_from_ai_action(actor, action, code), payload, profile)
-    if code in {"machine_gun", "electronic_laser", "vitality_blast", "dragon_breath", "remote_dragon_breath"}:
+    if code in {"machine_gun", "electronic_laser", "vitality_blast", "dragon_breath", "remote_dragon_breath", "hell_orb", "hell_orb_free"}:
         return reviewed_r18_effect_score(battle, actor, skill_from_ai_action(actor, action, code), payload, profile)
     if code == "black_cat_paw":
         skill = skill_from_ai_action(actor, action, code)
@@ -2755,7 +2808,7 @@ def score_reaction_payload(
     code = str(option.get("action_code") or "")
     if reactor.hero_code == "excel_r192" and code == "gladiator_roar":
         return andrew_reaction_score(battle, reactor, queued_action, payload, code)
-    if (reactor.hero_code == "excel_r337" and code == "light_wall") or (reactor.hero_code == "excel_r352" and code == "evasion"):
+    if (reactor.hero_code == "excel_r337" and code == "light_wall") or (reactor.hero_code == "excel_r239" and code in {"hell_wall", "hell_wall_free"}) or (reactor.hero_code == "excel_r352" and code == "evasion"):
         return r22_paid_reaction_score(battle, reactor, queued_action, payload, code)
     if reactor.hero_code in {"excel_r327", "excel_r337", "excel_r352"} and code == "counter":
         source = battle.get_unit(queued_action.actor_id)
@@ -5965,7 +6018,10 @@ def red_attack_value(battle: Battle, actor: Unit, payload: dict[str, Any]) -> fl
         cells = battle.basic_attack_area_cells_for_payload(actor, resolved)
         if cells is not None:
             resolved.update(attack_cells=positions_to_payload(cells), area_attack=True)
-            targets = [target for target in battle.effect_units_at_cells(cells) if target.player_id != actor.player_id]
+            affects_allies = all(component.basic_attack_area_affects_allies(battle, actor, resolved)
+                                  for component in actor.iter_components())
+            targets = [target for target in battle.effect_units_at_cells(cells)
+                       if target.player_id != actor.player_id or affects_allies]
         else:
             target = battle.units.get(str(payload.get("target_unit_id") or ""))
             if target is None or not battle.attack_target_allowed(actor, target, payload=payload)[0]:
@@ -6892,13 +6948,15 @@ def score_respawn_destination(
     profile: DifficultyProfile,
 ) -> float:
     enemies = living_hostile_combatants(battle, unit.player_id)
-    if unit.hero_code in {"excel_r238", "excel_r240", "excel_r242"}:
+    if unit.hero_code in {"excel_r238", "excel_r239", "excel_r240", "excel_r242", "excel_r243", "excel_r244"}:
         nearest_enemy = min((distance_to_position(battle, enemy, destination) for enemy in enemies), default=8)
-        danger = sum(max(0.0, enemy.stat("attack") - unit.stat("defense") + 1.0) * 12.0
+        effective_defense = 4.0 if unit.hero_code == "excel_r243" else unit.stat("defense")
+        danger = sum(max(0.0, enemy.stat("attack") - effective_defense + 1.0) * 12.0
                      for enemy in enemies if distance_to_position(battle, enemy, destination)
                      <= enemy.normal_move_distance() + enemy.targeting_range())
-        pressure = (22.0 if unit.hero_code == "excel_r238" else 13.0)
-        return -nearest_enemy * pressure - danger * (1.3 if unit.hero_code == "excel_r242" else 0.8)
+        pressure = (22.0 if unit.hero_code in {"excel_r238", "excel_r243", "excel_r244"} else 13.0)
+        safety = 1.3 if unit.hero_code in {"excel_r242", "excel_r239"} else 0.8
+        return -nearest_enemy * pressure - danger * safety
     allies = [ally for ally in battle.player_units(unit.player_id) if ally.unit_id != unit.unit_id and ally.alive and ally.position is not None and not ally.banished]
     nearest_enemy = min((distance_to_position(battle, enemy, destination) for enemy in enemies), default=8)
     nearest_ally = min((distance_to_position(battle, ally, destination) for ally in allies), default=8)
@@ -7319,7 +7377,7 @@ def probe_skill_damage_impact(
             half_ignore_shield=half_ignore_shield,
             ignore_magic_immunity=skill.ignores_magic_immunity_for_payload(battle, probe_actor, payload),
             cannot_evade=skill.cannot_evade_for_payload(battle, probe_actor, payload),
-            ignore_targeting_restrictions=str(skill.code) in {"great_funeral", "judgment_fire", "wind_sand", "crazy_sand", "dragon_breath", "remote_dragon_breath", "rending", "complete_burn", "blizzard", "machine_gun", "missile", "laser", "magnetic_wave", "frey_quick_flash", "frey_god_stab", "frey_lion_spear", "demon_blade", "nuclear_mutation", "gravity_field"},
+            ignore_targeting_restrictions=str(skill.code) in {"great_funeral", "judgment_fire", "wind_sand", "crazy_sand", "dragon_breath", "remote_dragon_breath", "hell_orb", "hell_orb_free", "rending", "complete_burn", "blizzard", "machine_gun", "missile", "laser", "magnetic_wave", "frey_quick_flash", "frey_god_stab", "frey_lion_spear", "demon_blade", "nuclear_mutation", "gravity_field"},
             resolve_defenses=False,
             damage_target=True,
             tags=set(target_tags),
@@ -8302,7 +8360,7 @@ def r22_paid_reaction_score(battle: Battle, actor: Unit, queued: QueuedAction, p
     skill = actor.get_skill(code)
     if not skill.can_react_with_payload(battle, actor, queued, payload)[0]:
         return -1000.0
-    targets = battle.effect_units(skill.chosen_targets(battle, actor, payload)) if code == "light_wall" else [battle.effect_recipient(actor)]
+    targets = battle.effect_units(skill.chosen_targets(battle, actor, payload)) if code in {"light_wall", "hell_wall", "hell_wall_free"} else [battle.effect_recipient(actor)]
     before = {target.unit_id: r21_queued_loss(battle, target, queued) for target in targets}
     with ai_probe_rollback(battle):
         hp_before = {target.unit_id: target.current_hp for target in targets}

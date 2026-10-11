@@ -1619,6 +1619,8 @@ export function renderHeader() {
     pill.textContent = `房间 ${state.room.room_id} · 玩家 ${inputPlayer()} 决定伤害`;
     caption.textContent = prompt.kind === "hell_sacrifice"
       ? "赤候可以技能破坏一名己方地狱单位，或放弃。"
+      : prompt.kind === "hell_death_strike"
+      ? "刺客临死可选周围一名单位连续反击两次，或放弃。"
       : prompt.kind === "rotation"
       ? `安德鲁因【${prompt.action_name}】实际损失 ${prompt.damage} 点生命。请选择队友交换位置，或保持位置。`
       : `拉奥将受到 ${prompt.damage} 点【${prompt.action_name}】伤害。请选择降低一项能力抵消，或承受伤害。`;

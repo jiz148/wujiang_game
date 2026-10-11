@@ -598,10 +598,15 @@ def create_room_battle(
     board_height: int | None = None,
     turn_timeout_limit: int | None = None,
     turn_timeout_winner: int | None = None,
+    special_mode_codes: Sequence[str] = (),
 ) -> Battle:
     normalized_mode = str(mode or CLASSIC_BATTLE_MODE).strip().lower()
     player1_units = _create_units_for_room_entries(player1_entries, 1)
     player2_units = _create_units_for_room_entries(player2_entries, 2)
+    if special_mode_codes:
+        from wujiang.tactical.rooms.special_battle import prepare_bp_special_rosters
+
+        player1_units, player2_units = prepare_bp_special_rosters(player1_units, player2_units, special_mode_codes)
     if not player1_units or not player2_units:
         raise ValueError("Room battle requires both teams to have at least one hero.")
 
@@ -649,6 +654,12 @@ def create_room_battle(
         )
     ]
     battle.configure_turn_order(turn_order, starting_index=0)
+    if "fast" in special_mode_codes and "arena" not in special_mode_codes:
+        battle.configure_turn_order(list(reversed(turn_order)), starting_index=0)
+    if special_mode_codes:
+        from wujiang.tactical.rooms.special_battle import apply_bp_special_modes
+
+        apply_bp_special_modes(battle, special_mode_codes)
     if turn_timeout_limit is not None:
         battle.turn_timeout_limit = max(1, int(turn_timeout_limit))
     if turn_timeout_winner in {1, 2}:
