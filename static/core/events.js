@@ -1517,13 +1517,17 @@ export function renderHeader() {
     const prompt = currentRespawnPrompt();
     const unit = unitById(prompt?.unit_id || "");
     pill.textContent = `\u623f\u95f4 ${state.room.room_id} \u00b7 \u73a9\u5bb6 ${inputPlayer()} \u91cd\u65b0\u51fa\u73b0\u4e2d`;
-    caption.textContent = `\u8bf7\u4e3a ${unit?.name || "\u6d88\u5931\u5355\u4f4d"} \u9009\u62e9\u91cd\u65b0\u51fa\u73b0\u7684\u4f4d\u7f6e\u3002`;
+    caption.textContent = prompt?.kind === "hell_rebirth"
+      ? `请为 ${unit?.name || "地狱武将"} 选择地狱再临落点。`
+      : `\u8bf7\u4e3a ${unit?.name || "\u6d88\u5931\u5355\u4f4d"} \u9009\u62e9\u91cd\u65b0\u51fa\u73b0\u7684\u4f4d\u7f6e\u3002`;
     return;
   }
   if (isDamageChoiceMode()) {
     const prompt = state.battle.pending_damage_choice;
     pill.textContent = `房间 ${state.room.room_id} · 玩家 ${inputPlayer()} 决定伤害`;
-    caption.textContent = prompt.kind === "rotation"
+    caption.textContent = prompt.kind === "hell_sacrifice"
+      ? "赤候可以技能破坏一名己方地狱单位，或放弃。"
+      : prompt.kind === "rotation"
       ? `安德鲁因【${prompt.action_name}】实际损失 ${prompt.damage} 点生命。请选择队友交换位置，或保持位置。`
       : `拉奥将受到 ${prompt.damage} 点【${prompt.action_name}】伤害。请选择降低一项能力抵消，或承受伤害。`;
     return;

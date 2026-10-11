@@ -2,6 +2,12 @@
 
 Update this file after every new gameplay requirement or code change in `wujiang_game`. Keep entries concise and durable; do not paste full docs.
 
+- 2026-10-10 Phase H R238/R240/R242：源与保存问卷先各自锁JSON/XLSX，再在`heroes/excel_roster.py`接魔枪/魔压付费与严格0魔免费双档、三名技能死亡回场特性；`engine/core.py`从真实死亡记录安排下一敌方英雄末原对象合法选位并暂停轮序，避免待回场即判败；尖兵三轮普攻破魔、番兵三轮回血双攻、赤候可选真实友军技能破坏。`rooms/ai.py`补免费技能、回场及牺牲取舍，`static/tactical/vfx.js`和`battle-ui.js`等展示选择。`NewBatch238240242HellBehaviorTests`待用户定向运行；公开池88/388，剩余300。
+
+- 2026-10-10 通用开局顺序：`heroes/registry.py::start_order_key`改为原生等级升序、当前速降序、当前攻降序，其后保留守/范降序与魔升序、完全相同随机。双方各自排序、比较首名决定先手、交叉排列；单挑入口也使用同一规则。classic/random/多人/BP/自走棋共用排序；开局后不因数值变化重排。教学固定火葬者5级先于艾莉8级，与规则一致。`NewBatch223TurnOrderBehaviorTests`待用户运行；规则见通用规则与武将游戏规则。连锁窗口的反应单位排序仍由其独立规则控制。
+
+- 2026-10-10 Phase H R223：源223及保存R223-Q002=b/Q003=a先锁JSON/XLSX；`heroes/excel_roster.py`的装甲电子翼附着/射击/解除由宿主状态逐翼提供，`engine/core.py`跳过已附着本体轮槽、向资料公开赠与技能，`rooms/ai.py`比较独立输出、宿主危险与永久减值。`NewBatch223`静态场景覆盖克隆/多翼/寿命/轮序/AI无污染，用户运行定向命令；公开池85。
+
 - 2026-10-09 并行自走棋首版：规则与数值在 `docs/自走棋模式规则.md`；`rooms/autochess.py` 管 4/8 人经营、商店/预算/布阵、AI 备战、配对、经济/淘汰及观战数据，`multiplayer.py` 复用账号房间并持久化，`engine/core.py` 完整战斗轮超时判定，`api.py` 操作接口，`static/tactical/autochess-ui.js` 界面。`data/装备.xlsx` 经 `rooms/equipment.py` 读取，`rooms/equipment_effects.py` 接入战斗，5 金每轮限抽一件、每将三件；`rooms/synergy.py` 实现职业/属性/种族 3/6 档羁绊；`tests/test_behavior.py::AutoChessBehaviorTests` 定向场景，动态验证由用户执行。2026-10-09 体验修正：商店和后备席共用 `hero-hover.js` 展示武将与三类 3/6 档羁绊；`#autochess` 独立全屏路由在备战和交战都显示完整 10×10 标准战场、真实占格及开场坐骑提示；服务端公开当前与下一级按现有武将等级可上场人数上限。每次买已拥有的同名将直接强化所选或优先场上个体并待选一项能力 +1；不再等三张合成。开战阶段分批建立战场和推进 AI，每次只发送精简观战快照、定期持久化，操作响应不附带额外模拟；非 JSON、超时和网络错误显示具体原因。`resolve_ai_until_human_input` 公共包装已接受 `max_steps`。
 - 2026-10-09 运行入口：`start_windows_server.bat` 从 `C:\Users\jiz14\TeamGH\wujiang_game` 加载代码；在 Codex worktree 实施的功能必须同步到该主目录后重启脚本才会出现在与朋友共享的公网页面。`scripts/start_windows_server.ps1` 的隧道后台进程使用隐藏窗口，启动器本身仍显示公网地址。
 

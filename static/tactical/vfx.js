@@ -75,6 +75,20 @@ export function displayActions() {
   if (isGameOver()) return [];
   if (isDamageChoiceMode()) {
     const prompt = state.battle.pending_damage_choice;
+    if (prompt.kind === "hell_sacrifice") {
+      return [
+        ...(prompt.options || []).map((unitId) => ({
+          code: `hell_sacrifice_${unitId}`, name: `技能破坏${unitById(unitId)?.name || "地狱友军"}`,
+          kind: "damage_choice", target_unit_id: unitId, timing: "reaction", available: true,
+          description: "尝试以技能破坏这名地狱友军；护盾、魔免、回避等正常生效，成功后可触发其技能死亡能力。",
+          preview: { cells: [], target_unit_ids: [unitId], requires_target: false },
+        })),
+        { code: "hell_sacrifice_decline", name: "不牺牲友军", kind: "damage_choice",
+          target_unit_id: "decline", timing: "reaction", available: true,
+          description: "放弃赤候这次可选牺牲。",
+          preview: { cells: [], target_unit_ids: [], requires_target: false } },
+      ];
+    }
     if (prompt.kind === "electronic_teleport") {
       return [
         ...(prompt.options || []).map((option, index) => {

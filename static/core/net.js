@@ -153,7 +153,11 @@ export function boardUnits() {
 }
 
 export function unitById(unitId) {
-  return allUnits().find((unit) => unit.id === unitId) || null;
+  return allUnits().find((unit) => unit.id === unitId)
+    || (currentRespawnPrompt()?.unit_id === unitId
+      ? (state.battle?.destroyed_units || []).find((unit) => unit.id === unitId)
+      : null)
+    || null;
 }
 
 export function hoveredUnit() {

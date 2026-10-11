@@ -88,6 +88,8 @@ MOVE_SKILL_CODES.update({"iron_chain_path", "ghost_step", "frey_quick_flash"})
 MOVE_SKILL_CODES.update({"flash_slash", "bird_soul", "bird_soul_free"})
 AREA_ESCAPE_REACTION_CODES = {"evasion", "backstep_shot", "card_transposition", "shadow_counter", "ghost_step"}
 DAMAGING_SKILL_CODES = {
+    "hell_spear",
+    "hell_spear_free",
     "paralyzing_glove",
     "machine_gun",
     "pierce",
@@ -457,6 +459,9 @@ def choose_damage_choice_action(battle: Battle) -> dict[str, Any]:
     if prompt.get("kind") == "electronic_teleport":
         with ai_enemy_view(battle, unit.player_id):
             return choose_electronic_teleport_action(battle, prompt, unit)
+    if prompt.get("kind") == "hell_sacrifice":
+        with ai_enemy_view(battle, unit.player_id):
+            return choose_hell_sacrifice_action(battle, prompt, unit)
     if prompt.get("kind") in {"rotation", "attack_swap", "formation", "optional_swap", "optional_placement"}:
         with ai_enemy_view(battle, unit.player_id):
             return choose_rotation_damage_choice_action(battle, prompt, unit)
@@ -467,6 +472,33 @@ def choose_damage_choice_action(battle: Battle) -> dict[str, Any]:
         costs = {"attack": 48, "defense": 52, "speed": 40, "attack_range": 44}
         choice = min(stats, key=lambda name: (costs[name] + (30 if unit.stat(name) <= 2 else 0), name))
     return {"type": "damage_choice", "unit_id": unit.unit_id, "stat_name": choice}
+
+
+def choose_hell_sacrifice_action(battle: Battle, prompt: dict[str, Any], unit: Unit) -> dict[str, Any]:
+    """A free click is still a real allied death; decline unless rebirth repays it."""
+    best = (0.0, "decline")
+    for unit_id in prompt.get("options", []):
+        target = battle.units.get(unit_id)
+        if target is None or target.unit_id == unit.unit_id or not target.alive:
+            continue
+        recipient = battle.effect_recipient(target)
+        if (recipient.magic_immunity or recipient.total_shields() > 0 or recipient.dodge_charges > 0
+                or recipient.skill_non_damage_effects_blocked()):
+            continue
+        if recipient.hero_code not in {"excel_r238", "excel_r240", "excel_r242"}:
+            continue
+        if not any(enemy.alive for enemy in living_hostile_combatants(battle, unit.player_id)):
+            continue
+        immediate_loss = (recipient.current_hp * 125.0 + recipient.stat("attack") * 14.0
+                          + (35.0 if recipient.turn_ready else 0.0))
+        future_gain = (115.0 if recipient.hero_code == "excel_r238" else
+                       105.0 if recipient.hero_code == "excel_r240" else 0.0)
+        if recipient.current_mana > 0:
+            future_gain -= recipient.current_mana * 12.0
+        score = future_gain - immediate_loss
+        if score > best[0] + 12.0:
+            best = (score, unit_id)
+    return {"type": "damage_choice", "unit_id": unit.unit_id, "target_unit_id": best[1]}
 
 
 def choose_rotation_damage_choice_action(battle: Battle, prompt: dict[str, Any], unit: Unit) -> dict[str, Any]:
@@ -713,6 +745,16 @@ def build_skill_candidates(
 ) -> list[AICandidate]:
     payloads = skill_payloads_for_action(battle, actor, action)
     code = str(action.get("code") or "")
+    if code.startswith("fusion_piercing_shot__"):
+        # One cell per actual recipient is sufficient for this single-cell strike.
+        unique_shots: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
+        for shot_payload in payloads:
+            cells = preview_positions(shot_payload.get("cells"))
+            if not cells:
+                continue
+            targets = tuple(unit.unit_id for unit in battle.effect_units_at_cells(cells[:1]))
+            unique_shots.setdefault((str(shot_payload.get("choice_code") or ""), targets), shot_payload)
+        payloads = list(unique_shots.values())
     if code in {"battle_hurricane", "water_wave_cannon", "earth_shatter", "satellite_cannon"}:
         payloads = dedupe_damage_area_payloads(battle, payloads)
     if code == "interference":
@@ -723,7 +765,7 @@ def build_skill_candidates(
         payloads = dedupe_damage_area_payloads(battle, payloads)
     pre_scored: dict[str, float] = {}
     prequalified_payloads: set[str] = set()
-    if code in {"paralysis_card", "poison_card", "drain_card", "sacrifice_ritual", "electronic_repair", "satellite_cannon", "descent_moment", "smoke_spray", "dragon_slash", "world_seed", "mimic_skill", "frey_quick_flash", "frey_god_stab", "frey_lion_spear", "royal_soldier", "agency_contract", "agency_borrowed_skill", "morning_holy_light", "lao_wave_bullet", "interference", "noise_wave", "fuma_shuriken", "fuma_trap", "fantasy_move", "rainbow_mirror", "true_blade_air_slash", "eagle_eye", "missile", "gladiator_claw", "gladiator_gale", "battle_hurricane", "flash_slash", "bird_dash", "bird_dash_free", "bird_soul", "bird_soul_free"}:
+    if (code.startswith("fusion_piercing_shot__") or code in {"paralysis_card", "poison_card", "drain_card", "sacrifice_ritual", "electronic_repair", "satellite_cannon", "descent_moment", "smoke_spray", "dragon_slash", "world_seed", "mimic_skill", "frey_quick_flash", "frey_god_stab", "frey_lion_spear", "royal_soldier", "agency_contract", "agency_borrowed_skill", "morning_holy_light", "lao_wave_bullet", "interference", "noise_wave", "fuma_shuriken", "fuma_trap", "fantasy_move", "rainbow_mirror", "true_blade_air_slash", "eagle_eye", "missile", "gladiator_claw", "gladiator_gale", "battle_hurricane", "flash_slash", "bird_dash", "bird_dash_free", "bird_soul", "bird_soul_free"}):
         if code == "frey_quick_flash":
             unique = {}
             skill = skill_from_ai_action(actor, action, code)
@@ -1471,7 +1513,7 @@ def reaction_payloads_for_option(
 ) -> list[dict[str, Any]]:
     action_code = str(option.get("action_code") or "")
     base_payload = {"type": "chain_react", "unit_id": reactor.unit_id, "action_code": action_code}
-    if action_code in {"block", "counter", "knockback"}:
+    if action_code in {"block", "counter", "knockback", "hell_pressure", "hell_pressure_free"}:
         return [base_payload]
     if action_code == "agency_borrowed_skill":
         return [{**base_payload, "contract_payload": payload["contract_payload"]}
@@ -2173,6 +2215,12 @@ def _score_skill_payload(
     instant_only: bool,
 ) -> float:
     code = str(action.get("code") or payload.get("skill_code") or "")
+    if code == "electronic_fusion":
+        return electronic_fusion_score(battle, actor, payload, profile)
+    if code.startswith("fusion_piercing_shot__"):
+        return electronic_fusion_shot_score(battle, actor, payload)
+    if code.startswith("electronic_unfuse__"):
+        return electronic_unfuse_score(battle, actor, payload)
     if code == "electronic_repair":
         return electronic_repair_score(battle, actor, payload)
     if code == "satellite_cannon":
@@ -2865,7 +2913,7 @@ def score_reaction_payload(
         if destination_still_in_queued_target_area(battle, reactor, destination, queued_action):
             return -1000.0
         return threat + score_move_destination(battle, reactor, destination, hero_style(reactor), profile) / 2.0 + 22.0
-    if code == "knockback":
+    if code in {"knockback", "hell_pressure", "hell_pressure_free"}:
         score = threat * 0.8 + 18.0
         adjacent_units = [
             unit
@@ -2883,7 +2931,7 @@ def score_reaction_payload(
         score -= min(110.0, future_melee_value)
         score -= len(nearby_allies) * 12.0
         urgent = proxy_target.current_hp <= max(0.25, threat / 100.0)
-        if reactor.current_mana <= 1.0 + 1e-9 and not urgent:
+        if code != "hell_pressure_free" and reactor.current_mana <= 1.0 + 1e-9 and not urgent:
             score -= 55.0
         return score
     if code == "boxer_block_counter":
@@ -3968,7 +4016,7 @@ def skill_damage_score(
                 reward = next((trait for trait in actor.traits if trait.name == "击破重置"), None)
                 if reward is not None and not reward.used_this_turn and reward._eligible_target(unit):
                     score += 55.0
-    if code in {"judgment_fire", "great_funeral", "laser", "missile", "machine_gun", "pierce", "large_pierce_plus", "remote_dragon_breath", "dragon_breath", "magnetic_wave", "whirlwind_attack"}:
+    if code in {"judgment_fire", "great_funeral", "laser", "missile", "machine_gun", "pierce", "hell_spear", "hell_spear_free", "large_pierce_plus", "remote_dragon_breath", "dragon_breath", "magnetic_wave", "whirlwind_attack"}:
         score += len([unit for unit in affected if unit.player_id != actor.player_id]) * 18.0
     if hero_style(actor) != "support":
         score += profile.aggressive_bonus
@@ -6844,6 +6892,13 @@ def score_respawn_destination(
     profile: DifficultyProfile,
 ) -> float:
     enemies = living_hostile_combatants(battle, unit.player_id)
+    if unit.hero_code in {"excel_r238", "excel_r240", "excel_r242"}:
+        nearest_enemy = min((distance_to_position(battle, enemy, destination) for enemy in enemies), default=8)
+        danger = sum(max(0.0, enemy.stat("attack") - unit.stat("defense") + 1.0) * 12.0
+                     for enemy in enemies if distance_to_position(battle, enemy, destination)
+                     <= enemy.normal_move_distance() + enemy.targeting_range())
+        pressure = (22.0 if unit.hero_code == "excel_r238" else 13.0)
+        return -nearest_enemy * pressure - danger * (1.3 if unit.hero_code == "excel_r242" else 0.8)
     allies = [ally for ally in battle.player_units(unit.player_id) if ally.unit_id != unit.unit_id and ally.alive and ally.position is not None and not ally.banished]
     nearest_enemy = min((distance_to_position(battle, enemy, destination) for enemy in enemies), default=8)
     nearest_ally = min((distance_to_position(battle, ally, destination) for ally in allies), default=8)
@@ -7860,6 +7915,77 @@ def r23_attack_value(battle: Battle, actor: Unit, payload: dict[str, Any]) -> fl
         except (ActionError, KeyError, TypeError, ValueError):
             return -1000.0
         return r23_action_delta(actor, before) - 4.0
+
+
+def electronic_fusion_score(battle: Battle, actor: Unit, payload: dict[str, Any], profile: DifficultyProfile) -> float:
+    try:
+        host = battle.get_unit(str(payload["target_unit_id"]))
+        skill = actor.get_skill("electronic_fusion")
+        if host not in skill.valid_hosts(battle, actor):
+            return -1000.0
+    except (ActionError, KeyError, TypeError, ValueError):
+        return -1000.0
+    if host.current_hp <= 0.25:
+        return -1000.0
+    with ai_probe_rollback(battle):
+        before = r23_action_state(battle)
+        try:
+            skill.execute(battle, actor, payload)
+        except (ActionError, KeyError, TypeError, ValueError):
+            return -1000.0
+        if getattr(actor, "equipped_to_id", None) != host.unit_id:
+            return -1000.0
+        benefit = r23_action_delta(actor, before) + 12.0
+    host_threat = max((enemy.stat("attack") - host.stat("defense")
+                       for enemy in living_hostile_combatants(battle, actor.player_id)
+                       if battle.distance_between_units(host, enemy) <= enemy.normal_move_distance() + enemy.targeting_range()),
+                      default=-10.0)
+    if host_threat >= 0 and host.current_hp <= 0.5:
+        benefit -= 45.0
+    if actor.attacks_used < actor.attack_actions_per_turn():
+        benefit -= max(0.0, best_available_attack_score(battle, actor, profile)) * 0.6
+    return benefit - 47.0
+
+
+def electronic_fusion_shot_score(battle: Battle, actor: Unit, payload: dict[str, Any]) -> float:
+    code = str(payload.get("skill_code") or "")
+    try:
+        skill = actor.get_skill(code)
+        cell = skill.selected_cell(payload)
+        target = next((unit for unit in battle.effect_units_at_cells([cell])
+                       if unit.player_id != actor.player_id), None)
+        if target is None or str(payload.get("choice_code") or "") not in skill.available_stats(actor):
+            return -1000.0
+    except (ActionError, KeyError, TypeError, ValueError):
+        return -1000.0
+    value = r23_paid_skill_value(battle, actor, payload)
+    if value <= 0:
+        return -1000.0
+    stat = str(payload["choice_code"])
+    # r23_action_delta already prices reductions to attack, defense, and speed.
+    future_cost = {"attack": 13.0, "defense": 16.0, "speed": 12.0,
+                   "attack_range": 31.0, "mana": 30.0}[stat]
+    if actor.stat(stat) <= (1 if stat != "mana" else 0) + 1:
+        future_cost += 12.0
+    return value - future_cost
+
+
+def electronic_unfuse_score(battle: Battle, actor: Unit, payload: dict[str, Any]) -> float:
+    code = str(payload.get("skill_code") or "")
+    wing = battle.units.get(code.removeprefix("electronic_unfuse__"))
+    if wing is None or not wing.alive or actor.current_hp > 0.5:
+        return -1000.0
+    try:
+        cell = Position(int(payload["x"]), int(payload["y"]))
+        if cell not in actor.get_skill(code).available_cells(battle, actor):
+            return -1000.0
+    except (ActionError, KeyError, TypeError, ValueError):
+        return -1000.0
+    threats = [enemy for enemy in living_hostile_combatants(battle, actor.player_id)
+               if distance_to_position(battle, enemy, cell) <= enemy.normal_move_distance() + enemy.targeting_range()]
+    if not threats:
+        return 28.0 + (0.5 - actor.current_hp) * 70.0
+    return -1000.0
 
 
 def electronic_repair_score(battle: Battle, actor: Unit, payload: dict[str, Any]) -> float:

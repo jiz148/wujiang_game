@@ -11759,6 +11759,247 @@ class SatelliteCannonSkill(Skill):
         return result
 
 
+class ElectronicWingMovementTrait(Trait):
+    def __init__(self) -> None:
+        super().__init__("电子翼连续移动", "每本人回合可多次正常移动，累计距离不超过当前速。")
+
+    def modify_normal_move_actions_per_turn(self, value: int) -> int:
+        return 1_000_000
+
+    def allows_split_normal_movement(self, battle: Battle, unit: Unit) -> bool:
+        return True
+
+
+class ElectronicFusionStatus(StatModifierStatus):
+    def __init__(self, wing_id: str) -> None:
+        super().__init__(f"电子融合·{wing_id}", attack_delta=1, defense_delta=1, range_delta=1,
+                         description="装甲电子翼：攻守范+1、飞行、每本人轮一次能力牺牲射击。")
+        self.wing_id = wing_id
+        self.detaching = False
+        self.shot = ElectronicFusionShotSkill(wing_id)
+        self.detach = ElectronicFusionDetachSkill(wing_id)
+
+    def bind(self, owner: HeroUnit) -> "ElectronicFusionStatus":
+        super().bind(owner)
+        self.shot.bind(owner)
+        self.detach.bind(owner)
+        owner.has_flying = True
+        owner.ignore_units_while_moving = True
+        return self
+
+    def provided_components(self) -> tuple[Skill, Skill]:
+        return self.shot, self.detach
+
+    def _destroy_attached_wing(self, battle: Battle) -> None:
+        owner = self.owner
+        wing = battle.units.get(self.wing_id)
+        if self.detaching or wing is None or not wing.alive or owner is None:
+            return
+        wing.alive = False
+        wing.position = owner.position or getattr(owner, "last_position", None)
+        battle.capture_destruction_position(wing)
+        if wing.unit_id not in {unit.unit_id for unit in battle.destroyed_units}:
+            battle.destroyed_units.append(wing)
+        battle.log_public_event(f"{wing.name} 随宿主 {owner.name} 被破坏。", source=owner, target=wing)
+        battle.remove_unit(wing)
+
+    def on_removed(self, battle: Battle) -> None:
+        owner = self.owner
+        if owner is not None:
+            owner.has_flying = any(isinstance(trait, FlyingTrait) for trait in owner.traits) or any(
+                isinstance(status, ElectronicFusionStatus) for status in owner.statuses
+            ) or any(isinstance(status, MageCloakEquippedStatus) for status in owner.statuses)
+            owner.ignore_units_while_moving = owner.has_flying or any(
+                isinstance(trait, PassThroughMovementTrait) for trait in owner.traits
+            )
+        self._destroy_attached_wing(battle)
+
+    def on_owner_removed(self, battle: Battle) -> None:
+        self._destroy_attached_wing(battle)
+
+    def sync_linked_state(self, battle: Battle) -> None:
+        owner = self.owner
+        wing = battle.units.get(self.wing_id)
+        if owner is not None and self in owner.statuses and (
+            not owner.alive or wing is None or not wing.alive or getattr(wing, "equipped_to_id", None) != owner.unit_id
+        ):
+            owner.remove_status(self, battle)
+
+
+class ElectronicFusionSkill(Skill):
+    def __init__(self) -> None:
+        super().__init__("electronic_fusion", "电子融合", "装备到范内一名己方电子系武将身上。", target_mode="unit")
+
+    def valid_hosts(self, battle: Battle, actor: Unit) -> list[Unit]:
+        return [unit for unit in battle.all_units()
+                if unit.alive and unit.position is not None and not unit.banished
+                and unit.player_id == actor.player_id and "电子" in unit.name
+                and unit.name != "电子修理工厂" and unit.unit_id != actor.unit_id
+                and battle.unit_can_be_selected(unit, actor=actor)[0]
+                and battle.unit_target_in_range_and_line(actor, unit, actor.targeting_range())]
+
+    def can_use(self, battle: Battle, actor: Unit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok:
+            return ok, reason
+        if not self.valid_hosts(battle, actor):
+            return False, "范内没有可融合的己方电子系武将。"
+        if payload and payload.get("target_unit_id") not in {unit.unit_id for unit in self.valid_hosts(battle, actor)}:
+            return False, "请选择范内合法的己方电子系武将。"
+        return True, ""
+
+    def execute(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
+        host = payload_target_unit(battle, payload)
+        if host not in self.valid_hosts(battle, actor):
+            raise ActionError("电子融合宿主已失效。")
+        status = ElectronicFusionStatus(actor.unit_id)
+        # Equipment does not count as a damaging or disabling skill effect on a clone.
+        status.is_skill_effect = False
+        host.add_status(status, source=actor)
+        if status not in host.statuses:
+            battle.log_public_event(f"{host.name} 未受到电子融合装备效果。", source=actor, target=host)
+            return
+        actor.equipped_to_id = host.unit_id
+        actor.position = None
+        battle.log_public_event(f"{actor.name} 电子融合到 {host.name} 身上，宿主攻守范+1并获得飞行。",
+                                source=actor, target=host)
+
+    def preview(self, battle: Battle, actor: Unit) -> dict[str, Any]:
+        hosts = self.valid_hosts(battle, actor)
+        return {"cells": positions_to_dict([cell for host in hosts for cell in battle.unit_cells(host)]),
+                "target_unit_ids": [host.unit_id for host in hosts], "secondary_cells": [], "requires_target": True}
+
+
+class ElectronicFusionShotSkill(Skill):
+    target_cells_are_geometry_only = True
+
+    def __init__(self, wing_id: str) -> None:
+        self.wing_id = wing_id
+        super().__init__(f"fusion_piercing_shot__{wing_id}", "电子翼破魔射击",
+                         "永久降低宿主一项能力1，对范3一个实际受体造成固定4破魔伤害。",
+                         max_uses_per_turn=1, target_mode="cell")
+
+    def available_stats(self, actor: Unit) -> list[str]:
+        floors = {"attack": 1, "defense": 1, "speed": 1, "attack_range": 1, "mana": 0}
+        return [name for name, floor in floors.items() if actor.stat(name) > floor]
+
+    def available_cells(self, battle: Battle, actor: Unit) -> list[Position]:
+        return sorted({cell for target in battle.all_units()
+                       if target.alive and target.position is not None and not target.banished
+                       and battle.unit_can_be_selected(target, actor=actor)[0]
+                       for cell in battle.unit_cells(target)
+                       if battle.unit_distance_to_cell(actor, cell) <= 3}, key=lambda cell: (cell.y, cell.x))
+
+    def selected_cell(self, payload: dict[str, Any]) -> Position:
+        cells = payload.get("cells")
+        if isinstance(cells, list) and len(cells) == 1:
+            return Position(**cells[0])
+        return payload_position(payload)
+
+    def can_use(self, battle: Battle, actor: Unit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok:
+            return ok, reason
+        if not self.available_stats(actor) or not self.available_cells(battle, actor):
+            return False, "没有可支付的能力值或范内目标。"
+        if payload and (str(payload.get("choice_code") or "") not in self.available_stats(actor)
+                        or self.selected_cell(payload) not in self.available_cells(battle, actor)):
+            return False, "请选择可降低的能力值与范3内目标。"
+        return True, ""
+
+    def get_target_cells_for_payload(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> list[Position]:
+        return [self.selected_cell(payload)]
+
+    def get_target_units_for_payload(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> list[Unit]:
+        return battle.effect_units_at_cells([self.selected_cell(payload)])
+
+    def ignores_shield_for_payload(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> bool:
+        return True
+
+    def pay_stat_cost(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
+        stat = str(payload.get("choice_code") or "")
+        if stat not in self.available_stats(actor):
+            raise ActionError("电子翼破魔射击的能力代价已失效。")
+        setattr(actor.base_stats, stat, getattr(actor.base_stats, stat) - 1)
+        if stat == "mana":
+            actor.current_mana = min(actor.current_mana, actor.max_mana())
+        battle.log_public_event(f"{actor.name} 为电子翼破魔射击永久降低{stat} 1点。", source=actor)
+
+    def prepay_resources(self, battle: Battle, actor: Unit, payload: dict[str, Any] | None = None) -> None:
+        if payload is None:
+            raise ActionError("电子翼破魔射击需要选择能力代价。")
+        if str(payload.get("choice_code") or "") not in self.available_stats(actor):
+            raise ActionError("电子翼破魔射击的能力代价已失效。")
+        super().prepay_resources(battle, actor, payload)
+        self.pay_stat_cost(battle, actor, payload)
+
+    def execute(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
+        cell = self.selected_cell(payload)
+        if not payload.get("resources_prepaid"):
+            if cell not in self.available_cells(battle, actor):
+                raise ActionError("电子翼破魔射击目标已失效。")
+            self.pay_stat_cost(battle, actor, payload)
+        battle.queue_area_damage_effect(actor=actor, display_name=self.name, cells=[cell], attack_power=4,
+                                        ignore_shield=True, tags={"skill", "fusion_piercing_shot"},
+                                        refresh_cell_targets=True)
+
+    def preview(self, battle: Battle, actor: Unit) -> dict[str, Any]:
+        cells = self.available_cells(battle, actor)
+        labels = {"attack": "攻", "defense": "守", "speed": "速", "attack_range": "范", "mana": "魔"}
+        return {"cells": positions_to_dict(cells), "target_unit_ids": [
+                    unit.unit_id for unit in battle.effect_units_at_cells(cells)
+                    if battle.unit_can_be_selected(unit, actor=actor)[0]],
+                "secondary_cells": [], "requires_target": True,
+                "selection": {"mode": "choice_pattern",
+                              "choice_prompt": "先选择永久降低的能力，再点击范3内的一名目标。",
+                              "cell_prompt": "点击要承受固定4点破魔伤害的目标格。",
+                              "choices": [
+                    {"code": stat, "label": f"{labels[stat]}-1", "patterns": [positions_to_dict([cell]) for cell in cells]}
+                    for stat in self.available_stats(actor)]}}
+
+
+class ElectronicFusionDetachSkill(Skill):
+    def __init__(self, wing_id: str) -> None:
+        self.wing_id = wing_id
+        super().__init__(f"electronic_unfuse__{wing_id}", "解除电子融合", "将原电子翼放到宿主身体外邻合法空格。", target_mode="cell")
+
+    def available_cells(self, battle: Battle, actor: Unit) -> list[Position]:
+        wing = battle.units.get(self.wing_id)
+        if wing is None or not wing.alive or getattr(wing, "equipped_to_id", None) != actor.unit_id:
+            return []
+        return [cell for cell in square_around_cells(battle, battle.unit_cells(actor), radius=1)
+                if battle.can_place_unit(wing, cell, ignore=wing, mover=wing)]
+
+    def can_use(self, battle: Battle, actor: Unit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok:
+            return ok, reason
+        if not self.available_cells(battle, actor):
+            return False, "宿主周围没有电子翼可回场的合法空格。"
+        if payload and payload_position(payload) not in self.available_cells(battle, actor):
+            return False, "请选择宿主周围完整合法空格。"
+        return True, ""
+
+    def execute(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
+        cell = payload_position(payload)
+        if cell not in self.available_cells(battle, actor):
+            raise ActionError("电子翼解除融合落点已失效。")
+        status = next((status for status in actor.statuses
+                       if isinstance(status, ElectronicFusionStatus) and status.wing_id == self.wing_id), None)
+        if status is None:
+            raise ActionError("电子翼融合状态已失效。")
+        wing = battle.units[self.wing_id]
+        status.detaching = True
+        actor.remove_status(status, battle)
+        wing.equipped_to_id = None
+        wing.position = cell
+        battle.log_public_event(f"{actor.name} 解除电子融合，{wing.name} 在周围回场。", source=actor, target=wing)
+
+    def preview(self, battle: Battle, actor: Unit) -> dict[str, Any]:
+        return {"cells": positions_to_dict(self.available_cells(battle, actor)),
+                "target_unit_ids": [], "secondary_cells": [], "requires_target": True}
+
+
 class ElectronicRepairSkill(Skill):
     def __init__(self) -> None:
         super().__init__("electronic_repair", "电子维修",
@@ -11923,6 +12164,164 @@ class BirdSoulSkill(Skill):
                 "requires_target": True}
 
 
+class HellSpearSkill(PierceSkill):
+    def __init__(self, *, free: bool = False) -> None:
+        super().__init__()
+        self.free = free
+        self.code = "hell_spear_free" if free else "hell_spear"
+        self.name = "魔枪（0魔免费）" if free else "魔枪"
+        self.description = ("当前魔恰为0时，每2本人轮免费使用一次通用穿刺。" if free
+                            else "沿用通用穿刺：1.5魔，每本人轮最多2次。")
+        if free:
+            self.mana_cost = 0
+            self.max_uses_per_turn = 1
+            self.cooldown_turns = 2
+
+    def can_use(self, battle: Battle, actor: Unit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if ok and self.free and actor.current_mana != 0:
+            return False, "只有当前魔为0时才可免费使用魔枪。"
+        return ok, reason
+
+
+class HellPressureSkill(KnockbackSkill):
+    def __init__(self, *, free: bool = False) -> None:
+        super().__init__()
+        self.free = free
+        self.code = "hell_pressure_free" if free else "hell_pressure"
+        self.name = "魔压（0魔免费）" if free else "魔压"
+        self.description = ("当前魔恰为0时，每个敌方武将回合可免费连锁一次通用震开。" if free
+                            else "沿用通用震开：1魔，被敌方动作影响时连锁。")
+        if free:
+            self.mana_cost = 0
+            self.max_uses_per_turn = 1
+
+    def can_react_to(self, battle: Battle, actor: Unit, queued_action: Any) -> tuple[bool, str]:
+        ok, reason = super().can_react_to(battle, actor, queued_action)
+        if ok and self.free and actor.current_mana != 0:
+            return False, "只有当前魔为0时才可免费使用魔压。"
+        return ok, reason
+
+
+class HellRebirthPierceStatus(StatusEffect):
+    def __init__(self) -> None:
+        super().__init__("地狱再临·普攻破魔", "再临后3本人轮普攻破魔。", duration=3)
+
+    def _matches(self, ctx: TargetContext | DamageContext) -> bool:
+        source = ctx.actor if isinstance(ctx, TargetContext) else ctx.source
+        return (self.owner is not None and source is not None and source.unit_id == self.owner.unit_id
+                and not ctx.is_skill and "attack" in ctx.tags)
+
+    def on_targeted(self, battle: Battle, ctx: TargetContext) -> None:
+        if self._matches(ctx):
+            ctx.ignore_shield = True
+
+    def on_before_damage(self, battle: Battle, ctx: DamageContext) -> None:
+        if self._matches(ctx):
+            ctx.ignore_shield = True
+
+
+class HellRebirthGuardStatus(StatusEffect):
+    def __init__(self) -> None:
+        super().__init__("地狱再临·守卫", "再临后3本人轮自然回血、每轮普攻2次。", duration=3)
+
+    def on_owner_turn_start(self, battle: Battle) -> None:
+        if self.owner is not None and self.owner.alive:
+            battle.heal(HealContext(source=self.owner, target=self.owner, amount=0.25,
+                                    action_name="地狱再临·自然回血"))
+
+    def modify_attack_actions_per_turn(self, value: int) -> int:
+        return value + 1
+
+
+class HellRebirthTrait(Trait):
+    def __init__(self, code: str) -> None:
+        self.hero_code = code
+        super().__init__("地狱再临", "真正被技能破坏后，在下个敌方武将回合末以0魔合法回场。")
+
+    def on_after_damage(self, battle: Battle, ctx: DamageContext) -> None:
+        owner = self.owner
+        if (owner is None or ctx.target.unit_id != owner.unit_id or owner.alive
+                or not ctx.is_skill or ctx.from_field_effect):
+            return
+        battle.schedule_hell_rebirth(owner)
+
+    def on_hell_forced_skill_death(self, battle: Battle) -> None:
+        if self.owner is not None:
+            battle.schedule_hell_rebirth(self.owner)
+
+    def on_hell_rebirth(self, battle: Battle) -> None:
+        owner = self.owner
+        if owner is None:
+            return
+        status: StatusEffect | None = None
+        if self.hero_code == "excel_r238":
+            status = HellRebirthPierceStatus()
+        elif self.hero_code == "excel_r240":
+            status = HellRebirthGuardStatus()
+        if status is not None:
+            status.is_skill_effect = False
+            owner.add_status(status, source=owner)
+        battle.log(f"{owner.name} 的地狱再临强化开始。")
+
+
+class HellSikaSacrificeTrait(HellRebirthTrait):
+    requires_damage_choice = True
+
+    def __init__(self) -> None:
+        super().__init__("excel_r242")
+        self.name = "赤候牺牲"
+        self.description = "技能死亡回场后或普攻死亡时，可选一名己方名字含地狱的在场单位作技能破坏。"
+
+    def sacrifice_options(self, battle: Battle) -> list[str]:
+        owner = self.owner
+        return [unit.unit_id for unit in battle.all_units()
+                if owner is not None and unit.alive and not unit.banished and unit.position is not None
+                and unit.player_id == owner.player_id and "地狱" in unit.name]
+
+    def offer_sacrifice(self, battle: Battle) -> None:
+        owner = self.owner
+        if owner is None:
+            return
+        options = self.sacrifice_options(battle)
+        choice = battle.optional_position_choice(owner, options, action_name="赤候牺牲", kind="hell_sacrifice")
+        if choice not in options:
+            battle.log(f"{owner.name} 放弃了地狱牺牲。")
+            return
+        target = battle.units.get(choice)
+        if target is None or not target.alive:
+            return
+        result = battle.validate_target(owner, target, action_name="赤候牺牲", is_skill=True,
+                                        is_hostile=True, ignore_targeting_restrictions=True,
+                                        record_effect_on_validation=False)
+        recipient = result.target
+        if result.cancelled or recipient.skill_non_damage_effects_blocked():
+            battle.log_public_event(result.reason or f"{recipient.name} 未受到赤候牺牲影响。",
+                                    source=owner, target=recipient)
+            return
+        recipient.current_hp = 0
+        recipient.alive = False
+        battle.log_public_event(f"{owner.name} 选择技能破坏己方的{recipient.name}。", source=owner, target=recipient)
+        for component in list(recipient.iter_components()):
+            callback = getattr(component, "on_hell_forced_skill_death", None)
+            if callable(callback):
+                callback(battle)
+
+    def on_after_damage(self, battle: Battle, ctx: DamageContext) -> None:
+        owner = self.owner
+        if owner is None or ctx.target.unit_id != owner.unit_id or owner.alive:
+            return
+        if ctx.is_skill and not ctx.from_field_effect:
+            super().on_after_damage(battle, ctx)
+        elif not ctx.from_field_effect and not ctx.is_skill and "attack" in ctx.tags:
+            self.offer_sacrifice(battle)
+
+    def on_hell_rebirth(self, battle: Battle) -> None:
+        super().on_hell_rebirth(battle)
+        self.offer_sacrifice(battle)
+        battle.cleanup_dead_units()
+
+
 def _slug_tail(source_row: int, name: str) -> str:
     ascii_tail = re.sub(r"[^0-9a-zA-Z_]+", "_", name).strip("_").lower()
     return ascii_tail or f"r{source_row:03d}"
@@ -11931,11 +12330,18 @@ def _slug_tail(source_row: int, name: str) -> str:
 def _special_skill_factory(spec: dict[str, Any], fragment: dict[str, Any]) -> Skill | None:
     name = _text(fragment.get("name"))
     source = _text(fragment.get("fragment"))
+    if spec.get("code") in {"excel_r238", "excel_r240", "excel_r242"}:
+        if name == "魔枪":
+            return HellSpearSkill()
+        if name == "魔压":
+            return HellPressureSkill()
     if spec.get("code") == "excel_r221" and name == "卫星加农炮":
         return SatelliteCannonSkill()
     if spec.get("code") == "excel_r222" and name == "电子维修":
         return ElectronicRepairSkill()
-    if spec.get("code") in {"excel_r221", "excel_r222"} and name == "离子盾":
+    if spec.get("code") == "excel_r223" and name == "电子融合":
+        return ElectronicFusionSkill()
+    if spec.get("code") in {"excel_r221", "excel_r222", "excel_r223"} and name == "离子盾":
         return IonShieldSkill()
     if spec.get("code") == "excel_r215" and name == "一闪":
         return UesugiFlashSkill()
@@ -12325,6 +12731,12 @@ def _common_trait_factory(fragment: dict[str, Any]) -> Trait | None:
 
 def _special_trait_factory(spec: dict[str, Any], fragment: dict[str, Any]) -> Trait | None:
     text = _text(fragment.get("fragment"))
+    if spec.get("code") in {"excel_r238", "excel_r240"} and "被技能破坏后" in text:
+        return HellRebirthTrait(spec["code"])
+    if spec.get("code") == "excel_r242" and "被技能破坏后" in text:
+        return HellSikaSacrificeTrait()
+    if spec.get("code") == "excel_r223" and text == "每回不限制移动次数":
+        return ElectronicWingMovementTrait()
     if spec.get("code") == "excel_r221" and "瞬移到任意一个己方单位周围" in text:
         return ElectronicDragonTeleportTrait()
     if spec.get("code") == "excel_r215" and "回合结束时穿人直线移动6格" in text:
@@ -12529,6 +12941,8 @@ def _make_build_skills(spec: dict[str, Any]) -> Callable[[AbstractHero], list[Sk
             skills.append(BoxerBlockCounterSkill())
         if spec.get("code") == "excel_r219":
             skills.extend([BirdDashSkill(free=True), BirdSoulSkill(free=True)])
+        if spec.get("code") in {"excel_r238", "excel_r240", "excel_r242"}:
+            skills.extend([HellSpearSkill(free=True), HellPressureSkill(free=True)])
         return skills
 
     return build_skills
@@ -12654,9 +13068,13 @@ IMPLEMENTED_EXCEL_HERO_CODES: frozenset[str] = frozenset(
         "excel_r219",
         "excel_r221",
         "excel_r222",
+        "excel_r223",
         "excel_r206",
         "excel_r224",
         "excel_r225",
+        "excel_r238",
+        "excel_r240",
+        "excel_r242",
         "excel_r264",
         "excel_r291",
         "excel_r326",

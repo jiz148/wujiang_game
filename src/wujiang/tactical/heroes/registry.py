@@ -114,8 +114,8 @@ def normalize_hero_roster(hero_codes: str | Sequence[str]) -> list[str]:
 
 def start_order_key(unit: object, *, tie_breaker: float = 0.0) -> tuple[float, float, float, float, float, float, float]:
     return (
+        -float(unit.level),
         float(unit.stat("speed")),
-        float(unit.level),
         float(unit.stat("attack")),
         float(unit.stat("defense")),
         float(unit.stat("attack_range")),
@@ -548,7 +548,8 @@ def create_legacy_duel_battle(hero1_code: str, hero2_code: str) -> Battle:
     player1_spawn, player2_spawn = legacy_duel_spawn_positions(hero1, hero2)
     battle.add_unit(hero1, player1_spawn)
     battle.add_unit(hero2, player2_spawn)
-    battle.configure_turn_order([hero1.unit_id, hero2.unit_id], starting_index=0)
+    turn_order = interleaved_classic_turn_order([hero1], [hero2])
+    battle.configure_turn_order([unit.unit_id for unit in turn_order], starting_index=0)
     battle.start_battle()
     return battle
 
