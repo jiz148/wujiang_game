@@ -3,8 +3,10 @@ from __future__ import annotations
 import tempfile
 import sys
 import sqlite3
+import threading
 import time
 from contextlib import closing
+from http import HTTPStatus
 import unittest
 from pathlib import Path
 
@@ -43,6 +45,48 @@ class UserStoreTests(unittest.TestCase):
         self.assertEqual(login_user.user_id, user.user_id)
         self.assertNotEqual(login_token, token)
         self.assertEqual(self.store.user_for_session(login_token).username, "Alice")
+
+    def test_login_waits_for_a_transient_database_writer(self) -> None:
+        self.store.register("Alice", "secret123")
+        result: list[tuple[str, str] | BaseException] = []
+        started = threading.Event()
+        with closing(sqlite3.connect(self.db_path)) as writer:
+            writer.execute("BEGIN IMMEDIATE")
+
+            def login() -> None:
+                started.set()
+                try:
+                    user, token = self.store.authenticate("Alice", "secret123")
+                    result.append((user.username, token))
+                except BaseException as exc:
+                    result.append(exc)
+
+            worker = threading.Thread(target=login, daemon=True)
+            worker.start()
+            self.assertTrue(started.wait(timeout=2))
+            worker.join(timeout=0.1)
+            self.assertTrue(worker.is_alive())
+            writer.commit()
+            worker.join(timeout=3)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(result), 1)
+        self.assertIsInstance(result[0], tuple)
+        username, token = result[0]
+        self.assertEqual(username, "Alice")
+        self.assertEqual(self.store.user_for_session(token).username, "Alice")
+
+    def test_persistent_database_lock_returns_retryable_auth_error(self) -> None:
+        store = UserStore(self.db_path, busy_timeout_seconds=0.05)
+        store.register("Alice", "secret123")
+        with closing(sqlite3.connect(self.db_path)) as writer:
+            writer.execute("BEGIN IMMEDIATE")
+            with self.assertRaises(AuthError) as raised:
+                store.authenticate("Alice", "secret123")
+            self.assertEqual(raised.exception.status, HTTPStatus.SERVICE_UNAVAILABLE)
+            writer.rollback()
+
+        self.assertEqual(store.authenticate("Alice", "secret123")[0].username, "Alice")
 
     def test_duplicate_username_is_case_insensitive(self) -> None:
         self.store.register("Alice", "secret123")

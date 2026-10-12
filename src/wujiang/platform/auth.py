@@ -21,6 +21,7 @@ SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
 SESSION_IDLE_TTL_SECONDS = 60 * 60 * 24 * 7
 SESSION_TOUCH_INTERVAL_SECONDS = 5 * 60
 MAX_ACTIVE_SESSIONS_PER_USER = 8
+SQLITE_BUSY_TIMEOUT_SECONDS = 30.0
 
 
 class AuthError(Exception):
@@ -123,6 +124,13 @@ def session_token_hash(token: str) -> str:
 DUMMY_PASSWORD_HASH = hash_password("not-a-real-account-password")
 
 
+def _database_is_busy(exc: sqlite3.OperationalError) -> bool:
+    code = getattr(exc, "sqlite_errorcode", None)
+    if code is not None:
+        return (code & 0xFF) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    return str(exc).lower() in {"database is locked", "database table is locked"}
+
+
 class UserStore:
     def __init__(
         self,
@@ -132,18 +140,20 @@ class UserStore:
         session_ttl_seconds: int = SESSION_TTL_SECONDS,
         session_idle_ttl_seconds: int = SESSION_IDLE_TTL_SECONDS,
         max_active_sessions_per_user: int = MAX_ACTIVE_SESSIONS_PER_USER,
+        busy_timeout_seconds: float = SQLITE_BUSY_TIMEOUT_SECONDS,
     ) -> None:
         self.db_path = auth_database_path(str(db_path) if db_path is not None else None)
         self._clock = clock
         self._session_ttl_seconds = max(60, int(session_ttl_seconds))
         self._session_idle_ttl_seconds = max(60, int(session_idle_ttl_seconds))
         self._max_active_sessions_per_user = max(1, int(max_active_sessions_per_user))
+        self._busy_timeout_seconds = max(0.0, float(busy_timeout_seconds))
         self._lock = threading.RLock()
         self._schema_ready = False
 
     def _connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self.db_path)
+        connection = sqlite3.connect(self.db_path, timeout=self._busy_timeout_seconds)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
@@ -158,15 +168,24 @@ class UserStore:
 
     @contextmanager
     def _connection(self) -> sqlite3.Connection:
-        connection = self._connect()
+        connection: sqlite3.Connection | None = None
         try:
+            connection = self._connect()
             yield connection
             connection.commit()
+        except sqlite3.OperationalError as exc:
+            if connection is not None:
+                connection.rollback()
+            if _database_is_busy(exc):
+                raise AuthError("账号服务繁忙，请稍后重试。", status=HTTPStatus.SERVICE_UNAVAILABLE) from exc
+            raise
         except Exception:
-            connection.rollback()
+            if connection is not None:
+                connection.rollback()
             raise
         finally:
-            connection.close()
+            if connection is not None:
+                connection.close()
 
     def _ensure_schema(self) -> None:
         if self._schema_ready:
@@ -253,28 +272,38 @@ class UserStore:
     def authenticate(self, username: str, password: str) -> tuple[AuthUser, str]:
         normalized_key = normalized_username_key(username)
         valid_password = validate_login_password(password)
-        now = self._clock()
-        with self._lock:
-            self._ensure_schema()
-            with self._connection() as connection:
-                row = connection.execute(
-                    "SELECT * FROM users WHERE normalized_username = ?",
-                    (normalized_key,),
-                ).fetchone()
-                encoded_hash = str(row["password_hash"]) if row is not None else DUMMY_PASSWORD_HASH
-                password_matches = verify_password(valid_password, encoded_hash)
-                if row is None or not password_matches:
-                    raise AuthError("用户名或密码不正确。", status=HTTPStatus.UNAUTHORIZED)
-                user = self._user_from_row(row)
-                if user is None:
-                    raise AuthError("用户不存在。", status=HTTPStatus.UNAUTHORIZED)
-                if password_hash_needs_upgrade(str(row["password_hash"])):
-                    connection.execute(
-                        "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
-                        (hash_password(valid_password), now, user.user_id),
-                    )
-                token = self._create_session(connection, user.user_id, now)
-                return user, token
+        self._ensure_schema()
+        # Password hashing is intentionally outside the write transaction.
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM users WHERE normalized_username = ?",
+                (normalized_key,),
+            ).fetchone()
+            encoded_hash = str(row["password_hash"]) if row is not None else DUMMY_PASSWORD_HASH
+        password_matches = verify_password(valid_password, encoded_hash)
+        if row is None or not password_matches:
+            raise AuthError("用户名或密码不正确。", status=HTTPStatus.UNAUTHORIZED)
+        user = self._user_from_row(row)
+        if user is None:
+            raise AuthError("用户不存在。", status=HTTPStatus.UNAUTHORIZED)
+        upgraded_hash = hash_password(valid_password) if password_hash_needs_upgrade(encoded_hash) else None
+        with self._connection() as connection:
+            # Acquire the write lock before reading again, so a competing
+            # strategy write cannot trap login in a read-to-write upgrade.
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT password_hash FROM users WHERE id = ?", (user.user_id,)
+            ).fetchone()
+            if current is None or str(current["password_hash"]) != encoded_hash:
+                raise AuthError("用户名或密码不正确。", status=HTTPStatus.UNAUTHORIZED)
+            now = self._clock()
+            if upgraded_hash is not None:
+                connection.execute(
+                    "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
+                    (upgraded_hash, now, user.user_id),
+                )
+            token = self._create_session(connection, user.user_id, now)
+            return user, token
 
     def user_for_session(self, token: str) -> AuthUser:
         normalized_token = str(token or "").strip()

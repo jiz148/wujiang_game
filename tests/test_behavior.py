@@ -2466,6 +2466,34 @@ class RoomBehaviorTests(unittest.TestCase):
         self.assertEqual(status, 401)
         self.assertIn("error", bad_login)
 
+    def test_scenario_login_reports_database_contention_and_recovers(self) -> None:
+        db_path = http_runtime.AUTH_STORE.db_path
+        http_runtime.AUTH_STORE = UserStore(db_path, busy_timeout_seconds=0.05)
+        self.api_post("/api/auth/register", {"username": "Alice", "password": "secret123"})
+
+        with closing(sqlite3.connect(db_path)) as writer:
+            writer.execute("BEGIN IMMEDIATE")
+            status, response = self.api_post_error(
+                "/api/auth/login", {"username": "Alice", "password": "secret123"},
+            )
+            self.assertEqual(status, 503)
+            self.assertIn("稍后重试", response["error"])
+            writer.rollback()
+
+        login = self.api_post("/api/auth/login", {"username": "Alice", "password": "secret123"})
+        self.assertEqual(login["user"]["username"], "Alice")
+        self.assertEqual(self.api_get("/api/auth/me", params={"session_token": login["session_token"]})["user"]["username"], "Alice")
+
+        with closing(sqlite3.connect(db_path)) as writer:
+            writer.execute("BEGIN IMMEDIATE")
+            status, response = self.api_post_error(
+                "/api/auth/logout", {"session_token": login["session_token"]},
+            )
+            self.assertEqual(status, 503)
+            self.assertIn("稍后重试", response["error"])
+            writer.rollback()
+        self.api_post("/api/auth/logout", {"session_token": login["session_token"]})
+
     def test_scenario_local_analytics_records_only_allowlisted_product_events(self) -> None:
         # Given a new anonymous visitor opens the home screen and starts the tutorial
         session_id = "visitor-test-1"
@@ -26710,7 +26738,7 @@ class BPSpecialModeBehaviorTests(unittest.TestCase):
         self.assertEqual(len(restored.bp_hero_pool), 66)
 
     def test_workbook_mode_catalog_and_double_down(self):
-        from wujiang.tactical.rooms.special_modes import SPECIAL_MODES, choose_bp_special_modes
+        from wujiang.tactical.rooms.special_modes import SPECIAL_MODES, SPECIAL_MODE_BY_CODE, choose_bp_special_modes
 
         self.assertEqual(len(SPECIAL_MODES), 18)
         self.assertEqual({code for code, _, _ in SPECIAL_MODES}, {
@@ -26719,6 +26747,7 @@ class BPSpecialModeBehaviorTests(unittest.TestCase):
             "mages", "arena", "double_down", "chain", "eternal", "true_turn",
             "face_tank", "none",
         })
+        self.assertIn("己方行动顺序下一位仍存活", SPECIAL_MODE_BY_CODE["soft_persimmon"]["description"])
         with mock.patch("wujiang.tactical.rooms.special_modes.secrets.choice", return_value=("double_down", "Double Down", "")):
             modes = choose_bp_special_modes()
         self.assertEqual(modes[0], "double_down")
@@ -26822,6 +26851,45 @@ class BPSpecialModeBehaviorTests(unittest.TestCase):
         self.assertEqual(victim.current_hp, victim.max_health)
         self.assertEqual(len(soft.destroyed_units), 1)
 
+    def test_soft_persimmon_replaces_next_living_ally_in_cyclic_order(self):
+        from wujiang.tactical.engine.core import DamageContext
+
+        for choose_last in (False, True):
+            with self.subTest(wraps_to_first_ally=choose_last):
+                battle = self.battle("soft_persimmon")
+                own_order = [battle.units[unit_id] for unit_id in battle.turn_order_unit_ids
+                             if battle.units[unit_id].player_id == 1]
+                victim = own_order[-1] if choose_last else own_order[0]
+                successor = own_order[0] if choose_last else own_order[1]
+                enemy_ids = {hero.unit_id for hero in battle.hero_units(2)}
+                attacker = battle.hero_units(2)[0]
+                battle.resolve_damage(DamageContext(source=attacker, target=victim, attack_power=0,
+                                                    is_skill=False, action_name="己方顺位替死", raw_damage=2))
+                self.assertTrue(victim.alive)
+                self.assertEqual([unit.unit_id for unit in battle.destroyed_units], [successor.unit_id])
+                self.assertEqual({hero.unit_id for hero in battle.hero_units(2)}, enemy_ids)
+                self.assertIsNone(battle.winner)
+
+        skipped = self.battle("soft_persimmon")
+        own_order = [skipped.units[unit_id] for unit_id in skipped.turn_order_unit_ids
+                     if skipped.units[unit_id].player_id == 1]
+        bypassed = own_order[1]
+        bypassed.alive = False
+        skipped.remove_unit(bypassed)
+        skipped.resolve_damage(DamageContext(source=skipped.hero_units(2)[0], target=own_order[0],
+                                             attack_power=0, is_skill=False,
+                                             action_name="跳过已阵亡队友", raw_damage=2))
+        self.assertTrue(own_order[0].alive)
+        self.assertEqual([unit.unit_id for unit in skipped.destroyed_units], [own_order[2].unit_id])
+
+        sudden = self.battle("soft_persimmon", "sudden_death")
+        victim, attacker = sudden.hero_units(1)[0], sudden.hero_units(2)[0]
+        sudden.resolve_damage(DamageContext(source=attacker, target=victim, attack_power=0,
+                                            is_skill=False, action_name="己方替死骤死", raw_damage=2))
+        self.assertTrue(victim.alive)
+        self.assertEqual(sudden.winner, 2)
+        self.assertEqual(sudden.destroyed_units[0].player_id, 1)
+
     def test_direct_resource_changes_follow_bp_recovery_rules(self):
         no_recovery = self.battle("no_recovery")
         hero = no_recovery.hero_units(1)[0]
@@ -26865,6 +26933,7 @@ class BPSpecialModeBehaviorTests(unittest.TestCase):
         self.assertTrue(victim.alive)
         self.assertEqual(victim.current_hp, victim.max_health)
         self.assertEqual(len(soft.destroyed_units), 1)
+        self.assertEqual(soft.destroyed_units[0].player_id, victim.player_id)
 
         arena = self.battle("arena")
         champion = next(hero for hero in arena.hero_units(1) if not hero.banished)
@@ -26880,6 +26949,7 @@ class BPSpecialModeBehaviorTests(unittest.TestCase):
         second_champion.alive = False
         stacked.cleanup_dead_units()
         self.assertTrue(second_champion.alive)
+        self.assertEqual(stacked.destroyed_units[0].player_id, second_champion.player_id)
         self.assertEqual(sum(not hero.banished for hero in stacked.hero_units(first_team)), 1)
 
         arena_zone = self.battle("arena", "eternal")
@@ -27027,8 +27097,9 @@ class BPSpecialModeBehaviorTests(unittest.TestCase):
         victim, attacker = stacked.hero_units(1)[0], stacked.hero_units(2)[0]
         stacked.resolve_damage(DamageContext(source=attacker, target=victim, attack_power=0,
                                              is_skill=False, action_name="单挑替死", raw_damage=2))
-        self.assertTrue(victim.alive)
-        self.assertEqual(stacked.winner, 1)
+        self.assertFalse(victim.alive)
+        self.assertEqual(stacked.winner, 2)
+        self.assertEqual(stacked.win_reason_code, "bp_duel")
 
     def test_arena_bench_ignores_resource_status_movement_and_fast_reverses_order(self):
         from wujiang.tactical.engine.core import ActionError, Position, StatusEffect

@@ -292,6 +292,7 @@ class BPSpecialModeEffect(BattleFieldEffect):
         index = order.index(original.unit_id)
         successor = next((battle.units[unit_id] for offset in range(1, len(order))
                           if (unit_id := order[(index + offset) % len(order)]) in battle.units
+                          and battle.units[unit_id].player_id == original.player_id
                           and real_hero(battle.units[unit_id]) and battle.units[unit_id].alive), None)
         if successor is None:
             return False
