@@ -16,13 +16,15 @@ const FLOW_PANELS = {
   skirmish: "skirmish-panel",
   tutorial: "quick-start-panel",
   archive: "recent-matches-panel",
+  settings: "settings-panel",
 };
 
 // caption 为 null 表示该流程自己写页头说明，或者干脆不需要说明。
 // 遭遇战进了房间之后标题是房间码，那比一句玩法介绍有用；没进房间时也只留「遭遇战」。
 const FLOW_HEADINGS = {
   campaign: ["战役", null],
-  skirmish: ["遭遇战", null],
+  skirmish: ["房间大厅", null],
+  settings: ["设置", null],
   tutorial: ["新手教学", "用固定阵容和地图走一遍战场操作。"],
   archive: ["战绩与回放", "最近 10 场已结束对局，以及武将熟练度。"],
 };
@@ -33,9 +35,10 @@ export function renderHomeFlow() {
     const panel = $(id);
     if (panel) panel.classList.toggle("hidden", flow !== name);
   }
-  // 房间列表只在遭遇战下有意义，战役有自己的战役列表。
+  // 房间列表只在房间大厅有意义。正在选模式时这一步只回答「打哪种」，列表先让开。
+  const creating = Boolean(state.modePickerOpen) && !state.room && flow === "skirmish";
   const directory = $("room-directory");
-  if (directory) directory.classList.toggle("hidden", flow !== "skirmish");
+  if (directory) directory.classList.toggle("hidden", flow !== "skirmish" || creating);
 
   const tutorialButton = $("start-tutorial");
   const resumeButton = $("resume-tutorial");
@@ -49,12 +52,25 @@ export function renderHomeFlow() {
   const lobbyCaption = $("lobby-caption");
   if (!state.room) {
     const [heading, caption] = FLOW_HEADINGS[flow] || ["", ""];
-    if (lobbyTitle && heading) lobbyTitle.textContent = heading;
+    if (lobbyTitle && heading) lobbyTitle.textContent = creating ? "选择模式" : heading;
     // 加载失败时这里会被写成错误信息，不要用流程文案盖掉它。
     if (lobbyCaption && !state.homeLoadError) {
       lobbyCaption.textContent = state.roomError || caption || "";
       lobbyCaption.classList.toggle("is-error", Boolean(state.roomError));
     }
+  }
+  $("lobby-bar")?.classList.toggle("hidden", creating);
+  $("room-create-step")?.classList.toggle("hidden", !creating);
+  const createButton = $("create-room");
+  if (createButton) {
+    createButton.disabled = Boolean(state.roomCreateBusy);
+    createButton.classList.toggle("is-busy", Boolean(state.roomCreateBusy));
+    createButton.setAttribute("aria-busy", state.roomCreateBusy ? "true" : "false");
+    createButton.textContent = state.roomCreateBusy ? "正在创建" : "创建房间";
+  }
+  for (const id of ["mode-classic", "mode-bp", "mode-autochess"]) {
+    const button = $(id);
+    if (button) button.disabled = Boolean(state.roomCreateBusy);
   }
   if (tutorialButton) {
     tutorialButton.disabled = state.quickStartBusy || !userLoggedIn();

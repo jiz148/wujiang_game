@@ -542,7 +542,11 @@ class AutoChessState:
             seat.set_ai()
         runner.battle = battle
         runner.status = "battle"
-        runner.fast_ai_simulation = False
+        # 这些子局同时开好几场，又跑在拉房间状态的那条请求里。逐步录像会在每一步
+        # 把整张棋盘序列化多份，是战斗阶段卡住的主要开销。它们本来也不是回放。
+        runner.replay_forced = "off"
+        runner.fast_ai_simulation = True
+        battle.fast_ai_simulation = True
         return runner
 
     def _begin_battles(self) -> None:

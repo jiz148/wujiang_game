@@ -16,14 +16,15 @@ const DEFAULT_SCREEN = "draft";
 // 重开时无从还原是哪一个——地址栏因此必须写玩家实际所在的去处，而不是容器名。
 // 这也是先前那个 bug 的根源：旧的 screenHash() 把 menu 也写成 `#draft`，
 // 于是主菜单会在地址栏留下 `#draft`，下次打开就直接跳进内层，退不回菜单。
-export const FLOWS = ["campaign", "skirmish", "archive"];
+export const FLOWS = ["campaign", "skirmish", "archive", "settings"];
 
 // 左上角写的是"你在哪"。此前它恒为「武将」，于是战役和遭遇战顶着同一个标题，
 // 而这两条路线除了共用一个外壳之外没有任何关系。
 const ROUTE_TITLES = {
   campaign: "战役",
-  skirmish: "战场对战",
+  skirmish: "房间大厅",
   archive: "战绩与回放",
+  settings: "设置",
 };
 
 export function routeTitle(screen = state.screen, flow = state.homeFlow) {
@@ -69,7 +70,10 @@ export function applyScreen() {
   // 战役进行中会把外壳锁成一屏（见 body.campaign-mode）。开关由 renderStrategyPanel
   // 打开，但它只在 draft 屏跑得到；离开这一屏必须在这里关掉，否则主菜单会继承
   // 一个 height: 100vh 的外壳。
-  if (active !== "draft") document.body.classList.remove("campaign-mode");
+  if (active !== "draft") {
+    document.body.classList.remove("campaign-mode");
+    document.body.classList.remove("in-room-lobby");
+  }
   // draft 是四条路线共用的容器，样式却常常只对其中一条成立（战役那条自带页头，
   // 共享的 section-head 于是成了同一个词的第二遍）。把路线也写到 body 上。
   for (const name of FLOWS) {

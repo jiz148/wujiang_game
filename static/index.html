@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>武将</title>
-    <link rel="stylesheet" href="/theme.css?v=r24" />
-    <link rel="stylesheet" href="/styles.css?v=r68" />
+    <link rel="stylesheet" href="/theme.css?v=r27" />
+    <link rel="stylesheet" href="/styles.css?v=r86" />
   </head>
   <!-- 哪一屏该显示，要等 /api/auth/me 回来才知道。在那之前先什么都不显示，
        否则标记里默认可见的那一屏会先闪出来，再被换掉。 -->
@@ -29,42 +29,41 @@
 
       <section id="draft-screen" class="screen draft-screen hidden" aria-labelledby="lobby-title">
         <section class="draft panel">
-          <div class="section-head">
+            <div class="section-head">
             <div>
-              <h2 id="lobby-title">在线房间</h2>
+              <div class="lobby-title-row">
+                <h2 id="lobby-title">在线房间</h2>
+              </div>
               <p id="lobby-caption"></p>
-            </div>
-            <div class="draft-head-actions">
-              <button id="leave-room" class="ghost hidden">离开房间</button>
-              <button id="delete-room" class="ghost hidden">删除房间</button>
-              <button id="recover-room" class="ghost hidden">恢复席位</button>
-              <button id="copy-invite" class="ghost hidden">复制邀请链接</button>
-              <button id="room-battle" class="primary room-battle-btn hidden" type="button">
-                <span class="room-battle-btn__mark" aria-hidden="true">⚔</span>
-                进入战场
-              </button>
-              <button id="start-room" class="primary hidden">开始对局</button>
             </div>
           </div>
 
           <div id="room-home" class="room-home">
-            <!-- 遭遇战：不经营大地图，直接打一场。席位同样可以让真人顶替。 -->
+            <!-- 房间大厅：列表是这一屏的主体。创建先选模式，加入只留一个房间码。 -->
             <section id="skirmish-panel" class="flow-panel hidden">
-              <div class="flow-option">
-                <div class="flow-option__text">
-                  <h3>建立房间</h3>
-                  <p>自己选将，拿到邀请码后其他人可以顶替 AI 席位或旁观。</p>
-                </div>
-                <button id="create-room" class="ghost" type="button">建立房间</button>
-              </div>
-              <div class="flow-option">
-                <div class="flow-option__text">
-                  <h3>加入房间</h3>
-                  <p>输入邀请码进入他人的房间。</p>
-                </div>
-                <div class="flow-option__form">
+              <div id="lobby-bar" class="lobby-bar">
+                <button id="create-room" class="primary" type="button">创建房间</button>
+                <div class="lobby-join">
                   <input id="join-room-code" type="text" maxlength="6" placeholder="房间码" aria-label="房间码" />
                   <button id="join-room" class="ghost" type="button">加入</button>
+                </div>
+              </div>
+              <!-- 创建是单独一步，不跟房间列表挤在同一屏。 -->
+              <div id="room-create-step" class="room-create hidden">
+                <button id="room-create-back" class="ghost" type="button">返回</button>
+                <div id="mode-picker" class="mode-picker">
+                  <button id="mode-classic" class="mode-card" type="button">
+                    <strong>战场对战</strong>
+                    <span>双方自行选将</span>
+                  </button>
+                  <button id="mode-bp" class="mode-card" type="button">
+                    <strong>BP</strong>
+                    <span>轮流禁用与选取</span>
+                  </button>
+                  <button id="mode-autochess" class="mode-card" type="button">
+                    <strong>自走棋</strong>
+                    <span>多路同时对战</span>
+                  </button>
                 </div>
               </div>
             </section>
@@ -80,6 +79,14 @@
                   <button id="start-tutorial" class="primary" type="button">进入新手教学</button>
                 </div>
               </div>
+            </section>
+            <section id="settings-panel" class="flow-panel settings-panel hidden" aria-labelledby="settings-title">
+              <h3 id="settings-title" class="visually-hidden">设置</h3>
+              <div class="settings-row">
+                <span class="settings-row__label">对战记录</span>
+                <div id="settings-replay" class="settings-seg" role="group" aria-label="对战记录"></div>
+              </div>
+              <p id="settings-message" class="meta-note"></p>
             </section>
             <section id="recent-matches-panel" class="recent-matches-panel hidden" aria-labelledby="recent-matches-title">
               <!-- 标题由页头承担。这一层只留操作与一条补充说明的悬浮提示。 -->
@@ -139,10 +146,7 @@
             <!-- 公开房间列表。也是玩家离开房间后回去的路——从主菜单另选去处
                  会清掉当前房间视图，房间本身仍在这里等着。 -->
             <section id="room-directory" class="room-directory hidden">
-              <div class="section-head room-directory-head">
-                <h3>已有房间</h3>
-                <button type="button" class="hint" aria-label="房间说明">i<span class="hint__bubble">可直接加入正在等人的房间，也可以查看已经开战的房间。</span></button>
-              </div>
+              <h3 class="visually-hidden">房间列表</h3>
               <div id="room-list" class="room-list"></div>
             </section>
           </div>
@@ -151,23 +155,20 @@
                武将。模式与席位数是开局前定一次的设置，选将是一次性的挑选动作，
                两者都收进弹窗——摊在页面上只会把席位挤到屏幕外。 -->
           <div id="room-lobby" class="room-lobby hidden">
-            <div class="room-overview">
-              <div class="room-fact">
-                <span class="room-fact__label">房间码</span>
-                <strong id="room-code-label" class="room-fact__value">------</strong>
+            <aside class="room-side">
+              <div class="room-side__id">
+                <span class="room-side__kicker">房间号</span>
+                <div class="lobby-title-row">
+                  <strong id="room-code-label" class="room-side__code">------</strong>
+                  <span id="room-host-tag" class="room-tag hidden">房主</span>
+                </div>
               </div>
-              <div class="room-fact">
-                <span class="room-fact__label">身份</span>
-                <strong id="viewer-seat-label" class="room-fact__value">访客</strong>
-                <span id="viewer-seat-note" class="room-fact__note"></span>
-              </div>
-              <div class="room-fact">
-                <span class="room-fact__label">状态</span>
-                <strong id="room-status-label" class="room-fact__value">等待双方进入</strong>
-              </div>
-              <button id="auto-configure-room" class="ghost hidden" type="button">自动配置</button>
+              <div class="rule-divider" role="separator"></div>
+              <div class="room-side__kicker">房间配置</div>
+              <span id="viewer-seat-label" class="visually-hidden">访客</span>
+              <span id="viewer-seat-note" class="visually-hidden"></span>
+              <span id="room-status-label" class="visually-hidden">等待双方进入</span>
               <span id="invite-path-label" class="visually-hidden">未生成</span>
-            </div>
 
             <section id="room-setup-section" class="room-setup">
               <div class="room-setup__facts">
@@ -196,13 +197,36 @@
                   <strong id="room-board-size-label" class="room-setup__value">10×10</strong>
                 </span>
               </div>
-              <div class="room-setup__actions">
-                <button id="toggle-ready" class="ghost hidden" type="button">确认准备</button>
-                <button id="open-room-setup" class="ghost" type="button">修改设置</button>
-              </div>
             </section>
+            <div class="room-side__actions">
+                <button id="open-room-setup" class="room-side__action" type="button">修改设置</button>
+                <button id="auto-configure-room" class="room-side__action hidden" type="button">自动配置</button>
+            </div>
+            <div class="rule-divider" role="separator"></div>
+            <div class="room-side__actions">
+                <button id="toggle-ready" class="ready-toggle hidden" type="button">未准备</button>
+            </div>
+              <div class="room-side__grow"></div>
+              <div class="draft-head-actions">
+                <button id="room-battle" class="primary room-battle-btn hidden" type="button">
+                  <span class="room-battle-btn__mark" aria-hidden="true">⚔</span>
+                  进入战场
+                </button>
+                <button id="start-room" class="primary hidden">开始对局</button>
+                <button id="leave-room" class="ghost hidden">离开房间</button>
+                <button id="delete-room" class="ghost hidden">删除房间</button>
+                <button id="recover-room" class="ghost hidden">恢复席位</button>
+                <button id="copy-invite" class="ghost hidden">复制邀请链接</button>
+              </div>
+            </aside>
 
-            <div id="seat-cards" class="seat-grid"></div>
+            <div id="seat-column" class="seat-column">
+              <div class="seat-column__head">
+                <h3>席位</h3>
+                <button id="add-seat" class="ghost hidden" type="button">增加席位</button>
+              </div>
+              <div id="seat-cards" class="seat-grid"></div>
+            </div>
             <section id="bp-panel" class="bp-panel hidden" aria-label="BP禁选与控制权分配"></section>
           </div>
         </section>
@@ -243,10 +267,24 @@
                 <span id="replay-status" class="replay-status">实时</span>
               </div>
               <div id="board-zoom-controls" class="battle-console__group zoom-controls hidden">
-                <button id="board-zoom-out" type="button" class="ghost">缩小</button>
-                <button id="board-zoom-reset" type="button" class="ghost">复位</button>
-                <button id="board-zoom-in" type="button" class="ghost">放大</button>
-                <span id="board-zoom-value" class="zoom-value">100%</span>
+                <div class="zoom-cluster">
+                  <button id="board-zoom-out" type="button" class="ghost">缩小</button>
+                  <button id="board-zoom-reset" type="button" class="ghost">复位</button>
+                  <button id="board-zoom-in" type="button" class="ghost">放大</button>
+                  <span id="board-zoom-value" class="zoom-value">100%</span>
+                </div>
+                <label class="replay-speed-control sim-speed-control" for="sim-speed">
+                  <span>AI 速度</span>
+                  <select id="sim-speed">
+                    <option value="0.5">0.5x</option>
+                    <option value="1" selected>1x</option>
+                    <option value="2">2x</option>
+                    <option value="4">4x</option>
+                    <option value="6">6x</option>
+                    <option value="8">8x</option>
+                    <option value="16">16x</option>
+                  </select>
+                </label>
               </div>
             </div>
           </div>
@@ -456,7 +494,7 @@
             <span class="field__label">模式</span>
             <select id="room-mode-select" class="select"></select>
           </label>
-          <label class="field" for="room-seat-count-input">
+          <label class="field hidden" for="room-seat-count-input">
             <span class="field__label">席位数</span>
             <input id="room-seat-count-input" class="input" type="number" min="2" max="8" step="1" value="2" />
           </label>
@@ -472,13 +510,42 @@
             <span>每队总等级上限</span>
             <input id="bp-level-cap-input" class="input" type="number" min="1" max="50" step="1" value="15" />
           </label>
-          <label id="bp-win-count-control" class="field field--switch hidden" for="bp-show-win-count">
-            <span>显示双方胜场数</span>
-            <input id="bp-show-win-count" type="checkbox" checked />
+          <label id="bp-format-control" class="field hidden" for="bp-format-select">
+            <span class="field__label">BP 类型</span>
+            <select id="bp-format-select" class="select">
+              <option value="full">全体选择</option>
+              <option value="tier">随机等级</option>
+            </select>
           </label>
-          <label id="room-hero-limit-switch" class="field field--switch" for="room-hero-limit-enabled">
-            <span class="field__label">限定武将数量</span>
+          <label id="bp-same-hero-control" class="switch hidden" for="bp-allow-same-hero">
+            <input id="bp-allow-same-hero" type="checkbox" />
+            <span class="switch__track" aria-hidden="true"></span>
+            <span class="switch__text">允许双方选择同一武将</span>
+          </label>
+          <label id="bp-tier-rounds-control" class="field hidden" for="bp-tier-rounds-input">
+            <span class="field__label">轮数</span>
+            <input id="bp-tier-rounds-input" class="input" type="number" min="1" max="12" step="1" value="3" />
+            <span class="field__hint">一共抽几轮。每一轮双方只在抽到的等级里各选 1 名。</span>
+          </label>
+          <div id="bp-tier-pool-control" class="field hidden">
+            <span class="field__label">可随机的等级</span>
+            <div id="bp-tier-pool" class="bp-tier-pool"></div>
+            <span class="field__hint">人够就各禁 2 再各选 1，少一点就各禁 1，太少就不禁。抽过的等级还可以再抽到。</span>
+          </div>
+          <label id="bp-win-count-control" class="switch hidden" for="bp-show-win-count">
+            <input id="bp-show-win-count" type="checkbox" checked />
+            <span class="switch__track" aria-hidden="true"></span>
+            <span class="switch__text">显示双方胜场数</span>
+          </label>
+          <label id="room-army-switch" class="switch" for="room-army-enabled">
+            <input id="room-army-enabled" type="checkbox" />
+            <span class="switch__track" aria-hidden="true"></span>
+            <span class="switch__text">配置士兵</span>
+          </label>
+          <label id="room-hero-limit-switch" class="switch" for="room-hero-limit-enabled">
             <input id="room-hero-limit-enabled" type="checkbox" />
+            <span class="switch__track" aria-hidden="true"></span>
+            <span class="switch__text">限定武将数量</span>
           </label>
           <label id="room-hero-limit-control" class="field hidden" for="room-hero-limit-input">
             <span class="field__label">每席最多</span>
@@ -616,6 +683,6 @@
     <script src="/platform/home-ui.js?v=r13" defer></script>
     <script src="/tactical/replay-ui.js?v=r14" defer></script>
     <script src="/tactical/battle-feedback.js?v=r15" defer></script>
-    <script type="module" src="/app.js?v=r67"></script>
+    <script type="module" src="/app.js?v=r70"></script>
   </body>
 </html>

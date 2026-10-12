@@ -8,6 +8,7 @@ import { renderProfilePanel, userLoggedIn } from '../platform/auth.js';
 import { renderGate } from '../platform/gate.js';
 import { refreshResumableTutorial, renderHomeFlow } from '../platform/home.js';
 import { renderMenu } from '../platform/menu.js';
+import { renderSettings } from '../platform/settings.js';
 import { clearStrategyState, refreshStrategyCampaigns } from '../strategic/api.js';
 import { renderRecentMatches } from '../strategic/ui-base.js';
 import { isRoomConfigControlActive, isStrategyControlActive, renderProfileModal, renderStrategyPanel } from '../strategic/workbench.js';
@@ -47,6 +48,7 @@ export function render() {
   renderTopbar();
   renderProfilePanel();
   renderHomeFlow();
+  renderSettings();
   renderRecentMatches();
   if (!preserveStrategyControl) renderStrategyPanel();
   renderProfileModal();
@@ -169,7 +171,18 @@ export async function refreshState({ preserveScreen = true } = {}) {
       }
       syncScreen({ preferBattle: false });
       const homeRenderSignature = JSON.stringify({
-        rooms: (state.rooms || []).map((room) => [room.room_id, room.status, room.player_count, room.is_full]),
+        rooms: (state.rooms || []).map((room) => [
+          room.room_id,
+          room.status,
+          room.mode,
+          room.updated_at,
+          room.occupied_seat_count,
+          room.seat_count,
+          room.player_count,
+          room.is_full,
+          room.can_join,
+          (room.seats || []).map((seat) => [seat.name, seat.occupied, seat.is_ai, seat.ready]),
+        ]),
         campaigns: (state.strategyCampaigns || []).map((campaign) => [
           campaign.id,
           campaign.updated_at,

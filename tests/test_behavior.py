@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 import sqlite3
@@ -2290,6 +2291,7 @@ class RoomBehaviorTests(unittest.TestCase):
         SESSION.battle = None
         server_module.reset_rate_limiter()
         self.auth_tmpdir = tempfile.TemporaryDirectory()
+        os.environ["WUJIANG_SETTINGS_PATH"] = str(Path(self.auth_tmpdir.name) / "settings.json")
         http_runtime.AUTH_STORE = UserStore(Path(self.auth_tmpdir.name) / "auth.sqlite3")
         http_runtime.ANALYTICS_STORE = AnalyticsStore(Path(self.auth_tmpdir.name) / "analytics.sqlite3")
         http_runtime.MATCH_HISTORY_STORE = MatchHistoryStore(Path(self.auth_tmpdir.name) / "history.sqlite3")
@@ -2883,6 +2885,20 @@ class RoomBehaviorTests(unittest.TestCase):
         self.assertEqual(contract["year_limit"], 0)
         self.assertEqual(campaign["world"]["world_crises"], [])
         self.assertEqual(campaign["world"]["current_month"], 1)
+
+    def test_settings_roundtrip_and_room_mode_is_chosen_at_creation(self) -> None:
+        current = self.api_get(
+            "/api/settings",
+            params={"session_token": self.default_session_token()},
+        )
+        self.assertEqual(current["replay_recording"], "full")
+        saved = self.api_post("/api/settings", {
+            "replay_recording": "off",
+            "session_token": self.default_session_token(),
+        })
+        self.assertEqual(saved["replay_recording"], "off")
+        created = self.api_post("/api/rooms/create", {"player_name": "Host", "mode": "bp"})
+        self.assertEqual(created["room"]["mode"], "bp")
 
     def test_scenario_owner_deletes_a_campaign_and_it_stays_gone(self) -> None:
         # 战役此前只能归档，而归档的仍然留在列表里——试玩几局之后列表再也清不干净。
@@ -9476,7 +9492,7 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertIn('id="quick-start-panel"', html)
         self.assertIn('id="strategy-panel"', html)
         self.assertIn('id="recent-matches-panel"', html)
-        self.assertIn("遭遇战", app_source)
+        self.assertIn("房间大厅", app_source)
         self.assertIn("display: none", styles)
         self.assertIn("renderHomeFlow", app_source)
         # 建房页只留席位。选将、房间设置、武将详情都收进弹窗，页面上不再有
@@ -9563,7 +9579,7 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertIn(".hero-slot.is-wounded", styles)
         self.assertIn(".strategy-hero-duty-row.is-wounded", styles)
         self.assertIn(".strategy-hero-wounded-banner", styles)
-        self.assertIn('if (attackKinds.has(kind) && own) return;', app_source)
+        self.assertIn('if (ownCityKinds.has(kind) && !own) return;', app_source)
         self.assertIn("createLordRitualPanel", app_source)
         self.assertIn("renderStrategyTechPanel", app_source)
         self.assertIn("showStrategyTechTree", app_source)
@@ -9578,7 +9594,7 @@ class FrontendBehaviorTests(unittest.TestCase):
         self.assertNotIn("发布招募武将令", app_source)
         self.assertIn(".strategy-role-header.role-grand_general", styles)
         self.assertIn(".strategy-hero-duty-row", styles)
-        self.assertIn("nextHomePollAt = now + 5000", app_source)
+        self.assertIn("nextHomePollAt = now + 4000", app_source)
         self.assertIn("lastLobbyRenderSignature", app_source)
         self.assertIn("homeRenderSignature === ui.lastHomeRenderSignature", app_source)
         self.assertIn("scroll-margin-top: 76px", styles)
@@ -11219,7 +11235,7 @@ class FrontendBehaviorTests(unittest.TestCase):
         )
         self.assertEqual(ctx.eval("globalThis.syncedStrategyName"), "战后战役")
         self.assertIn("战役结算已同步", ctx.eval("globalThis.syncedStrategyMessage"))
-        self.assertEqual(ctx.eval("globalThis.gameOverTitle"), "玩家 2 获胜")
+        self.assertEqual(ctx.eval("globalThis.gameOverTitle"), "蓝队 获胜")
         self.assertFalse(ctx.eval("globalThis.strategyReturnDisabled"))
         self.assertEqual(ctx.eval("globalThis.returnedScreen"), "draft")
         self.assertEqual(ctx.eval("globalThis.returnedHomeFlow"), "campaign")
@@ -26681,6 +26697,7 @@ class BPRoomBehaviorTests(unittest.TestCase):
         with mock.patch.object(room, "_bp_feasible_level_pairs", return_value=[(1, 2)]):
             room.set_ready(red_token, True)
             room.set_ready(blue_token, True)
+            room.start_battle(red_token, require_confirmation=True)
         self.assertEqual(room.bp_auto_banned_levels, (1, 2))
         self.assertEqual(room.bp_actions, [])
         self.assertEqual(room._bp_public_state()["auto_banned_levels"], [1, 2])
@@ -26719,6 +26736,61 @@ class BPRoomBehaviorTests(unittest.TestCase):
         self.assertNotIn((1, 2), pairs)
         self.assertTrue(all(room._bp_draft_feasible([], banned_levels=pair) for pair in pairs))
 
+    def test_tier_rounds_pick_one_and_repeat_levels_without_stalling(self):
+        from wujiang.tactical.rooms.multiplayer import RoomError, bp_tier_round_shape, hero_lookup
+
+        self.assertEqual(bp_tier_round_shape(2), (0, 1))
+        self.assertEqual(bp_tier_round_shape(2, allow_same_hero=True), (0, 1))
+        self.assertIsNone(bp_tier_round_shape(1))
+        self.assertEqual(bp_tier_round_shape(1, allow_same_hero=True), (0, 1))
+        self.assertEqual(bp_tier_round_shape(3), (0, 1))
+        self.assertEqual(bp_tier_round_shape(4), (1, 1))
+        self.assertEqual(bp_tier_round_shape(5, allow_same_hero=True), (2, 1))
+        self.assertEqual(bp_tier_round_shape(6), (2, 1))
+        self.assertEqual(bp_tier_round_shape(19), (2, 1))
+
+        room = GameRoom("BPTIER", mode="bp")
+        _, red_token = room.create_host("Red")
+        _, blue_token = room.join("Blue")
+        with self.assertRaisesRegex(RoomError, "轮数"):
+            room.set_bp_settings(red_token, team_size=3, level_cap=15, show_win_count=True,
+                                 bp_format="tier", allow_same_hero=False, tier_pool=[10], tier_rounds=0)
+        room.set_bp_settings(red_token, team_size=3, level_cap=15, show_win_count=True,
+                             bp_format="tier", allow_same_hero=True, tier_pool=[10], tier_rounds=2)
+        self.assertEqual(room.bp_tier_rounds, 2)
+        room.set_ready(red_token, True)
+        room.set_ready(blue_token, True)
+        room.start_battle(red_token, require_confirmation=True)
+        self.assertTrue(all(item["level"] == 10 and item["bans"] == 0 and item["picks"] == 1
+                            for item in room.bp_tier_plan))
+        self.assertEqual(len(room.bp_tier_plan), 2)
+        tens = [code for code, hero in hero_lookup().items() if int(hero["level"]) == 10]
+        self.assertEqual(len(tens), 2)
+        tokens = {1: red_token, 2: blue_token}
+        first_team = room._bp_sequence()[0][1]
+        second_team = room._bp_sequence()[1][1]
+        room.bp_choose(tokens[first_team], tens[0])
+        room.bp_choose(tokens[second_team], tens[0])
+        self.assertEqual(room._bp_public_state()["current_level"], 10)
+        self.assertEqual(room._bp_public_state()["current_kind"], "pick")
+        room.bp_choose(tokens[room._bp_sequence()[len(room.bp_actions)][1]], tens[1])
+        room.bp_choose(tokens[room._bp_sequence()[len(room.bp_actions)][1]], tens[1])
+        self.assertEqual(room._bp_phase(), "review")
+
+        stalled = GameRoom("BPTIER2", mode="bp")
+        _, red_token = stalled.create_host("Red")
+        _, blue_token = stalled.join("Blue")
+        stalled.set_bp_settings(red_token, team_size=3, level_cap=15, show_win_count=True,
+                                bp_format="tier", allow_same_hero=False, tier_pool=[10], tier_rounds=2)
+        stalled.set_ready(red_token, True)
+        stalled.set_ready(blue_token, True)
+        stalled.start_battle(red_token, require_confirmation=True)
+        tokens = {1: red_token, 2: blue_token}
+        stalled.bp_choose(tokens[stalled._bp_sequence()[0][1]], tens[0])
+        stalled.bp_choose(tokens[stalled._bp_sequence()[1][1]], tens[1])
+        self.assertEqual(stalled._bp_public_state()["phase"], "review")
+        self.assertEqual(len(stalled.bp_actions), 2)
+
     @unittest.skipIf(quickjs is None, "quickjs is required to render the BP panel")
     def test_bp_panel_shows_budget_and_honors_win_visibility(self):
         ctx = quickjs.Context()
@@ -26726,7 +26798,11 @@ class BPRoomBehaviorTests(unittest.TestCase):
             function node(tag) {
               return {
                 tagName: tag.toUpperCase(), textContent: '', className: '', value: '', disabled: false,
-                children: [], dataset: {}, listeners: {}, open: false, classList: {toggle() {}},
+                children: [], dataset: {}, listeners: {}, open: false, classList: {
+                  add(...names) { this.className = [this.className, ...names].filter(Boolean).join(' '); },
+                  toggle() {},
+                  contains(name) { return String(this.className || '').split(' ').includes(name); },
+                },
                 append(...items) { this.children.push(...items); },
                 replaceChildren(...items) { this.children = items; },
                 addEventListener(type, handler) { this.listeners[type] = handler; },
@@ -26776,96 +26852,51 @@ class BPRoomBehaviorTests(unittest.TestCase):
         ctx.eval(strip_module_syntax(frontend_module("hero-hover.js")))
         ctx.eval(strip_module_syntax(frontend_module("bp-ui.js")))
         ctx.eval("renderBpPanel()")
-        self.assertIn("红队 2 : 1 蓝队", ctx.eval("panel.children[0].textContent"))
+        self.assertEqual(ctx.eval("panel.children.length"), 0)
         ctx.eval("state.room.bp.show_win_count=false; renderBpPanel()")
-        self.assertEqual(ctx.eval("panel.children[0].textContent"), "赛前设置")
-        self.assertIn("随机禁用两个等级", ctx.eval("panel.children[1].textContent"))
+        self.assertEqual(ctx.eval("panel.children.length"), 0)
         ctx.eval("""
             state.room.status='bp'; state.room.bp.phase='draft';
             state.room.bp.current_kind='pick'; state.room.bp.current_team_id=1;
-            state.room.bp.first_pick_team=1; state.room.bp.step_count=12;
+            state.room.bp.first_pick_team=1; state.room.bp.step_count=12; state.room.bp.step_index=0;
             state.room.bp.total_levels={1:10,2:0}; state.room.bp.actions=[];
             renderBpPanel();
+            function allText(parent) {
+              return [parent.textContent || "", ...(parent.children || []).map(allText)].join(" ");
+            }
+            function findText(parent, text) {
+              if (parent.textContent === text && parent.tagName === 'BUTTON') return parent;
+              for (const child of parent.children || []) {
+                const found = findText(child, text);
+                if (found) return found;
+              }
+              return null;
+            }
         """)
-        self.assertIn("红队 10/15", ctx.eval("panel.children[0].textContent"))
-        self.assertEqual(ctx.eval("findByDataset(panel, 'bpHeroChoice').children[0].textContent"), "低级 · Lv 5")
-        self.assertEqual(ctx.eval("findByDataset(panel, 'bpHeroChoice').children[1].children[1]['aria-disabled']"), "true")
-        ctx.eval("findByDataset(panel, 'bpHeroChoice').children[0].listeners.mouseenter()")
-        self.assertEqual(ctx.eval("findByDataset(panel, 'bpHeroDetails').children[1].children[0].textContent"), "低级 · Lv 5")
-        ctx.eval("findByDataset(panel, 'bpHeroChoice').children[0].listeners.mouseleave()")
-        ctx.eval("findByDataset(panel, 'bpHeroChoice').children[1].children[1].listeners.mouseenter()")
-        self.assertEqual(ctx.eval("findByDataset(panel, 'bpHeroDetails').children[1].children[0].textContent"), "高级 · Lv 6")
-        self.assertEqual(ctx.eval("findByDataset(panel, 'bpHeroDetails').children[1].children[3].children[1].textContent"), "高级技能")
-        ctx.eval("findByDataset(panel, 'bpHeroChoice').children[1].children[1].listeners.click()")
-        self.assertEqual(ctx.eval("findByDataset(panel, 'bpHeroChoice').children[0].textContent"), "低级 · Lv 5")
-        ctx.eval("findByDataset(panel, 'bpHeroChoice').children[1].children[1].listeners.mouseleave()")
-        self.assertIn("将鼠标移到", ctx.eval("findByDataset(panel, 'bpHeroDetails').children[1].children[0].textContent"))
-        ctx.eval("""
-            const picker = findByDataset(panel, 'bpHeroChoice');
-            const keyEvent = (key) => ({key, preventDefault() {}});
-            picker.children[0].listeners.keydown(keyEvent('ArrowDown'));
-            picker.children[1].listeners.keydown(keyEvent('ArrowDown'));
-        """)
-        self.assertEqual(ctx.eval("findByDataset(panel, 'bpHeroDetails').children[1].children[0].textContent"), "高级 · Lv 6")
-        ctx.eval("findByDataset(panel, 'bpHeroChoice').children[1].listeners.keydown(keyEvent('Escape'))")
-        self.assertFalse(ctx.eval("findByDataset(panel, 'bpHeroChoice').open"))
-        ctx.eval("const retainedChoice = findByDataset(panel, 'bpHeroChoice'); renderBpPanel();")
-        self.assertTrue(ctx.eval("findByDataset(panel, 'bpHeroChoice') === retainedChoice"))
-        ctx.eval("""
-            const levelFilter = findByDataset(panel, 'bpLevelFilter');
-            levelFilter.value = '6'; levelFilter.listeners.change();
-        """)
-        self.assertEqual(ctx.eval("findByDataset(panel, 'bpHeroChoice').children[1].children.length"), 1)
-        self.assertEqual(ctx.eval("findByDataset(panel, 'bpHeroChoice').children[1].children[0].dataset.bpHeroOption"), "high")
-        self.assertTrue(ctx.eval("findByDataset(panel, 'bpConfirm').disabled"))
-        ctx.eval("""
-            state.room.bp.current_kind='ban'; state.room.bp.step_index=1;
-            document.activeElement = findByDataset(panel, 'bpHeroChoice');
-            renderBpPanel();
-        """)
-        self.assertEqual(ctx.eval("findByDataset(panel, 'bpLevelFilter').value"), "6")
-        self.assertFalse(ctx.eval("findByDataset(panel, 'bpConfirm').disabled"))
-        self.assertEqual(ctx.eval("findByDataset(panel, 'bpHeroChoice').children[0].textContent"), "高级 · Lv 6")
-        ctx.eval("""
-            state.room.bp.step_index=3; state.room.bp.current_team_id=2;
-            state.room.viewer_player_id=2;
-            renderBpPanel();
-            findByDataset(panel, 'bpHeroChoice').children[1].children[0].listeners.mouseenter();
-        """)
-        self.assertEqual(ctx.eval("findByDataset(panel, 'bpHeroDetails').children[1].children[0].textContent"), "高级 · Lv 6")
-        ctx.eval("""
-            findByDataset(panel, 'bpHeroChoice').children[1].children[0].listeners.click();
-            findByDataset(panel, 'bpConfirm').listeners.click();
-        """)
-        self.assertEqual(ctx.eval("chosen[0]"), "high")
+        self.assertIn("选取", ctx.eval("allText(panel)"))
+        self.assertIn("已用 10/15", ctx.eval("allText(panel)"))
+        ctx.eval("findText(panel, '低级').listeners.click()")
+        self.assertIn("低级", ctx.eval("allText(findByDataset(panel, 'bpHeroDetails'))"))
+        self.assertEqual(ctx.eval("chosen.length"), 0)
+        ctx.eval("findText(panel, '确认选取 低级').listeners.click()")
+        self.assertEqual(ctx.eval("chosen.length"), 1)
+        ctx.eval("findText(panel, '高级').listeners.click()")
+        self.assertEqual(ctx.eval("chosen.length"), 1)
         ctx.eval("""
             state.room.bp.actions=[
               {kind:'ban', team_id:1, hero_code:'low', hero_name:'低级', hero_level:5},
               {kind:'pick', team_id:2, hero_code:'high', hero_name:'高级', hero_level:6}];
             renderBpPanel();
-            findByDataset(panel, 'bpHistoryHero').listeners.mouseenter();
         """)
-        self.assertEqual(ctx.eval("findByDataset(panel, 'bpHeroDetails').children[1].children[0].textContent"), "低级 · Lv 5")
-        ctx.eval("findByDataset(panel, 'bpHistoryHero').listeners.mouseleave()")
-        self.assertIn("将鼠标移到", ctx.eval("findByDataset(panel, 'bpHeroDetails').children[1].children[0].textContent"))
-        ctx.eval("""
-            function findByDatasetValue(parent, key, value) {
-              if (parent.dataset?.[key] === value) return parent;
-              for (const child of parent.children || []) {
-                const found = findByDatasetValue(child, key, value);
-                if (found) return found;
-              }
-              return null;
-            }
-            findByDatasetValue(panel, 'bpHistoryHero', 'high').listeners.mouseenter();
-        """)
-        self.assertEqual(ctx.eval("findByDataset(panel, 'bpHeroDetails').children[1].children[0].textContent"), "高级 · Lv 6")
+        self.assertIn("低级", ctx.eval("allText(panel)"))
+        self.assertIn("高级", ctx.eval("allText(panel)"))
         ctx.eval("""
             state.room.bp.phase='assign'; state.room.bp.picks={1:['low'],2:['high']};
+            state.room.bp.team_ai={1:false,2:false};
             renderBpPanel();
-            findByDataset(panel, 'bpAssignedHero').listeners.focus();
         """)
-        self.assertEqual(ctx.eval("findByDataset(panel, 'bpHeroDetails').children[1].children[0].textContent"), "低级 · Lv 5")
+        self.assertIn("交给 AI", ctx.eval("allText(panel)"))
+        self.assertIn("低级", ctx.eval("allText(panel)"))
         ctx.eval("""
             state.heroes.push(
               {code:'ban1', name:'一级禁将', level:1, raw_skill_text:'一级技能'},
@@ -26874,19 +26905,17 @@ class BPRoomBehaviorTests(unittest.TestCase):
             state.room.bp.current_kind='ban'; state.room.bp.current_team_id=1;
             state.room.viewer_player_id=1; state.room.bp.step_index=0;
             state.room.bp.auto_banned_levels=[1,2]; state.room.bp.legal_levels=[5];
+            chosen.length = 0;
             renderBpPanel();
-            const autoFilter = findByDataset(panel, 'bpLevelFilter');
-            autoFilter.value='all'; autoFilter.listeners.change();
-            findByDatasetValue(panel, 'bpAutoBanHero', 'ban2').listeners.mouseenter();
         """)
-        self.assertEqual(ctx.eval("findByDataset(panel, 'bpHeroDetails').children[1].children[0].textContent"), "二级禁将 · Lv 2")
-        self.assertTrue(ctx.eval("findByDatasetValue(panel, 'bpAutoBanHero', 'ban1') !== null"))
-        self.assertEqual(ctx.eval("findByDataset(panel, 'bpHeroChoice').children[1].children.length"), 2)
-        self.assertEqual(ctx.eval("findByDataset(panel, 'bpHeroChoice').children[0].textContent"), "低级 · Lv 5")
-        self.assertEqual(ctx.eval("findByDatasetValue(panel, 'bpHeroOption', 'high')['aria-disabled']"), "true")
-        self.assertFalse(ctx.eval("findByDataset(panel, 'bpConfirm').disabled"))
+        self.assertIn("Lv 1 已禁用", ctx.eval("allText(panel)"))
+        self.assertIn("is-banned", ctx.eval("findText(panel, '一级禁将').className"))
+        ctx.eval("findText(panel, '一级禁将').listeners.click()")
+        self.assertEqual(ctx.eval("chosen.length"), 0)
+        ctx.eval("findText(panel, '低级').listeners.click()")
+        ctx.eval("findText(panel, '确认禁用 低级').listeners.click()")
+        self.assertEqual(ctx.eval("chosen[0]"), "low")
 
-    @unittest.skipIf(quickjs is None, "quickjs is required to verify BP polling")
     def test_bp_progress_changes_lobby_poll_signature(self):
         source = frontend_module("render.js")
         signature_function = source[source.index("function lobbySyncSignature()"):source.index("\nfunction markPollFailure()")]
@@ -26916,6 +26945,7 @@ class BPRoomBehaviorTests(unittest.TestCase):
                 self.assertEqual(room.status, "lobby")
                 with mock.patch.object(room, "_bp_feasible_level_pairs", return_value=[(8, 9)]):
                     room.set_ready(blue_token, True)
+                    room.start_battle(red_token, require_confirmation=True)
                 self.assertEqual(room.status, "bp")
                 self.assertIn(room.bp_first_pick_team, (1, 2))
                 self.assertEqual(len(room.bp_auto_banned_levels), 2)
@@ -26944,22 +26974,20 @@ class BPRoomBehaviorTests(unittest.TestCase):
                     if index == 0:
                         with self.assertRaises(RoomError):
                             room.bp_choose(token, chosen)
-                self.assertEqual(room._bp_phase(), "assign")
+                self.assertEqual(room._bp_phase(), "review")
                 self.assertEqual(len(room._bp_picks(1)), team_size)
                 self.assertEqual(len(room._bp_picks(2)), team_size)
                 with self.assertRaises(RoomError):
                     room.start_battle(red_token, require_confirmation=True)
-                for team, token in ((1, red_token), (2, blue_token)):
-                    for index, code in enumerate(room._bp_picks(team)):
-                        room.bp_assign(token, code, team if index == 0 else "ai")
+                room.open_bp_assign(red_token)
+                room.set_bp_team_ai(red_token, 1, True)
+                room.set_bp_team_ai(blue_token, 2, False)
                 self.assertTrue(room.can_start())
                 with mock.patch.object(room, "_advance_simulation_due", return_value=0):
                     room.start_battle(red_token, require_confirmation=True)
                 self.assertEqual(room.status, "battle")
-                for team in (1, 2):
-                    units = room.battle.hero_units(team)
-                    self.assertEqual(len(units), team_size)
-                    self.assertEqual(sum(room._seat_for_actor(unit).is_ai for unit in units), team_size - 1)
+                self.assertEqual(sum(room._seat_for_actor(unit).is_ai for unit in room.battle.hero_units(1)), team_size)
+                self.assertEqual(sum(room._seat_for_actor(unit).is_ai for unit in room.battle.hero_units(2)), 0)
                 with mock.patch.object(room, "_ensure_replay_saved"):
                     room.surrender(blue_token)
                 room.touch()
@@ -26990,9 +27018,7 @@ class BPRoomBehaviorTests(unittest.TestCase):
                 self.assertEqual(room.bp_virtual_seat_ids, [])
                 for _ in room._bp_sequence():
                     self.choose_next_legal(room, tokens)
-                for team, token in ((1, red_token), (2, blue_token)):
-                    for code in room._bp_picks(team):
-                        room.bp_assign(token, code, team)
+                room.open_bp_assign(red_token)
                 with mock.patch.object(room, "_advance_simulation_due", return_value=0):
                     room.start_battle(red_token, require_confirmation=True)
                 with mock.patch.object(room, "_ensure_replay_saved"):
@@ -27029,6 +27055,7 @@ class BPRoomBehaviorTests(unittest.TestCase):
         with mock.patch.object(room, "_bp_feasible_level_pairs", return_value=[(8, 9)]):
             room.set_ready(red_token, True)
             room.set_ready(blue_token, True)
+            room.start_battle(red_token, require_confirmation=True)
         known = hero_lookup()
         bans = [code for code in known if known[code]["level"] == 5][:4]
         self.assertEqual(len(bans), 4)
@@ -27058,6 +27085,7 @@ class BPRoomBehaviorTests(unittest.TestCase):
         with mock.patch.object(room, "_bp_feasible_level_pairs", return_value=[(8, 9)]):
             room.set_ready(red_token, True)
             room.set_ready(blue_token, True)
+            room.start_battle(red_token, require_confirmation=True)
         level_one = [code for code, hero in hero_lookup().items() if hero["level"] == 1]
         level_two = [code for code, hero in hero_lookup().items() if hero["level"] == 2]
         self.assertEqual(len(level_one), 4)
@@ -27083,19 +27111,17 @@ class BPRoomBehaviorTests(unittest.TestCase):
         with mock.patch.object(room, "_bp_feasible_level_pairs", return_value=[(8, 9)]):
             for token in (red_token, blue_token, teammate_token):
                 room.set_ready(token, True)
+            room.start_battle(red_token, require_confirmation=True)
         self.assertEqual(room.status, "bp")
         for _ in room._bp_sequence():
             self.choose_next_legal(room, {1: red_token, 2: blue_token})
-        red_code = room._bp_picks(1)[0]
-        room.bp_assign(teammate_token, red_code, 3)
-        self.assertEqual(room.bp_assignments[red_code], 3)
+        room.open_bp_assign(red_token)
+        room.set_bp_team_ai(red_token, 1, False)
         with self.assertRaises(RoomError):
-            room.bp_assign(blue_token, red_code, "ai")
-        with self.assertRaises(RoomError):
-            room.bp_assign(teammate_token, red_code, 2)
-        room.bp_assign(red_token, red_code, 1)
-        with self.assertRaises(RoomError):
-            room.bp_assign(teammate_token, red_code, 3)
+            room.set_bp_team_ai(blue_token, 1, True)
+        room.set_bp_team_ai(blue_token, 2, True)
+        self.assertFalse(room.bp_team_ai[1])
+        self.assertTrue(room.bp_team_ai[2])
         room.leave(teammate_token)
         self.assertEqual(room.status, "lobby")
         self.assertEqual(room.bp_actions, [])
@@ -28572,9 +28598,9 @@ class AutoChessBehaviorTests(unittest.TestCase):
             room = GameRoom("CHESS1")
             _, token = room.create_host("甲", account_user_id=901)
             room.set_mode(token, "autochess")
-            self.assertEqual(len(room.seats), 4)
+            self.assertEqual(len(room.seats), 8)
             room.start_battle(token, require_confirmation=True)
-            self.assertEqual(room.ai_seat_count(), 3)
+            self.assertEqual(room.ai_seat_count(), 7)
             self.assertEqual(room.autochess.phase, "preparation")
             room.autochess.draw_equipment(1)
             restored = GameRoom.from_checkpoint_bytes(room.checkpoint_bytes())

@@ -67,6 +67,14 @@ export function syncScreen({ preferBattle = false } = {}) {
   const requested = window.location.hash.replace("#", "");
   if (requested) {
     const target = routeTarget(requested);
+    // 房主已经把这局开进战场。还停在房间大厅的人要跟着进去，
+    // 不能因为地址还写着房间大厅就被留在外面。
+    if (preferBattle && hasBattle() && !state.holdBattleView && target.screen === "draft" && target.flow === "skirmish") {
+      state.screen = "battle";
+      state.homeFlow = "skirmish";
+      syncLocation("battle");
+      return;
+    }
     // 地址请求进战斗，但手上没有战斗时不能空落一屏。
     if ((target.screen === "battle" && !hasBattle()) ||
         (target.screen === "autochess" && state.room?.mode !== "autochess")) {

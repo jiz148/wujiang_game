@@ -945,15 +945,15 @@ class MultiplayerRoomTests(unittest.TestCase):
         self.assertEqual(guest_view["host_player_id"], 2)
         self.assertTrue(guest_view["viewer_is_host"])
 
-    def test_last_player_leave_removes_room(self) -> None:
+    def test_last_player_leave_keeps_the_room(self) -> None:
         room, _, host_token = self.registry.create_room("Alice")
 
         deleted, leaving_player_id = self.registry.leave_room(room.room_id, host_token)
 
-        self.assertTrue(deleted)
+        self.assertFalse(deleted)
         self.assertEqual(leaving_player_id, 1)
-        with self.assertRaises(RoomError):
-            self.registry.get_room(room.room_id)
+        self.assertIs(self.registry.get_room(room.room_id), room)
+        self.assertEqual(room.human_seat_count(), 0)
 
     def test_player_leave_during_battle_surrenders_and_exits(self) -> None:
         room, _, host_token = self.registry.create_room("Alice")

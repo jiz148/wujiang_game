@@ -60,14 +60,14 @@ window.addEventListener("DOMContentLoaded", async () => {
   }
 
   // 这不是 WebSocket。大厅和对局里别人的变化靠短轮询拉 /api/rooms/state。
-  // 定时器本身 400ms 响一次，真正发请求会再按场景拉开：大厅 1.5s、对局 0.8s、
+  // 房间列表没有挂在某一间房上，单独 4 秒拉一次。房内大厅 1.5 秒，对局 0.8 秒。
   // 切到后台 5s。上一次还没回来就不发下一次，断线会逐步退避，避免把页面堵死。
   ui.pollHandle = window.setInterval(() => {
     if (ui.refreshInFlight) return;
     const now = Date.now();
     if (!roomQueryId()) {
       if (now < ui.nextHomePollAt) return;
-      ui.nextHomePollAt = now + 5000;
+      ui.nextHomePollAt = now + 4000;
       refreshState({ preserveScreen: false });
       return;
     }

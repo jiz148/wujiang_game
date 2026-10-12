@@ -207,6 +207,24 @@ p {
   cursor: not-allowed;
 }
 
+button.is-busy {
+  cursor: progress;
+}
+
+button.is-busy::after {
+  content: "";
+  width: 0.7em;
+  height: 0.7em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: btn-spin 0.7s linear infinite;
+}
+
+@keyframes btn-spin {
+  to { transform: rotate(360deg); }
+}
+
 .btn:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
@@ -690,6 +708,97 @@ select {
  * 收纳次要操作。把所有操作都摊在表面会让人看不出哪个重要，而次要操作往往
  * 只在特定时刻才有意义。
  * ========================================================================== */
+
+.switch {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  min-height: 36px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.switch input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.switch__track {
+  width: 42px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--surface-4);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  position: relative;
+  flex: 0 0 auto;
+  transition: background 160ms ease;
+}
+
+.switch__track::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--text-1);
+  transition: transform 160ms ease;
+}
+
+.switch input:checked + .switch__track {
+  background: var(--accent);
+}
+
+.switch input:checked + .switch__track::after {
+  transform: translateX(18px);
+  background: var(--accent-ink);
+}
+
+.switch input:focus-visible + .switch__track {
+  box-shadow: var(--focus-ring);
+}
+
+.switch__text {
+  color: var(--text-1);
+  font-size: var(--fs-base);
+}
+
+.rule-divider {
+  position: relative;
+  height: 1px;
+  width: 100%;
+  border: 0;
+  margin: var(--s-3) 0;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.22) 0%,
+    rgba(255, 255, 255, 0.34) 18%,
+    rgba(255, 255, 255, 0.62) 50%,
+    rgba(255, 255, 255, 0.34) 82%,
+    rgba(255, 255, 255, 0.22) 100%
+  );
+}
+
+.rule-divider::after {
+  content: "";
+  position: absolute;
+  left: 22%;
+  right: 22%;
+  top: -1px;
+  height: 3px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.28) 30%,
+    rgba(255, 255, 255, 0.45) 50%,
+    rgba(255, 255, 255, 0.28) 70%,
+    transparent 100%
+  );
+}
 
 .menu {
   position: relative;

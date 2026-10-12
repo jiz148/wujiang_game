@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 import json
+import time
 
 from wujiang.platform.http.runtime import PROJECT_ROOT
 from wujiang.platform.match_history import MatchHistoryError
@@ -13,9 +14,19 @@ from wujiang.platform.http import runtime
 def record_finished_room_history(room) -> bool:
     if getattr(room, "status", None) != "finished" or getattr(room, "battle", None) is None:
         return False
-    room._ensure_replay_saved()
+    # full 保持旧行为：没有可播放的录像就不入库。off / actions 仍然记胜负和席位，
+    # 只是战绩上的回放入口关着——逐步回放依赖全量快照，动作档放不出来。
+    mode = room._replay_mode() if hasattr(room, "_replay_mode") else "full"
+    if mode != "off":
+        room._ensure_replay_saved()
     replay = getattr(room, "replay", None)
-    if replay is None or not replay.saved_path or not replay.finished_at:
+    playable = bool(
+        mode == "full"
+        and replay is not None
+        and replay.saved_path
+        and replay.finished_at
+    )
+    if mode == "full" and not playable:
         return False
     participants_by_user: dict[int, dict[str, Any]] = {}
     winner_team_id = int(getattr(room.battle, "winner", 0) or 0)
@@ -36,22 +47,27 @@ def record_finished_room_history(room) -> bool:
         return False
     summary = room.serialize_summary()
     postgame = summary.get("postgame") or {}
+    match_id = (replay.match_id if replay is not None else None) or getattr(room, "current_match_id", None)
+    if not match_id:
+        return False
+    finished_at = replay.finished_at if replay is not None and replay.finished_at else time.time()
+    created_at = replay.created_at if replay is not None else finished_at
     return runtime.MATCH_HISTORY_STORE.record_match(
         match={
-            "match_id": replay.match_id,
+            "match_id": match_id,
             "room_id": room.room_id,
             "mode": room.mode,
             "mode_name": summary.get("mode_name"),
             "experience_kind": room.experience_kind,
-            "created_at": replay.created_at,
-            "finished_at": replay.finished_at,
+            "created_at": created_at,
+            "finished_at": finished_at,
             "winner_team_id": winner_team_id,
             "reason_code": postgame.get("reason_code"),
             "reason_text": postgame.get("reason_text"),
             "duration_seconds": postgame.get("duration_seconds"),
             "mvp_name": (postgame.get("mvp") or {}).get("name"),
-            "replay_path": replay.saved_path,
-            "replay_step_count": replay.step_count,
+            "replay_path": replay.saved_path if playable else "",
+            "replay_step_count": replay.step_count if playable else 0,
             "postgame": postgame,
             "seats": summary.get("seats") or [],
         },
