@@ -590,6 +590,64 @@ def post_rooms_set_seat_team(ctx: RequestContext) -> None:
     return
 
 
+@post("/api/rooms/remove-seat")
+def post_rooms_remove_seat(ctx: RequestContext) -> None:
+    handler = ctx.handler
+    payload = ctx.payload
+    room_id = payload.get("room_id", "")
+    player_token = payload.get("player_token")
+    seat_id = payload.get("seat_id")
+    try:
+        room = ROOMS.get_room(str(room_id))
+        room.remove_seat(str(player_token or ""), seat_id)
+    except RoomError as exc:
+        room = None
+        try:
+            room = ROOMS.get_room(str(room_id))
+        except RoomError:
+            pass
+        error_payload: dict[str, Any] = {"error": str(exc)}
+        if room is not None:
+            error_payload["state"] = room.serialize_state(str(player_token or ""), base_url=request_base_url(handler))
+        json_response(handler, HTTPStatus.BAD_REQUEST, error_payload)
+        return
+    json_response(
+        handler,
+        HTTPStatus.OK,
+        room_state_with_strategy_sync(room, str(player_token or ""), base_url=request_base_url(handler)),
+    )
+    return
+
+
+@post("/api/rooms/claim-seat")
+def post_rooms_claim_seat(ctx: RequestContext) -> None:
+    handler = ctx.handler
+    payload = ctx.payload
+    room_id = payload.get("room_id", "")
+    player_token = payload.get("player_token")
+    seat_id = payload.get("seat_id")
+    try:
+        room = ROOMS.get_room(str(room_id))
+        room.claim_seat(str(player_token or ""), seat_id)
+    except RoomError as exc:
+        room = None
+        try:
+            room = ROOMS.get_room(str(room_id))
+        except RoomError:
+            pass
+        error_payload = {"error": str(exc)}
+        if room is not None:
+            error_payload["state"] = room.serialize_state(str(player_token or ""), base_url=request_base_url(handler))
+        json_response(handler, HTTPStatus.BAD_REQUEST, error_payload)
+        return
+    json_response(
+        handler,
+        HTTPStatus.OK,
+        room_state_with_strategy_sync(room, str(player_token or ""), base_url=request_base_url(handler)),
+    )
+    return
+
+
 @post("/api/rooms/set-seat-controller")
 def post_rooms_set_seat_controller(ctx: RequestContext) -> None:
     handler = ctx.handler
@@ -715,13 +773,21 @@ def _post_bp_room_action(ctx: RequestContext, action: str) -> None:
         if action == "settings":
             room.set_bp_settings(token, team_size=payload.get("team_size"),
                                  level_cap=payload.get("level_cap"),
-                                 show_win_count=payload.get("show_win_count"))
+                                 show_win_count=payload.get("show_win_count"),
+                                 bp_format=payload.get("bp_format") if "bp_format" in payload else None,
+                                 allow_same_hero=payload.get("allow_same_hero") if "allow_same_hero" in payload else None,
+                                 tier_pool=payload.get("tier_pool") if "tier_pool" in payload else None,
+                                 tier_rounds=payload.get("tier_rounds") if "tier_rounds" in payload else None)
         elif action == "team-size":
             room.set_bp_team_size(token, payload.get("team_size"))
         elif action == "captain":
             room.set_bp_captain(token, payload.get("team_id"), payload.get("seat_id"))
         elif action == "choose":
             room.bp_choose(token, str(payload.get("hero_code") or ""))
+        elif action == "open-assign":
+            room.open_bp_assign(token)
+        elif action == "team-ai":
+            room.set_bp_team_ai(token, payload.get("team_id"), payload.get("enabled"))
         else:
             room.bp_assign(token, str(payload.get("hero_code") or ""), payload.get("controller"))
     except RoomError as exc:
@@ -753,6 +819,16 @@ def post_rooms_bp_captain(ctx: RequestContext) -> None:
 @post("/api/rooms/bp/choose")
 def post_rooms_bp_choose(ctx: RequestContext) -> None:
     _post_bp_room_action(ctx, "choose")
+
+
+@post("/api/rooms/bp/open-assign")
+def post_rooms_bp_open_assign(ctx: RequestContext) -> None:
+    _post_bp_room_action(ctx, "open-assign")
+
+
+@post("/api/rooms/bp/team-ai")
+def post_rooms_bp_team_ai(ctx: RequestContext) -> None:
+    _post_bp_room_action(ctx, "team-ai")
 
 
 @post("/api/rooms/bp/assign")
@@ -879,6 +955,26 @@ def post_rooms_set_hero_limit(ctx: RequestContext) -> None:
         if room is not None:
             error_payload["state"] = room.serialize_state(str(player_token or ""), base_url=request_base_url(handler))
         json_response(handler, HTTPStatus.BAD_REQUEST, error_payload)
+        return
+    json_response(
+        handler,
+        HTTPStatus.OK,
+        room_state_with_strategy_sync(room, str(player_token or ""), base_url=request_base_url(handler)),
+    )
+    return
+
+
+@post("/api/rooms/set-army-enabled")
+def post_rooms_set_army_enabled(ctx: RequestContext) -> None:
+    handler = ctx.handler
+    payload = ctx.payload
+    room_id = payload.get("room_id", "")
+    player_token = payload.get("player_token")
+    try:
+        room = ROOMS.get_room(str(room_id))
+        room.set_army_enabled(str(player_token or ""), payload.get("enabled"))
+    except RoomError as exc:
+        json_response(handler, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         return
     json_response(
         handler,
@@ -1079,7 +1175,11 @@ def post_rooms_delete(ctx: RequestContext) -> None:
         room = ROOMS.get_room(str(room_id))
         assert auth_user is not None
         require_strategy_room_mutation_allowed(room, auth_user, allow_battleplay=False)
-        ROOMS.delete_room(str(room_id), player_token)
+        ROOMS.delete_room(
+            str(room_id),
+            player_token,
+            owner_user_id=auth_user.user_id,
+        )
     except RoomError as exc:
         json_response(handler, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         return

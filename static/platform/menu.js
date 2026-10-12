@@ -34,26 +34,31 @@ function goto(flow) {
   setScreen("draft");
 }
 
-// 两种玩法并列：战役是大地图经营，遭遇战是单独一场战斗。后者不是前者的简化版，
-// 它有自己的入口、自己的房间，同样能让真人顶替 AI 席位——只是不经营地图。
+// 战役是大地图。房间大厅是一场一场的对战：模式在创建时选定，而不是进房后再改。
 const ENTRY_DEFS = [
   {
     id: "campaign",
     title: "战役",
-    desc: "在大地图上经营、外交与开战",
+    desc: "大地图经营",
     onClick: () => goto("campaign"),
   },
   {
     id: "skirmish",
-    title: "遭遇战",
-    desc: "跳过经营，直接打一场；可独自对 AI，也可开房邀人",
+    title: "房间大厅",
+    desc: "创建或加入一局",
     onClick: () => goto("skirmish"),
   },
   {
     id: "archive",
     title: "战绩与回放",
-    desc: "查看历史对局、回放与武将熟练度",
+    desc: "历史对局",
     onClick: () => goto("archive"),
+  },
+  {
+    id: "settings",
+    title: "设置",
+    desc: "",
+    onClick: () => goto("settings"),
   },
 ];
 
@@ -85,11 +90,13 @@ function build(host) {
     caption.className = "menu-entry__title";
     caption.textContent = def.title;
 
-    const desc = document.createElement("span");
-    desc.className = "menu-entry__desc";
-    desc.textContent = def.desc;
-
-    entry.append(caption, desc);
+    entry.append(caption);
+    if (def.desc) {
+      const desc = document.createElement("span");
+      desc.className = "menu-entry__desc";
+      desc.textContent = def.desc;
+      entry.append(desc);
+    }
     list.append(entry);
   }
 

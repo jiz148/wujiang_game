@@ -52,6 +52,7 @@ DEFAULT_ROOM_MODE = "classic"
 DEFAULT_RANDOM_ROSTER_SIZE = 1
 MIN_ROOM_SEAT_COUNT = 2
 MAX_ROOM_SEAT_COUNT = 8
+AUTOCHESS_SEAT_COUNT = 8
 MIN_ROOM_HERO_LIMIT = 1
 MAX_ROOM_HERO_LIMIT = 20
 AUTO_CONFIGURE_COUNT_MIN = 1
@@ -93,17 +94,98 @@ ROOM_MODES: dict[str, dict[str, str]] = {
     },
     "bp": {
         "name": "BP模式",
-        "description": "每局随机禁用两个等级的全部武将，队长再轮流禁选并分配控制权，支持 3v3 和 5v5。",
+        "description": "两人轮流禁选。全体选择沿用现在的等级上限；随机等级则每一轮抽一个点数，只在这个点数里禁选。",
     },
     "autochess": {
         "name": "自走棋",
-        "description": "4 人或 8 人经营阵容、自动战斗，最后存活者获胜。",
+        "description": "8 人经营阵容、自动战斗，最后存活者获胜。",
     },
 }
 
 
 class RoomError(Exception):
     pass
+
+
+BP_FORMAT_FULL = "full"
+BP_FORMAT_TIER = "tier"
+BP_TIER_LEVELS = tuple(range(1, 11))
+BP_TIER_ROUNDS = 3
+BP_TIER_ROUNDS_MIN = 1
+BP_TIER_ROUNDS_MAX = 12
+
+
+def bp_tier_round_shape(hero_count: int, *, allow_same_hero: bool = False) -> Optional[tuple[int, int]]:
+    """一个等级这一轮，双方各禁几个、各选 1 个。
+
+    随机等级是一轮一轮选人，每边每轮只选一名。禁用会从公共池里拿掉武将。
+    人够双方各禁 2 再各选 1，就禁 2；只够各禁 1，就禁 1；再少就不禁。
+    不允许重复时，选取也会拿走武将，所以至少要 2 人才能开这一轮。
+    返回 None 表示这个等级已经不够双方各拿到一名。
+    """
+    count = int(hero_count)
+    if allow_same_hero:
+        if count >= 5:
+            return (2, 1)
+        if count >= 3:
+            return (1, 1)
+        if count >= 1:
+            return (0, 1)
+        return None
+    if count >= 6:
+        return (2, 1)
+    if count >= 4:
+        return (1, 1)
+    if count >= 2:
+        return (0, 1)
+    return None
+
+
+def normalize_bp_tier_rounds(value: Any) -> int:
+    if isinstance(value, bool) or not str(value).strip().isdigit():
+        raise RoomError("轮数必须是 1 到 12 的整数。")
+    rounds = int(value)
+    if not BP_TIER_ROUNDS_MIN <= rounds <= BP_TIER_ROUNDS_MAX:
+        raise RoomError("轮数必须是 1 到 12 的整数。")
+    return rounds
+
+
+def tier_round_steps(starter: int, bans: int, picks: int) -> list[tuple[str, int]]:
+    other = 3 - int(starter)
+    starter = int(starter)
+    return ([("ban", starter)] * int(bans) + [("ban", other)] * int(bans)
+            + [("pick", starter)] * int(picks) + [("pick", other)] * int(picks))
+
+
+def normalize_bp_format(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    aliases = {
+        "full": BP_FORMAT_FULL,
+        "全体选择": BP_FORMAT_FULL,
+        "tier": BP_FORMAT_TIER,
+        "随机等级": BP_FORMAT_TIER,
+    }
+    mapped = aliases.get(text)
+    if mapped is None:
+        raise RoomError("BP 类型只能是全体选择或随机等级。")
+    return mapped
+
+
+def normalize_bp_tier_pool(value: Any) -> tuple[int, ...]:
+    if isinstance(value, str):
+        value = [part for part in value.replace("，", ",").split(",") if part.strip()]
+    if not isinstance(value, (list, tuple)) or not value:
+        raise RoomError("请至少勾选一个可随机的等级。")
+    levels: list[int] = []
+    for item in value:
+        if isinstance(item, bool) or not str(item).strip().isdigit():
+            raise RoomError("等级必须是 1 到 10 的整数。")
+        level = int(item)
+        if level not in BP_TIER_LEVELS:
+            raise RoomError("等级必须是 1 到 10 的整数。")
+        if level not in levels:
+            levels.append(level)
+    return tuple(levels)
 
 
 def heroes_catalog() -> list[dict[str, Any]]:
@@ -814,16 +896,24 @@ class GameRoom:
         self.tutorial_checkpoint: Optional[Battle] = None
         self.random_roster_size = DEFAULT_RANDOM_ROSTER_SIZE
         self.hero_limit = 0
+        self.army_enabled = False
         self.bp_team_size = 3
         self.bp_level_caps = {3: 15, 5: 25}
         self.bp_show_win_count = True
         self.bp_wins = {1: 0, 2: 0}
         self.bp_counted_match_ids: set[str] = set()
         self.bp_captains: dict[int, int] = {}
+        self.bp_format = BP_FORMAT_FULL
+        self.bp_allow_same_hero = False
+        self.bp_tier_pool = BP_TIER_LEVELS
+        self.bp_tier_rounds = BP_TIER_ROUNDS
+        self.bp_tier_plan: list[dict[str, Any]] = []
         self.bp_first_pick_team: Optional[int] = None
         self.bp_auto_banned_levels: tuple[int, ...] = ()
         self.bp_actions: list[dict[str, Any]] = []
         self.bp_assignments: dict[str, int | str] = {}
+        self.bp_assign_opened = False
+        self.bp_team_ai = {1: True, 2: True}
         self.bp_virtual_seat_ids: list[int] = []
         self.autochess = None
         self.board_width = DEFAULT_BOARD_WIDTH
@@ -833,7 +923,8 @@ class GameRoom:
         self.turn_limit_winner = 2
         self.default_ai_difficulty = DEFAULT_AI_DIFFICULTY
         self.host_player_id = 1
-        self.seats = self._build_seats(4 if self.mode == "autochess" else normalize_room_seat_count(seat_count))
+        self.owner_user_id: Optional[int] = None
+        self.seats = self._build_seats(AUTOCHESS_SEAT_COUNT if self.mode == "autochess" else normalize_room_seat_count(seat_count))
         self.army_orders_by_team = default_army_orders()
         self._reset_random_quotas_to_defaults()
         self.battle: Optional[Battle] = None
@@ -858,7 +949,7 @@ class GameRoom:
         self._lock = threading.RLock()
         if self.mode == "autochess":
             from wujiang.tactical.rooms.autochess import AutoChessState
-            self.autochess = AutoChessState(4)
+            self.autochess = AutoChessState(AUTOCHESS_SEAT_COUNT)
 
     def __getstate__(self) -> dict[str, Any]:
         state = dict(self.__dict__)
@@ -893,6 +984,16 @@ class GameRoom:
             self.bp_counted_match_ids = set()
         if not hasattr(self, "bp_captains"):
             self.bp_captains = {}
+        if not hasattr(self, "bp_format"):
+            self.bp_format = BP_FORMAT_FULL
+        if not hasattr(self, "bp_allow_same_hero"):
+            self.bp_allow_same_hero = False
+        if not hasattr(self, "bp_tier_pool"):
+            self.bp_tier_pool = BP_TIER_LEVELS
+        if not hasattr(self, "bp_tier_rounds"):
+            self.bp_tier_rounds = BP_TIER_ROUNDS
+        if not hasattr(self, "bp_tier_plan"):
+            self.bp_tier_plan = []
         if not hasattr(self, "bp_first_pick_team"):
             self.bp_first_pick_team = None
         if not hasattr(self, "bp_auto_banned_levels"):
@@ -901,6 +1002,10 @@ class GameRoom:
             self.bp_actions = []
         if not hasattr(self, "bp_assignments"):
             self.bp_assignments = {}
+        if not hasattr(self, "bp_assign_opened"):
+            self.bp_assign_opened = False
+        if not hasattr(self, "bp_team_ai"):
+            self.bp_team_ai = {1: True, 2: True}
         if not hasattr(self, "bp_virtual_seat_ids"):
             self.bp_virtual_seat_ids = []
         if not hasattr(self, "autochess"):
@@ -968,7 +1073,9 @@ class GameRoom:
                 self.invalidate_readiness()
                 self.touch()
 
-    def set_bp_settings(self, token: str, *, team_size: Any, level_cap: Any, show_win_count: Any) -> None:
+    def set_bp_settings(self, token: str, *, team_size: Any, level_cap: Any, show_win_count: Any,
+                        bp_format: Any = None, allow_same_hero: Any = None, tier_pool: Any = None,
+                        tier_rounds: Any = None) -> None:
         with self._lock:
             self.require_host(token)
             if self.status != "lobby" or self.mode != "bp":
@@ -980,13 +1087,32 @@ class GameRoom:
                 raise RoomError("每队总等级上限必须为1到50的整数。")
             if not isinstance(show_win_count, bool):
                 raise RoomError("胜场显示设置无效。")
+            next_format = self.bp_format if bp_format is None else normalize_bp_format(bp_format)
+            if allow_same_hero is None:
+                next_same = bool(self.bp_allow_same_hero)
+            elif not isinstance(allow_same_hero, bool):
+                raise RoomError("是否允许选择同一武将的设置无效。")
+            else:
+                next_same = allow_same_hero
+            next_pool = self.bp_tier_pool if tier_pool is None else normalize_bp_tier_pool(tier_pool)
+            next_rounds = self.bp_tier_rounds if tier_rounds is None else normalize_bp_tier_rounds(tier_rounds)
             cap = int(level_cap)
             if (size == self.bp_team_size and cap == self.bp_level_caps[size]
-                    and show_win_count == self.bp_show_win_count):
+                    and show_win_count == self.bp_show_win_count
+                    and next_format == self.bp_format
+                    and next_same == bool(self.bp_allow_same_hero)
+                    and tuple(next_pool) == tuple(self.bp_tier_pool)
+                    and next_rounds == int(self.bp_tier_rounds)):
                 return
             self.bp_team_size = size
             self.bp_level_caps[size] = cap
             self.bp_show_win_count = show_win_count
+            self.bp_format = next_format
+            self.bp_allow_same_hero = next_same
+            self.bp_tier_pool = tuple(next_pool)
+            self.bp_tier_rounds = next_rounds
+            self._bp_pair_cache = None
+            self._bp_legal_cache = None
             self.invalidate_readiness()
             self.touch()
 
@@ -1004,7 +1130,29 @@ class GameRoom:
                 self.invalidate_readiness()
                 self.touch()
 
+    def _sync_default_captains(self) -> None:
+        if self.mode != "bp" or self.status != "lobby":
+            return
+        for team_id in TEAM_IDS:
+            current = self.seats.get(self.bp_captains.get(team_id, -1))
+            if current is not None and current.is_human and current.team_id == team_id:
+                continue
+            humans = [seat for seat in self._team_seats(team_id) if seat.is_human]
+            if len(humans) == 1:
+                self.bp_captains[team_id] = humans[0].player_id
+
+    def _tier_round_steps(self, round_plan: dict[str, Any]) -> list[tuple[str, int]]:
+        steps = round_plan.get("steps")
+        if steps is None:
+            return tier_round_steps(int(round_plan["starter"]), int(round_plan["bans"]), int(round_plan["picks"]))
+        return [(str(kind), int(team)) for kind, team in steps]
+
     def _bp_sequence(self) -> list[tuple[str, int]]:
+        if self.bp_format == BP_FORMAT_TIER:
+            sequence: list[tuple[str, int]] = []
+            for round_plan in self.bp_tier_plan:
+                sequence += self._tier_round_steps(round_plan)
+            return sequence
         first = self.bp_first_pick_team
         if first not in TEAM_IDS:
             return []
@@ -1035,6 +1183,10 @@ class GameRoom:
 
     def _bp_draft_feasible(self, actions: list[dict[str, Any]],
                            *, banned_levels: Optional[tuple[int, ...]] = None) -> bool:
+        if self.bp_format == BP_FORMAT_TIER:
+            return True
+        if self.bp_allow_same_hero:
+            return self._bp_shared_draft_feasible(actions, banned_levels=banned_levels)
         known = hero_lookup()
         used = {action["hero_code"] for action in actions}
         excluded = set(self.bp_auto_banned_levels if banned_levels is None else banned_levels)
@@ -1072,6 +1224,133 @@ class GameRoom:
 
         return can_fill(0, needs[0], needs[1], budgets[0], budgets[1])
 
+    def _bp_shared_draft_feasible(self, actions: list[dict[str, Any]],
+                                  *, banned_levels: Optional[tuple[int, ...]] = None) -> bool:
+        known = hero_lookup()
+        excluded = set(self.bp_auto_banned_levels if banned_levels is None else banned_levels)
+        banned_codes = {action["hero_code"] for action in actions if action["kind"] == "ban"}
+        sequence_bans = 6 if self.bp_team_size == 3 else 10
+        ban_steps_left = sequence_bans - sum(action["kind"] == "ban" for action in actions)
+        needs = []
+        for team in TEAM_IDS:
+            need = self.bp_team_size - sum(action["kind"] == "pick" and action["team_id"] == team for action in actions)
+            budget = self._bp_level_cap() - self._bp_total_level(team, actions)
+            if need < 0 or budget < 0:
+                return False
+            own_picks = {action["hero_code"] for action in actions if action["kind"] == "pick" and action["team_id"] == team}
+            levels = sorted(
+                int(hero["level"])
+                for code, hero in known.items()
+                if code not in banned_codes and code not in own_picks and int(hero["level"]) not in excluded
+            )
+            if len(levels) < need or sum(levels[:need]) > budget:
+                return False
+            needs.append(need)
+        open_heroes = sum(
+            1 for code, hero in known.items()
+            if code not in banned_codes and int(hero["level"]) not in excluded
+        )
+        return open_heroes - ban_steps_left >= max(needs or [0])
+
+    def _catalog_level_counts(self) -> Counter[int]:
+        return Counter(int(hero["level"]) for hero in hero_lookup().values())
+
+    def _tier_pool_can_start(self) -> bool:
+        counts = self._catalog_level_counts()
+        return any(
+            bp_tier_round_shape(counts[level], allow_same_hero=self.bp_allow_same_hero) is not None
+            for level in self.bp_tier_pool
+        )
+
+    def _plan_tier_rounds(self) -> list[dict[str, Any]]:
+        counts = self._catalog_level_counts()
+        pool = [
+            level for level in self.bp_tier_pool
+            if bp_tier_round_shape(counts[level], allow_same_hero=self.bp_allow_same_hero) is not None
+        ]
+        if not pool:
+            return []
+        first = self.bp_first_pick_team if self.bp_first_pick_team in TEAM_IDS else secrets.choice(list(TEAM_IDS))
+        plan: list[dict[str, Any]] = []
+        for index in range(int(self.bp_tier_rounds)):
+            level = secrets.choice(pool)
+            bans, picks = bp_tier_round_shape(counts[level], allow_same_hero=self.bp_allow_same_hero)
+            starter = first if index % 2 == 0 else 3 - first
+            plan.append({
+                "level": level,
+                "bans": bans,
+                "picks": picks,
+                "starter": starter,
+                "steps": tier_round_steps(starter, bans, picks),
+            })
+        return plan
+
+    def _bp_tier_round_at(self, step_index: int) -> tuple[Optional[dict[str, Any]], Optional[int]]:
+        cursor = 0
+        number = 0
+        for round_plan in self.bp_tier_plan:
+            steps = self._tier_round_steps(round_plan)
+            if not steps:
+                continue
+            number += 1
+            if step_index < cursor + len(steps):
+                return round_plan, number
+            cursor += len(steps)
+        return None, None
+
+    def _tier_step_has_hero(self, kind: str, team: int, level: int) -> bool:
+        for code, hero in hero_lookup().items():
+            if int(hero["level"]) != int(level):
+                continue
+            if self._bp_hero_taken_error(code, team, kind) is None:
+                return True
+        return False
+
+    def _drop_stuck_tier_steps(self) -> None:
+        """当前这一步已经没有武将可选时，把这一步拿掉，避免整局卡死。"""
+        if self.bp_format != BP_FORMAT_TIER or self.status != "bp":
+            return
+        changed = False
+        for _ in range(64):
+            index = len(self.bp_actions)
+            sequence = self._bp_sequence()
+            if index >= len(sequence):
+                break
+            kind, team = sequence[index]
+            round_plan, _number = self._bp_tier_round_at(index)
+            if round_plan is None:
+                break
+            if self._tier_step_has_hero(kind, team, int(round_plan["level"])):
+                break
+            if "steps" not in round_plan:
+                round_plan["steps"] = self._tier_round_steps(round_plan)
+            cursor = 0
+            for earlier in self.bp_tier_plan:
+                if earlier is round_plan:
+                    break
+                cursor += len(self._tier_round_steps(earlier))
+            offset = index - cursor
+            steps = round_plan.get("steps") or []
+            if offset < 0 or offset >= len(steps):
+                break
+            del steps[offset]
+            changed = True
+        if changed:
+            self._bp_legal_cache = None
+            self.touch()
+
+    def _bp_hero_taken_error(self, hero_code: str, team: int, kind: str) -> Optional[str]:
+        actions = [action for action in self.bp_actions if action["hero_code"] == hero_code]
+        if any(action["kind"] == "ban" for action in actions):
+            return "该武将已经被禁用。"
+        if any(action["kind"] == "pick" and action["team_id"] == team for action in actions):
+            return "本队已经选过这名武将。"
+        if kind == "ban" and any(action["kind"] == "pick" for action in actions):
+            return "该武将已经被选走，不能禁用。"
+        if any(action["kind"] == "pick" for action in actions) and not self.bp_allow_same_hero:
+            return "该武将已经被选走。"
+        return None
+
     def _bp_feasible_level_pairs(self) -> list[tuple[int, int]]:
         counts = Counter(int(hero["level"]) for hero in hero_lookup().values())
         key = (self.bp_team_size, self._bp_level_cap(), tuple(sorted(counts.items())))
@@ -1089,9 +1368,20 @@ class GameRoom:
         if hero is None:
             return "所选武将不存在。"
         level = int(hero["level"])
+        if self.bp_format == BP_FORMAT_TIER:
+            round_plan, _round_number = self._bp_tier_round_at(len(self.bp_actions))
+            if round_plan is None:
+                return "BP 已经结束。"
+            if level != int(round_plan["level"]):
+                return f"这一轮只能选择 {int(round_plan['level'])} 点的武将。"
+            return self._bp_hero_taken_error(hero_code, team, kind)
         if level in self.bp_auto_banned_levels:
             return "该等级已被系统禁用。"
-        if any(action["hero_code"] == hero_code for action in self.bp_actions):
+        if self.bp_allow_same_hero:
+            taken = self._bp_hero_taken_error(hero_code, team, kind)
+            if taken is not None:
+                return taken
+        elif any(action["hero_code"] == hero_code for action in self.bp_actions):
             return "该武将已经被禁用或选走。"
         if kind == "pick" and self._bp_total_level(team) + level > self._bp_level_cap():
             return f"{team_name(team)}选将总等级不能超过{self._bp_level_cap()}。"
@@ -1113,13 +1403,14 @@ class GameRoom:
             return []
         kind, team = sequence[len(self.bp_actions)]
         key = (self.bp_team_size, self._bp_level_cap(), self.bp_auto_banned_levels,
-               self.bp_first_pick_team, kind, team,
+               self.bp_first_pick_team, self.bp_format, bool(self.bp_allow_same_hero), kind, team,
                tuple((action["kind"], action["team_id"], action["hero_code"])
                      for action in self.bp_actions))
         cached = getattr(self, "_bp_legal_cache", None)
         if cached and cached[0] == key:
             return cached[1]
-        used = {action["hero_code"] for action in self.bp_actions}
+        used = {action["hero_code"] for action in self.bp_actions
+                if not self.bp_allow_same_hero or action["kind"] == "ban" or action["team_id"] == team}
         representative = {}
         for code, hero in hero_lookup().items():
             level = int(hero["level"])
@@ -1133,9 +1424,16 @@ class GameRoom:
     def _bp_phase(self) -> str:
         if self.status != "bp":
             return "closed"
-        return "draft" if len(self.bp_actions) < len(self._bp_sequence()) else "assign"
+        if len(self.bp_actions) < len(self._bp_sequence()):
+            return "draft"
+        if not self.bp_assign_opened:
+            return "review"
+        return "assign"
 
     def _begin_bp(self) -> None:
+        if self.bp_format == BP_FORMAT_TIER:
+            self._begin_tier_bp()
+            return
         pairs = self._bp_feasible_level_pairs()
         if not pairs:
             raise RoomError("当前武将库无法在随机禁用两个等级后完成BP。")
@@ -1143,13 +1441,58 @@ class GameRoom:
         self.bp_first_pick_team = secrets.choice(TEAM_IDS)
         self.bp_actions = []
         self.bp_assignments = {}
+        self.bp_assign_opened = False
+        self.bp_team_ai = {1: True, 2: True}
+        self.bp_tier_plan = []
         self.status = "bp"
+
+    def _begin_tier_bp(self) -> None:
+        if not self._tier_pool_can_start():
+            raise RoomError("勾选的等级里没有足够的武将，双方无法各选到一名。")
+        self.bp_first_pick_team = secrets.choice(list(TEAM_IDS))
+        plan = self._plan_tier_rounds()
+        if not plan:
+            self.bp_first_pick_team = None
+            raise RoomError("勾选的等级里没有足够的武将，双方无法各选到一名。")
+        self.bp_tier_plan = plan
+        self.bp_auto_banned_levels = ()
+        self.bp_actions = []
+        self.bp_assignments = {}
+        self.bp_assign_opened = False
+        self.bp_team_ai = {1: True, 2: True}
+        self.status = "bp"
+
+    def open_bp_assign(self, token: str) -> None:
+        with self._lock:
+            self.require_host(token)
+            if self.mode != "bp" or self._bp_phase() != "review":
+                raise RoomError("禁选结束后，才能进入分配。")
+            self.bp_assign_opened = True
+            self.touch()
+
+    def set_bp_team_ai(self, token: str, team_id: Any, enabled: Any) -> None:
+        with self._lock:
+            seat = self.require_seat(token)
+            if self.mode != "bp" or self._bp_phase() != "assign":
+                raise RoomError("进入分配后才能选择是否交给 AI。")
+            team = normalize_team_id(team_id)
+            if not isinstance(enabled, bool):
+                raise RoomError("AI 控制设置无效。")
+            if seat.team_id != team and seat.player_id != self.host_player_id:
+                raise RoomError("只能设置自己这一侧。")
+            if self.bp_team_ai.get(team) == enabled:
+                return
+            self.bp_team_ai[team] = enabled
+            self.touch()
 
     def bp_choose(self, token: str, hero_code: str) -> None:
         with self._lock:
             seat = self.require_seat(token)
-            if self.mode != "bp" or self._bp_phase() != "draft":
+            if self.mode != "bp" or self.status != "bp":
                 raise RoomError("当前不在BP禁选阶段。")
+            self._drop_stuck_tier_steps()
+            if self._bp_phase() != "draft":
+                raise RoomError("这一步已经没有可选武将。")
             kind, team = self._bp_sequence()[len(self.bp_actions)]
             if self.bp_captains.get(team) != seat.player_id:
                 raise RoomError("当前轮到另一队队长操作。")
@@ -1187,42 +1530,46 @@ class GameRoom:
             self.touch()
 
     def _bp_assignment_blocker(self) -> Optional[str]:
-        if self._bp_phase() != "assign":
+        phase = self._bp_phase()
+        if phase == "review":
+            return "请房主确认后再进入分配。"
+        if phase != "assign":
             return "请先完成BP禁选。"
-        for team in TEAM_IDS:
-            for code in self._bp_picks(team):
-                if code not in self.bp_assignments:
-                    return "请先为全部武将分配真人玩家或AI。"
         return None
+
+    def _bp_ai_seat(self, team: int, ai_seats: dict[int, Any]) -> Any:
+        if team in ai_seats:
+            return ai_seats[team]
+        existing = next((seat for seat in self._team_seats(team) if seat.is_ai), None)
+        if existing is not None:
+            ai_seats[team] = existing
+            return existing
+        seat_id = max(self.seats) + 1
+        virtual = PlayerSeat(player_id=seat_id, team_id=team)
+        virtual.set_ai()
+        self.seats[seat_id] = virtual
+        self.bp_virtual_seat_ids.append(seat_id)
+        ai_seats[team] = virtual
+        return virtual
 
     def _materialize_bp_assignments(self) -> None:
         for seat in self.seats.values():
             seat.clear_roster()
-        ai_seats: dict[int, PlayerSeat] = {}
+        ai_seats: dict[int, Any] = {}
         for team in TEAM_IDS:
-            existing_ai = next((seat for seat in self._team_seats(team) if seat.is_ai), None)
-            if existing_ai is not None:
-                ai_seats[team] = existing_ai
+            human = next((seat for seat in self._team_seats(team) if seat.is_human), None)
+            use_ai = bool(self.bp_team_ai.get(team)) or human is None
+            target = self._bp_ai_seat(team, ai_seats) if use_ai else human
             for code in self._bp_picks(team):
-                owner = self.bp_assignments[code]
-                if owner == "ai":
-                    if team not in ai_seats:
-                        seat_id = max(self.seats) + 1
-                        virtual = PlayerSeat(player_id=seat_id, team_id=team)
-                        virtual.set_ai()
-                        self.seats[seat_id] = virtual
-                        self.bp_virtual_seat_ids.append(seat_id)
-                        ai_seats[team] = virtual
-                    target = ai_seats[team]
-                else:
-                    target = self.seats[int(owner)]
                 target.adjust_hero_count(code, 1)
 
     def _bp_public_state(self) -> dict[str, Any]:
+        self._drop_stuck_tier_steps()
         sequence = self._bp_sequence()
         index = len(self.bp_actions)
         step = sequence[index] if index < len(sequence) else None
         known = hero_lookup()
+        round_plan, round_number = self._bp_tier_round_at(index) if self.bp_format == BP_FORMAT_TIER else (None, None)
         return {
             "team_size": self.bp_team_size,
             "level_cap": self._bp_level_cap(),
@@ -1231,6 +1578,16 @@ class GameRoom:
             "wins": dict(self.bp_wins) if self.bp_show_win_count else None,
             "total_levels": {team: self._bp_total_level(team) for team in TEAM_IDS},
             "captains": dict(self.bp_captains),
+            "format": self.bp_format,
+            "format_name": "随机等级" if self.bp_format == BP_FORMAT_TIER else "全体选择",
+            "allow_same_hero": bool(self.bp_allow_same_hero),
+            "tier_pool": list(self.bp_tier_pool),
+            "tier_rounds": int(self.bp_tier_rounds),
+            "round_index": round_number,
+            "round_count": sum(1 for item in self.bp_tier_plan if self._tier_round_steps(item)),
+            "current_level": None if round_plan is None else int(round_plan["level"]),
+            "round_bans": None if round_plan is None else int(round_plan["bans"]),
+            "round_picks": None if round_plan is None else int(round_plan["picks"]),
             "phase": self._bp_phase(),
             "first_pick_team": self.bp_first_pick_team,
             "auto_banned_levels": list(self.bp_auto_banned_levels),
@@ -1245,6 +1602,7 @@ class GameRoom:
                         for action in self.bp_actions],
             "picks": {team: self._bp_picks(team) for team in TEAM_IDS},
             "assignments": dict(self.bp_assignments),
+            "team_ai": {team: bool(self.bp_team_ai.get(team)) for team in TEAM_IDS},
         }
 
     def configure_tutorial(self) -> None:
@@ -1675,8 +2033,21 @@ class GameRoom:
             return
         self.battle.on_replay_checkpoint = self._record_replay_step
 
+    def _replay_mode(self) -> str:
+        # 子战斗（自走棋里同时打的那几场）可以强制关掉。它们不是给人回放的，
+        # 却会在每次轮询里把整张棋盘序列化好几份。
+        forced = getattr(self, "replay_forced", None)
+        if forced in {"off", "actions", "full"}:
+            return str(forced)
+        from wujiang.platform.app_settings import replay_recording
+
+        return replay_recording()
+
     def _record_replay_step(self, reason: str) -> None:
         if self.battle is None:
+            return
+        mode = self._replay_mode()
+        if mode == "off":
             return
         if bool(getattr(self, "fast_ai_simulation", False)) and reason not in {
             "battle_start",
@@ -1687,6 +2058,21 @@ class GameRoom:
             return
         if self.replay is None:
             self.replay = ReplayRecorder(self.room_id, self.mode, match_id=self.current_match_id)
+        # actions 档只在开局留一份棋盘，之后每步只记「发生了什么」，不再复制
+        # 全体单位。逐步回放要重演才看得懂，所以这档不对外提供播放。
+        if mode == "actions" and reason != "battle_start":
+            self.replay.append_step(
+                reason=reason,
+                omniscient_battle={
+                    "replay_kind": "action",
+                    "reason": reason,
+                    "round_number": getattr(self.battle, "round_number", None),
+                    "winner": self.battle.winner,
+                },
+                spectator_battle={},
+                seat_views={},
+            )
+            return
         omniscient_battle = self.battle.to_public_dict()
         spectator_battle = battle_state_for_viewer(self.battle, None, None)
         seat_views = {
@@ -2005,6 +2391,8 @@ class GameRoom:
         with self._lock:
             seat = self.seats[self.host_player_id]
             token = seat.claim(player_name, account_user_id=account_user_id)
+            if account_user_id is not None:
+                self.owner_user_id = int(account_user_id)
             self.invalidate_readiness()
             self.touch()
             return seat.player_id, token
@@ -2043,8 +2431,10 @@ class GameRoom:
             if self.status != "lobby":
                 raise RoomError("只有在大厅中才能调整席位数。")
             next_count = normalize_room_seat_count(seat_count)
-            if self.mode == "autochess" and next_count not in (4, 8):
-                raise RoomError("自走棋席位数只能为 4 或 8。")
+            if self.mode == "bp" and next_count != 2:
+                raise RoomError("BP 模式固定两个席位。")
+            if self.mode == "autochess":
+                raise RoomError("自走棋固定 8 个席位。")
             if self.mode != "autochess" and next_count > 6:
                 raise RoomError("该模式最多 6 个席位。")
             current_count = len(self.seats)
@@ -2067,6 +2457,67 @@ class GameRoom:
             if self.mode == "autochess":
                 from wujiang.tactical.rooms.autochess import AutoChessState
                 self.autochess = AutoChessState(next_count)
+            self.invalidate_readiness()
+            self.touch()
+
+    def remove_seat(self, token: str, seat_id: Any) -> None:
+        with self._lock:
+            self.require_host(token)
+            if self.status != "lobby":
+                raise RoomError("只有在大厅中才能删除席位。")
+            if self.mode == "autochess":
+                raise RoomError("自走棋固定 8 个席位。")
+            if len(self.seats) <= MIN_ROOM_SEAT_COUNT:
+                raise RoomError(f"房间至少保留 {MIN_ROOM_SEAT_COUNT} 个席位。")
+            seat = self._seat(seat_id)
+            if seat.player_id == self.host_player_id:
+                raise RoomError("不能删除自己的席位。")
+            if seat.is_human:
+                seat.release()
+            host_seat = self.seats.get(self.host_player_id)
+            ordered = [item for player_id, item in sorted(self.seats.items()) if player_id != seat.player_id]
+            rebuilt: dict[int, PlayerSeat] = {}
+            for index, item in enumerate(ordered, start=1):
+                item.player_id = index
+                rebuilt[index] = item
+            self.seats = rebuilt
+            if host_seat is not None:
+                self.host_player_id = host_seat.player_id
+            if self.mode == "random":
+                self._reset_random_quotas_to_defaults()
+            self.invalidate_readiness()
+            self.touch()
+
+    def claim_seat(self, token: str, seat_id: Any) -> None:
+        with self._lock:
+            actor = self.require_seat(token)
+            if self.status != "lobby":
+                raise RoomError("只有在大厅中才能换席。")
+            target = self._seat(seat_id)
+            if target.player_id == actor.player_id:
+                return
+            if target.is_human:
+                raise RoomError("这个席位已经有人。")
+            name = actor.name
+            account = actor.account_user_id
+            heroes = dict(actor.hero_counts)
+            army = dict(getattr(actor, "army_counts", {}) or {})
+            quota = getattr(actor, "random_quota", 0)
+            was_host = actor.player_id == self.host_player_id
+            kept_token = actor.token
+            # AI 席位的 can_join 是假的。先改成空位再坐进去；失败时不能先把自己的席位清掉，
+            # 否则房主令牌没了，界面会掉回大厅而且之后什么都点不动。
+            if target.is_ai:
+                target.set_open()
+            target.claim(name, account_user_id=account)
+            target.token = kept_token
+            target.hero_counts.clear()
+            target.hero_counts.update(heroes)
+            target.army_counts = army
+            target.random_quota = quota
+            actor.release()
+            if was_host:
+                self.host_player_id = target.player_id
             self.invalidate_readiness()
             self.touch()
 
@@ -2147,15 +2598,15 @@ class GameRoom:
             next_mode = normalize_room_mode(mode)
             if next_mode == self.mode:
                 return
-            if next_mode == "autochess" and len(self.seats) > 4 and len(self.seats) != 8:
-                raise RoomError("请先调整到 4 人或 8 人房间。")
+            if next_mode == "bp":
+                extras = [seat for seat in self.seats.values() if seat.player_id > 2 and seat.occupied]
+                if extras:
+                    raise RoomError("BP 模式固定两个席位。请先请出多出的玩家。")
             previous_mode = self.mode
             self.mode = next_mode
             if next_mode == "autochess":
-                for player_id in range(len(self.seats) + 1, 5):
+                for player_id in range(len(self.seats) + 1, AUTOCHESS_SEAT_COUNT + 1):
                     self.seats[player_id] = PlayerSeat(player_id=player_id, team_id=default_team_for_seat(player_id))
-                if len(self.seats) not in (4, 8):
-                    raise RoomError("请先调整到 4 人或 8 人房间。")
                 from wujiang.tactical.rooms.autochess import AutoChessState
                 self.autochess = AutoChessState(len(self.seats))
             else:
@@ -2169,6 +2620,9 @@ class GameRoom:
             self.bp_auto_banned_levels = ()
             self.bp_actions = []
             self.bp_assignments = {}
+            if self.mode == "bp":
+                for player_id in [seat_id for seat_id in list(self.seats) if seat_id > 2]:
+                    self.seats.pop(player_id, None)
             for seat in self.seats.values():
                 seat.clear_roster()
             if self.mode == "random":
@@ -2291,6 +2745,14 @@ class GameRoom:
             self.invalidate_readiness()
             self.touch()
 
+    def set_army_enabled(self, token: str, enabled: Any) -> None:
+        with self._lock:
+            self.require_host(token)
+            if self.status != "lobby":
+                raise RoomError("只有在大厅中才能调整士兵配置。")
+            self.army_enabled = bool(enabled)
+            self.touch()
+
     def _editable_seat(self, token: str, seat_id: Any | None) -> PlayerSeat:
         viewer = self.require_seat(token)
         if seat_id in {None, "", viewer.player_id}:
@@ -2357,8 +2819,6 @@ class GameRoom:
             if seat.ready == next_ready:
                 return
             seat.ready = next_ready
-            if self.mode == "bp" and self._start_blocker() is None:
-                self._begin_bp()
             self.touch()
 
     def human_ready_count(self) -> int:
@@ -2745,9 +3205,11 @@ class GameRoom:
                 "invite_path": self.invite_path(),
                 "invite_url": self.invite_url(base_url),
                 "host_player_id": self.host_player_id,
+                "owner_user_id": getattr(self, "owner_user_id", None),
                 "random_roster_size": self.random_roster_size,
                 "bp": self._bp_public_state() if self.mode == "bp" else None,
                 "hero_limit": self.hero_limit,
+                "army_enabled": bool(getattr(self, "army_enabled", False)),
                 "board_width": int(getattr(self, "board_width", DEFAULT_BOARD_WIDTH) or DEFAULT_BOARD_WIDTH),
                 "board_height": int(getattr(self, "board_height", DEFAULT_BOARD_HEIGHT) or DEFAULT_BOARD_HEIGHT),
                 "turn_timeout_seconds": int(getattr(self, "turn_timeout_seconds", DEFAULT_TURN_TIMEOUT_SECONDS) or 0),
@@ -2801,10 +3263,15 @@ class GameRoom:
         if self.human_seat_count() <= 0:
             return "当前至少需要一个真人席位才能开始。"
         if self.mode == "bp":
+            self._sync_default_captains()
             for team_id in TEAM_IDS:
                 captain = self.seats.get(self.bp_captains.get(team_id, -1))
                 if captain is None or not captain.is_human or captain.team_id != team_id:
                     return f"请先为{team_name(team_id)}指定真人队长。"
+            if self.bp_format == BP_FORMAT_TIER:
+                if not self._tier_pool_can_start():
+                    return "勾选的等级里没有足够的武将，双方无法各选到一名。"
+                return None
             if not self._bp_feasible_level_pairs():
                 return f"当前武将库无法在随机禁用两个等级后满足每队总等级{self._bp_level_cap()}的上限。"
             return None
@@ -2886,6 +3353,14 @@ class GameRoom:
                         seat.set_ai()
                 self.autochess.start()
                 self.status = "preparation"
+                self.touch()
+                return
+            if self.mode == "bp" and self.status == "lobby":
+                self.require_host(token)
+                blocker = self._start_blocker()
+                if blocker is not None:
+                    raise RoomError(blocker)
+                self._begin_bp()
                 self.touch()
                 return
             if require_confirmation:
@@ -3327,6 +3802,7 @@ class GameRoom:
                 "random_roster_size": self.random_roster_size,
                 "bp": self._bp_public_state() if self.mode == "bp" else None,
                 "hero_limit": self.hero_limit,
+                "army_enabled": bool(getattr(self, "army_enabled", False)),
                 "board_width": int(getattr(self, "board_width", DEFAULT_BOARD_WIDTH) or DEFAULT_BOARD_WIDTH),
                 "board_height": int(getattr(self, "board_height", DEFAULT_BOARD_HEIGHT) or DEFAULT_BOARD_HEIGHT),
                 "turn_timeout_seconds": int(getattr(self, "turn_timeout_seconds", DEFAULT_TURN_TIMEOUT_SECONDS) or 0),
@@ -3411,7 +3887,7 @@ class GameRoom:
             "viewer_player_id": viewer_id, "viewer_team_id": None,
             "viewer_name": viewer.name if viewer else None,
             "viewer_is_host": viewer_id == self.host_player_id,
-            "seat_count": len(self.seats), "seat_count_min": 4, "seat_count_max": 8,
+            "seat_count": len(self.seats), "seat_count_min": AUTOCHESS_SEAT_COUNT, "seat_count_max": AUTOCHESS_SEAT_COUNT,
             "occupied_seat_count": self.occupied_seat_count(),
             "human_seat_count": self.human_seat_count(), "ai_seat_count": self.ai_seat_count(),
             "is_full": all(seat.occupied for seat in self.seats.values()),
@@ -3616,13 +4092,16 @@ class RoomRegistry:
         with self._lock:
             self._rooms.pop(normalized, None)
 
-    def delete_room(self, room_id: str, token: str) -> None:
+    def delete_room(self, room_id: str, token: str, *, owner_user_id: Optional[int] = None) -> None:
         normalized = normalize_room_id(room_id)
         with self._lock:
             room = self._rooms.get(normalized)
             if room is None:
                 raise RoomError("房间不存在，可能是房间码输错了。")
-            room.require_host(token)
+            owner = getattr(room, "owner_user_id", None)
+            is_owner = owner_user_id is not None and owner is not None and int(owner) == int(owner_user_id)
+            if not is_owner:
+                room.require_host(token)
             del self._rooms[normalized]
             if room.mode == "autochess":
                 self._chess_path(normalized).unlink(missing_ok=True)
@@ -3637,31 +4116,30 @@ class RoomRegistry:
                 seat = room.require_seat(token)
                 return False, seat.player_id
             leaving_player_id = room.leave(token)
-            deleted = room.human_seat_count() == 0
-            if deleted:
-                del self._rooms[normalized]
-                if room.mode == "autochess":
-                    self._chess_path(normalized).unlink(missing_ok=True)
-            return deleted, leaving_player_id
+            # 人走了房间还在，席位空出来，同一个房间码可以再连回来。
+            # 不想留的，从房间列表里删。
+            return False, leaving_player_id
 
     def list_rooms(self, *, base_url: Optional[str] = None) -> list[dict[str, Any]]:
         with self._lock:
-            for path in self._chess_path("ABCDEF").parent.glob("*.room"):
-                if path.stem in self._rooms:
-                    continue
-                try:
-                    restored = GameRoom.from_checkpoint_bytes(path.read_bytes())
-                    if restored.mode == "autochess" and restored.room_id == path.stem:
-                        self._rooms[restored.room_id] = restored
-                except (OSError, RoomError):
-                    continue
-            rooms = list(self._rooms.values())
+            chess_dir = self._chess_path("ABCDEF").parent
+            if chess_dir.is_dir():
+                for path in chess_dir.glob("*.room"):
+                    if path.stem in self._rooms:
+                        continue
+                    try:
+                        restored = GameRoom.from_checkpoint_bytes(path.read_bytes())
+                    except (OSError, RoomError):
+                        continue
+                    if restored.mode != "autochess" or restored.room_id != path.stem:
+                        continue
+                    self._rooms[restored.room_id] = restored
+            rooms = [
+                room for room in self._rooms.values()
+                if not is_campaign_launch(room)
+            ]
         rooms.sort(key=lambda room: room.updated_at, reverse=True)
-        return [
-            room.serialize_summary(base_url=base_url)
-            for room in rooms
-            if not is_campaign_launch(room)
-        ]
+        return [room.serialize_summary(base_url=base_url) for room in rooms]
 
 
 ROOMS = RoomRegistry()

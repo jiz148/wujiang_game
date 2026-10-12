@@ -846,13 +846,37 @@ export function renderActionForecast() {
   `;
 }
 
+function viewerMustCommand(unit) {
+  // 操作轮只在「这一下必须由眼前这个人来选」时出现。
+  // 技能写着速度 2，只说明它是被动或响应，不说明现在轮到你点。
+  // 单位如果挂在 AI 席位上，就算跟你同队，也是电脑在下，不把选项摊出来。
+  if (!unit || !state.battle || state.screen !== "battle" || isGameOver() || isReplayMode()) return false;
+  const owner = (state.room?.seats || []).find((seat) => Number(seat.player_id) === Number(unit.owner_seat_id));
+  if (owner && (owner.is_ai || owner.is_ai_controlled || owner.ai_takeover || owner.controller_type === "ai")) return false;
+  if (isAiTakeover()) return false;
+  const mine = owner
+    ? Number(owner.player_id) === Number(viewerPlayerId())
+    : canInteract() && Number(unit.player_id) === Number(viewerTeamId());
+  if (!mine) return false;
+  if (isDamageChoiceMode() || isRespawnMode() || isChainMode()) return true;
+  return canInteract();
+}
+
 function renderActionWheel() {
   const layer = actionWheelLayer();
   if (!layer) return;
   layer.innerHTML = "";
   const unit = selectedUnit();
   const actions = displayActions();
-  if (!unit || !actions.length) return;
+  if (!unit || !actions.length || !viewerMustCommand(unit)) return;
+  const promptedId = isDamageChoiceMode()
+    ? state.battle.pending_damage_choice?.unit_id
+    : isRespawnMode()
+      ? currentRespawnPrompt()?.unit_id
+      : isChainMode()
+        ? state.battle.pending_chain?.current_unit_id
+        : "";
+  if (promptedId && unit.id !== promptedId) return;
   const action = selectedAction();
   if (action && actionNeedsTarget(action)) return;
   const stageRect = $("board-stage")?.getBoundingClientRect?.();
@@ -1575,7 +1599,10 @@ export function renderPostgameSummary() {
   if (!panel) return;
   panel.classList.toggle("hidden", !summary.available);
   if (!summary.available) return;
-  $("postgame-reason").textContent = `${summary.winner_team_name}获胜：${summary.reason_text}`;
+  const winnerLabel = state.room?.mode === "bp"
+    ? battleWinnerLabel(state.battle, state.room)
+    : summary.winner_team_name;
+  $("postgame-reason").textContent = `${winnerLabel}获胜：${summary.reason_text}`;
   $("postgame-meta").textContent = `${Number(summary.completed_turns || 0)} 个武将回合 · ${Number(summary.duration_seconds || 0)} 秒`;
   $("postgame-formula").textContent = `综合贡献：${summary.mvp_formula}`;
 
@@ -1585,7 +1612,8 @@ export function renderPostgameSummary() {
     const card = document.createElement("article");
     card.className = `postgame-team-card ${Number(team.team_id) === Number(summary.winner_team_id) ? "is-winner" : ""}`;
     const title = document.createElement("strong");
-    title.textContent = `${team.team_name}${Number(team.team_id) === Number(summary.winner_team_id) ? " · 胜方" : ""}`;
+    const sideName = state.room?.mode === "bp" ? bpSidePlayerName(team.team_id, state.room) : "";
+    title.textContent = `${sideName || team.team_name}${Number(team.team_id) === Number(summary.winner_team_id) ? " · 胜方" : ""}`;
     const line = document.createElement("span");
     line.textContent = `伤害 ${formatPostgameValue(team.damage_dealt)} · 治疗 ${formatPostgameValue(team.healing_done)} · 承伤 ${formatPostgameValue(team.damage_taken)} · 击破 ${team.kills || 0} · 破盾 ${team.shields_broken || 0} · 连锁 ${team.chain_reactions || 0}`;
     card.append(title, line);
@@ -1660,6 +1688,29 @@ export function renderPostgameSummary() {
   }
 }
 
+function bpSidePlayerName(teamId, room) {
+  const source = state.holdBattleView && state.settlementSeats?.length ? state.settlementSeats : (room?.seats || []);
+  const seats = source.filter((seat) => Number(seat.team_id) === Number(teamId) && (seat.occupied || seat.name));
+  const humans = seats.filter((seat) => !seat.is_ai && seat.name);
+  if (humans.length) return humans.map((seat) => seat.name).join("、");
+  return seats.find((seat) => seat.name)?.name || "";
+}
+
+export function battleWinnerLabel(battle, room) {
+  const winner = Number(battle?.winner || 0);
+  if (room?.mode === "bp") {
+    const name = bpSidePlayerName(winner, room);
+    if (name) return name;
+  }
+  const source = state.holdBattleView && state.settlementSeats?.length ? state.settlementSeats : (room?.seats || []);
+  const seats = source.filter((seat) => Number(seat.team_id) === winner && (seat.occupied || seat.name));
+  if (seats.length === 1) return seats[0].name || (seats[0].is_ai ? `AI ${seats[0].player_id}` : seats[0].team_name || "获胜方");
+  if (seats.length > 1) return seats[0].team_name || "获胜方";
+  if (winner === 1) return "红队";
+  if (winner === 2) return "蓝队";
+  return "获胜方";
+}
+
 export function renderGameOverOverlay() {
   const overlay = $("game-over-overlay");
   const title = $("game-over-title");
@@ -1673,7 +1724,7 @@ export function renderGameOverOverlay() {
     return;
   }
   renderPostgameSummary();
-  if (title) title.textContent = `玩家 ${state.battle.winner} 获胜`;
+  if (title) title.textContent = `${battleWinnerLabel(state.battle, state.room)} 获胜`;
   const showDetails = Boolean(state.gameOverShowDetails);
   $("game-over-overview")?.classList.toggle("hidden", showDetails);
   $("game-over-details")?.classList.toggle("hidden", !showDetails);
@@ -1692,20 +1743,14 @@ export function renderGameOverOverlay() {
   }
   if (back) {
     back.classList.toggle("hidden", launch.source === "campaign");
-    back.textContent = launch.allowLobby ? "返回房间大厅" : "离开战场";
+    back.textContent = "退出战斗";
   }
   if (rematch) {
-    rematch.classList.toggle("hidden", !launch.allowRematch);
-    rematch.disabled = !launch.allowRematch || !Boolean(state.room?.can_rematch && state.room?.viewer_player_id !== null);
+    const tutorial = tutorialState();
+    rematch.classList.toggle("hidden", !tutorial);
     if (tutorial) {
       rematch.disabled = state.battle.winner !== 1 && !tutorial.can_retry_checkpoint;
       rematch.textContent = state.battle.winner === 1 ? "再次开始教学" : "从检查点重试";
-    } else if (state.room?.experience_kind === "quick_ai") {
-      rematch.textContent = "同阵容再来一局";
-    } else if (state.room?.mode === "bp") {
-      rematch.textContent = state.room?.viewer_is_host ? "进入下一局 BP" : "等待房主开启下一局 BP";
-    } else {
-      rematch.textContent = state.room?.viewer_is_host ? "同配置再来一局" : "等待房主再开一局";
     }
   }
   overlay.classList.remove("hidden");

@@ -4,8 +4,11 @@ from __future__ import annotations
 from http import HTTPStatus
 
 from wujiang.platform.analytics import AnalyticsError
+from wujiang.platform.app_settings import public_settings
+from wujiang.platform.app_settings import update_settings
 from wujiang.platform.auth import AuthError
 from wujiang.platform.http.runtime import auth_error_response
+from wujiang.platform.http.runtime import authenticated_user_from_request
 from wujiang.platform.http.runtime import auth_token_from_request
 from wujiang.platform.http.runtime import json_response
 from wujiang.platform.http.runtime import readiness_status
@@ -87,6 +90,34 @@ def get_analytics_strategy(ctx: RequestContext) -> None:
         json_response(handler, HTTPStatus.BAD_REQUEST, {"error": "战役分析筛选条件无效。"})
         return
     json_response(handler, HTTPStatus.OK, dashboard)
+    return
+
+
+@get("/api/settings")
+def get_settings(ctx: RequestContext) -> None:
+    handler = ctx.handler
+    try:
+        authenticated_user_from_request(handler, query=ctx.query)
+    except AuthError as exc:
+        auth_error_response(handler, exc)
+        return
+    json_response(handler, HTTPStatus.OK, public_settings())
+    return
+
+
+@post("/api/settings")
+def post_settings(ctx: RequestContext) -> None:
+    handler = ctx.handler
+    try:
+        authenticated_user_from_request(handler, payload=ctx.payload, query=ctx.query)
+        saved = update_settings(ctx.payload)
+    except AuthError as exc:
+        auth_error_response(handler, exc)
+        return
+    except ValueError as exc:
+        json_response(handler, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        return
+    json_response(handler, HTTPStatus.OK, saved)
     return
 
 

@@ -10,7 +10,7 @@ import { $ } from '../core/dom.js';
 import { fetchJson, hasRoom, viewerPlayerId } from '../core/net.js';
 import { render } from '../core/render.js';
 import { state } from '../core/state.js';
-import { applyRoomPayload, autoConfigureRoom, availableRoomModes, isRandomRoomMode, reportRoomError, selectRoomHero, setBpSettings, setRandomRosterSize, setRoomBoardSize, setRoomHeroLimit, setRoomMode, setRoomSeatCount, setRoomTurnTimeout } from '../tactical/room-api.js';
+import { applyRoomPayload, autoConfigureRoom, availableRoomModes, isRandomRoomMode, reportRoomError, selectRoomHero, setBpSettings, setRandomRosterSize, setRoomArmyEnabled, setRoomBoardSize, setRoomHeroLimit, setRoomMode, setRoomSeatCount, setRoomTurnTimeout } from '../tactical/room-api.js';
 import { randomRoomRosterSize, seatHeroCount, seatIdentityLabel, setRoomEditSeat } from '../tactical/targeting.js';
 import { bindHeroHover, hideHeroHover } from './hero-hover.js';
 
@@ -37,7 +37,7 @@ export function isSeatLocked(seat) {
 export function canManageSeatRoster(seat) {
   if (!seat || !hasRoom() || state.room?.status !== "lobby") return false;
   if (state.room?.launch_context && state.room.launch_context.allow_roster_edit === false) return false;
-  if (isRandomRoomMode() || state.room?.mode === "bp") return false;
+  if (isRandomRoomMode() || state.room?.mode === "bp" || state.room?.mode === "autochess") return false;
   if (seat.player_id === viewerPlayerId()) return true;
   return Boolean(state.room?.viewer_is_host && seat.is_ai);
 }
@@ -45,6 +45,8 @@ export function canManageSeatRoster(seat) {
 /** 遭遇战配兵：随机模式下也可以加士兵，战役房间则跟阵容一样锁住。 */
 export function canManageSeatArmy(seat) {
   if (!seat || !hasRoom() || state.room?.status !== "lobby") return false;
+  // BP 和自走棋的阵容不走士兵配置。BP 在禁选里决定武将，自走棋在备战里买棋子。
+  if (state.room?.mode === "bp" || state.room?.mode === "autochess") return false;
   if (state.room?.launch_context && state.room.launch_context.allow_roster_edit === false) return false;
   if (seat.player_id === viewerPlayerId()) return true;
   return Boolean(state.room?.viewer_is_host && seat.is_ai);
@@ -97,8 +99,15 @@ export function openRoomSetup() {
     bpLevelCap: String(state.room.bp?.level_cap || 15),
     bpLevelCaps: {...(state.room.bp?.level_caps || {3: 15, 5: 25})},
     bpShowWinCount: state.room.bp?.show_win_count !== false,
+    bpFormat: state.room.bp?.format === "tier" ? "tier" : "full",
+    bpAllowSameHero: Boolean(state.room.bp?.allow_same_hero),
+    bpTierPool: Array.isArray(state.room.bp?.tier_pool) && state.room.bp.tier_pool.length
+      ? state.room.bp.tier_pool.map(Number)
+      : [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    bpTierRounds: String(Math.max(1, Math.min(12, Number(state.room.bp?.tier_rounds) || 3))),
     heroLimitEnabled: currentLimit > 0,
     heroLimit: String(currentLimit > 0 ? currentLimit : 5),
+    armyEnabled: Boolean(state.room.army_enabled),
     turnTimeout: String(Number(state.room.turn_timeout_seconds ?? 0)),
     boardWidth: String(Number(state.room.board_width || 10)),
     boardHeight: String(Number(state.room.board_height || 10)),
@@ -213,18 +222,20 @@ export async function confirmRoomSetup() {
     return;
   }
   const nextMode = draft.mode;
-  const nextSeatCount = nextMode === "autochess" ? (Number(draft.seatCount) === 8 ? 8 : 4) : draft.seatCount;
   const nextRosterSize = draft.randomRosterSize;
   const nextBpTeamSize = Number(draft.bpTeamSize) === 5 ? 5 : 3;
   const nextBpLevelCap = Math.max(1, Math.min(50, Number.parseInt(draft.bpLevelCap, 10) || nextBpTeamSize * 5));
   const nextBpShowWinCount = Boolean(draft.bpShowWinCount);
+  const nextBpFormat = draft.bpFormat === "tier" ? "tier" : "full";
+  const nextBpAllowSameHero = Boolean(draft.bpAllowSameHero);
+  const nextBpTierPool = [...new Set((draft.bpTierPool || []).map(Number))].filter((level) => level >= 1 && level <= 10).sort((left, right) => left - right);
+  const nextBpTierRounds = Math.max(1, Math.min(12, Number.parseInt(draft.bpTierRounds, 10) || 3));
   const nextHeroLimit = draft.heroLimitEnabled
     ? Math.max(1, Math.min(20, Number.parseInt(draft.heroLimit, 10) || 1))
     : 0;
   state.roomSetupOpen = false;
   state.roomSetupDraft = null;
   if (nextMode && nextMode !== state.room.mode) await setRoomMode(nextMode);
-  if (Number(nextSeatCount) !== Number(state.room?.seat_count || 0)) await setRoomSeatCount(nextSeatCount);
   if (isRandomRoomMode() && Number(nextRosterSize) !== randomRoomRosterSize()) {
     await setRandomRosterSize(nextRosterSize);
   }
@@ -232,10 +243,23 @@ export async function confirmRoomSetup() {
     nextBpTeamSize !== Number(state.room?.bp?.team_size || 3)
     || nextBpLevelCap !== Number(state.room?.bp?.level_cap || 15)
     || nextBpShowWinCount !== Boolean(state.room?.bp?.show_win_count)
+    || nextBpFormat !== (state.room?.bp?.format === "tier" ? "tier" : "full")
+    || nextBpAllowSameHero !== Boolean(state.room?.bp?.allow_same_hero)
+    || nextBpTierPool.join(",") !== (state.room?.bp?.tier_pool || [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]).map(Number).sort((left, right) => left - right).join(",")
+    || nextBpTierRounds !== Math.max(1, Math.min(12, Number(state.room?.bp?.tier_rounds) || 3))
   )) {
-    await setBpSettings({teamSize: nextBpTeamSize, levelCap: nextBpLevelCap, showWinCount: nextBpShowWinCount});
+    await setBpSettings({
+      teamSize: nextBpTeamSize,
+      levelCap: nextBpLevelCap,
+      showWinCount: nextBpShowWinCount,
+      format: nextBpFormat,
+      allowSameHero: nextBpAllowSameHero,
+      tierPool: nextBpTierPool,
+      tierRounds: nextBpTierRounds,
+    });
   }
   if (!["bp", "autochess"].includes(state.room?.mode) && nextHeroLimit !== Number(state.room?.hero_limit || 0)) await setRoomHeroLimit(nextHeroLimit);
+  if (Boolean(draft.armyEnabled) !== Boolean(state.room?.army_enabled)) await setRoomArmyEnabled(draft.armyEnabled);
   const nextTurnTimeout = [0, 30, 60, 120].includes(Number.parseInt(draft.turnTimeout, 10))
     ? Number.parseInt(draft.turnTimeout, 10)
     : 0;
@@ -257,6 +281,33 @@ export function updateRoomSetupDraft(field, value) {
   state.roomSetupDraft[field] = String(value);
 }
 
+function renderBpTierPool(draft) {
+  const host = $("bp-tier-pool");
+  if (!host) return;
+  host.replaceChildren();
+  if (draft.mode !== "bp" || draft.bpFormat !== "tier") return;
+  const selected = new Set((draft.bpTierPool || []).map(Number));
+  const counts = {};
+  for (let level = 1; level <= 10; level += 1) counts[level] = 0;
+  (state.heroes || []).forEach((hero) => {
+    const level = Number(hero.level);
+    if (counts[level] != null) counts[level] += 1;
+  });
+  for (let level = 1; level <= 10; level += 1) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = `bp-tier-chip${selected.has(level) ? " is-on" : ""}`;
+    chip.dataset.level = String(level);
+    chip.setAttribute("aria-pressed", selected.has(level) ? "true" : "false");
+    const title = document.createElement("strong");
+    title.textContent = `${level} 点`;
+    const count = document.createElement("small");
+    count.textContent = `${counts[level]} 人`;
+    chip.append(title, count);
+    host.append(chip);
+  }
+}
+
 export function renderRoomSetupDialog() {
   const modal = $("room-setup-dialog");
   if (!modal) return;
@@ -273,14 +324,18 @@ export function renderRoomSetupDialog() {
   const modeSelect = $("room-mode-select");
   if (modeSelect && document.activeElement !== modeSelect) {
     modeSelect.replaceChildren();
-    availableRoomModes().forEach((mode) => {
-      const option = document.createElement("option");
-      option.value = mode.code;
-      option.textContent = mode.name;
-      modeSelect.append(option);
-    });
-    modeSelect.value = draft.mode;
+    availableRoomModes()
+      .filter((mode) => mode.code === "classic" || mode.code === "random")
+      .forEach((mode) => {
+        const option = document.createElement("option");
+        option.value = mode.code;
+        option.textContent = mode.name;
+        modeSelect.append(option);
+      });
+    if (["classic", "random"].includes(draft.mode)) modeSelect.value = draft.mode;
   }
+  const modeField = modeSelect?.closest("label");
+  modeField?.classList.toggle("hidden", !["classic", "random"].includes(draft.mode));
   const seatCountInput = $("room-seat-count-input");
   if (seatCountInput) {
     seatCountInput.min = draft.mode === "autochess" ? "4" : "2";
@@ -292,10 +347,26 @@ export function renderRoomSetupDialog() {
   const randomControl = $("random-roster-size-control");
   const randomInput = $("random-roster-size-input");
   randomControl?.classList.toggle("hidden", draft.mode !== "random");
-  $("bp-team-size-control")?.classList.toggle("hidden", draft.mode !== "bp");
+  const bpFormat = draft.bpFormat === "tier" ? "tier" : "full";
+  $("bp-format-control")?.classList.toggle("hidden", draft.mode !== "bp");
+  const bpFormatSelect = $("bp-format-select");
+  if (bpFormatSelect && document.activeElement !== bpFormatSelect) bpFormatSelect.value = bpFormat;
+  $("bp-same-hero-control")?.classList.toggle("hidden", draft.mode !== "bp");
+  const bpSameHero = $("bp-allow-same-hero");
+  if (bpSameHero) bpSameHero.checked = Boolean(draft.bpAllowSameHero);
+  const tierPoolControl = $("bp-tier-pool-control");
+  const tierMode = draft.mode === "bp" && bpFormat === "tier";
+  tierPoolControl?.classList.toggle("hidden", !tierMode);
+  $("bp-tier-rounds-control")?.classList.toggle("hidden", !tierMode);
+  const tierRoundsInput = $("bp-tier-rounds-input");
+  if (tierRoundsInput && document.activeElement !== tierRoundsInput) {
+    tierRoundsInput.value = String(draft.bpTierRounds || 3);
+  }
+  renderBpTierPool(draft);
+  $("bp-team-size-control")?.classList.toggle("hidden", draft.mode !== "bp" || bpFormat !== "full");
   const bpSizeSelect = $("bp-team-size-select");
   if (bpSizeSelect && document.activeElement !== bpSizeSelect) bpSizeSelect.value = draft.bpTeamSize;
-  $("bp-level-cap-control")?.classList.toggle("hidden", draft.mode !== "bp");
+  $("bp-level-cap-control")?.classList.toggle("hidden", draft.mode !== "bp" || bpFormat !== "full");
   const bpLevelCap = $("bp-level-cap-input");
   if (bpLevelCap && document.activeElement !== bpLevelCap) bpLevelCap.value = draft.bpLevelCap;
   $("bp-win-count-control")?.classList.toggle("hidden", draft.mode !== "bp");
@@ -312,6 +383,9 @@ export function renderRoomSetupDialog() {
   $("room-hero-limit-switch")?.classList.toggle("hidden", ["bp", "autochess"].includes(draft.mode));
   $("room-turn-timeout-select")?.closest("label")?.classList.toggle("hidden", draft.mode === "autochess");
   $("room-board-width-input")?.closest(".field")?.classList.toggle("hidden", draft.mode === "autochess");
+  $("room-army-switch")?.classList.toggle("hidden", draft.mode === "bp");
+  const armyEnabled = $("room-army-enabled");
+  if (armyEnabled) armyEnabled.checked = Boolean(draft.armyEnabled);
   if (limitInput && document.activeElement !== limitInput) {
     limitInput.value = draft.heroLimit;
   }

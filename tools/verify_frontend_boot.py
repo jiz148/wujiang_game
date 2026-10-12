@@ -206,7 +206,7 @@ def main() -> int:
             ".menu-entry": "主菜单条目",
         })
         text = page.evaluate("document.querySelector('.menu-layout').textContent") or ""
-        for label in ("战役", "遭遇战", "战绩与回放"):
+        for label in ("战役", "房间大厅", "战绩与回放", "设置"):
             if label not in text:
                 problems.append(f"主菜单缺少「{label}」")
         for label in ("继续战役", "新手教学"):
@@ -256,10 +256,17 @@ def main() -> int:
         page.evaluate("document.getElementById('strategy-new-campaign').click()")
         if not page.wait_for("!!document.querySelector('.strategy-wizard')", timeout=20):
             return fail(page, "CAMPAIGN FAILED: 打不开新建战役流程")
-        for step in ("下一步", "下一步", "创建战役"):
-            if not click_text(".strategy-wizard__footer button", step):
-                return fail(page, f"CAMPAIGN FAILED: 新建战役流程里找不到「{step}」")
+        # 向导步数会变。一直点「下一步」，直到出现「创建战役」。
+        created = False
+        for _ in range(6):
+            if click_text(".strategy-wizard__footer button", "创建战役"):
+                created = True
+                break
+            if not click_text(".strategy-wizard__footer button", "下一步"):
+                return fail(page, "CAMPAIGN FAILED: 新建战役流程里既没有「下一步」也没有「创建战役」")
             page.wait_for("true", timeout=2)
+        if not created:
+            return fail(page, "CAMPAIGN FAILED: 新建战役流程里找不到「创建战役」")
 
         # --- 开局准备：出身抉择独立成屏，选定之后房主才锁定开战 ---
         if not page.wait_for("!!document.querySelector('.campaign-prep')", timeout=40):
@@ -373,8 +380,8 @@ def main() -> int:
             timeout=25,
         ):
             return fail(page, "NAV FAILED: 直接访问 #skirmish 到不了遭遇战")
-        if page.evaluate("document.getElementById('brand-title').textContent") != "战场对战":
-            return fail(page, "NAV FAILED: 遭遇战路由的左上角标题不是「战场对战」")
+        if page.evaluate("document.getElementById('brand-title').textContent") != "房间大厅":
+            return fail(page, "NAV FAILED: 房间大厅的左上角标题不是「房间大厅」")
         problems = check(page, {
             "#create-room": "建立房间按钮",
             "#join-room-code": "房间码输入框",
@@ -394,6 +401,7 @@ def main() -> int:
         # 设置与选将都收进了弹窗，所以它们各自是一段没有任何静态检查看得见的
         # 代码：席位卡渲染得再对，点开的那一层也可能是空的。
         page.evaluate("document.getElementById('create-room').click()")
+        page.evaluate("document.getElementById('mode-classic').click()")
         if not page.wait_for(
             "!document.getElementById('room-lobby').classList.contains('hidden')"
             " && document.querySelectorAll('#seat-cards .seat-card').length > 0",
@@ -489,7 +497,7 @@ def main() -> int:
             return fail(page, "BATTLE FAILED: 回不到主菜单")
         page.evaluate(
             "[...document.querySelectorAll('.menu-entry')]"
-            ".find((node) => node.querySelector('.menu-entry__title').textContent === '遭遇战').click()"
+            ".find((node) => node.querySelector('.menu-entry__title').textContent === '房间大厅').click()"
         )
         if not page.wait_for(
             "!document.getElementById('skirmish-panel').classList.contains('hidden')",
@@ -497,6 +505,7 @@ def main() -> int:
         ):
             return fail(page, "BATTLE FAILED: 打不开遭遇战入口")
         page.evaluate("document.getElementById('create-room').click()")
+        page.evaluate("document.getElementById('mode-classic').click()")
         if not page.wait_for(
             "!document.getElementById('room-lobby').classList.contains('hidden')"
             " && !!document.getElementById('auto-configure-room')",

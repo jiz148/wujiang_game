@@ -12,7 +12,7 @@ import { roomStateLabel, syncAiPreview } from '../tactical/battle-ui.js';
 import { clearActionSelection, clearStoredIdentity, loadStoredIdentity, resetRoomSession, saveStoredIdentity, syncSelectedUnitAfterStateChange } from '../tactical/session.js';
 import { actionNeedsTarget, controllerTypeLabel, currentPreview, currentRoomSeat, randomRoomRosterSize, roomSummaries, unitIsSelectableTarget } from '../tactical/targeting.js';
 import { maxVisualEventId, positionKey, selectedAction, syncBattleVfxState, tutorialState, visualEvents, wrapCopiedActionPayload } from '../tactical/vfx.js';
-import { adoptBattleLaunchFromRoom, currentBattleLaunch, rememberBattleLaunch } from '../bridge/battle-launch.js';
+import { adoptBattleLaunchFromRoom, currentBattleLaunch, exitBattle, rememberBattleLaunch } from '../bridge/battle-launch.js';
 import { loadRecordedMatchEnds, syncStrategyCampaignFromRoomPayload } from '../bridge/campaign-battle.js';
 
 function normalizePlayerNameForSeatMatch(name) {
@@ -85,12 +85,26 @@ export function shouldShowLobbyPanel() {
 }
 
 export function applyRoomPayload(payload, { preserveScreen = false } = {}) {
+  // 离开房间后，已经发出去的状态轮询还会带着旧房间回来。不拦下的话，
+  // 人已经点了离开，界面却又被拉回那间房。
+  if (state.suppressRoomId && String(payload?.room?.room_id || "") === state.suppressRoomId) return;
   const hadBattle = Boolean(state.liveBattle || state.battle);
   const previousScreen = state.screen;
   const previousBoardKey = state.battle ? `${state.battle.board.width}x${state.battle.board.height}` : "";
   const previousRoomId = state.room?.room_id || "";
   const previousChessPhase = state.room?.autochess?.phase || "";
   const previousBattle = state.liveBattle;
+  // 对局进行中，轮询带来的新棋盘会盖掉本地棋盘。
+  // 一旦服务端把这场战斗拿掉，或本地已经钉住终局，就不再跟着切画面。
+  const sameRoom = Boolean(previousRoomId && String(payload?.room?.room_id || "") === String(previousRoomId));
+  const keepLocalBattle = Boolean(
+    previousScreen === "battle"
+    && state.battle
+    && !state.replayMode
+    && sameRoom
+    && (state.holdBattleView || !payload.battle)
+  );
+  const frozenBattle = keepLocalBattle ? state.battle : null;
   // 拿到了新的房间状态，说明上一条失败已经翻篇了。
   state.roomError = "";
   if (Array.isArray(payload.heroes)) state.heroes = payload.heroes;
@@ -133,17 +147,27 @@ export function applyRoomPayload(payload, { preserveScreen = false } = {}) {
     adoptBattleLaunchFromRoom(state.room);
   }
   state.liveBattle = payload.battle || null;
+  if (frozenBattle) {
+    state.battle = frozenBattle;
+    state.liveBattle = frozenBattle;
+    state.holdBattleView = true;
+    if (state.room && state.settlementPostgame?.available) {
+      state.room.postgame = state.settlementPostgame;
+    }
+  } else if (!state.replayMode || !state.liveBattle) {
+    state.battle = state.liveBattle;
+  }
   if (!state.room || state.room.room_id !== previousRoomId) {
     state.aiPreview = null;
     state.gameOverDismissed = false;
+    state.holdBattleView = false;
+    state.settlementPostgame = null;
+    state.settlementSeats = null;
   }
   if (!state.room || state.room.room_id !== previousRoomId || !state.room.replay?.available) {
     state.replayMode = false;
     state.replayStepIndex = 0;
     state.replayOmniscient = false;
-  }
-  if (!state.replayMode || !state.liveBattle) {
-    state.battle = state.liveBattle;
   }
   if (!state.room) {
     state.roomEditSeatId = null;
@@ -182,6 +206,22 @@ export function applyRoomPayload(payload, { preserveScreen = false } = {}) {
     && Boolean(state.room?.viewer_player_id)
     && (!hadBattle || previousScreen === "battle");
   syncScreen({ preferBattle: autoEnterBattle || (preserveScreen && previousScreen === "battle") });
+  if (state.screen === "battle" && state.battle?.winner && !state.replayMode) {
+    state.holdBattleView = true;
+    if (state.room?.postgame?.available) {
+      state.settlementPostgame = JSON.parse(JSON.stringify(state.room.postgame));
+    }
+    if (!state.settlementSeats && state.room?.seats) {
+      state.settlementSeats = state.room.seats.map((seat) => ({
+        player_id: seat.player_id,
+        team_id: seat.team_id,
+        name: seat.name,
+        is_ai: seat.is_ai,
+        occupied: seat.occupied,
+        team_name: seat.team_name,
+      }));
+    }
+  }
   if (state.room?.mode === "autochess" && state.room.autochess?.phase !== "lobby" &&
       previousScreen === "draft" &&
       (previousRoomId !== state.room.room_id || previousChessPhase === "lobby")) {
@@ -213,7 +253,20 @@ export function isRandomRoomMode() {
   return state.room?.mode === "random";
 }
 
-export async function createRoom() {
+export function openModePicker() {
+  if (state.roomCreateBusy) return;
+  state.modePickerOpen = true;
+  render();
+}
+
+export function closeModePicker() {
+  if (state.roomCreateBusy) return;
+  state.modePickerOpen = false;
+  render();
+}
+
+export async function createRoom(mode = "classic") {
+  if (state.roomCreateBusy) return;
   if (!requireAuthForRoomEntry()) return;
   if (!state.profileReady) {
     openProfileModal();
@@ -222,22 +275,32 @@ export async function createRoom() {
   }
   const playerName = effectiveProfileName();
   state.roomForm.createName = playerName;
+  state.suppressRoomId = "";
+  state.roomCreateBusy = true;
+  state.modePickerOpen = false;
+  render();
   try {
     const payload = await fetchJson("/api/rooms/create", {
       method: "POST",
-      body: JSON.stringify({ player_name: playerName }),
+      body: JSON.stringify({ player_name: playerName, mode }),
     });
     state.playerToken = payload.player_token;
     saveStoredIdentity(payload.room.room_id, payload.player_token, payload.room.viewer_name || playerName);
     syncLocation("draft", payload.room.room_id);
     applyRoomPayload(payload);
-    render();
   } catch (error) {
-    $("lobby-caption").textContent = error.error || "创建房间失败。";
+    const message = error.error || "创建房间失败。";
+    state.homeLoadError = message;
+    const caption = $("lobby-caption");
+    if (caption) caption.textContent = message;
+  } finally {
+    state.roomCreateBusy = false;
+    render();
   }
 }
 
 export async function joinRoom(roomIdOverride = "") {
+  state.suppressRoomId = "";
   if (!requireAuthForRoomEntry()) return;
   if (!state.profileReady) {
     openProfileModal();
@@ -271,6 +334,7 @@ export async function joinRoom(roomIdOverride = "") {
 }
 
 function openListedRoom(roomId) {
+  state.suppressRoomId = "";
   state.playerToken = "";
   state.roomForm.joinRoomCode = roomId;
   $("join-room-code").value = roomId;
@@ -279,6 +343,7 @@ function openListedRoom(roomId) {
 }
 
 function joinListedRoom(roomId) {
+  state.suppressRoomId = "";
   if (!state.profileReady) {
     openProfileModal();
     render();
@@ -291,6 +356,7 @@ function joinListedRoom(roomId) {
 }
 
 export function resumeStoredSeat(roomId = roomQueryId()) {
+  state.suppressRoomId = "";
   const identity = loadStoredIdentity(roomId);
   if (!identity.token) {
     if (canReclaimSeatByName()) {
@@ -335,6 +401,22 @@ async function restartRoomDraft() {
   }
 }
 
+export async function leaveFinishedBattle() {
+  state.holdBattleView = false;
+  state.settlementPostgame = null;
+  state.settlementSeats = null;
+  const launch = currentBattleLaunch();
+  if (!launch.allowLobby || launch.source === "campaign") {
+    exitBattle();
+    return;
+  }
+  if (state.room?.status === "finished" && state.playerToken && state.room.viewer_is_host) {
+    await restartRoomDraft();
+    return;
+  }
+  setScreen("draft");
+}
+
 export async function deleteRoom() {
   if (!hasRoom() || !state.playerToken || !state.room?.viewer_is_host) return;
   const confirmed = await confirmDialog({
@@ -374,7 +456,10 @@ export async function leaveRoom() {
     tone: inBattle ? "danger" : "default",
   });
   if (!confirmed) return;
-  let caption = `你已离开房间 ${leftRoomId}。`;
+  const caption = `你已离开房间 ${leftRoomId}。`;
+  state.homeFlow = "skirmish";
+  state.modePickerOpen = false;
+  state.suppressRoomId = leftRoomId;
   try {
     if (state.playerToken && state.room.viewer_player_id !== null) {
       const payload = await fetchJson("/api/rooms/leave", {
@@ -384,19 +469,20 @@ export async function leaveRoom() {
           player_token: state.playerToken,
         }),
       });
-      caption = payload.room_deleted
-        ? `你已离开房间 ${leftRoomId},该房间因已无玩家而被关闭。`
-        : `你已离开房间 ${leftRoomId}。`;
       resetRoomSession({ rooms: payload.rooms || [], roomId: leftRoomId });
     } else {
       resetRoomSession({ roomId: leftRoomId });
     }
   } catch (error) {
     resetRoomSession({ roomId: leftRoomId });
-    caption = error.error || caption;
+    $("lobby-caption").textContent = error.error || caption;
+    setScreen("draft");
+    return;
   }
+  setScreen("draft");
   await refreshState({ preserveScreen: false });
-  $("lobby-caption").textContent = caption;
+  const note = $("lobby-caption");
+  if (note) note.textContent = caption;
 }
 
 export async function setAiStyles({ heroAiStyle, armyAiStyle } = {}) {
@@ -526,11 +612,19 @@ async function postBpAction(action, fields) {
 }
 
 export const setBpTeamSize = (teamSize) => postBpAction("team-size", {team_size: teamSize});
-export const setBpSettings = ({teamSize, levelCap, showWinCount}) => postBpAction("settings", {
-  team_size: teamSize, level_cap: levelCap, show_win_count: showWinCount,
+export const setBpSettings = ({teamSize, levelCap, showWinCount, format, allowSameHero, tierPool, tierRounds}) => postBpAction("settings", {
+  team_size: teamSize,
+  level_cap: levelCap,
+  show_win_count: showWinCount,
+  bp_format: format,
+  allow_same_hero: allowSameHero,
+  tier_pool: tierPool,
+  tier_rounds: tierRounds,
 });
 export const setBpCaptain = (teamId, seatId) => postBpAction("captain", {team_id: teamId, seat_id: seatId});
 export const bpChoose = (heroCode) => postBpAction("choose", {hero_code: heroCode});
+export const openBpAssign = () => postBpAction("open-assign", {});
+export const setBpTeamAi = (teamId, enabled) => postBpAction("team-ai", {team_id: teamId, enabled});
 export const bpAssign = (heroCode, controller) => postBpAction("assign", {hero_code: heroCode, controller});
 
 export async function setRandomRosterSize(rosterSize) {
@@ -579,6 +673,68 @@ export async function setRoomSeatCount(seatCount) {
       render();
     }
     reportRoomError(error.error || "调整席位数失败。");
+  }
+}
+
+export async function removeRoomSeat(seatId) {
+  if (!hasRoom() || !state.playerToken || !state.room?.viewer_is_host) return;
+  try {
+    const payload = await fetchJson("/api/rooms/remove-seat", {
+      method: "POST",
+      body: JSON.stringify({
+        room_id: state.room.room_id,
+        player_token: state.playerToken,
+        seat_id: seatId,
+      }),
+    });
+    applyRoomPayload(payload, { preserveScreen: true });
+    render();
+  } catch (error) {
+    if (error.state) {
+      applyRoomPayload(error.state, { preserveScreen: true });
+      render();
+    }
+    reportRoomError(error.error || "删除席位失败。");
+  }
+}
+
+export async function claimRoomSeat(seatId) {
+  if (!hasRoom() || !state.playerToken) return;
+  try {
+    const payload = await fetchJson("/api/rooms/claim-seat", {
+      method: "POST",
+      body: JSON.stringify({
+        room_id: state.room.room_id,
+        player_token: state.playerToken,
+        seat_id: seatId,
+      }),
+    });
+    applyRoomPayload(payload, { preserveScreen: true });
+    render();
+  } catch (error) {
+    if (error.state) {
+      applyRoomPayload(error.state, { preserveScreen: true });
+      render();
+    }
+    reportRoomError(error.error || "接管席位失败。");
+  }
+}
+
+export async function setRoomArmyEnabled(enabled) {
+  if (!hasRoom() || !state.playerToken || !state.room?.viewer_is_host) return;
+  try {
+    const payload = await fetchJson("/api/rooms/set-army-enabled", {
+      method: "POST",
+      body: JSON.stringify({
+        room_id: state.room.room_id,
+        player_token: state.playerToken,
+        enabled: Boolean(enabled),
+      }),
+    });
+    applyRoomPayload(payload, { preserveScreen: true });
+    render();
+  } catch (error) {
+    reportRoomError(error.error || "士兵配置开关失败。");
   }
 }
 
@@ -806,6 +962,32 @@ export async function setSeatRandomQuota(seatId, quota) {
   }
 }
 
+export async function deleteListedRoom(roomId) {
+  const confirmed = await confirmDialog({
+    title: "删除房间",
+    body: `房间 ${roomId} 将从列表里移除。正在里面的人需要重新建房。`,
+    confirmLabel: "删除房间",
+    tone: "danger",
+  });
+  if (!confirmed) return;
+  try {
+    const identity = loadStoredIdentity(roomId);
+    const payload = await fetchJson("/api/rooms/delete", {
+      method: "POST",
+      body: JSON.stringify({
+        room_id: roomId,
+        player_token: identity.token || state.playerToken || "",
+      }),
+    });
+    state.rooms = payload.rooms || [];
+    if (state.room?.room_id === roomId) resetRoomSession({ rooms: state.rooms, roomId });
+    render();
+  } catch (error) {
+    const caption = $("lobby-caption");
+    if (caption) caption.textContent = error.error || "删除房间失败。";
+  }
+}
+
 export function renderRoomListActive() {
   const list = $("room-list");
   if (!list) return;
@@ -813,30 +995,41 @@ export function renderRoomListActive() {
   if (!roomSummaries().length) {
     const empty = document.createElement("div");
     empty.className = "room-list-empty";
-    empty.textContent = "\u5f53\u524d\u8fd8\u6ca1\u6709\u516c\u5f00\u623f\u95f4\u3002\u4f60\u53ef\u4ee5\u5148\u521b\u5efa\u4e00\u95f4\uff0c\u6216\u8005\u7a0d\u540e\u7b49\u670b\u53cb\u5efa\u597d\u623f\u95f4\u540e\u76f4\u63a5\u5728\u8fd9\u91cc\u52a0\u5165\u3002";
+    empty.textContent = "还没有房间";
     list.append(empty);
     return;
   }
 
   roomSummaries().forEach((room) => {
     const remembered = loadStoredIdentity(room.room_id);
-    const seatSummary = (room.seats || [])
-      .map((seat) => {
-        const summary = seat.hero_summary || seat.hero_name || (room.mode === "random" && seat.occupied ? "\u5f00\u5c40\u540e\u968f\u673a\u5206\u914d" : "");
-        return `\u5e2d\u4f4d ${seat.player_id}\uff1a${seat.team_name || ""} \u00b7 ${seat.name || controllerTypeLabel(seat)}${summary ? ` \u00b7 ${summary}` : ""}`;
-      })
-      .join(" / ");
+    const face = roomModeFace(room);
     const card = document.createElement("article");
-    card.className = "room-list-card";
-    card.innerHTML = `
-      <div class="room-list-head">
-        <strong>\u623f\u95f4 ${room.room_id}</strong>
-        <span class="room-list-state ${roomStateClass(room)}">${roomStateLabel(room)}</span>
-      </div>
-      <div class="room-list-meta">\u5e2d\u4f4d ${room.occupied_seat_count}/${room.seat_count} \u00b7 ${room.mode_name || roomModeMeta(room.mode).name} \u00b7 ${room.status === "lobby" ? "\u7b49\u5f85\u73a9\u5bb6\u5c31\u7eea" : "\u6b63\u5728\u8fdb\u884c\u6216\u5df2\u7ed3\u675f"}</div>
-      <div class="room-list-seats">${seatSummary}</div>
-      <div class="room-list-note">${remembered.token ? "\u8fd9\u4e2a\u6d4f\u89c8\u5668\u4e4b\u524d\u8fdb\u5165\u8fc7\u8be5\u623f\u95f4\u3002\u4f60\u53ef\u4ee5\u7ee7\u7eed\u539f\u6765\u7684\u5e2d\u4f4d\uff0c\u4e5f\u53ef\u4ee5\u76f4\u63a5\u7528\u5f53\u524d\u6635\u79f0\u201c${effectiveProfileName()}\u201d\u4f5c\u4e3a\u65b0\u73a9\u5bb6\u52a0\u5165\u3002" : `\u73b0\u5728\u53ef\u4ee5\u76f4\u63a5\u7528\u5f53\u524d\u6635\u79f0\u201c${effectiveProfileName()}\u201d\u52a0\u5165\u3002`} </div>
-    `;
+    card.className = `room-list-card is-mode-${face.tone}`;
+
+    const plate = document.createElement("div");
+    plate.className = "room-mode-plate";
+    const plateTitle = document.createElement("strong");
+    plateTitle.textContent = face.title;
+    const plateHint = document.createElement("span");
+    plateHint.textContent = face.hint;
+    plate.append(plateTitle, plateHint);
+
+    const main = document.createElement("div");
+    main.className = "room-list-main";
+    const head = document.createElement("div");
+    head.className = "room-list-head";
+    const code = document.createElement("strong");
+    code.textContent = room.room_id;
+    const stateTag = document.createElement("span");
+    stateTag.className = `room-tag ${roomStateClass(room)}`;
+    stateTag.textContent = roomStateLabel(room);
+    head.append(code, stateTag);
+
+    const hostSeat = (room.seats || []).find((seat) => seat.is_host);
+    const meta = document.createElement("div");
+    meta.className = "room-list-meta";
+    meta.textContent = `房主 ${hostSeat?.name || "—"} · ${room.occupied_seat_count}/${room.seat_count} 席位`;
+    main.append(head, meta);
 
     const actions = document.createElement("div");
     actions.className = "room-list-actions";
@@ -861,22 +1054,26 @@ export function renderRoomListActive() {
       actions.append(resumeBtn);
     }
 
-    if (!remembered.token && room.can_join) {
-      const fillBtn = document.createElement("button");
-      fillBtn.className = "ghost";
-      fillBtn.textContent = "\u586b\u5165\u623f\u95f4\u7801";
-      fillBtn.addEventListener("click", () => {
-        state.roomForm.joinRoomCode = room.room_id;
-        joinListedRoom(room.room_id);
-        $("lobby-caption").textContent = `\u5df2\u586b\u5165\u623f\u95f4 ${room.room_id}\u3002\u70b9\u51fb\u201c\u52a0\u5165\u623f\u95f4\u201d\u540e\uff0c\u5c31\u4f1a\u4ee5\u201c${effectiveProfileName()}\u201d\u52a0\u5165\u3002`;
-        renderProfilePanel();
-      });
-      actions.append(fillBtn);
+    if (Number(room.owner_user_id) === Number(state.authUser?.id || 0)) {
+      const remove = document.createElement("button");
+      remove.className = "ghost";
+      remove.textContent = "删除";
+      remove.addEventListener("click", () => deleteListedRoom(room.room_id));
+      actions.append(remove);
     }
 
-    card.append(actions);
+    main.append(actions);
+    card.append(plate, main);
     list.append(card);
   });
+}
+
+function roomModeFace(room) {
+  const code = room?.mode || "classic";
+  if (code === "bp") return { tone: "bp", title: "BP", hint: "禁选" };
+  if (code === "autochess") return { tone: "chess", title: "自走棋", hint: "多路" };
+  if (code === "random") return { tone: "battle", title: "战场对战", hint: "随机" };
+  return { tone: "battle", title: "战场对战", hint: "选将" };
 }
 
 export async function startTutorialBattle() {
@@ -1080,7 +1277,11 @@ export async function startRoomBattle() {
       }),
     });
     applyRoomPayload(payload);
-    setScreen(state.room?.mode === "autochess" ? "autochess" : "battle", { renderAfter: false });
+    if (state.room?.status === "bp") {
+      setScreen("draft", { renderAfter: false });
+    } else {
+      setScreen(state.room?.mode === "autochess" ? "autochess" : "battle", { renderAfter: false });
+    }
     render();
   } catch (error) {
     const payload = error.state || null;

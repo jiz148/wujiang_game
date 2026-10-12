@@ -5,16 +5,15 @@ import { state, ui } from '../core/state.js';
 import { setScreen, syncScreen } from '../core/ui.js';
 import { closeProfileModal, confirmProfile, effectiveProfileName, normalizeProfileName, openProfileModal, renderProfilePanel } from '../platform/auth.js';
 import { refreshRecentMatches } from '../platform/home.js';
-import { exitBattle } from '../bridge/battle-launch.js';
 import { advanceStrategyMonth, exitStrategyCampaignView, joinStrategyCampaignByCode, openStrategyCampaignCreator, refreshStrategyCampaigns, returnToStrategyCampaign } from '../strategic/api.js';
 import { connectionStatusLabel, readyStateLabel } from '../strategic/ui-base.js';
 import { renderRecoveryButton, renderStrategyPanel } from '../strategic/workbench.js';
-import { chainQueuedActionPrompt, hideTooltip, renderHoverCard, roomStateLabel, scheduleBoardOverlayRender, showTooltip } from '../tactical/battle-ui.js';
+import { battleWinnerLabel, chainQueuedActionPrompt, hideTooltip, renderHoverCard, roomStateLabel, scheduleBoardOverlayRender, showTooltip } from '../tactical/battle-ui.js';
 import { closeKeyboardHelp, focusMainContent, handleBattleKeyboard, onBoardClick, openKeyboardHelp } from '../tactical/board-input.js';
 import { canEditRoomSetup, canManageSeatArmy, canManageSeatRoster, closeAutoConfigure, closeHeroDetail, closeHeroPicker, closeRoomSetup, confirmAutoConfigure, confirmRoomSetup, isSeatLocked, openAutoConfigure, openHeroDetail, openHeroPicker, openRoomSetup, renderAutoConfigureDialog, renderHeroPicker, renderRoomSetupDialog, roomHeroLimit, seatHeroEntries, updateAutoConfigureDraft, updateRoomSetupDraft } from '../tactical/room-lobby.js';
 import { renderBpPanel } from '../tactical/bp-ui.js';
 import { bindAutoChessEvents, renderAutoChessPanel } from '../tactical/autochess-ui.js';
-import { applyRoomPayload, canReclaimSeatByName, controlSimulation, copyInviteLink, createRoom, deleteRoom, exitTutorial, isRandomRoomMode, joinRoom, leaveReplayMode, leaveRoom, loadReplayStep, performAction, renderTutorialGuide, restartFromGameOver, resumeStoredSeat, resumeTutorialBattle, retryTutorialStep, roomModeMeta, selectRoomHero, setAiStyles, setRoomSeatController, setRoomSeatTeam, setSeatArmyComposition, setSeatRandomQuota, shouldShowLobbyPanel, startRoomBattle, startTutorialBattle, surrenderBattle, toggleAiTakeover, toggleRoomReady } from '../tactical/room-api.js';
+import { applyRoomPayload, canReclaimSeatByName, claimRoomSeat, closeModePicker, controlSimulation, copyInviteLink, createRoom, deleteRoom, exitTutorial, isRandomRoomMode, joinRoom, leaveFinishedBattle, leaveReplayMode, leaveRoom, loadReplayStep, openModePicker, performAction, removeRoomSeat, renderTutorialGuide, restartFromGameOver, resumeStoredSeat, resumeTutorialBattle, retryTutorialStep, roomModeMeta, selectRoomHero, setAiStyles, setRoomSeatController, setRoomSeatCount, setRoomSeatTeam, setSeatArmyComposition, setSeatRandomQuota, shouldShowLobbyPanel, startRoomBattle, startTutorialBattle, surrenderBattle, toggleAiTakeover, toggleRoomReady } from '../tactical/room-api.js';
 import { clearActionSelection, loadStoredIdentity } from '../tactical/session.js';
 import { bodyDirectionSelection, canCompleteTargetSelection, choicePatternSelection, controllerTypeLabel, currentRoomSeat, hasCancelableTargetSelection, isBoardTargetSelectionActive, movePathSelection, multiUnitSelection, patternSelection, randomRoomRosterSize, reviveUnitCellSelection, roomSummaries, sanitizeRandomRosterSizeInput, seatHeroSummary, setStagedAttackVariant, setStagedBodyDirection, setStagedPatternChoice, setStagedReviveUnitId, setStagedStatName, setStagedUnitDirection, stagedAttackActionPayload, stagedBodyCells, stagedBodyDirection, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, stagedUnitDirection, stagedUnitDirectionTargetId, statCellSelection, unitDirectionSelection } from '../tactical/targeting.js';
 import { clearBattleVfx, selectedAction, tutorialState } from '../tactical/vfx.js';
@@ -106,7 +105,11 @@ export function bindEvents() {
   });
   $("profile-save").addEventListener("click", confirmProfile);
   $("profile-cancel").addEventListener("click", closeProfileModal);
-  $("create-room").addEventListener("click", createRoom);
+  $("create-room").addEventListener("click", openModePicker);
+  $("room-create-back")?.addEventListener("click", closeModePicker);
+  $("mode-classic")?.addEventListener("click", () => createRoom("classic"));
+  $("mode-bp")?.addEventListener("click", () => createRoom("bp"));
+  $("mode-autochess")?.addEventListener("click", () => createRoom("autochess"));
   $("join-room").addEventListener("click", () => joinRoom());
   $("resume-room").addEventListener("click", () => resumeStoredSeat());
   $("recover-room").addEventListener("click", () => resumeStoredSeat());
@@ -123,6 +126,10 @@ export function bindEvents() {
   });
   $("board-zoom-in").addEventListener("click", () => {
     adjustBoardZoom(0.15);
+  });
+  $("sim-speed")?.addEventListener("change", (event) => {
+    if (!state.room?.simulation?.can_control) return;
+    controlSimulation("set_speed", Number(event.target.value || 1));
   });
   $("replay-step-back").addEventListener("click", () => {
     if (!replayMeta().available) return;
@@ -278,7 +285,7 @@ export function bindEvents() {
     scheduleBoardOverlayRender();
   });
   $("room-battle").addEventListener("click", () => setScreen(state.room?.mode === "autochess" ? "autochess" : "battle"));
-  $("return-room-lobby")?.addEventListener("click", () => exitBattle());
+  $("return-room-lobby")?.addEventListener("click", () => leaveFinishedBattle());
   $("ai-takeover-toggle")?.addEventListener("click", () => toggleAiTakeover());
   $("ai-hero-style")?.addEventListener("change", (event) => {
     setAiStyles({ heroAiStyle: event.target.value });
@@ -291,7 +298,7 @@ export function bindEvents() {
     renderBattleConsole();
   });
   $("game-over-strategy").addEventListener("click", returnToStrategyCampaign);
-  $("game-over-back").addEventListener("click", () => exitBattle());
+  $("game-over-back").addEventListener("click", () => leaveFinishedBattle());
   $("game-over-rematch").addEventListener("click", restartFromGameOver);
   $("game-over-details-toggle")?.addEventListener("click", () => {
     state.gameOverShowDetails = !state.gameOverShowDetails;
@@ -647,12 +654,12 @@ export function fallbackRoomModes() {
     {
       code: "bp",
       name: "BP模式",
-      description: "每局随机禁用两个等级的全部武将，队长再轮流禁选并分配控制权，支持3v3和5v5。",
+      description: "两人轮流禁选。全体选择沿用等级上限；随机等级每一轮抽一个点数。",
     },
     {
       code: "autochess",
       name: "自走棋",
-      description: "4 人或 8 人经营阵容、自动战斗，最后存活者获胜。",
+      description: "8 人经营阵容、自动战斗，最后存活者获胜。",
     },
   ];
 }
@@ -782,6 +789,12 @@ export function renderBoardZoomControls() {
   zoomOut.disabled = zoom <= 0.46;
   zoomIn.disabled = zoom >= 1.84;
   zoomReset.disabled = Math.abs(zoom - 1) < 0.01;
+  const speed = $("sim-speed");
+  if (speed && document.activeElement !== speed) {
+    const current = String(state.room?.simulation?.speed ?? 1);
+    if ([...speed.options].some((option) => option.value === current)) speed.value = current;
+    speed.disabled = !state.room?.simulation?.can_control;
+  }
 }
 
 export function renderConnectionAndTurnState() {
@@ -857,6 +870,26 @@ function bindRoomLobbyDialogs() {
   $("bp-show-win-count")?.addEventListener("change", (event) => {
     if (state.roomSetupDraft) state.roomSetupDraft.bpShowWinCount = Boolean(event.target.checked);
   });
+  $("bp-format-select")?.addEventListener("change", (event) => {
+    updateRoomSetupDraft("bpFormat", event.target.value);
+    renderRoomSetupDialog();
+  });
+  $("bp-allow-same-hero")?.addEventListener("change", (event) => {
+    if (state.roomSetupDraft) state.roomSetupDraft.bpAllowSameHero = Boolean(event.target.checked);
+  });
+  $("bp-tier-rounds-input")?.addEventListener("input", (event) => {
+    updateRoomSetupDraft("bpTierRounds", event.target.value);
+  });
+  $("bp-tier-pool")?.addEventListener("click", (event) => {
+    const chip = event.target.closest("[data-level]");
+    if (!chip || !state.roomSetupDraft) return;
+    const level = Number(chip.dataset.level);
+    const pool = new Set((state.roomSetupDraft.bpTierPool || []).map(Number));
+    if (pool.has(level)) pool.delete(level);
+    else pool.add(level);
+    state.roomSetupDraft.bpTierPool = [...pool].sort((left, right) => left - right);
+    renderRoomSetupDialog();
+  });
   $("room-hero-limit-enabled")?.addEventListener("change", (event) => {
     if (!state.roomSetupDraft) return;
     state.roomSetupDraft.heroLimitEnabled = Boolean(event.target.checked);
@@ -864,6 +897,9 @@ function bindRoomLobbyDialogs() {
       state.roomSetupDraft.heroLimit = "5";
     }
     renderRoomSetupDialog();
+  });
+  $("room-army-enabled")?.addEventListener("change", (event) => {
+    if (state.roomSetupDraft) state.roomSetupDraft.armyEnabled = Boolean(event.target.checked);
   });
   $("room-hero-limit-input")?.addEventListener("input", (event) => {
     const raw = Number.parseInt(event.target.value, 10);
@@ -881,6 +917,10 @@ function bindRoomLobbyDialogs() {
     updateRoomSetupDraft("boardHeight", event.target.value);
   });
   $("auto-configure-room")?.addEventListener("click", openAutoConfigure);
+  $("add-seat")?.addEventListener("click", () => {
+    if (!state.room) return;
+    setRoomSeatCount(Number(state.room.seat_count || 2) + 1);
+  });
   $("auto-configure-cancel")?.addEventListener("click", closeAutoConfigure);
   $("auto-configure-confirm")?.addEventListener("click", confirmAutoConfigure);
   $("auto-configure-method-count")?.addEventListener("change", () => {
@@ -996,6 +1036,7 @@ function seatBadgeKind(label) {
   if (label === "AI") return "ai";
   if (label === "开放") return "open";
   if (label === "房主") return "host";
+  if (label === "你") return "you";
   return "";
 }
 
@@ -1026,10 +1067,9 @@ function createSeatCard(seat) {
   name.textContent = `席位 ${seat.player_id}`;
   const badges = document.createElement("div");
   badges.className = "seat-badges";
-  [seat.team_name, controllerTypeLabel(seat), seat.is_host ? "房主" : ""]
-    .filter(Boolean)
-    .forEach((label) => badges.append(createSeatBadge(label)));
+  if (seat.team_name && state.room.mode !== "autochess") badges.append(createSeatBadge(seat.team_name));
   head.append(name, badges);
+  if (isViewer) card.dataset.viewerSeat = "true";
   const player = document.createElement("div");
   player.className = "seat-player";
   player.textContent = seat.name || "空位";
@@ -1067,7 +1107,7 @@ function createSeatCard(seat) {
       roster.append(empty);
     }
   }
-  card.append(roster);
+  if (state.room.mode !== "autochess") card.append(roster);
 
   const armyKinds = state.room.army_kinds?.length
     ? state.room.army_kinds
@@ -1078,8 +1118,8 @@ function createSeatCard(seat) {
     ];
   const armyCounts = seat.army_counts || {};
   const armyTotal = Number(seat.army_total_count || 0);
-  const manageArmy = canManageSeatArmy(seat);
-  if (manageArmy || armyTotal > 0) {
+  const manageArmy = canManageSeatArmy(seat) && state.room.army_enabled;
+  if (state.room.army_enabled && (manageArmy || armyTotal > 0)) {
     const army = document.createElement("div");
     army.className = "seat-block seat-block--army seat-army";
     const armyTitle = document.createElement("div");
@@ -1127,35 +1167,54 @@ function createSeatCard(seat) {
     card.append(army);
   }
 
-  const showConfig = Boolean(state.room.viewer_is_host && state.room.status === "lobby");
-  if (showConfig || seat.occupied) {
+  const lobbyOpen = state.room.status === "lobby";
+  const showTeam = Boolean(state.room.viewer_is_host && lobbyOpen);
+  const canClaim = Boolean(lobbyOpen && !isViewer && !seat.is_human && state.room.viewer_player_id);
+  const showStatus = lobbyOpen && (showTeam || canClaim || seat.is_human || isViewer);
+  if (showTeam || showStatus || seat.occupied) {
     const config = document.createElement("div");
     config.className = "seat-block seat-block--config";
-    if (showConfig) {
+    if (showTeam || showStatus) {
       const controls = document.createElement("div");
       controls.className = "seat-controls";
-      const teamField = createSeatSelect(
-        seat,
-        "队伍",
-        "seatTeam",
-        [["1", "红队"], ["2", "蓝队"]],
-        String(seat.team_id),
-        (value) => setRoomSeatTeam(seat.player_id, value),
-      );
-      teamField.selectEl.disabled = locked;
-      controls.append(teamField);
-      const controllerField = createSeatSelect(
-        seat,
-        "状态",
-        "seatController",
-        seat.is_human ? [["human", "真人"]] : [["open", "开放"], ["ai", "AI"]],
-        seat.is_human ? "human" : String(seat.controller_type || "open"),
-        (value) => setRoomSeatController(seat.player_id, value),
-      );
-      // 真人已经坐下了，房主不能把他改成 AI 或开放位；准备之后整张卡都锁住。
-      controllerField.selectEl.disabled = Boolean(seat.is_human || locked);
-      controls.append(controllerField);
-      if (isRandomRoomMode()) {
+      if (showTeam && state.room.mode !== "autochess") {
+        const teamField = createSeatSelect(
+          seat,
+          "队伍",
+          "seatTeam",
+          [["1", "红队"], ["2", "蓝队"]],
+          String(seat.team_id),
+          (value) => setRoomSeatTeam(seat.player_id, value),
+        );
+        teamField.selectEl.disabled = locked;
+        controls.append(teamField);
+      }
+      if (showStatus) {
+        const current = seat.is_human ? "human" : String(seat.controller_type || "open");
+        const options = [];
+        if (seat.is_human || isViewer) {
+          options.push(["human", "真人"]);
+        } else if (state.room.viewer_is_host) {
+          options.push(["open", "开放"], ["ai", "AI"]);
+          if (canClaim) options.push(["claim", "接管"]);
+        } else {
+          options.push([current, current === "ai" ? "AI" : "开放"], ["claim", "接管"]);
+        }
+        const statusField = createSeatSelect(
+          seat,
+          "状态",
+          "seatController",
+          options,
+          seat.is_human || isViewer ? "human" : current,
+          (value) => {
+            if (value === "claim") claimRoomSeat(seat.player_id);
+            else if (state.room.viewer_is_host) setRoomSeatController(seat.player_id, value);
+          },
+        );
+        statusField.selectEl.disabled = Boolean(seat.is_human || isViewer || locked);
+        controls.append(statusField);
+      }
+      if (showTeam && isRandomRoomMode()) {
         const quotaField = document.createElement("label");
         quotaField.className = "seat-control";
         const quotaLabel = document.createElement("span");
@@ -1194,6 +1253,18 @@ function createSeatCard(seat) {
     }
     card.append(config);
   }
+  const seatActions = document.createElement("div");
+  seatActions.className = "seat-actions";
+  const minSeats = Number(state.room.seat_count_min || 2);
+  if (lobbyOpen && state.room.viewer_is_host && !isViewer && Number(state.room.seat_count) > minSeats && state.room.mode !== "autochess") {
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "ghost";
+    remove.textContent = "删除";
+    remove.addEventListener("click", () => removeRoomSeat(seat.player_id));
+    seatActions.append(remove);
+  }
+  if (seatActions.childElementCount) card.append(seatActions);
   return card;
 }
 
@@ -1204,6 +1275,9 @@ export function renderRoomPanels() {
   $("room-lobby").classList.toggle("hidden", !showLobby);
   $("join-room-code").value = roomId || state.roomForm.joinRoomCode;
 
+  document.body.classList.toggle("in-room-lobby", Boolean(showLobby));
+  const hostTag = $("room-host-tag");
+  if (hostTag) hostTag.classList.toggle("hidden", !(showLobby && state.room?.viewer_is_host));
   const title = $("lobby-title");
   const caption = $("lobby-caption");
   const copyInvite = $("copy-invite");
@@ -1255,7 +1329,7 @@ export function renderRoomPanels() {
     return;
   }
 
-  title.textContent = `房间 ${state.room.room_id}`;
+  title.textContent = state.room.room_id;
   // 这一行平时空着。建房页此前挂着一整段随状态改写的解说，那些话看一遍就够，
   // 却要一直占着位置；现在只有操作失败时才会有字。
   if (caption) {
@@ -1278,8 +1352,12 @@ export function renderRoomPanels() {
   $("invite-path-label").textContent = state.room.invite_url || state.room.invite_path;
 
   const modeMeta = roomModeMeta();
-  $("room-mode-label").textContent = modeMeta.name;
-  $("room-seat-count-label").textContent = `${state.room.seat_count} / ${state.room.seat_count_max}`;
+  $("room-mode-label").textContent = state.room.mode === "bp"
+    ? `BP · ${state.room.bp?.format === "tier" ? "随机等级" : "全体选择"}`
+    : modeMeta.name;
+  $("room-seat-count-label").textContent = state.room.mode === "autochess"
+    ? String(state.room.seat_count)
+    : `${state.room.seat_count} / ${state.room.seat_count_max}`;
   $("room-random-size-fact").classList.toggle("hidden", !isRandomRoomMode());
   $("room-random-size-label").textContent = String(randomRoomRosterSize());
   const heroLimit = roomHeroLimit();
@@ -1300,6 +1378,17 @@ export function renderRoomPanels() {
   if (openSetup) openSetup.classList.toggle("hidden", !canEditRoomSetup());
   const autoConfigure = $("auto-configure-room");
   if (autoConfigure) autoConfigure.classList.toggle("hidden", ["bp", "autochess"].includes(state.room.mode) || !canEditRoomSetup());
+  const addSeat = $("add-seat");
+  if (addSeat) {
+    const maxSeats = Number(state.room.seat_count_max || 6);
+    const showAdd = Boolean(
+      state.room.viewer_is_host
+      && state.room.status === "lobby"
+      && !["autochess", "bp"].includes(state.room.mode),
+    );
+    addSeat.classList.toggle("hidden", !showAdd);
+    addSeat.disabled = Number(state.room.seat_count) >= maxSeats;
+  }
 
   leaveRoomBtn.classList.remove("hidden");
   leaveRoomBtn.disabled = false;
@@ -1314,8 +1403,8 @@ export function renderRoomPanels() {
   roomBattle.classList.remove("ghost");
   if (toggleReady) {
     const canShowReady = Boolean(viewerSeat?.is_human && state.room.status === "lobby" && state.room.mode !== "autochess");
-    toggleReady.textContent = viewerSeat?.ready ? "取消准备" : "确认准备";
-    toggleReady.className = viewerSeat?.ready ? "primary" : "ghost";
+    toggleReady.textContent = viewerSeat?.ready ? "已准备" : "未准备";
+    toggleReady.className = `ready-toggle${viewerSeat?.ready ? " is-ready" : " is-waiting"}`;
     toggleReady.classList.toggle("hidden", !canShowReady);
     toggleReady.disabled = !viewerSeat?.ready && !state.room.configuration_ready;
   }
@@ -1323,14 +1412,14 @@ export function renderRoomPanels() {
     ? Boolean(state.room.viewer_is_host && state.room.status === "lobby")
     : state.room.status === "finished"
     ? state.room.viewer_player_id !== null
-    : Boolean(state.room.viewer_is_host && (state.room.status === "lobby" && state.room.mode !== "bp" || state.room.status === "bp" && state.room.bp?.phase === "assign"));
+    : Boolean(state.room.viewer_is_host && (state.room.status === "lobby" || state.room.status === "bp" && state.room.bp?.phase === "assign"));
   startRoom.classList.toggle("hidden", !canShowStart);
   startRoom.disabled = state.room.status === "finished" ? !state.room.can_rematch : !state.room.can_start;
   startRoom.textContent = state.room.status === "finished"
     ? (state.room.mode === "bp"
       ? (state.room.viewer_is_host ? "进入下一局 BP" : "等待房主开启下一局 BP")
       : (state.room.viewer_is_host ? "同配置再来一局" : "等待房主再开一局"))
-    : (state.room.mode === "autochess" ? "开始自走棋并由 AI 补位" : (state.room.mode === "bp" ? "完成分配并开战" : (isRandomRoomMode() ? "开始随机对局" : "开始对局")));
+    : (state.room.mode === "autochess" ? "开始自走棋" : (state.room.mode === "bp" ? (state.room.status === "lobby" ? "开始禁选" : "完成分配并开战") : (isRandomRoomMode() ? "开始随机对局" : "开始对局")));
   // 开不了局的原因挂在按钮上。它只有在你想开局时才有意义，不值得为它常设一段文字。
   startRoom.title = startRoom.disabled ? String(state.room.start_blocker || "") : "";
   renderRoomOverflowMenu();
@@ -1339,7 +1428,7 @@ export function renderRoomPanels() {
   const inBp = state.room.mode === "bp" && state.room.status === "bp";
   const inChess = state.room.mode === "autochess";
   $("room-setup-section")?.classList.toggle("hidden", inBp || (inChess && state.room.status !== "lobby"));
-  seatCards.classList.toggle("hidden", inBp || inChess);
+  seatCards.classList.toggle("hidden", inBp || (inChess && state.room.status !== "lobby"));
   seatCards.replaceChildren();
   (state.room.seats || []).forEach((seat) => seatCards.append(createSeatCard(seat)));
   renderBpPanel();
@@ -1509,8 +1598,11 @@ export function renderHeader() {
     return;
   }
   if (isGameOver()) {
-    pill.textContent = `\u623f\u95f4 ${state.room.room_id} \u00b7 \u73a9\u5bb6 ${state.battle.winner} \u83b7\u80dc`;
-    caption.textContent = `\u73a9\u5bb6 ${state.battle.winner} \u5df2\u83b7\u80dc\uff0c\u6218\u573a\u5df2\u9501\u5b9a\u3002`;
+    const winnerLabel = state.room?.mode === "bp"
+      ? battleWinnerLabel(state.battle, state.room)
+      : `\u73a9\u5bb6 ${state.battle.winner}`;
+    pill.textContent = `\u623f\u95f4 ${state.room.room_id} \u00b7 ${winnerLabel} \u83b7\u80dc`;
+    caption.textContent = `${winnerLabel} \u5df2\u83b7\u80dc\uff0c\u6218\u573a\u5df2\u9501\u5b9a\u3002`;
     return;
   }
   if (isRespawnMode()) {
