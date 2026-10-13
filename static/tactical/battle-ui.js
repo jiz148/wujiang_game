@@ -57,6 +57,16 @@ function renderBoardAlert() {
 
   const action = selectedAction();
 
+  if (action?.preview?.selection?.mode === "ancient_fusion") {
+    const escape = (value) => String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
+    const selection = action.preview.selection;
+    const buttons = (selection.targets || []).flatMap((target) => (selection.skills || []).map((skill) =>
+      `<button type="button" class="board-alert-choice" data-ancient-fusion-target="${escape(target.unit_id)}" data-ancient-fusion-skill="${escape(skill.code)}">${escape(target.name)} · 继承${escape(skill.name)}</button>`
+    )).join("");
+    showBoardHint("古代融合", "选择受体和传承技能后，施放者会被破坏；受体永久攻守速+1，并获得施放者的特性。", buttons);
+    return;
+  }
+
   if (action?.preview?.selection?.mode === "mimic_skill") {
     const escape = (value) => String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
     const buttons = (action.preview.selection.targets || []).flatMap((source) => source.skills.map((skill) =>

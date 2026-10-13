@@ -3,20 +3,23 @@
   "review_process": "原73名设计优先检查修改及第三轮武将线动态复测已完成。2026-10-02用户授权新增武将：每批先锁源设计，再实现战斗、AI、前端和行为场景；助手不运行动态测试，由用户执行仅覆盖新增批次的命令，报告保存在共享工作区。",
   "validation_policy": {
     "mode": "new_hero_batch_user_validation",
-    "scope": "原73名第三轮复测通过；R247用户专场7项行为通过、10场AI零高信号但有2场步数上限；R245/R246跨将异常已静态修复待复跑；R248二次报告6项行为5过、1项AI评分夹具失败且模拟缓慢，夹具和候选路径已静态修复待用户重跑",
+    "scope": "原73名第三轮复测通过；R247用户专场7项行为通过、10场AI零高信号但有2场步数上限；R245/R246跨将异常已静态修复待复跑；R248评分夹具和慢候选静态修复待用户复跑；R249/R251静态实施待用户专场",
     "per_batch_test_gate": false,
-    "final_command": "python detail_test_all_wujiangs.py --targets excel_r248 --regression-filter NewBatch248 --out reports/new-batch-248-20261012-optimized",
+    "final_command": "python detail_test_all_wujiangs.py --targets excel_r249,excel_r251 --regression-filter NewBatch249251 --matches-per-hero 3 --max-steps 150 --out reports/new-batch-249251-20261012",
     "user_override_date": "2026-10-05"
   },
   "current_hero_codes": [
-    "excel_r248"
+    "excel_r249",
+    "excel_r251"
   ],
   "developed_hero_inspection_progress": {
     "definition": "完成新设计优先流程：独立记录并锁定设计初衷，随后对照审查战斗实现、武将专属与通用AI、测试，并完成所有必要修改；用户复测签收单独统计",
-    "developed_public_total": 95,
-    "inspected_and_modified": 95,
+    "developed_public_total": 97,
+    "inspected_and_modified": 97,
     "remaining_to_inspect_and_modify": 0,
     "inspected_and_modified_codes": [
+      "excel_r249",
+      "excel_r251",
       "excel_r248",
       "excel_r247",
       "excel_r245",
@@ -113,12 +116,14 @@
       "excel_r291",
       "excel_r356"
     ],
-    "remaining_set_rule": "原73名第三轮复测通过；R191/R195/R194/R197/R215定向通过；R192/R193/R196/R219待复测；R221/R222/R223待定向，R238/R240/R242与R239/R243/R244各首报告一处共用错误已静态修正，R245/R246用户专场跨将异常已静态修复，R247待用户运行。",
+    "remaining_set_rule": "原73名第三轮复测通过；R191/R195/R194/R197/R215定向通过；R192/R193/R196/R219待复测；R221/R222/R223待定向；R238/R240/R242与R239/R243/R244各首报告一处共用错误已静态修正；R245/R246跨将异常待复跑；R247首轮专场完成；R248优化及R249/R251待专场。",
     "focused_retest_accepted": 78,
-    "awaiting_consolidated_test": 16,
-    "awaiting_consolidated_test_definition": "R192/R193/R196夹具、R219失效受体待复测；R221/R222/R223待定向；R238/R240/R242及R239/R243/R244首报告共用错误各一处已静态修复待复测；R245/R246跨将异常待复跑；R247首轮定向7项通过、10场AI零高信号，2场步数上限另存观察；R248二次报告5/6行为通过、前2/10场AI零高信号，评分夹具与候选慢已静态修复待用户重跑。"
+    "awaiting_consolidated_test": 18,
+    "awaiting_consolidated_test_definition": "R192/R193/R196夹具、R219失效受体待复测；R221/R222/R223待定向；R238/R240/R242及R239/R243/R244首报告共用错误各一处已静态修复待复测；R245/R246跨将异常待复跑；R247首轮定向7项通过、10场AI零高信号，2场步数上限另存观察；R248评分夹具与候选慢静态修复待复跑；R249/R251静态实施待用户专场。"
   },
   "heroes": [
+    {"code":"excel_r249","name":"古代的工兵","batch":"H11-new-20261012","design_baseline":"docs/武将设计思想.json#excel_r249","baseline_locked_at":"2026-10-12","review_status":"源设计先锁；修整、真实死亡融合、传承及非目标技能连锁封锁已静态实施。","acceptance_status":"pending_focused_user_validation","audit_evidence":"源249、保存R249-Q001至Q004及通用澄清；NewBatch249251场景覆盖公开名单、修整资格和期限、融合独立技能额度、AI价值；助手未运行测试。","items":[]},
+    {"code":"excel_r251","name":"古代机械炮台","batch":"H11-new-20261012","design_baseline":"docs/武将设计思想.json#excel_r251","baseline_locked_at":"2026-10-12","review_status":"源设计先锁；4×4双方普攻、破魔禁疗、来源死亡清理与融合传承已静态实施。","acceptance_status":"pending_focused_user_validation","audit_evidence":"源251、保存R251-Q001至Q004及通用澄清；NewBatch249251场景覆盖面积普攻、禁疗与死亡清理；助手未运行测试。","items":[]},
     {
       "code": "excel_r248", "name": "地狱的古龙。GRUFER", "batch": "H10-new-20261012", "design_baseline": "docs/武将设计思想.json#excel_r248", "baseline_locked_at": "2026-10-12", "review_status": "源248与保存Q001先锁；战斗、AI、房间和界面已实施；公开名单修正后用户二次报告5/6行为通过，余一场景夹具与AI大范围候选慢已静态修正，待完整重跑。", "acceptance_status": "pending_focused_user_validation", "audit_evidence": "源248、保存Q001=b及独立推定Q002–006；首报告公开名单缺失，二次报告6项行为5过、前2/10场AI零高信号且后续很慢；NewBatch248夹具已修、AI候选先去重和预筛再完整预演；助手未运行测试。",
       "items": [
@@ -4182,5 +4187,5 @@
       ]
     }
   ],
-  "updated_at": "2026-10-11"
+  "updated_at": "2026-10-12"
 }

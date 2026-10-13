@@ -4,6 +4,10 @@
 
 Update this file after every new gameplay requirement or code change in `wujiang_game`. Keep entries concise and durable; do not paste full docs.
 
+- 2026-10-12 BP“真男人模式”修正：源表“只能使用主动技能”约束技能类型，不禁普攻。`engine/core.py::basic_attack_resource_allowed` 移除该模式对普攻的全局封锁；操作预览和 AI 候选沿用同一合法性判断。`rooms/special_modes.py`、BP 规则与武将游戏规则同步说明，`BPSpecialModeBehaviorTests` 覆盖玩家与 AI 普攻可用及动作声明；动态验证待统一运行。
+
+- 2026-10-12 Phase H R249/R251：源249/251、保存问卷和通用敌我范围先独立锁入设计JSON/XLSX。`excel_roster.py`接工兵机甲修整、伤害时旁观者技能封锁，以及两将共用真实死亡古代融合；炮台4×4双方普攻、下一次普攻破魔禁疗。`engine/core.py`在来源死亡后清理持续状态，`rooms/ai.py`评估修整、禁疗、区域友伤和融合牺牲，前端提供受体/技能融合选择。`NewBatch249251AncientBehaviorTests`静态写入待用户运行；公开池97/388，剩余291。R248优化仍待用户动态复跑。
+
 - 2026-10-12 R248复跑报告：6项定向行为5过，火焰AI评分场景因夹具未切到古龙本人轮，合法性预演两候选均`-1000`；现设正确轮槽。地狱之火AI原对大量5×5候选逐个完整回滚和逐目标探针，导致用户模拟久等；现按受体/多格命中去重、双方净值轻量预筛，仅前12组合完整预演。2/10场初始AI无高信号，整场报告未完成；静态修复待用户验证。
 
 - 2026-10-12 R248首报告入口故障：用户定向命令在公开目录校验处报`Unknown or non-public target hero code(s): excel_r248`，未进入测试/AI。责任是`heroes/excel_roster.py::IMPLEMENTED_EXCEL_HERO_CODES`漏列R248，已补；`NewBatch248HellDragonBehaviorTests`新增公开目录断言，静态检查通过待用户重跑。新增将交付须同时核对工厂注册与公开名单。

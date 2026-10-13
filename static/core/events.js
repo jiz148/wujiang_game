@@ -359,6 +359,13 @@ export function bindEvents() {
   });
   document.addEventListener("click", (event) => {
     const target = event.target instanceof Element ? event.target : null;
+    const fusionButton = target?.closest("[data-ancient-fusion-target]");
+    if (fusionButton && canInteract() && selectedAction()?.code === "ancient_fusion") {
+      performAction({ type: "skill", unit_id: state.selectedUnitId, skill_code: "ancient_fusion",
+        target_unit_id: fusionButton.dataset.ancientFusionTarget,
+        copied_skill_code: fusionButton.dataset.ancientFusionSkill });
+      return;
+    }
     if (target?.closest("[data-heaven-select]")) {
       if (selectedAction()?.code !== "heaven_punishment" || !canInteract()) return;
       state.stagedPayload = { ...(state.stagedPayload || {}),

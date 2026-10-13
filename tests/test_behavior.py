@@ -27055,6 +27055,30 @@ class BPSpecialModeBehaviorTests(unittest.TestCase):
         self.assertTrue(victim.alive)
         self.assertEqual(victim.stat("attack"), base_attack)
 
+    def test_real_men_keeps_player_and_ai_basic_attacks_available(self):
+        from wujiang.tactical.engine.core import Position
+        from wujiang.tactical.rooms.ai import build_attack_candidates, difficulty_profile
+        from wujiang.tactical.rooms.special_modes import SPECIAL_MODE_BY_CODE
+
+        battle = self.battle("real_men")
+        actor = battle.current_turn_unit()
+        target = next(hero for hero in battle.hero_units(3 - actor.player_id)
+                      if hero.hero_code == "bard")
+        actor.position, target.position = Position(4, 4), Position(5, 4)
+        actor.base_stats.attack = max(5, actor.base_stats.attack)
+        target.base_stats.defense = 0
+        attack = next(action for action in battle.action_snapshot_for(actor)["actions"]
+                      if action["code"] == "attack")
+        self.assertIn("普攻", SPECIAL_MODE_BY_CODE["real_men"]["description"])
+        self.assertTrue(attack["available"])
+        self.assertIn(target.unit_id, attack["preview"]["target_unit_ids"])
+        self.assertTrue(build_attack_candidates(battle, actor, attack, difficulty_profile("standard")))
+
+        battle.perform_action({"type": "attack", "unit_id": actor.unit_id,
+                               "target_unit_id": target.unit_id})
+        resolve_pending_chain(battle)
+        self.assertEqual(actor.attacks_used, 1)
+
     def test_arena_true_turn_face_tank_and_real_men(self):
         from wujiang.tactical.engine.core import DamageContext
 
@@ -27072,7 +27096,7 @@ class BPSpecialModeBehaviorTests(unittest.TestCase):
         real_men = self.battle("real_men")
         actor = real_men.hero_units(1)[0]
         self.assertTrue(actor.magic_immunity)
-        self.assertFalse(real_men.basic_attack_resource_allowed(actor, {})[0])
+        self.assertTrue(real_men.basic_attack_resource_allowed(actor, {})[0])
         from wujiang.tactical.engine.core import Skill
         self.assertFalse(any(isinstance(component, Skill) and component.timing != "active"
                              for component in actor.iter_components()))
@@ -30457,6 +30481,159 @@ class NewBatch248HellDragonBehaviorTests(unittest.TestCase):
         self.assertIn(dragon.unit_id, battle.hell_dragon_return_cells)
         self.assertNotIn(offered.unit_id, battle.hell_dragon_return_cells)
         self.assertFalse(offered.alive)
+
+
+class NewBatch249251AncientBehaviorTests(unittest.TestCase):
+    """Source-first engineer and turret: support, sacrifice, area attack, rust."""
+
+    def fixture(self):
+        battle = create_battle(["excel_r249", "excel_r251"], "elite_soldier")
+        battle.width, battle.height = 12, 10
+        engineer = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r249")
+        turret = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r251")
+        enemy = primary_hero(battle, 2)
+        engineer.position, turret.position, enemy.position = Position(4, 3), Position(2, 3), Position(7, 3)
+        for unit in (engineer, turret, enemy):
+            unit.max_health = unit.current_hp = 10
+        return battle, engineer, turret, enemy
+
+    def test_public_registry_and_skill_trait_contract(self):
+        from wujiang.tactical.heroes.registry import list_heroes
+
+        listed = {entry["code"] for entry in list_heroes()}
+        self.assertTrue({"excel_r249", "excel_r251"}.issubset(listed))
+        _, engineer, turret, _ = self.fixture()
+        self.assertTrue({"protection", "shensu", "pierce", "ancient_repair", "ancient_fusion"}.issubset(engineer.skill_map()))
+        self.assertTrue({"remote_dragon_breath", "protection", "ancient_rust", "ancient_fusion"}.issubset(turret.skill_map()))
+        self.assertEqual((engineer.get_skill("ancient_repair").max_uses_per_turn,
+                          turret.get_skill("ancient_rust").max_uses_per_turn), (1, 1))
+        self.assertTrue(any(trait.name == "古代工兵伤害封锁" for trait in engineer.traits))
+        self.assertTrue(any(trait.name == "古代炮台4×4普攻" for trait in turret.traits))
+
+    def test_repair_mecha_only_and_next_owner_end(self):
+        battle, engineer, turret, enemy = self.fixture()
+        repair = engineer.get_skill("ancient_repair")
+        self.assertIn(engineer.unit_id, [unit.unit_id for unit in repair.targets(battle, engineer)])
+        self.assertIn(turret.unit_id, [unit.unit_id for unit in repair.targets(battle, engineer)])
+        self.assertNotIn(enemy.unit_id, [unit.unit_id for unit in repair.targets(battle, engineer)])
+        opposing_mecha = create_battle("excel_r249", "excel_r251")
+        opposing_engineer = primary_hero(opposing_mecha, 1)
+        opposing_turret = primary_hero(opposing_mecha, 2)
+        opposing_engineer.position, opposing_turret.position = Position(2, 2), Position(4, 2)
+        self.assertIn(opposing_turret.unit_id,
+                      [unit.unit_id for unit in opposing_engineer.get_skill("ancient_repair").targets(
+                          opposing_mecha, opposing_engineer)])
+        turret.current_hp, turret.current_mana = 0.5, 0
+        battle.turn_number = 9
+        with mock.patch("wujiang.tactical.heroes.excel_roster.random.choice", return_value="speed"):
+            repair.execute(battle, engineer, {"target_unit_id": turret.unit_id})
+        self.assertGreater(turret.current_hp, 0.5)
+        self.assertEqual(turret.current_mana, 1)
+        self.assertEqual(turret.stat("speed"), 2)
+        status = turret.get_status("万古的修整")
+        status.on_owner_turn_end(battle)
+        self.assertIsNotNone(turret.get_status("万古的修整"))
+        battle.turn_number += 1
+        status.on_owner_turn_end(battle)
+        self.assertEqual(turret.stat("speed"), 1)
+
+    def test_fusion_real_death_visible_inheritance_and_recipient_quota(self):
+        battle, engineer, turret, _ = self.fixture()
+        turret.get_skill("ancient_fusion").uses_this_battle = 0
+        engineer.get_skill("pierce").uses_this_battle = 1
+        before = (turret.stat("attack"), turret.stat("defense"), turret.stat("speed"))
+        engineer.get_skill("ancient_fusion").execute(
+            battle, engineer, {"target_unit_id": turret.unit_id, "copied_skill_code": "pierce"})
+        self.assertFalse(engineer.alive)
+        self.assertNotIn(engineer.unit_id, battle.units)
+        self.assertEqual((turret.stat("attack"), turret.stat("defense"), turret.stat("speed")),
+                         tuple(value + 1 for value in before))
+        self.assertTrue(any(trait.name == "古代工兵伤害封锁" for trait in turret.traits))
+        inherited = turret.get_skill("pierce")
+        self.assertIs(inherited.owner, turret)
+        self.assertEqual(inherited.uses_this_battle, 0)
+
+    def test_turret_four_by_four_hits_both_teams(self):
+        battle, engineer, turret, enemy = self.fixture()
+        trait = next(trait for trait in turret.traits if trait.name == "古代炮台4×4普攻")
+        pattern = next(cells for cells in trait.patterns(battle, turret)
+                       if len(cells) == 16 and engineer.position in cells and enemy.position in cells
+                       and turret.position not in cells)
+        battle.configure_turn_order([turret.unit_id, engineer.unit_id, enemy.unit_id])
+        battle.start_current_turn()
+        ally_hp, enemy_hp = engineer.current_hp, enemy.current_hp
+        battle.basic_area_attack_with_payload(turret, {"cells": [cell.to_dict() for cell in pattern]}, pattern)
+        self.assertLess(engineer.current_hp, ally_hp)
+        self.assertLess(enemy.current_hp, enemy_hp)
+
+    def test_engineer_blocks_bystander_skill_but_preserves_target_and_plain_reactions(self):
+        from wujiang.tactical.engine.core import Skill
+
+        class WitnessSkill(Skill):
+            def __init__(self):
+                super().__init__("ancient_witness", "见证连锁", "测试连锁旁观者资格", timing="passive", target_mode="self")
+
+            def can_react_to(self, battle, actor, queued_action):
+                return True, ""
+
+            def execute(self, battle, actor, payload):
+                return None
+
+        battle, engineer, turret, target = self.fixture()
+        bystander = create_hero("elite_soldier", 2)
+        battle.add_unit(bystander, Position(8, 3))
+        for unit in (target, bystander):
+            unit.skills.append(WitnessSkill().bind(unit))
+        queued = QueuedAction("attack", engineer.unit_id, "普攻", 1, {},
+                              target_unit_ids=[target.unit_id], target_cells=[target.position],
+                              source_player_id=engineer.player_id, hostile=True)
+        self.assertIn("ancient_witness", {option.action_code for option in battle.available_reaction_options(target, queued)})
+        self.assertNotIn("ancient_witness", {option.action_code for option in battle.available_reaction_options(bystander, queued)})
+        self.assertTrue(all(option.action_type != "skill" for option in battle.available_reaction_options(bystander, queued)))
+
+    def test_rust_only_true_hits_and_clears_when_turret_dies(self):
+        battle, engineer, turret, enemy = self.fixture()
+        rust = turret.get_skill("ancient_rust")
+        rust.execute(battle, turret, {})
+        self.assertTrue(turret.has_status("生锈的气味预备"))
+        trait = next(trait for trait in turret.traits if trait.name == "古代炮台4×4普攻")
+        pattern = next(cells for cells in trait.patterns(battle, turret)
+                       if enemy.position in cells and engineer.position not in cells and turret.position not in cells)
+        enemy.shields = 1
+        battle.configure_turn_order([turret.unit_id, engineer.unit_id, enemy.unit_id])
+        battle.start_current_turn()
+        battle.basic_area_attack_with_payload(turret, {"cells": [cell.to_dict() for cell in pattern]}, pattern)
+        self.assertFalse(turret.has_status("生锈的气味预备"))
+        self.assertEqual(enemy.total_shields(), 0)
+        self.assertTrue(enemy.cannot_heal)
+        self.assertFalse(engineer.cannot_heal)
+        turret.get_skill("ancient_fusion").execute(
+            battle, turret, {"target_unit_id": engineer.unit_id,
+                             "copied_skill_code": "remote_dragon_breath"})
+        self.assertFalse(turret.alive)
+        self.assertFalse(enemy.cannot_heal)
+        self.assertTrue(any(trait.name == "古代炮台4×4普攻" for trait in engineer.traits))
+        self.assertEqual(engineer.targeting_range(), 4)
+
+    def test_ai_values_ally_repair_and_avoids_healthy_turret_fusion(self):
+        from wujiang.tactical.rooms.ai import difficulty_profile, score_skill_payload
+
+        battle, engineer, turret, enemy = self.fixture()
+        turret.current_hp = 0.5
+        battle.configure_turn_order([engineer.unit_id, turret.unit_id, enemy.unit_id])
+        battle.start_current_turn()
+        profile = difficulty_profile("standard")
+        repair = engineer.get_skill("ancient_repair")
+        action = {"code": repair.code, "target_mode": "unit", "preview": repair.preview(battle, engineer)}
+        ally = {"type": "skill", "unit_id": engineer.unit_id, "skill_code": repair.code,
+                "target_unit_id": turret.unit_id}
+        self.assertGreater(score_skill_payload(battle, engineer, action, ally, profile, instant_only=False), 0)
+        fusion = engineer.get_skill("ancient_fusion")
+        fusion_action = {"code": fusion.code, "target_mode": "ally", "preview": fusion.preview(battle, engineer)}
+        sacrifice = {"type": "skill", "unit_id": engineer.unit_id, "skill_code": fusion.code,
+                     "target_unit_id": turret.unit_id, "copied_skill_code": "pierce"}
+        self.assertLess(score_skill_payload(battle, engineer, fusion_action, sacrifice, profile,
+                                            instant_only=False), 0)
 
 
 class NewBatch239243244HellBehaviorTests(NewBatch239243244HellBehaviorBase, unittest.TestCase):
