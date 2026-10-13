@@ -529,6 +529,23 @@ class MatchAuditToolTests(unittest.TestCase):
 
         self.assertEqual(findings.items, [])
 
+    def test_candidate_gap_ignores_attack_preview_with_only_friendly_targets(self) -> None:
+        findings = FindingRecorder()
+        actor = create_hero("soul_wraith", 1)
+        base = {
+            "kind": "attack", "code": "attack", "raw_payload_count": 0,
+            "legal_payload_count": 0, "effective_payload_count": 0, "candidate_count": 0,
+            "preview_cell_count": 1, "preview_pattern_count": 3,
+            "preview_target_count": 1, "preview_enemy_target_count": 0,
+            "preview_candidate_count": 0, "required_cells": 0,
+        }
+        record_candidate_gap(findings, step=1, source="ai_turn", actor=actor, diag=base)
+        self.assertEqual(findings.items, [])
+        record_candidate_gap(findings, step=2, source="ai_turn", actor=actor,
+                             diag={**base, "preview_enemy_target_count": 1})
+        self.assertEqual(len(findings.items), 1)
+        self.assertEqual(findings.items[0]["category"], "ai_payload_generation_gap")
+
     def test_candidate_gap_ignores_heaven_punishment_without_preview_targets(self) -> None:
         findings = FindingRecorder()
         actor = create_hero("excel_r070", 1)

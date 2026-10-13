@@ -604,6 +604,12 @@ def action_diagnostic(
             diag["_candidates"] = candidates
             return diag
         if kind == "attack":
+            preview_target_ids = [str(unit_id) for unit_id in preview.get("target_unit_ids") or []]
+            diag["preview_enemy_target_count"] = sum(
+                1 for unit_id in preview_target_ids
+                if (battle.units.get(unit_id) is not None
+                    and battle.units[unit_id].player_id != actor.player_id)
+            )
             raw_payloads = ai_policy.attack_payloads_for_action(battle, actor, action)
             legal_payloads = [payload for payload in raw_payloads if ai_policy.payload_is_legal(battle, payload)]
             effective_payloads = [
@@ -748,7 +754,7 @@ def record_candidate_gap(
     if diag.get("expected_filter_reason"):
         return
     if raw_count == 0 and preview_option_count > 0 and diag.get("kind") in {"attack", "skill", "reaction"}:
-        if diag.get("kind") == "attack" and int(diag.get("preview_target_count") or 0) == 0:
+        if diag.get("kind") == "attack" and int(diag.get("preview_enemy_target_count") or 0) == 0:
             return
         if diag.get("code") == "heaven_punishment" and int(diag.get("preview_target_count") or 0) == 0:
             return

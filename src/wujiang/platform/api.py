@@ -191,6 +191,10 @@ def post_auth_login(ctx: RequestContext) -> None:
 def post_auth_logout(ctx: RequestContext) -> None:
     handler = ctx.handler
     payload = ctx.payload
-    runtime.AUTH_STORE.logout(auth_token_from_request(handler, payload=payload))
+    try:
+        runtime.AUTH_STORE.logout(auth_token_from_request(handler, payload=payload))
+    except AuthError as exc:
+        auth_error_response(handler, exc)
+        return
     json_response(handler, HTTPStatus.OK, {"ok": True})
     return

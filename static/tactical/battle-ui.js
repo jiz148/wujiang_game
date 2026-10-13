@@ -57,6 +57,16 @@ function renderBoardAlert() {
 
   const action = selectedAction();
 
+  if (action?.preview?.selection?.mode === "ancient_fusion") {
+    const escape = (value) => String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
+    const selection = action.preview.selection;
+    const buttons = (selection.targets || []).flatMap((target) => (selection.skills || []).map((skill) =>
+      `<button type="button" class="board-alert-choice" data-ancient-fusion-target="${escape(target.unit_id)}" data-ancient-fusion-skill="${escape(skill.code)}">${escape(target.name)} · 继承${escape(skill.name)}</button>`
+    )).join("");
+    showBoardHint("古代融合", "选择受体和传承技能后，施放者会被破坏；受体永久攻守速+1，并获得施放者的特性。", buttons);
+    return;
+  }
+
   if (action?.preview?.selection?.mode === "mimic_skill") {
     const escape = (value) => String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
     const buttons = (action.preview.selection.targets || []).flatMap((source) => source.skills.map((skill) =>
@@ -545,6 +555,9 @@ export function renderBoard() {
   const aiCurrentKey = aiPreviewCells.length ? positionKey(aiPreviewCells[aiPreviewCells.length - 1]) : "";
   const placementSize = Number(selectedAction()?.preview?.placement_size || 1);
   const boardWidth = state.battle.board.width;
+  const eternalZone = state.room?.mode === "bp" && state.room?.bp?.special_modes?.some((mode) => mode.code === "eternal");
+  const eternalLeft = Math.floor((boardWidth - 5) / 2);
+  const eternalTop = Math.floor((state.battle.board.height - 5) / 2);
   const cellAt = [];
 
   for (let y = 0; y < state.battle.board.height; y += 1) {
@@ -568,6 +581,9 @@ export function renderBoard() {
       const terrain = Array.isArray(state.battle?.board?.terrain) ? state.battle.board.terrain : [];
       const isWall = terrain.some((item) => Number(item.x) === x && Number(item.y) === y && item.kind === "wall");
       const cellEffects = fieldCellMap.get(key) || [];
+      const inEternalZone = eternalZone && x >= eternalLeft && x < eternalLeft + 5
+        && y >= eternalTop && y < eternalTop + 5;
+      if (inEternalZone) cell.classList.add("is-bp-eternal-zone");
       if (isWall) cell.classList.add("is-terrain-wall");
       if (preview.cellKeys.has(key)) cell.classList.add("is-preview");
       if (preview.secondaryCellKeys.has(key)) cell.classList.add("is-secondary");
@@ -586,6 +602,7 @@ export function renderBoard() {
       if (occupant && preview.targetIds.has(occupant.id)) cellLabels.push("可选目标");
       if (unitOccupiedCells(selected).some((cellPosition) => cellPosition.x === x && cellPosition.y === y)) cellLabels.push("当前选择");
       if (cellEffects.length) cellLabels.push(`战场状态：${cellEffects.map((effect) => effect.name).join("、")}`);
+      if (inEternalZone) cellLabels.push("永恒轮回战场区域");
       cell.setAttribute?.("aria-label", cellLabels.join("；"));
       if (typeof cell.setAttribute !== "function") cell.ariaLabel = cellLabels.join("；");
 
@@ -1537,8 +1554,18 @@ export function renderChainPanel() {
   }
   if (isDamageChoiceMode()) {
     const prompt = state.battle.pending_damage_choice;
-    if (caption) caption.textContent = prompt.kind === "hell_sacrifice"
+    if (caption) caption.textContent = prompt.kind === "hell_dragon_first"
+      ? "古龙阵亡：选择第一名己方地狱单位，或放弃献祭。"
+      : prompt.kind === "hell_dragon_second"
+      ? "古龙阵亡：选择第二名不同的己方地狱单位，或放弃献祭。"
+      : prompt.kind === "hell_dragon_effect"
+      ? "两名献祭者中只可选择一名发动本次技能死亡后的特殊效果。"
+      : prompt.kind === "hell_sacrifice"
       ? "赤候可以技能破坏一名己方地狱单位，或放弃这次牺牲。"
+      : prompt.kind === "hell_death_strike"
+      ? "刺客临死可选周围一名单位连续反击两次，或放弃。"
+      : prompt.kind === "hell_rescue"
+      ? "猎人临死可在原格救回一名已破坏的地狱友军，或放弃；猎人仍将延迟回场。"
       : prompt.kind === "attack_swap"
       ? "亚历山大的普攻已完成，请选择一名有合法落点的友军交换位置。"
       : prompt.kind === "electronic_teleport"

@@ -570,7 +570,7 @@ export function currentPreview() {
     };
   }
   const action = hoveredAction();
-  if (action?.preview?.selection?.mode === "mimic_skill") {
+  if (["mimic_skill", "ancient_fusion"].includes(action?.preview?.selection?.mode)) {
     return { cellKeys: new Set(), targetIds: new Set(), secondaryCellKeys: new Set(), destinationCellKeys: new Set() };
   }
   if (!action) {

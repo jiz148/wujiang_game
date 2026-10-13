@@ -130,7 +130,8 @@ def apply_piercing_status_effect(
     return status in target.statuses
 
 
-def remote_rectangle_patterns(battle: Battle, actor: HeroUnit, width: int, height: int) -> list[list[Position]]:
+def remote_rectangle_patterns(battle: Battle, actor: HeroUnit, width: int, height: int,
+                              *, attack_range: int | None = None) -> list[list[Position]]:
     if actor.position is None:
         return []
     patterns: list[list[Position]] = []
@@ -145,7 +146,7 @@ def remote_rectangle_patterns(battle: Battle, actor: HeroUnit, width: int, heigh
                     if not battle.in_bounds(cell):
                         continue
                     cells.append(cell)
-                    if battle.unit_distance_to_cell(actor, cell) <= actor.targeting_range():
+                    if battle.unit_distance_to_cell(actor, cell) <= (attack_range if attack_range is not None else actor.targeting_range()):
                         contains_range_cell = True
             if not cells or not contains_range_cell:
                 continue
@@ -2351,7 +2352,7 @@ class ArcAttackTrait(Trait):
         if code not in [choice_code for choice_code, _, _ in ARC_DIRECTION_CHOICES]:
             raise ActionError("所选普攻方向无效。")
         cells = self.direction_cells(battle, actor, code)
-        if not any(unit.player_id != actor.player_id for unit in battle.effect_units_at_cells(cells)):
+        if not battle.effect_units_at_cells(cells):
             raise ActionError("攻击区域内没有有效目标。")
         return cells
 
@@ -2363,7 +2364,7 @@ class ArcAttackTrait(Trait):
         seen_cells: set[tuple[int, int]] = set()
         for code, _, label in ARC_DIRECTION_CHOICES:
             direction_patterns: list[list[dict[str, int]]] = []
-            for enemy in battle.enemy_units(actor.player_id):
+            for enemy in battle.all_units():
                 valid_cells = self.valid_target_cells(battle, actor, enemy, code)
                 if not valid_cells:
                     continue
@@ -5763,7 +5764,7 @@ class DragonAreaAttackTrait(Trait):
     def patterns(self, battle: Battle, actor: HeroUnit) -> list[list[Position]]:
         patterns: list[list[Position]] = []
         for pattern in remote_rectangle_patterns(battle, actor, 3, 3):
-            if any(unit.player_id != actor.player_id for unit in battle.effect_units_at_cells(pattern)):
+            if battle.effect_units_at_cells(pattern):
                 patterns.append(pattern)
         return patterns
 
@@ -5784,7 +5785,7 @@ class DragonAreaAttackTrait(Trait):
         targets: list[str] = []
         for pattern in patterns:
             for unit in battle.effect_units_at_cells(pattern):
-                if unit.player_id == actor.player_id or unit.unit_id in targets:
+                if unit.unit_id in targets:
                     continue
                 targets.append(unit.unit_id)
         preview.update({"target_unit_ids": targets, "secondary_cells": [], "requires_target": True})
@@ -5816,9 +5817,7 @@ class DragonAreaAttackTrait(Trait):
         if payload is None:
             return None
         cells = self.selected_cells(battle, actor, payload)
-        if not battle.payload_positions(payload, "attack_cells") and not any(
-            unit.player_id != actor.player_id for unit in battle.effect_units_at_cells(cells)
-        ):
+        if not battle.payload_positions(payload, "attack_cells") and not battle.effect_units_at_cells(cells):
             raise ActionError("攻击区域内没有有效目标。")
         return cells
 

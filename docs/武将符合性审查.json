@@ -3,22 +3,32 @@
   "review_process": "原73名设计优先检查修改及第三轮武将线动态复测已完成。2026-10-02用户授权新增武将：每批先锁源设计，再实现战斗、AI、前端和行为场景；助手不运行动态测试，由用户执行仅覆盖新增批次的命令，报告保存在共享工作区。",
   "validation_policy": {
     "mode": "new_hero_batch_user_validation",
-    "scope": "原73名第三轮复测通过；R191/R195/R194/R197/R215定向通过；R192/R193/R196夹具及R219疾走已修待复测；R221/R222/R223/R238/R240/R242静态实施待用户验证",
+    "scope": "原73名第三轮复测通过；R248用户优化复跑6项行为全过、3场AI零高信号；R249/R251用户报告7项中6项通过、一项测试夹具缺说明参数已修正待复跑、6场AI零高信号；R250/R252静态实施待用户专场",
     "per_batch_test_gate": false,
-    "final_command": "python detail_test_all_wujiangs.py --targets excel_r238,excel_r240,excel_r242 --regression-filter NewBatch238240242 --out reports/new-batch-238240242-20261010",
+    "final_command": "python detail_test_all_wujiangs.py --targets excel_r250,excel_r252 --regression-filter NewBatch250252 --matches-per-hero 3 --max-steps 150 --out reports/new-batch-250252-20261013",
     "user_override_date": "2026-10-05"
   },
   "current_hero_codes": [
-    "excel_r238",
-    "excel_r240",
-    "excel_r242"
+    "excel_r250",
+    "excel_r252"
   ],
   "developed_hero_inspection_progress": {
     "definition": "完成新设计优先流程：独立记录并锁定设计初衷，随后对照审查战斗实现、武将专属与通用AI、测试，并完成所有必要修改；用户复测签收单独统计",
-    "developed_public_total": 88,
-    "inspected_and_modified": 88,
+    "developed_public_total": 99,
+    "inspected_and_modified": 99,
     "remaining_to_inspect_and_modify": 0,
     "inspected_and_modified_codes": [
+      "excel_r250",
+      "excel_r252",
+      "excel_r249",
+      "excel_r251",
+      "excel_r248",
+      "excel_r247",
+      "excel_r245",
+      "excel_r246",
+      "excel_r239",
+      "excel_r243",
+      "excel_r244",
       "excel_r238",
       "excel_r240",
       "excel_r242",
@@ -108,12 +118,41 @@
       "excel_r291",
       "excel_r356"
     ],
-    "remaining_set_rule": "原73名第三轮复测通过；R191/R195/R194/R197/R215定向通过；R192/R193/R196/R219待复测；R221/R222/R223/R238/R240/R242新增静态待验证。",
+    "remaining_set_rule": "原73名第三轮复测通过；R191/R195/R194/R197/R215定向通过；R192/R193/R196/R219待复测；R221/R222/R223待定向；R238/R240/R242与R239/R243/R244各首报告一处共用错误已静态修正；R245/R246跨将异常待复跑；R247首轮专场完成；R248优化及R249/R251待专场。",
     "focused_retest_accepted": 78,
-    "awaiting_consolidated_test": 10,
-    "awaiting_consolidated_test_definition": "R192/R193/R196夹具、R219失效受体已静态修正待复测；R221/R222/R223/R238/R240/R242新实现等待用户定向报告。"
+    "awaiting_consolidated_test": 18,
+    "awaiting_consolidated_test_definition": "R192/R193/R196夹具、R219失效受体待复测；R221/R222/R223待定向；R238/R240/R242及R239/R243/R244首报告共用错误各一处已静态修复待复测；R245/R246跨将异常待复跑；R247首轮定向7项通过、10场AI零高信号，2场步数上限另存观察；R248评分夹具与候选慢静态修复待复跑；R249/R251静态实施待用户专场。"
   },
   "heroes": [
+    {"code":"excel_r250","name":"古代机械兽","batch":"H12-new-20261013","design_baseline":"docs/武将设计思想.json#excel_r250","baseline_locked_at":"2026-10-13","review_status":"源设计先锁；溶解弱化/来源清理、实际伤害夺上次公开主动技、真击毁剥特性和共用融合已静态实施。","acceptance_status":"pending_focused_user_validation","audit_evidence":"源250、保存Q001–004及新增Q005–007独立裁定；NewBatch250252八项场景含战斗与AI；助手未运行动态测试。","items":[{"layer":"战斗/弱化","requirement":"范2一次破魔当前攻，实际受击随机五属性-1，来源真死清除","evidence":"AncientJawSkill、AncientJawWeaknessStatus；范围、破盾、魔免和来源死亡场景","verdict":"静态符合待动态验证"},{"layer":"战斗/夺技与剥特性","requirement":"实际损血读取受体上次已用可见主动技，本人独立费用/次数和一份使用权；本人真正击毁剥特性","evidence":"Battle.prepay_skill_resources记录最近主动技，AncientBeastTheftTrait在on_after_damage按归因复制并在目标死亡时清现有特性；双场景覆盖","verdict":"静态符合待动态验证"},{"layer":"AI/预览/融合","requirement":"选择能兑现弱化和可用夺技，不虚估自杀后状态，技能/融合公开可选","evidence":"AI的ancient_jaw和ancient_fusion专属估值、技能和融合预览、独立一次额度；定向AI场景","verdict":"静态符合待动态验证"}]},
+    {"code":"excel_r252","name":"古代机械巨人","batch":"H12-new-20261013","design_baseline":"docs/武将设计思想.json#excel_r252","baseline_locked_at":"2026-10-13","review_status":"源设计先锁；2×2占格、机械臂2×2半破魔、回血后定长合法位移、技能伤害免疫和融合已静态实施。","acceptance_status":"pending_focused_user_validation","audit_evidence":"源252、保存Q001–003及新增Q004–006独立裁定；NewBatch250252八项场景含战斗与AI；助手未运行动态测试。","items":[{"layer":"战斗/占格与机械臂","requirement":"原生2×2、范5旧格2×2双方技能伤及按盾半破魔","evidence":"规格身形、AncientArmSkill固定选区和逐受体半破魔；友敌同伤场景","verdict":"静态符合待动态验证"},{"layer":"战斗/回血位移与免伤","requirement":"实际回血后可拒绝或恰四格全身合法位移，只免技能生命伤","evidence":"AncientVigorSkill用HealContext.actual_heal与move_unit精确路径，RedLotusSkillDamageImmunityTrait保留后效；定向场景","verdict":"静态符合待动态验证"},{"layer":"AI/预览/融合","requirement":"区域按双方实际净值、无实得回血不虚估移动、融合不传身形","evidence":"AI机械臂12候选预筛后完整预演、活力实得判断和融合牺牲估值；2×2预览与AI定向场景","verdict":"静态符合待动态验证"}]},
+    {"code":"excel_r249","name":"古代的工兵","batch":"H11-new-20261012","design_baseline":"docs/武将设计思想.json#excel_r249","baseline_locked_at":"2026-10-12","review_status":"源设计先锁；修整、真实死亡融合、传承及非目标技能连锁封锁已静态实施。","acceptance_status":"pending_focused_user_validation","audit_evidence":"源249、保存R249-Q001至Q004及通用澄清；NewBatch249251场景覆盖公开名单、修整资格和期限、融合独立技能额度、AI价值；助手未运行测试。","items":[]},
+    {"code":"excel_r251","name":"古代机械炮台","batch":"H11-new-20261012","design_baseline":"docs/武将设计思想.json#excel_r251","baseline_locked_at":"2026-10-12","review_status":"源设计先锁；4×4双方普攻、破魔禁疗、来源死亡清理与融合传承已静态实施。","acceptance_status":"pending_focused_user_validation","audit_evidence":"源251、保存R251-Q001至Q004及通用澄清；NewBatch249251场景覆盖面积普攻、禁疗与死亡清理；助手未运行测试。","items":[]},
+    {
+      "code": "excel_r248", "name": "地狱的古龙。GRUFER", "batch": "H10-new-20261012", "design_baseline": "docs/武将设计思想.json#excel_r248", "baseline_locked_at": "2026-10-12", "review_status": "源248与保存Q001先锁；战斗、AI、房间和界面已实施；公开名单修正后用户二次报告5/6行为通过，余一场景夹具与AI大范围候选慢已静态修正，待完整重跑。", "acceptance_status": "pending_focused_user_validation", "audit_evidence": "源248、保存Q001=b及独立推定Q002–006；首报告公开名单缺失，二次报告6项行为5过、前2/10场AI零高信号且后续很慢；NewBatch248夹具已修、AI候选先去重和预筛再完整预演；助手未运行测试。",
+      "items": [
+        {"layer":"公开目录/审计入口","requirement":"R248作为已实现武将出现于选将、BP与定向审计目标池","evidence":"首报告在审计入口报Unknown or non-public target；根因IMPLEMENTED_EXCEL_HERO_CODES漏列excel_r248，已补并加入list_heroes目录行为断言，待用户重跑。","verdict":"静态修复待动态验证","severity":"P1","planned_change":"用户原命令重跑","status":"待用户报告"},
+        {"layer":"AI评分场景/大范围候选","requirement":"古龙本人合法回合内对友敌火焰真实净值排序，并使定向十场模拟可完成","evidence":"二次用户报告评分场景双候选-1000，源于夹具仍停在等级更低的队友回合；已设古龙本人轮。审计前2场31/106步无高信号，后续耗时较长；火焰候选现按受体/多格命中去重、轻量净值预筛前12项再完整回放，减少全场回滚和重复探针。","verdict":"静态修复待动态验证","severity":"P1","planned_change":"用户新报告目录完整重跑","status":"待用户报告"},
+        {"layer":"战斗/技能","requirement":"近身龙息、通用震开、远程5×5两轮冷却、一次宝珠三轮物免","evidence":"实施前R248无专属技能注册；现DragonBreathSkill/KnockbackSkill、HellDragonFireSkill、FlyingDragonOrbSkill/Status按源接入，声明旧格与双边目标由共用范围结算。","verdict":"静态符合待动态验证","severity":"P1","planned_change":"用户专场报告核验","status":"待用户报告"},
+        {"layer":"死亡/献祭/复活","requirement":"两名同队显示名地狱单位的真实技能死亡、只放行一个死亡特效、任意时刻旧格满状态原身份回场","evidence":"实施前无死亡特性或自由回场；现真死亡三步选择、两目标正常防御、局部压制未选者、共用清理循环与原格待复活权；Battle独立回场指令、胜负保留原对象，堵格可等待。","verdict":"静态符合待动态验证","severity":"P1","planned_change":"用户专场报告核验","status":"待用户报告"},
+        {"layer":"AI/前端/场景","requirement":"友敌火焰净值、宝珠威胁、双牺牲净值与单效果、持久复活选择和合法旧格预览","evidence":"实施前无R248候选或玩家操作；现AI回放火焰双方收效、按普攻威胁评宝珠、比较献祭净值、唯一死亡效果及旧格安全；房间允许所属席位跨回合回场，界面显示三步选择与原格按钮；NewBatch248六项场景含未获准的另一古龙死亡回调待用户运行。","verdict":"静态符合待动态验证","severity":"P1","planned_change":"用户专场报告核验","status":"待用户报告"}
+      ]
+    },
+    {"code":"excel_r247","name":"地狱的术士。SNOW","batch":"H9-new-20261011","design_baseline":"docs/武将设计思想.json#excel_r247","baseline_locked_at":"2026-10-11","review_status":"源247与保存Q001先锁；战斗、AI、前端预览和定向场景已静态实施，待用户验证。","acceptance_status":"pending_focused_user_validation","audit_evidence":"源247、保存Q001=a及独立推断Q002–005；NewBatch247HellBehaviorTests；仅静态AST/JSON/差异检查，动态待用户运行。","items":[{"layer":"地狱犬/魔墙/瞬移","requirement":"1魔多犬、付费与0魔墙、每场一次全图纯位移","evidence":"HellDogSkill按1魔逐次邻格召魔免犬且不另造数量上限；HellWallSkill双档独立计次；HellTeleportSkill每场一次全图合法落格纯位移，公开预览可选格。","verdict":"静态符合待动态验证","severity":"P1","planned_change":"用户专场报告核验","status":"待用户报告"},{"layer":"技能死亡/回场","requirement":"本人召犬旧格逐个爆破，原身份下敌方末0魔回场，三本人轮回魔及大招重置","evidence":"HellSnowRebirthTrait仅真技能死亡锁本人活犬旧外邻、强制破坏并排双方逐犬死后连锁；共用地狱再临恢复原对象0魔，HellSnowManaStatus三轮始回魔且只重置瞬移。","verdict":"静态符合待动态验证","severity":"P1","planned_change":"用户专场报告核验","status":"待用户报告"},{"layer":"AI/前端/场景","requirement":"犬位双方净值、墙反应、瞬移保留、死后连锁与回场预览","evidence":"AI评估犬接敌/友伤/魔留存、瞬移前后危险、墙反应和回场安全/犬位；通用格子预览与公开状态日志；NewBatch247HellBehaviorTests七项场景。","verdict":"静态符合待动态验证","severity":"P1","planned_change":"用户专场报告核验","status":"待用户报告"}]},
+    {"code":"excel_r245","name":"地狱的猎人。BRAO","batch":"H8-new-20261011","design_baseline":"docs/武将设计思想.json#excel_r245","baseline_locked_at":"2026-10-11","review_status":"源245与保存Q001/Q002先锁；战斗、AI、前端和场景静态实施，待用户验证。","acceptance_status":"pending_focused_user_validation","audit_evidence":"源245、保存Q001=a/Q002=b及设计推断Q003–004；NewBatch245246HellBehaviorTests；动态待用户运行。","items":[{"layer":"战斗/免费远程枪","requirement":"远程穿刺及严格0魔免费档","evidence":"HellRangedSpearSkill沿通用RemotePierceSkill，付费/恰0魔免费独立计次；范4原型选型。","verdict":"静态符合待动态验证","severity":"P1","planned_change":"用户定向报告核验","status":"待用户报告"},{"layer":"死亡救援/回场","requirement":"技能死亡先原格救已毁地狱友军，后本人延迟0魔回场","evidence":"HellHunterRescueTrait只列此前已毁的己方显示名含地狱原对象，完整合法旧格救回并取消其原回场队列；本人仍按敌方实际英雄末回场。","verdict":"静态符合待动态验证","severity":"P1","planned_change":"用户定向报告核验","status":"待用户报告"},{"layer":"AI/前端/场景","requirement":"救援择人、选格、无收益放弃与本将定向行为","evidence":"AI按合法尸体原战力选择；界面显示姓名、放弃和回场落点；场景覆盖无尸体、旧格受阻、普攻死亡和原对象救回。","verdict":"静态符合待动态验证","severity":"P1","planned_change":"用户定向报告核验","status":"待用户报告"}]},
+    {"code":"excel_r246","name":"地狱的武神。GALDER","batch":"H8-new-20261011","design_baseline":"docs/武将设计思想.json#excel_r246","baseline_locked_at":"2026-10-11","review_status":"源246与保存Q001/Q002先锁；战斗、AI、前端和场景静态实施，待用户验证。","acceptance_status":"pending_focused_user_validation","audit_evidence":"源246、保存Q001=a/Q002=b及设计推断Q003–004；NewBatch245246HellBehaviorTests；动态待用户运行。","items":[{"layer":"战斗/大招","requirement":"攻守+1，两敌方英雄末到期技能破坏且不重置","evidence":"HellWarGodSkill/Status本场一次、攻守即+1，仅敌方实际英雄末倒计时；到期按技能死亡处理。","verdict":"静态符合待动态验证","severity":"P1","planned_change":"用户定向报告核验","status":"待用户报告"},{"layer":"死亡伤害/回场","requirement":"真技能死亡旧邻敌方各一次伤害，任意活单位旁0魔回场","evidence":"HellWarGodRebirthTrait按死亡时当前攻逐个旧邻敌方排死后连锁；共用轮末先清扫击且本节点跳过回场；原身份0魔回场不重置大招。","verdict":"静态符合待动态验证","severity":"P1","planned_change":"用户定向报告核验","status":"待用户报告"},{"layer":"AI/前端/场景","requirement":"大招择时、倒计时预览和死亡连锁定向行为","evidence":"AI临战才给武神正分，非收益远距拒开；界面显示剩余敌方末，场景覆盖到期、提前技能死亡、普攻死亡、敌方限定和回场额度。","verdict":"静态符合待动态验证","severity":"P1","planned_change":"用户定向报告核验","status":"待用户报告"}]},
+    {
+      "code": "excel_r239", "name": "地狱的狂王。BURON", "batch": "H7-new-20261011", "design_baseline": "docs/武将设计思想.json#excel_r239", "baseline_locked_at": "2026-10-11", "review_status": "源239与保存Q001/Q002先锁；战斗、AI、界面与定向场景已静态实施，待用户验证。", "acceptance_status": "pending_focused_user_validation", "audit_evidence": "源239、保存Q001/Q002及推定Q003–005；NewBatch239243244HellBehaviorTests；仅静态语法和一致性检查。",
+      "items": [{"layer": "战斗/技能", "requirement": "魔动球、魔墙0魔双档及地狱洗牌真实同名牺牲", "evidence": "HellOrbSkill沿用远程龙息，HellWallSkill沿用光墙，付费/恰0免费分别计次；HellShuffleSkill按显示名与实际受体、仅越魔免和通常盾/回避结算。", "verdict": "静态符合待动态验证", "severity": "P1", "planned_change": "用户定向报告核验", "status": "待用户报告"}, {"layer": "死亡/回场", "requirement": "真技能死亡后敌旁0魔回场，仅重置大招", "evidence": "共用回场队列按R239只收敌方锚点；原身份0魔落地后HellRebirthTrait仅清地狱洗牌场次。", "verdict": "静态符合待动态验证", "severity": "P1", "planned_change": "用户定向报告核验", "status": "待用户报告"}, {"layer": "AI/前端/场景", "requirement": "牺牲净收益、技能反应与合法回场选择", "evidence": "AI远程球评估真实敌友伤害、墙评估受威胁受体，洗牌以回场收益减当前战力和本场机会成本；前端复用技能/回场预览，行为场景覆盖免疫例外及重置。", "verdict": "静态符合待动态验证", "severity": "P1", "planned_change": "用户定向报告核验", "status": "待用户报告"}]
+    },
+    {
+      "code": "excel_r243", "name": "地狱的骑士。ZUR", "batch": "H7-new-20261011", "design_baseline": "docs/武将设计思想.json#excel_r243", "baseline_locked_at": "2026-10-11", "review_status": "源243与保存Q001/Q002先锁；战斗、AI、界面与定向场景已静态实施，待用户验证。", "acceptance_status": "pending_focused_user_validation", "audit_evidence": "源243、保存Q001/Q002及推定Q003–004；NewBatch239243244HellBehaviorTests；仅静态语法和一致性检查。",
+      "items": [{"layer": "战斗/初始状态", "requirement": "初始无马，枪压保留0魔双档", "evidence": "没有开场马特性；魔枪/魔压复用现有严格0魔双档，与源243独立注册。", "verdict": "静态符合待动态验证", "severity": "P1", "planned_change": "用户定向报告核验", "status": "待用户报告"}, {"layer": "死亡/坐骑", "requirement": "技能死亡后骑士与地狱马复合落位，马承担受体", "evidence": "HellKnightRebirthTrait的选格钩子先查马完整1×2占格；回场同格生成速4守4马并建立乘骑，通用实际受体/移动/召唤者级联处理后续。", "verdict": "静态符合待动态验证", "severity": "P1", "planned_change": "用户定向报告核验", "status": "待用户报告"}, {"layer": "AI/前端/场景", "requirement": "复合落格、马移动与骑士反应和受体预览", "evidence": "回场公开选项先过滤复合格，AI按马守4与接敌压力选位；通用乘骑动作与受体预览复用，行为场景断言初始无马、落地新马及受体转换。", "verdict": "静态符合待动态验证", "severity": "P1", "planned_change": "用户定向报告核验", "status": "待用户报告"}]
+    },
+    {
+      "code": "excel_r244", "name": "地狱的刺客。KAKI", "batch": "H7-new-20261011", "design_baseline": "docs/武将设计思想.json#excel_r244", "baseline_locked_at": "2026-10-11", "review_status": "源244与保存Q001先锁；战斗、AI、界面与定向场景已静态实施，待用户验证。", "acceptance_status": "pending_focused_user_validation", "audit_evidence": "源244、保存Q001及推定Q002–004；NewBatch239243244HellBehaviorTests；仅静态语法和一致性检查。",
+      "items": [{"layer": "战斗/免费技能", "requirement": "隐身及枪压0魔双档", "evidence": "通用隐身及现有魔枪/魔压严格0魔双档已注册，付费与免费次数独立。", "verdict": "静态符合待动态验证", "severity": "P1", "planned_change": "用户定向报告核验", "status": "待用户报告"}, {"layer": "死亡/反击/回场", "requirement": "技能死亡时原格外邻一目标两段独立伤害，敌旁隐身0魔回场", "evidence": "HellAssassinRebirthTrait在真技能死亡选旧邻单位、队列两段独立可连锁的死亡特性伤害；双死亡回调去重。共享回场仅敌方锚点，落地免费隐身并服从沙尘/全隐规则。", "verdict": "静态符合待动态验证", "severity": "P1", "planned_change": "用户定向报告核验", "status": "待用户报告"}, {"layer": "AI/前端/场景", "requirement": "选死亡反击受体、独立连锁、隐身回场预览", "evidence": "AI按双段预计损害与双方价值选择或放弃，前端展示目标/放弃按钮，行为场景断言两段队列旧格和普攻死亡排除。", "verdict": "静态符合待动态验证", "severity": "P1", "planned_change": "用户定向报告核验", "status": "待用户报告"}]
+    },
     {
       "code": "excel_r238", "name": "地狱的尖兵。BAKI", "batch": "H6-new-20261010", "design_baseline": "docs/武将设计思想.json#excel_r238", "baseline_locked_at": "2026-10-10", "review_status": "源238及保存Q001先锁；战斗、AI、界面与定向场景静态实施，待用户验证。", "acceptance_status": "pending_focused_user_validation", "audit_evidence": "源238、保存Q001及推定Q002–003；NewBatch238240242HellBehaviorTests；仅静态语法与一致性检查。", "items": [
         {"layer": "战斗/免费技能", "requirement": "魔枪、魔压保留通用形状/反应窗口与0魔独立免费额度", "evidence": "HellSpearSkill与HellPressureSkill双档复用通用穿刺/震开，0魔严格判断和各自计次；场景覆盖魔费与频率。", "verdict": "静态实施待验证", "severity": "P1", "planned_change": "用户定向报告核验", "status": "待用户报告"},
@@ -122,10 +161,10 @@
       ]
     },
     {
-      "code": "excel_r240", "name": "地狱的番兵。LANZI", "batch": "H6-new-20261010", "design_baseline": "docs/武将设计思想.json#excel_r240", "baseline_locked_at": "2026-10-10", "review_status": "源240及保存Q001先锁；战斗、AI、界面与定向场景静态实施，待用户验证。", "acceptance_status": "pending_focused_user_validation", "audit_evidence": "源240、保存Q001及推定Q002–003；NewBatch238240242HellBehaviorTests；仅静态语法与一致性检查。", "items": [
+      "code": "excel_r240", "name": "地狱的番兵。LANZI", "batch": "H6-new-20261010", "design_baseline": "docs/武将设计思想.json#excel_r240", "baseline_locked_at": "2026-10-10", "review_status": "源240及保存Q001先锁；首份定向报告行为通过但AI一处免非伤害技能目标动作错误，共用预检已静态修复待复测。", "acceptance_status": "reported_error_fix_pending_user_validation", "audit_evidence": "reports/new-batch-238240242-20261010：11项行为通过，30场AI一处R240魔压动作错误；NewBatch238240242HellBehaviorTests新增免疫邻敌回归。", "items": [
         {"layer": "战斗/常规与免费技能", "requirement": "穿刺、变硬、震开、锁链原机制与0魔免费枪/压", "evidence": "原通用变硬/锁链工厂保持，双档枪/压沿通用原形、费用及0魔独立额度。", "verdict": "静态实施待验证", "severity": "P1", "planned_change": "用户定向报告核验", "status": "待用户报告"},
         {"layer": "战斗/复活", "requirement": "技能死亡后下敌方末回场，三本人轮自然回血和双普攻", "evidence": "原对象回场及HellRebirthGuardStatus本人轮开始回血、普攻额外+1，第三本人轮末结束；场景覆盖。", "verdict": "静态实施待验证", "severity": "P1", "planned_change": "用户定向报告核验", "status": "待用户报告"},
-        {"layer": "AI/前端/场景", "requirement": "控制/防守取舍、复活格和双攻公开信息", "evidence": "通用锁链/变硬AI继承，魔压与回场分值补充；前端技能/状态及选格可见，场景已写。", "verdict": "静态实施待验证", "severity": "P1", "planned_change": "用户专用报告核验", "status": "待用户报告"}
+        {"layer": "AI/前端/场景", "requirement": "控制/防守取舍、复活格和双攻公开信息", "evidence": "首报告30场有一处魔压试图推动免非伤害技能效果的R194；共用KnockbackSkill.outward_destination已跳过免疫邻敌并新增定向回归，前端选格与其他AI保留。", "verdict": "已修复待复测", "severity": "P1", "planned_change": "用户复测旧批报告", "status": "待用户复测"}
       ]
     },
     {
@@ -4152,5 +4191,5 @@
       ]
     }
   ],
-  "updated_at": "2026-10-04"
+  "updated_at": "2026-10-12"
 }

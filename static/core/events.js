@@ -359,6 +359,13 @@ export function bindEvents() {
   });
   document.addEventListener("click", (event) => {
     const target = event.target instanceof Element ? event.target : null;
+    const fusionButton = target?.closest("[data-ancient-fusion-target]");
+    if (fusionButton && canInteract() && selectedAction()?.code === "ancient_fusion") {
+      performAction({ type: "skill", unit_id: state.selectedUnitId, skill_code: "ancient_fusion",
+        target_unit_id: fusionButton.dataset.ancientFusionTarget,
+        copied_skill_code: fusionButton.dataset.ancientFusionSkill });
+      return;
+    }
     if (target?.closest("[data-heaven-select]")) {
       if (selectedAction()?.code !== "heaven_punishment" || !canInteract()) return;
       state.stagedPayload = { ...(state.stagedPayload || {}),
@@ -1619,6 +1626,10 @@ export function renderHeader() {
     pill.textContent = `房间 ${state.room.room_id} · 玩家 ${inputPlayer()} 决定伤害`;
     caption.textContent = prompt.kind === "hell_sacrifice"
       ? "赤候可以技能破坏一名己方地狱单位，或放弃。"
+      : prompt.kind === "hell_death_strike"
+      ? "刺客临死可选周围一名单位连续反击两次，或放弃。"
+      : prompt.kind === "hell_rescue"
+      ? "猎人临死可在原格救回一名已破坏的地狱友军，或放弃；猎人仍将延迟回场。"
       : prompt.kind === "rotation"
       ? `安德鲁因【${prompt.action_name}】实际损失 ${prompt.damage} 点生命。请选择队友交换位置，或保持位置。`
       : `拉奥将受到 ${prompt.damage} 点【${prompt.action_name}】伤害。请选择降低一项能力抵消，或承受伤害。`;

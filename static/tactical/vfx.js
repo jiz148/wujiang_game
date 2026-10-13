@@ -57,7 +57,10 @@ export function unitStatusSummary(unit) {
     entries.push(`回避 ${unit.dodge_charges}`);
   }
   unit.statuses.forEach((status) => {
-    entries.push(`${status.name}${status.duration ? `(${status.duration})` : ""}`);
+    const remaining = status.remaining_enemy_ends != null
+      ? `(${status.remaining_enemy_ends}个敌方回合末)`
+      : status.duration ? `(${status.duration})` : "";
+    entries.push(`${status.name}${remaining}`);
   });
   return entries;
 }
@@ -75,6 +78,22 @@ export function displayActions() {
   if (isGameOver()) return [];
   if (isDamageChoiceMode()) {
     const prompt = state.battle.pending_damage_choice;
+    if (["hell_dragon_first", "hell_dragon_second", "hell_dragon_effect"].includes(prompt.kind)) {
+      const stage = prompt.kind === "hell_dragon_first" ? "第一名" : prompt.kind === "hell_dragon_second" ? "第二名" : "死亡效果";
+      const actions = (prompt.options || []).map((unitId) => ({
+        code: `${prompt.kind}_${unitId}`, name: `选${unitById(unitId)?.name || "地狱单位"}作${stage}`,
+        kind: "damage_choice", target_unit_id: unitId, timing: "reaction", available: true,
+        description: prompt.kind === "hell_dragon_effect" ? "只有所选这名献祭者可发动本次技能死亡后的特殊效果。" : "目标将作为技能效果被破坏；两名都真正死亡才能让古龙取得待复活权。",
+        preview: { cells: [], target_unit_ids: [unitId], requires_target: false },
+      }));
+      if (prompt.kind !== "hell_dragon_effect") actions.push({
+        code: `${prompt.kind}_decline`, name: "放弃古龙献祭", kind: "damage_choice",
+        target_unit_id: "decline", timing: "reaction", available: true,
+        description: "不完成双人献祭，古龙本次不会取得待复活权。",
+        preview: { cells: [], target_unit_ids: [], requires_target: false },
+      });
+      return actions;
+    }
     if (prompt.kind === "hell_sacrifice") {
       return [
         ...(prompt.options || []).map((unitId) => ({
@@ -86,6 +105,35 @@ export function displayActions() {
         { code: "hell_sacrifice_decline", name: "不牺牲友军", kind: "damage_choice",
           target_unit_id: "decline", timing: "reaction", available: true,
           description: "放弃赤候这次可选牺牲。",
+          preview: { cells: [], target_unit_ids: [], requires_target: false } },
+      ];
+    }
+    if (prompt.kind === "hell_death_strike") {
+      return [
+        ...(prompt.options || []).map((unitId) => ({
+          code: `hell_death_strike_${unitId}`, name: `两次反击${unitById(unitId)?.name || "周围单位"}`,
+          kind: "damage_choice", target_unit_id: unitId, timing: "reaction", available: true,
+          description: "刺客技能死亡时选择一名死前周围的单位；两段伤害分别开放防御与连锁。",
+          preview: { cells: [], target_unit_ids: [unitId], requires_target: false },
+        })),
+        { code: "hell_death_strike_decline", name: "放弃死亡反击", kind: "damage_choice",
+          target_unit_id: "decline", timing: "reaction", available: true,
+          description: "放弃刺客这次两段死亡反击。",
+          preview: { cells: [], target_unit_ids: [], requires_target: false } },
+      ];
+    }
+    if (prompt.kind === "hell_rescue") {
+      return [
+        ...(prompt.options || []).map((unitId) => ({
+          code: `hell_rescue_${unitId}`,
+          name: `救回${(state.battle?.destroyed_units || []).find((unit) => unit.id === unitId)?.name || "地狱友军"}`,
+          kind: "damage_choice", target_unit_id: unitId, timing: "reaction", available: true,
+          description: "猎人技能死亡时把这名已破坏的地狱友军以0魔召唤到猎人原格；本人仍会延迟回场。",
+          preview: { cells: [], target_unit_ids: [unitId], requires_target: false },
+        })),
+        { code: "hell_rescue_decline", name: "放弃死亡救援", kind: "damage_choice",
+          target_unit_id: "decline", timing: "reaction", available: true,
+          description: "不救回友军；猎人的延迟回场仍然生效。",
           preview: { cells: [], target_unit_ids: [], requires_target: false } },
       ];
     }
@@ -187,8 +235,17 @@ export function displayActions() {
     ];
   }
   if (isRespawnMode()) return [];
+  const dragonActions = (isChainMode() ? [] : (state.battle?.hell_dragon_returns || []))
+    .filter((entry) => entry.can_control && entry.options?.length)
+    .flatMap((entry) => entry.options.map((cell) => ({
+      code: `hell_dragon_return_${entry.unit_id}_${cell.x}_${cell.y}`,
+      name: `古龙复活至（${cell.x + 1},${cell.y + 1}）`, kind: "hell_dragon_return",
+      unit_id: entry.unit_id, x: cell.x, y: cell.y, timing: "instant", available: true,
+      description: "在一名献祭者死亡前的原格让古龙满血满魔复活；也可继续等待。",
+      preview: { cells: [cell], target_unit_ids: [], requires_target: false },
+    })));
   const bundle = bundleFor(state.selectedUnitId);
-  if (!bundle) return [];
+  if (!bundle) return dragonActions;
   if (isChainMode()) {
     const reactions = (bundle.reactions.actions || []).map((action) => ({
       ...action,
@@ -215,7 +272,7 @@ export function displayActions() {
     if (action.kind === "move" || action.kind === "attack") return true;
     return action.timing === "active";
   }));
-  return mergeAttackVariants(visible);
+  return [...dragonActions, ...mergeAttackVariants(visible)];
 }
 
 function mergeAttackVariants(actions) {

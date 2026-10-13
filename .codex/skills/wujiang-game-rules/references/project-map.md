@@ -1,6 +1,30 @@
 ﻿# wujiang_game Project Map
 
+- 2026-10-13 Phase H R250/R252：用户报告中R248优化6/6回归、3场AI零高信号；R249/R251 6/7回归（一项`WitnessSkill`夹具漏说明参数已修）及6场AI零高信号。新将源文/保存答案/独立推断先锁JSON/XLSX；`heroes/excel_roster.py`接机械兽破魔撕咬五属性持续弱化、实际损血夺目标最后公开主动技、真击毁剥特性，以及机械巨人2×2、范5的2×2半破魔机械臂、实际回血后恰四格可选移动和仅技能伤害免疫；两者共用古代融合。`engine/core.py`记录真正声明的最近主动技能及一次性借技额度，`next_five.py`区域生成允许显式射程，`rooms/ai.py`计双方区域净值、夺技与弱化、回血条件和融合牺牲；通用飞跃4格错误对齐已锁3格。`NewBatch250252AncientBehaviorTests`八项待用户动态验证；公开池99/388，剩余289。
+
+- 2026-10-12 `dev-jinchi` 与 `master` BP 冲突合并：全体选择沿用 66 人池、系统禁级和等级预算，随机等级沿用逐轮抽级与可选同名规则；两种流程均抽特殊模式并在战斗界面展示。`multiplayer.py` 的同名可选完成性、合法等级缓存纳入本局池；`bp-ui.js` 的等级矩阵仅列本局池，补可展开池/禁级资料。`tests/test_behavior.py` 前端断言对齐矩阵界面；相关规则见 `docs/武将游戏规则.md` 和 `docs/BP特殊模式规则.md`。动态验证按现阶段约定待用户统一运行。
+
 Update this file after every new gameplay requirement or code change in `wujiang_game`. Keep entries concise and durable; do not paste full docs.
+
+- 2026-10-12 BP“真男人模式”修正：源表“只能使用主动技能”约束技能类型，不禁普攻。`engine/core.py::basic_attack_resource_allowed` 移除该模式对普攻的全局封锁；操作预览和 AI 候选沿用同一合法性判断。`rooms/special_modes.py`、BP 规则与武将游戏规则同步说明，`BPSpecialModeBehaviorTests` 覆盖玩家与 AI 普攻可用及动作声明；动态验证待统一运行。
+
+- 2026-10-12 Phase H R249/R251：源249/251、保存问卷和通用敌我范围先独立锁入设计JSON/XLSX。`excel_roster.py`接工兵机甲修整、伤害时旁观者技能封锁，以及两将共用真实死亡古代融合；炮台4×4双方普攻、下一次普攻破魔禁疗。`engine/core.py`在来源死亡后清理持续状态，`rooms/ai.py`评估修整、禁疗、区域友伤和融合牺牲，前端提供受体/技能融合选择。`NewBatch249251AncientBehaviorTests`静态写入待用户运行；公开池97/388，剩余291。R248优化仍待用户动态复跑。
+
+- 2026-10-12 R248复跑报告：6项定向行为5过，火焰AI评分场景因夹具未切到古龙本人轮，合法性预演两候选均`-1000`；现设正确轮槽。地狱之火AI原对大量5×5候选逐个完整回滚和逐目标探针，导致用户模拟久等；现按受体/多格命中去重、双方净值轻量预筛，仅前12组合完整预演。2/10场初始AI无高信号，整场报告未完成；静态修复待用户验证。
+
+- 2026-10-12 R248首报告入口故障：用户定向命令在公开目录校验处报`Unknown or non-public target hero code(s): excel_r248`，未进入测试/AI。责任是`heroes/excel_roster.py::IMPLEMENTED_EXCEL_HERO_CODES`漏列R248，已补；`NewBatch248HellDragonBehaviorTests`新增公开目录断言，静态检查通过待用户重跑。新增将交付须同时核对工厂注册与公开名单。
+
+- 2026-10-12 Phase H R248：源248与保存Q001=b先锁设计；地狱古龙接入远程5×5双方地狱之火、三本人轮宝珠物免、真实死亡双地狱友军技能献祭及稳定窗口自主原格回场。两名都真死才授复活权，只有一名发动专属技能死亡效果。AI评估友伤、献祭净值和回场时机；房间及前端开放跨回合操作，行为场景待用户运行。公开池95/388，剩余293。R247用户报告7项行为通过、10场AI零高信号，2场触及步数上限。
+
+- 2026-10-11 Phase H R247：源247、保存Q001=a及独立Q002–005先锁JSON/XLSX设计；`heroes/excel_roster.py`新增1魔地狱犬、双档墙、一次性全图纯位移、技能真死亡逐犬旧邻双方独立爆破和原对象回场三本人轮自然回魔/瞬移重置；`rooms/ai.py`估犬位、友伤、一次性逃生及回场安全。R245/246报告的R225移动探针漏目标格已补；审计仅有友方预览不再误报弧形普攻候选缺口。`NewBatch247HellBehaviorTests`静态编写待用户运行；公开池94/388，剩余294。
+- 2026-10-11 Phase H R245/R246：先分别只读源245/246、保存问卷Q001/Q002和通则，锁JSON/XLSX设计，再接`HellHunterRescueTrait`旧格救已毁地狱原对象/独立自身回场与`HellWarGodSkill`两敌方末自毁、旧邻敌方逐个扫击；`engine/core.py`允许真实轮末死后连锁完成再推进且防同节点即回场，`rooms/ai.py`评估救回原战力与临战开大，前端展示选择和剩余节点。`NewBatch245246HellBehaviorTests`已由用户运行11项通过、20场AI；公开池当时93/388。上一批报告8项行为通过、30场一处KAKI魔压改变队友已声明回避落点，已由共用连锁静态修正待复测。
+- 2026-10-11 BP“软柿子”澄清：替死者只从被破坏武将**己方**的开场行动顺序向后循环找下一位存活武将；跳过敌方与已阵亡队友。己方无另一名存活武将（含单挑）时正常死亡。`rooms/special_battle.py`、`rooms/special_modes.py` 的公示说明、`docs/BP特殊模式规则.md` 与 `BPSpecialModeBehaviorTests` 同步。
+
+- 2026-10-11 用户确认通用阵营默认：所有武将的普攻、技能、特性在无明确阵营/特殊说明时均影响实际受体双方，单体普攻可合法选己方、区域普攻默认友伤。`engine/core.py` 的单体旧格、范围声明/结算与共同预览不再默认排除友方；原有“只打敌方”武将由组件显式排除。`rooms/ai.py` 的区域受体与友伤评分使用同一判断，特殊支援普攻仍按自身规则。逐将排除项须以源文核对，行为用例和静态检查同步。
+
+- 2026-10-11 Phase H R239/R243/R244：源与保存问卷先分别锁入设计JSON/XLSX。`heroes/excel_roster.py`新增狂王远程龙息/光墙严格0魔双档及仅越魔免的同名洗牌、骑士首次技能死亡后完整1×2地狱马乘骑、刺客技能死亡旧邻单体两段独立反击及隐身回场。`engine/core.py`筛敌方回场锚点、复合落格并允许死体后续效果参与独立连锁；`rooms/ai.py`评估牺牲净收益、真实远程伤害/护墙、坐骑取位及双段反击；前端显示反击/放弃。`NewBatch239243244HellBehaviorTests`待用户运行；公开池91/388，剩余297。R238/R240/R242首报告11项行为通过、30场AI一处R240震开免非伤害技能目标动作错误；共用`KnockbackSkill`已静态补合法性检查。
+
+- 2026-10-11 BP 66 人池与特殊模式：`rooms/multiplayer.py::draw_bp_hero_pool` 从已实现武将中按等级钟形权重及库存上限抽 66 人，系统禁级、完成性、合法候选和 BP 列表均限制在该池，连局重抽并持久化。`rooms/special_modes.py` 转录 `data/特殊规则.xlsx` 18 条，`rooms/special_battle.py` 在 `heroes/registry.py::create_room_battle` 进场与场地效果中执行；`engine/core.py` 提供回复、魔免、行动、轮次与死亡等规则接点，并在伤害来源奖励之后、目标死亡钩之前执行软柿子替死，在其他回合末效果之后执行法师补魔。软柿子清除来源状态/场地/召唤物与个人永久加成；回复反噬按施放者队伍选择目标；同情弱者限制目标范围与真回合制叠加时取 1。擂台候场资源/状态/位移免疫覆盖其召唤物；单挑代表死亡立即判胜；整场规则不受普通效果免疫跳过。`static/tactical/bp-ui.js` 在禁选和战斗均显示本局模式，`battle-ui.js` 标出轮回战场区域。逐项定义见 `docs/BP特殊模式规则.md`，场景见 `tests/test_behavior.py::BPSpecialModeBehaviorTests`。
 
 - 2026-10-10 Phase H R238/R240/R242：源与保存问卷先各自锁JSON/XLSX，再在`heroes/excel_roster.py`接魔枪/魔压付费与严格0魔免费双档、三名技能死亡回场特性；`engine/core.py`从真实死亡记录安排下一敌方英雄末原对象合法选位并暂停轮序，避免待回场即判败；尖兵三轮普攻破魔、番兵三轮回血双攻、赤候可选真实友军技能破坏。`rooms/ai.py`补免费技能、回场及牺牲取舍，`static/tactical/vfx.js`和`battle-ui.js`等展示选择。`NewBatch238240242HellBehaviorTests`待用户定向运行；公开池88/388，剩余300。
 
@@ -390,7 +414,7 @@ The codebase was reorganised by domain on 2026-08-27. Every phase record further
 - `src/wujiang/heroes/registry.py`: hero registry, battle creation, classic multi-hero spawn/board sizing, random mode, start order. Internal `strategy_*` soldier units are registered for battle creation but filtered from public manual/random hero lists.
 - `src/wujiang/heroes/strategy_soldiers.py`: internal v0.1 city-state strategy soldier units used by the strategy battle adapter. These are simple no-skill/no-trait grid combatants for ordinary infantry, garrisons, archers, cavalry, mountain soldiers, ether scouts, and wall engineers.
 - `src/wujiang/web/multiplayer.py` and `src/wujiang/web/server.py`: room flow, host mode changes, random roster-size configuration, `2~6` seat ownership/team assignment, seat persistence, room/battle serialization, AI-room simulation control, replay serialization, and replay HTTP endpoints. `multiplayer.py` had legacy overridden `GameRoom` methods removed; the later replay/simulation-aware implementations are the canonical ones.
-- `src/wujiang/web/auth.py`: SQLite-backed registration/login/session module for future persistent strategy saves and account-bound permissions. The default local database is `var/wujiang.sqlite3`, overrideable with `WUJIANG_AUTH_DB`; SQLite files must remain untracked.
+- `src/wujiang/platform/auth.py`: SQLite-backed registration/login/session module. The default local database is `var/wujiang.sqlite3`, shared with `StrategyStore` unless overridden with `WUJIANG_AUTH_DB`; SQLite files must remain untracked. Login verifies the password before a short `BEGIN IMMEDIATE` session-write transaction and waits up to 30 seconds for competing writers. Persistent SQLite busy/locked errors become a retryable HTTP 503 through `AuthError`, with a player-path regression in `tests/test_behavior.py`.
 - `src/wujiang/strategy/quick_campaign.py`: Rescue R1 compact-campaign contract, one-time map/force shaping, public three-choice opening status, authoritative immediate opening effects, and derived at-most-three governance/diplomacy/military recommendations with a readable early expansion window plus the latest faction battle outcome. `static/app.js` owns the quick conclusion surface, continued-sandbox/archive/restart controls and single-player campaign-card wording while the shared strategy backend remains authoritative for settlement and read-only rules.
 - `src/wujiang/strategy/models.py`, `src/wujiang/strategy/generation.py`, `src/wujiang/strategy/store.py`, `src/wujiang/strategy/simulation.py`, `src/wujiang/strategy/command.py`, `src/wujiang/strategy/armies.py`, `src/wujiang/strategy/sieges.py`, `src/wujiang/strategy/administration.py`, `src/wujiang/strategy/story.py`, `src/wujiang/strategy/tactics.py`, `src/wujiang/strategy/rebellion.py`, `src/wujiang/strategy/battles.py`, and `src/wujiang/strategy/battle_adapter.py`: city-state strategy backend layer. It provides serializable world/city/faction/event/battle/army/encounter/siege models, deterministic connected random city-node maps, SQLite campaign/member/presence persistence, role-gated field levies, local garrison levies and building projects, account-bound multiple campaigns, join codes and resume gating, shared monthly command points, briefings, story events, city settlement, rebellion handling, tactic-tech troop conversion, persistent army movement/supply/siege, source-bound encounter/assault/breakout battle snapshots, compatible quick/real-grid writeback, city attacks, battle-room handoff, and the strategy soldier roster adapter.
 - `src/wujiang/web/ai.py`: room-side AI policy layer. It builds legal move/attack/skill/reaction/instant payloads from battle previews, keeps hidden-info legality by consuming only viewer-legal battle state, and provides per-hero / per-skill scoring hints on top of a generic candidate framework.
@@ -680,6 +704,9 @@ The codebase was reorganised by domain on 2026-08-27. Every phase record further
 - Strategy hero identity is actor-first: each player/AI controls one persistent strategic hero, which may be a lord, remain roaming, found a faction at its current city, or request allegiance to another lord. A roaming player gets a dedicated map workspace and no faction/city commands. Additional faction heroes are obtained through the confirmed city ritual-site random summon rule: the ritual pays 30 city ether and one command point, requires free non-lord office capacity, and binds the summoned hero to that city. Acceptance/allegiance or ritual summoning never grants an office automatically; the lord must appoint an unassigned serving hero as grand general, general, or governor. A campaign-founded faction starts with only its founding lord, and office migration must never synthesize free heroes.
 
 ## Testing Policy
+
+- BP 特殊模式的阵亡判定必须覆盖伤害结算与非伤害途径：统一阵亡清理在移除单位前通知房间规则，处理骤死、软柿子替死与擂台接替；替死者要标记以防递归替死。当前生命与当前魔量的直接增加必须走与回复 API 一致的 BP 禁止回复/回复反噬判定。
+- BP“铁链”跟随应沿开场同队行动顺序继续传递，且不得绕回推动本次最初移动的单位；跟随移动不消耗行动资源。
 
 - Add focused tests for every durable gameplay rule change.
 - After every gameplay, room-flow, or player-visible UI change, add or update at least one behavior scenario that exercises the changed feature from the player's point of view.

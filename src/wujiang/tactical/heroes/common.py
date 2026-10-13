@@ -1501,7 +1501,8 @@ class KnockbackSkill(Skill):
             return None
         if (getattr(unit, "standable_terrain", False)
                 or getattr(unit, "attached_to_unit_id", None)
-                or unit.direct_effects_blocked()):
+                or unit.direct_effects_blocked()
+                or unit.skill_non_damage_effects_blocked()):
             return None
         actor_cells = battle.unit_cells(actor)
         target_cells = battle.unit_cells(unit)

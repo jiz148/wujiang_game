@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import os
 import pickle
 import random
@@ -36,6 +37,7 @@ from wujiang.tactical.heroes.registry import RoomBattleEntry, create_room_battle
 from wujiang.tactical.rooms.ai import (
     choose_chain_reaction,
     choose_damage_choice_action,
+    choose_hell_dragon_return_action,
     choose_instant_action,
     choose_respawn_action,
     choose_turn_bundle_action,
@@ -44,6 +46,7 @@ from wujiang.tactical.rooms.replay import ReplayRecorder
 from wujiang.tactical.rooms.postgame import build_postgame_summary
 from wujiang.tactical.rooms.launch import is_campaign_launch, make_launch_context, public_launch_context
 from wujiang.tactical.rooms.tutorial import TUTORIAL_ID, next_tutorial_step_id, tutorial_step
+from wujiang.tactical.rooms.special_modes import choose_bp_special_modes, public_special_modes
 
 
 ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -63,6 +66,7 @@ AUTO_CONFIGURE_POINTS_MAX = 50
 AUTO_CONFIGURE_POINTS_DEFAULT = 15
 AUTO_CONFIGURE_ROSTER_CAP = 12
 TEAM_IDS = (1, 2)
+BP_POOL_SIZE = 66
 TEAM_LABELS = {1: "红队", 2: "蓝队"}
 CONTROLLER_TYPES = {"open", "human", "ai"}
 DEFAULT_AI_DIFFICULTY = "standard"
@@ -94,7 +98,7 @@ ROOM_MODES: dict[str, dict[str, str]] = {
     },
     "bp": {
         "name": "BP模式",
-        "description": "两人轮流禁选。全体选择沿用现在的等级上限；随机等级则每一轮抽一个点数，只在这个点数里禁选。",
+        "description": "全体选择从66名武将池中禁选并随机禁两个等级；随机等级逐轮抽等级。每局随机特殊模式，支持3v3和5v5。",
     },
     "autochess": {
         "name": "自走棋",
@@ -194,6 +198,29 @@ def heroes_catalog() -> list[dict[str, Any]]:
 
 def hero_lookup() -> dict[str, dict[str, Any]]:
     return {hero["code"]: hero for hero in heroes_catalog()}
+
+
+def draw_bp_hero_pool(heroes: dict[str, dict[str, Any]], *, size: int = BP_POOL_SIZE,
+                      rng: Optional[random.Random] = None) -> tuple[str, ...]:
+    """Draw playable heroes using a capacity-constrained bell-shaped level mix."""
+    by_level: dict[int, list[str]] = {}
+    for code, hero in heroes.items():
+        by_level.setdefault(int(hero["level"]), []).append(code)
+    if len(heroes) < size:
+        raise RoomError(f"BP需要至少{size}名已实现武将，当前只有{len(heroes)}名。")
+    randomizer = rng or secrets.SystemRandom()
+    weights = {level: math.exp(-0.5 * ((level - 5.5) / 2.15) ** 2) for level in by_level}
+    quotas = {level: 0 for level in by_level}
+    for _ in range(size):
+        best_score = max(weights[level] / (quotas[level] + 1)
+                         for level in by_level if quotas[level] < len(by_level[level]))
+        candidates = [level for level in by_level if quotas[level] < len(by_level[level])
+                      and abs(weights[level] / (quotas[level] + 1) - best_score) < 1e-12]
+        quotas[randomizer.choice(candidates)] += 1
+    chosen = [code for level in sorted(by_level)
+              for code in randomizer.sample(by_level[level], quotas[level])]
+    randomizer.shuffle(chosen)
+    return tuple(chosen)
 
 
 def auto_configure_hero_choices() -> list[tuple[str, int]]:
@@ -612,6 +639,12 @@ def battle_state_for_viewer(
     viewer_seat_id: Optional[int] = None,
 ) -> dict[str, Any]:
     state = battle.to_public_dict()
+    state["hell_dragon_returns"] = [
+        {**entry, "can_control": bool(viewer_player_id == entry["player_id"] and
+         (viewer_seat_id is None or battle_unit_owner_seat_id(
+             battle, battle.get_unit(entry["unit_id"])) == viewer_seat_id))}
+        for entry in state.get("hell_dragon_returns", [])
+    ]
     input_player = state["input_player"]
     state["viewer_player_id"] = viewer_player_id
     hidden_unit_ids = {
@@ -652,7 +685,11 @@ def battle_state_for_viewer(
         ]
     elif viewer_player_id is not None:
         instant_units = _instant_units_for_viewer(battle, viewer_player_id)
-        if instant_units:
+        dragon_returns = [entry for entry in state.get("hell_dragon_returns", [])
+                          if entry["player_id"] == viewer_player_id and entry["options"]
+                          and (viewer_seat_id is None or battle_unit_owner_seat_id(
+                              battle, battle.get_unit(entry["unit_id"])) == viewer_seat_id)]
+        if instant_units or dragon_returns:
             state["input_player"] = viewer_player_id
             state["active_units"] = [
                 {
@@ -910,6 +947,8 @@ class GameRoom:
         self.bp_tier_plan: list[dict[str, Any]] = []
         self.bp_first_pick_team: Optional[int] = None
         self.bp_auto_banned_levels: tuple[int, ...] = ()
+        self.bp_hero_pool: tuple[str, ...] = ()
+        self.bp_special_modes: tuple[str, ...] = ()
         self.bp_actions: list[dict[str, Any]] = []
         self.bp_assignments: dict[str, int | str] = {}
         self.bp_assign_opened = False
@@ -998,6 +1037,10 @@ class GameRoom:
             self.bp_first_pick_team = None
         if not hasattr(self, "bp_auto_banned_levels"):
             self.bp_auto_banned_levels = ()
+        if not hasattr(self, "bp_hero_pool"):
+            self.bp_hero_pool = ()
+        if not hasattr(self, "bp_special_modes"):
+            self.bp_special_modes = ()
         if not hasattr(self, "bp_actions"):
             self.bp_actions = []
         if not hasattr(self, "bp_assignments"):
@@ -1190,8 +1233,9 @@ class GameRoom:
         known = hero_lookup()
         used = {action["hero_code"] for action in actions}
         excluded = set(self.bp_auto_banned_levels if banned_levels is None else banned_levels)
+        pool = set(self.bp_hero_pool) if self.bp_hero_pool else set(known)
         available_levels = sorted(int(hero["level"]) for code, hero in known.items()
-                                  if code not in used and int(hero["level"]) not in excluded)
+                                  if code in pool and code not in used and int(hero["level"]) not in excluded)
         needs = tuple(self.bp_team_size - sum(action["kind"] == "pick" and action["team_id"] == team
                                                 for action in actions) for team in TEAM_IDS)
         budgets = tuple(self._bp_level_cap() - self._bp_total_level(team, actions) for team in TEAM_IDS)
@@ -1227,6 +1271,7 @@ class GameRoom:
     def _bp_shared_draft_feasible(self, actions: list[dict[str, Any]],
                                   *, banned_levels: Optional[tuple[int, ...]] = None) -> bool:
         known = hero_lookup()
+        pool = set(self.bp_hero_pool) if self.bp_hero_pool else set(known)
         excluded = set(self.bp_auto_banned_levels if banned_levels is None else banned_levels)
         banned_codes = {action["hero_code"] for action in actions if action["kind"] == "ban"}
         sequence_bans = 6 if self.bp_team_size == 3 else 10
@@ -1241,14 +1286,14 @@ class GameRoom:
             levels = sorted(
                 int(hero["level"])
                 for code, hero in known.items()
-                if code not in banned_codes and code not in own_picks and int(hero["level"]) not in excluded
+                if code in pool and code not in banned_codes and code not in own_picks and int(hero["level"]) not in excluded
             )
             if len(levels) < need or sum(levels[:need]) > budget:
                 return False
             needs.append(need)
         open_heroes = sum(
             1 for code, hero in known.items()
-            if code not in banned_codes and int(hero["level"]) not in excluded
+            if code in pool and code not in banned_codes and int(hero["level"]) not in excluded
         )
         return open_heroes - ban_steps_left >= max(needs or [0])
 
@@ -1352,7 +1397,9 @@ class GameRoom:
         return None
 
     def _bp_feasible_level_pairs(self) -> list[tuple[int, int]]:
-        counts = Counter(int(hero["level"]) for hero in hero_lookup().values())
+        known = hero_lookup()
+        pool = self.bp_hero_pool or tuple(known)
+        counts = Counter(int(known[code]["level"]) for code in pool)
         key = (self.bp_team_size, self._bp_level_cap(), tuple(sorted(counts.items())))
         cached = getattr(self, "_bp_pair_cache", None)
         if cached and cached[0] == key:
@@ -1367,6 +1414,8 @@ class GameRoom:
         hero = known.get(hero_code)
         if hero is None:
             return "所选武将不存在。"
+        if self.bp_hero_pool and hero_code not in self.bp_hero_pool:
+            return "该武将不在本局武将池中。"
         level = int(hero["level"])
         if self.bp_format == BP_FORMAT_TIER:
             round_plan, _round_number = self._bp_tier_round_at(len(self.bp_actions))
@@ -1402,7 +1451,7 @@ class GameRoom:
         if self.status != "bp" or len(self.bp_actions) >= len(sequence):
             return []
         kind, team = sequence[len(self.bp_actions)]
-        key = (self.bp_team_size, self._bp_level_cap(), self.bp_auto_banned_levels,
+        key = (self.bp_team_size, self._bp_level_cap(), self.bp_hero_pool, self.bp_auto_banned_levels,
                self.bp_first_pick_team, self.bp_format, bool(self.bp_allow_same_hero), kind, team,
                tuple((action["kind"], action["team_id"], action["hero_code"])
                      for action in self.bp_actions))
@@ -1414,7 +1463,7 @@ class GameRoom:
         representative = {}
         for code, hero in hero_lookup().items():
             level = int(hero["level"])
-            if code not in used and level not in self.bp_auto_banned_levels:
+            if (not self.bp_hero_pool or code in self.bp_hero_pool) and code not in used and level not in self.bp_auto_banned_levels:
                 representative.setdefault(level, code)
         legal = [level for level, code in sorted(representative.items())
                  if self._bp_choice_error(kind, team, code) is None]
@@ -1434,10 +1483,14 @@ class GameRoom:
         if self.bp_format == BP_FORMAT_TIER:
             self._begin_tier_bp()
             return
+        known = hero_lookup()
+        self.bp_hero_pool = draw_bp_hero_pool(known)
         pairs = self._bp_feasible_level_pairs()
         if not pairs:
-            raise RoomError("当前武将库无法在随机禁用两个等级后完成BP。")
+            self.bp_hero_pool = ()
+            raise RoomError("当前可用武将无法组成满足等级限制的66人武将池。")
         self.bp_auto_banned_levels = secrets.choice(pairs)
+        self.bp_special_modes = choose_bp_special_modes()
         self.bp_first_pick_team = secrets.choice(TEAM_IDS)
         self.bp_actions = []
         self.bp_assignments = {}
@@ -1456,6 +1509,8 @@ class GameRoom:
             raise RoomError("勾选的等级里没有足够的武将，双方无法各选到一名。")
         self.bp_tier_plan = plan
         self.bp_auto_banned_levels = ()
+        self.bp_hero_pool = ()
+        self.bp_special_modes = choose_bp_special_modes()
         self.bp_actions = []
         self.bp_assignments = {}
         self.bp_assign_opened = False
@@ -1591,6 +1646,9 @@ class GameRoom:
             "phase": self._bp_phase(),
             "first_pick_team": self.bp_first_pick_team,
             "auto_banned_levels": list(self.bp_auto_banned_levels),
+            "hero_pool_codes": list(self.bp_hero_pool),
+            "hero_pool_levels": dict(sorted(Counter(int(known[code]["level"]) for code in self.bp_hero_pool).items())),
+            "special_modes": public_special_modes(self.bp_special_modes),
             "legal_levels": self._bp_legal_levels(),
             "step_index": index,
             "step_count": len(sequence),
@@ -1862,6 +1920,8 @@ class GameRoom:
                 return action_code or "连锁"
         if action_type == "respawn_select":
             return "重新出现"
+        if action_type == "hell_dragon_return":
+            return "古龙满状态复活"
         if action_type == "damage_choice":
             if payload.get("target_unit_id"):
                 if "@" in str(payload.get("target_unit_id") or ""):
@@ -2147,6 +2207,10 @@ class GameRoom:
                 difficulty = seat.ai_difficulty_override or self.default_ai_difficulty
                 payload = choose_chain_reaction(self.battle, reactor, options, difficulty)
                 return (payload or {"type": "chain_skip"}, "ai_chain", reactor)
+            dragon_payload = self._choose_ai_dragon_return_payload()
+            if dragon_payload is not None:
+                actor = self.battle.get_unit(str(dragon_payload["unit_id"]))
+                return dragon_payload, "ai_hell_dragon_return", actor
             instant_payload = self._choose_ai_instant_payload()
             if instant_payload is not None:
                 actor = self.battle.get_unit(str(instant_payload.get("unit_id") or ""))
@@ -2618,6 +2682,8 @@ class GameRoom:
             self.bp_captains = {}
             self.bp_first_pick_team = None
             self.bp_auto_banned_levels = ()
+            self.bp_hero_pool = ()
+            self.bp_special_modes = ()
             self.bp_actions = []
             self.bp_assignments = {}
             if self.mode == "bp":
@@ -2961,6 +3027,8 @@ class GameRoom:
                 self.status = "lobby"
                 self.bp_first_pick_team = None
                 self.bp_auto_banned_levels = ()
+                self.bp_hero_pool = ()
+                self.bp_special_modes = ()
                 self.bp_actions = []
                 self.bp_assignments = {}
             leaving_player_id = seat.player_id
@@ -3136,6 +3204,12 @@ class GameRoom:
     def allows_instant_action_override(self, seat: PlayerSeat, payload: dict[str, Any]) -> bool:
         if self.battle is None or self.battle.pending_damage_choice is not None or self.battle.pending_chain is not None or self.battle.current_respawn_prompt() is not None:
             return False
+        if payload.get("type") == "hell_dragon_return":
+            unit_id = str(payload.get("unit_id") or "")
+            if unit_id not in self.battle.hell_dragon_return_cells:
+                return False
+            actor = self.battle.get_unit(unit_id)
+            return actor.player_id == seat.team_id and self._unit_owner_seat_id(actor) == seat.player_id
         if payload.get("type") != "skill":
             return False
         actor_unit_id = payload.get("unit_id")
@@ -3175,6 +3249,21 @@ class GameRoom:
                 continue
             difficulty = seat.ai_difficulty_override or self.default_ai_difficulty
             payload = choose_instant_action(self.battle, owned_units, difficulty)
+            if payload is not None:
+                return payload
+        return None
+
+    def _choose_ai_dragon_return_payload(self) -> Optional[dict[str, Any]]:
+        if (self.battle is None or self.battle.pending_damage_choice is not None
+                or self.battle.pending_chain is not None or self.battle.current_respawn_prompt() is not None
+                or self.battle.pending_followup_actions):
+            return None
+        for unit_id in list(self.battle.hell_dragon_return_cells):
+            unit = self.battle.get_unit(unit_id)
+            seat = self._seat_for_actor(unit)
+            if seat is None or not seat.is_ai_controlled:
+                continue
+            payload = choose_hell_dragon_return_action(self.battle, unit)
             if payload is not None:
                 return payload
         return None
@@ -3391,6 +3480,7 @@ class GameRoom:
                     board_height=int(getattr(self, "board_height", DEFAULT_BOARD_HEIGHT) or DEFAULT_BOARD_HEIGHT),
                     turn_timeout_limit=int(getattr(self, "hero_turn_limit", 0) or SKIRMISH_HERO_TURN_LIMIT),
                     turn_timeout_winner=int(getattr(self, "turn_limit_winner", 2) or 2),
+                    special_mode_codes=self.bp_special_modes if self.mode == "bp" else (),
                 )
             except (ActionError, ValueError) as exc:
                 raise RoomError("当前战场放不下这些武将，请把战场调大后再开局。") from exc
@@ -3464,6 +3554,8 @@ class GameRoom:
             self.bp_virtual_seat_ids = []
             self.bp_first_pick_team = None
             self.bp_auto_banned_levels = ()
+            self.bp_hero_pool = ()
+            self.bp_special_modes = ()
             self.bp_actions = []
             self.bp_assignments = {}
             for seat in self.seats.values():
@@ -3526,8 +3618,12 @@ class GameRoom:
                     self._perform_battle_action(payload or {"type": "chain_skip"}, reason="ai_chain")
                     steps += 1
                 else:
-                    instant_payload = self._choose_ai_instant_payload()
-                    if instant_payload is not None:
+                    dragon_payload = self._choose_ai_dragon_return_payload()
+                    instant_payload = None if dragon_payload is not None else self._choose_ai_instant_payload()
+                    if dragon_payload is not None:
+                        self._perform_battle_action(dragon_payload, reason="ai_hell_dragon_return")
+                        steps += 1
+                    elif instant_payload is not None:
                         self._perform_battle_action(instant_payload, reason="ai_instant")
                         steps += 1
                     elif self.battle.is_army_turn():
