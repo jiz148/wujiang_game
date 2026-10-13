@@ -130,7 +130,8 @@ def apply_piercing_status_effect(
     return status in target.statuses
 
 
-def remote_rectangle_patterns(battle: Battle, actor: HeroUnit, width: int, height: int) -> list[list[Position]]:
+def remote_rectangle_patterns(battle: Battle, actor: HeroUnit, width: int, height: int,
+                              *, attack_range: int | None = None) -> list[list[Position]]:
     if actor.position is None:
         return []
     patterns: list[list[Position]] = []
@@ -145,7 +146,7 @@ def remote_rectangle_patterns(battle: Battle, actor: HeroUnit, width: int, heigh
                     if not battle.in_bounds(cell):
                         continue
                     cells.append(cell)
-                    if battle.unit_distance_to_cell(actor, cell) <= actor.targeting_range():
+                    if battle.unit_distance_to_cell(actor, cell) <= (attack_range if attack_range is not None else actor.targeting_range()):
                         contains_range_cell = True
             if not cells or not contains_range_cell:
                 continue

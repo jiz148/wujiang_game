@@ -2,6 +2,7 @@
 
 import re
 import random
+from copy import copy
 from contextlib import contextmanager
 from itertools import permutations
 from typing import Any, Callable
@@ -11,6 +12,7 @@ from wujiang.tactical.engine.core import (
     ActionError,
     ActionMiss,
     Battle,
+    BattleComponent,
     BattleFieldEffect,
     DamageContext,
     HealContext,
@@ -13109,6 +13111,422 @@ class HellDragonSacrificeTrait(Trait):
             battle.log_public_event(f"{owner.name} 未能真正破坏两名目标，未取得复活权。", target=owner)
 
 
+class AncientRepairBonusStatus(StatModifierStatus):
+    def __init__(self, stat_name: str, applied_turn_number: int) -> None:
+        deltas = {"attack": "attack_delta", "defense": "defense_delta", "speed": "speed_delta",
+                  "attack_range": "range_delta", "mana": "mana_delta"}
+        super().__init__("万古的修整", description=f"{stat_name} +1，直到下个本人回合结束。",
+                         duration=1, tick_scope="owner_turn_end", **{deltas[stat_name]: 1})
+        self.applied_turn_number = applied_turn_number
+
+    def on_owner_turn_end(self, battle: Battle) -> None:
+        if battle.turn_number != self.applied_turn_number:
+            super().on_owner_turn_end(battle)
+
+    def on_removed(self, battle: Battle) -> None:
+        if self.owner is not None:
+            self.owner.clamp_mana()
+
+
+class AncientRepairSkill(Skill):
+    def __init__(self) -> None:
+        super().__init__("ancient_repair", "万古的修整",
+                         "每回合一次；范4，机甲武将或其召唤物血+1/4、魔+1，随机一项能力值+1至其下回合结束。",
+                         max_uses_per_turn=1, target_mode="unit")
+
+    def targets(self, battle: Battle, actor: Unit) -> list[Unit]:
+        return [unit for unit in battle.all_units()
+                if unit.alive and not unit.banished and unit.position is not None
+                and ((isinstance(unit, HeroUnit) and not unit.is_summon and unit.race == "机甲")
+                     or (unit.is_summon and (unit.race == "机甲"
+                         or getattr(battle.units.get(unit.summoner_id or ""), "race", None) == "机甲")))
+                and battle.unit_can_be_selected(unit, actor=actor)[0]
+                and battle.unit_target_in_range_and_line(actor, unit, actor.targeting_range())]
+
+    def can_use(self, battle: Battle, actor: Unit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok:
+            return ok, reason
+        eligible = {unit.unit_id for unit in self.targets(battle, actor)}
+        if payload and payload.get("target_unit_id"):
+            return (True, "") if str(payload["target_unit_id"]) in eligible else (False, "只能修整射程内机甲武将或其召唤物。")
+        return (True, "") if eligible else (False, "没有可修整的机甲单位。")
+
+    def execute(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
+        target = battle.get_unit(str(payload.get("resolved_target_unit_id") or payload.get("target_unit_id") or ""))
+        if target.unit_id not in {unit.unit_id for unit in self.targets(battle, actor)}:
+            raise ActionMiss("万古的修整目标已不在合法范围。")
+        result = battle.validate_target(actor, target, action_name=self.name, is_skill=True,
+                                        is_hostile=target.player_id != actor.player_id,
+                                        record_effect_on_validation=False)
+        recipient = result.target
+        if (result.cancelled or recipient.unit_id not in {unit.unit_id for unit in self.targets(battle, actor)}
+                or recipient.skill_non_damage_effects_blocked()):
+            battle.log_public_event(result.reason or f"{recipient.name} 未受到万古的修整。", source=actor, target=recipient)
+            return
+        battle.heal(HealContext(source=actor, target=recipient, amount=0.25, action_name=self.name, tags={"skill"}))
+        recipient.gain_mana(1)
+        stat_name = random.choice(("attack", "defense", "speed", "attack_range", "mana"))
+        recipient.add_status(AncientRepairBonusStatus(stat_name, battle.turn_number), source=actor)
+        battle.log_public_event(f"{actor.name} 修整了{recipient.name}，其{stat_name}暂时+1。", source=actor, target=recipient)
+
+    def preview(self, battle: Battle, actor: Unit) -> dict[str, Any]:
+        targets = self.targets(battle, actor)
+        return {"cells": positions_to_dict([cell for target in targets for cell in battle.unit_cells(target)]),
+                "target_unit_ids": [target.unit_id for target in targets], "secondary_cells": [], "requires_target": True}
+
+
+class AncientFusionSkill(Skill):
+    requires_direct_unit_target_line = False
+
+    def __init__(self) -> None:
+        super().__init__("ancient_fusion", "古代融合",
+                         "破坏自己，使一名己方名字含古代的单位永久攻守速+1，并继承自身特性及所选一个技能。",
+                         target_mode="ally")
+
+    def direct_unit_target_range(self, battle: Battle, actor: Unit,
+                                 payload: dict[str, Any] | None = None) -> int:
+        return max(battle.width, battle.height)
+
+    def targets(self, battle: Battle, actor: Unit) -> list[Unit]:
+        return [unit for unit in battle.all_units()
+                if unit.unit_id != actor.unit_id and unit.player_id == actor.player_id
+                and unit.alive and not unit.banished and unit.position is not None
+                and "古代" in unit.name and battle.unit_can_be_selected(unit, actor=actor)[0]]
+
+    def source_skills(self, actor: Unit) -> list[Skill]:
+        return [skill for skill in actor.skills if skill.code
+                and getattr(skill, "_ancient_stolen_charges", 1) > 0]
+
+    def can_use(self, battle: Battle, actor: Unit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok:
+            return ok, reason
+        targets = {unit.unit_id for unit in self.targets(battle, actor)}
+        if not targets or not self.source_skills(actor):
+            return False, "场上没有可融合的古代友军或可传承技能。"
+        if payload and payload.get("target_unit_id"):
+            if str(payload["target_unit_id"]) not in targets:
+                return False, "只能选择场上己方名字含古代的其他单位。"
+            code = str(payload.get("copied_skill_code") or "")
+            if code not in {skill.code for skill in self.source_skills(actor)}:
+                return False, "请选择本单位一项可见技能传承。"
+        return True, ""
+
+    def execute(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
+        target = battle.get_unit(str(payload.get("resolved_target_unit_id") or payload.get("target_unit_id") or ""))
+        if target.unit_id not in {unit.unit_id for unit in self.targets(battle, actor)}:
+            raise ActionMiss("古代融合的受体已离场。")
+        selected = next((skill for skill in self.source_skills(actor)
+                         if skill.code == str(payload.get("copied_skill_code") or "")), None)
+        if selected is None:
+            raise ActionError("没有所选传承技能。")
+        result = battle.validate_target(actor, target, action_name=self.name, is_skill=True,
+                                        is_hostile=False, record_effect_on_validation=False)
+        recipient = result.target
+        if result.cancelled or recipient is not target or recipient.skill_non_damage_effects_blocked():
+            battle.log_public_event(result.reason or f"{target.name} 未接受古代融合。", source=actor, target=target)
+            return
+        actor.current_hp = 0
+        actor.alive = False
+        for stat_name in ("attack", "defense", "speed"):
+            setattr(recipient.base_stats, stat_name, getattr(recipient.base_stats, stat_name) + 1)
+        for trait in actor.traits:
+            if any(existing.name == trait.name for existing in recipient.traits):
+                continue
+            inherited = copy(trait)
+            BattleComponent.__init__(inherited, inherited.name, inherited.description)
+            recipient.traits.append(inherited.bind(recipient))
+        if selected.code not in recipient.skill_map():
+            inherited_skill = copy(selected)
+            BattleComponent.__init__(inherited_skill, inherited_skill.name, inherited_skill.description)
+            inherited_skill.uses_this_turn = 0
+            inherited_skill.uses_this_battle = 0
+            inherited_skill.cooldown_remaining = 0
+            inherited_skill._uses_turn_number = None
+            recipient.skills.append(inherited_skill.bind(recipient))
+        battle.log_public_event(f"{actor.name} 融合到{recipient.name}，传承【{selected.name}】。", source=actor, target=recipient)
+        battle.cleanup_dead_units()
+
+    def preview(self, battle: Battle, actor: Unit) -> dict[str, Any]:
+        targets = self.targets(battle, actor)
+        return {"cells": positions_to_dict([cell for target in targets for cell in battle.unit_cells(target)]),
+                "target_unit_ids": [target.unit_id for target in targets], "secondary_cells": [], "requires_target": True,
+                "selection": {"mode": "ancient_fusion", "targets": [
+                    {"unit_id": target.unit_id, "name": target.name} for target in targets],
+                    "skills": [{"code": skill.code, "name": skill.name} for skill in self.source_skills(actor)]}}
+
+
+class AncientEngineerReactionLockTrait(Trait):
+    def __init__(self) -> None:
+        super().__init__("古代工兵伤害封锁", "本人攻技的伤害计算阶段，非受击对象不能使用技能。")
+        self.blocks_bystander_reactions = True
+
+
+class AncientTurretAreaTrait(Trait):
+    def __init__(self) -> None:
+        super().__init__("古代炮台4×4普攻", "范内远程选择4×4区域，敌我均受击。")
+
+    def patterns(self, battle: Battle, actor: Unit) -> list[list[Position]]:
+        return remote_rectangle_patterns(battle, actor, 4, 4)
+
+    def basic_attack_area_cells(self, battle: Battle, actor: Unit,
+                                payload: dict[str, Any] | None = None) -> list[Position] | None:
+        if payload is None or not (payload.get("attack_cells") or payload.get("cells")):
+            return None
+        return match_payload_pattern({"cells": payload.get("attack_cells") or payload.get("cells")},
+                                     self.patterns(battle, actor))
+
+    def basic_attack_preview(self, battle: Battle, actor: Unit,
+                             payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        patterns = self.patterns(battle, actor)
+        preview = pattern_selection_preview(patterns)
+        covered_cells = {spot for pattern in patterns for spot in pattern}
+        preview.update({"target_unit_ids": [unit.unit_id for unit in battle.all_units()
+                                            if any(cell in covered_cells for cell in battle.unit_cells(unit))],
+                        "secondary_cells": [], "requires_target": True})
+        return preview
+
+
+class AncientRustNoHealStatus(StatusEffect):
+    remove_when_source_destroyed = True
+
+    def __init__(self, source_unit_id: str) -> None:
+        super().__init__("古代锈蚀禁疗", "原炮台破坏前不能回复。")
+        self.source_unit_id = source_unit_id
+        self.flag_name = "cannot_heal"
+
+    def bind(self, owner: Unit) -> "AncientRustNoHealStatus":
+        super().bind(owner)
+        owner.cannot_heal = True
+        return self
+
+    def on_removed(self, battle: Battle) -> None:
+        if self.owner is not None:
+            self.owner.cannot_heal = any(getattr(status, "flag_name", "") == "cannot_heal"
+                                         for status in self.owner.statuses)
+
+
+class AncientRustReadyStatus(StatusEffect):
+    def __init__(self) -> None:
+        super().__init__("生锈的气味预备", "下一次普攻破魔；实际命中者禁疗至本人破坏。")
+
+    def basic_attack_payload_metadata(self, battle: Battle, actor: Unit,
+                                      payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {"ignore_shield": True, "ancient_rust_attack": True}
+
+    def on_after_damage(self, battle: Battle, ctx: DamageContext) -> None:
+        owner = self.owner
+        if owner is None or ctx.source is not owner or ctx.is_skill or "attack" not in ctx.tags:
+            return
+        if not damage_followup_effect_applies(ctx) or ctx.target.skill_non_damage_effects_blocked():
+            return
+        if not any(isinstance(status, AncientRustNoHealStatus) and status.source_unit_id == owner.unit_id
+                   for status in ctx.target.statuses):
+            ctx.target.add_status(AncientRustNoHealStatus(owner.unit_id), source=owner)
+
+    def on_basic_attack_finished(self, battle: Battle, actor: Unit, payload: dict[str, Any],
+                                 damage_contexts: list[DamageContext], missed: bool) -> None:
+        if self.owner is actor:
+            actor.remove_status(self, battle)
+
+
+class AncientRustSkill(Skill):
+    def __init__(self) -> None:
+        super().__init__("ancient_rust", "生锈的气味", "每回合一次；下一次普攻破魔并令实际命中者禁疗至本人破坏。",
+                         max_uses_per_turn=1, target_mode="self")
+
+    def can_use(self, battle: Battle, actor: Unit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if ok and actor.has_status("生锈的气味预备"):
+            return False, "生锈的气味已经预备，先完成下一次攻击。"
+        return ok, reason
+
+    def execute(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
+        actor.add_status(AncientRustReadyStatus(), source=actor)
+
+
+class AncientJawWeaknessStatus(StatModifierStatus):
+    remove_when_source_destroyed = True
+
+    def __init__(self, source_unit_id: str, stat_name: str) -> None:
+        deltas = {"attack": "attack_delta", "defense": "defense_delta", "speed": "speed_delta",
+                  "attack_range": "range_delta", "mana": "mana_delta"}
+        super().__init__("溶解之颌弱化", description=f"{stat_name}-1，原机械兽破坏时解除。",
+                         **{deltas[stat_name]: -1})
+        self.source_unit_id = source_unit_id
+        self.stat_name = stat_name
+
+    def on_removed(self, battle: Battle) -> None:
+        if self.owner is not None:
+            self.owner.clamp_mana()
+
+
+class AncientJawSkill(Skill):
+    def __init__(self) -> None:
+        super().__init__("ancient_jaw", "溶解之颌", "每本人回合一次；范2，当前攻单体技能伤害破魔，真实命中随机一项能力-1至本人破坏。",
+                         max_uses_per_turn=1, target_mode="unit")
+
+    def direct_unit_target_range(self, battle: Battle, actor: Unit,
+                                 payload: dict[str, Any] | None = None) -> int:
+        return 2
+
+    def ignores_shield_for_payload(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> bool:
+        return True
+
+    def execute(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
+        target = battle.get_unit(str(payload.get("resolved_target_unit_id") or payload.get("target_unit_id") or ""))
+        ctx = battle.resolve_damage(DamageContext(
+            source=actor, target=target, attack_power=actor.stat("attack"), is_skill=True,
+            action_name=self.name, ignore_shield=True, tags={"skill", self.code},
+        ))
+        recipient = ctx.target
+        if recipient.alive and damage_followup_effect_applies(ctx) and not recipient.skill_non_damage_effects_blocked():
+            stat_name = random.choice(("attack", "defense", "speed", "attack_range", "mana"))
+            weakness = AncientJawWeaknessStatus(actor.unit_id, stat_name)
+            recipient.add_status(weakness, source=actor)
+            if weakness in recipient.statuses:
+                recipient.clamp_mana()
+                battle.log_public_event(f"{recipient.name} 被溶解之颌削弱了{stat_name}。", source=actor, target=recipient)
+
+    def preview(self, battle: Battle, actor: Unit) -> dict[str, Any]:
+        targets = [unit for unit in battle.all_units() if unit.alive and unit.position is not None
+                   and battle.unit_can_be_selected(unit, actor=actor)[0]
+                   and battle.unit_target_in_range_and_line(actor, unit, 2)]
+        return {"cells": positions_to_dict([cell for unit in targets for cell in battle.unit_cells(unit)]),
+                "target_unit_ids": [unit.unit_id for unit in targets], "secondary_cells": [], "requires_target": True}
+
+
+class AncientBeastTheftTrait(Trait):
+    def __init__(self) -> None:
+        super().__init__("古代机械兽夺技", "造成生命伤害后获得受体最近公开主动技能的一次使用权；真正击毁单位时该单位失去特性。")
+
+    def on_after_damage(self, battle: Battle, ctx: DamageContext) -> None:
+        owner = self.owner
+        if owner is None or ctx.source is not owner:
+            return
+        target = ctx.target
+        if not target.alive:
+            removed = [trait.name for trait in target.traits]
+            target.traits.clear()
+            if removed:
+                battle.log_public_event(f"{owner.name} 击毁{target.name}，其特性消失：{'、'.join(removed)}。",
+                                        source=owner, target=target)
+        if (ctx.cancelled or ctx.actual_damage <= 0
+                or (target.alive and not battle.unit_can_be_selected(target, actor=owner)[0])
+                or target.is_stealthed()):
+            return
+        code = str(getattr(target, "_last_active_skill_code", "") or "")
+        definition = target.skill_map().get(code)
+        if definition is None or definition.timing != "active":
+            return
+        own = owner.skill_map().get(code)
+        if own is not None and not hasattr(own, "_ancient_stolen_charges"):
+            battle.log_public_event(f"{owner.name} 已掌握【{definition.name}】，没有新增独立额度。", source=owner)
+            return
+        if own is None:
+            fresh = copy(definition)
+            BattleComponent.__init__(fresh, fresh.name, fresh.description)
+            fresh.uses_this_turn = fresh.uses_this_battle = fresh.cooldown_remaining = 0
+            fresh._uses_turn_number = None
+            if hasattr(fresh, "borrowed"):
+                fresh.borrowed = {}
+            fresh._ancient_stolen_charges = 0
+            owner.skills.append(fresh.bind(owner))
+            own = fresh
+        own._ancient_stolen_charges += 1
+        battle.log_public_event(f"{owner.name} 从{target.name}取得【{definition.name}】一次使用权。", source=owner, target=target)
+
+
+class AncientArmSkill(RemoteDragonBreathSkill):
+    excludes_caster_from_effect = False
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.code = "ancient_arm"
+        self.name = "机械臂"
+        self.description = "每本人回合一次；范5的2×2区域按当前攻伤双方，命中护盾时半破魔。"
+        self.mana_cost = 0
+        self.max_uses_per_turn = 1
+
+    def patterns(self, battle: Battle, actor: Unit) -> list[list[Position]]:
+        return remote_rectangle_patterns(battle, actor, 2, 2, attack_range=5)
+
+    def half_ignores_shield_for_payload(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> bool:
+        return True
+
+    def execute(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
+        cells = battle.payload_positions(payload, "declared_area_cells") if "declared_area_cells" in payload else self.chosen_cells(battle, actor, payload)
+        for target in battle.effect_units_at_cells(cells):
+            battle.resolve_damage(DamageContext(
+                source=actor, target=target, attack_power=actor.stat("attack"), is_skill=True,
+                action_name=self.name, half_ignore_shield=True,
+                area_cell_hits=battle.unit_hit_count_for_cells(target, cells), tags={"skill", self.code},
+            ))
+
+    def preview(self, battle: Battle, actor: Unit) -> dict[str, Any]:
+        preview = pattern_selection_preview(self.patterns(battle, actor))
+        covered = {cell for pattern in self.patterns(battle, actor) for cell in pattern}
+        preview.update({"target_unit_ids": [unit.unit_id for unit in battle.effect_units_at_cells(list(covered))
+                                             if battle.unit_can_be_selected(unit, actor=actor)[0]],
+                        "secondary_cells": [], "requires_target": True})
+        return preview
+
+    def get_target_units_for_payload(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> list[Unit]:
+        return battle.effect_units_at_cells(self.chosen_cells(battle, actor, payload))
+
+
+class AncientVigorSkill(Skill):
+    def __init__(self) -> None:
+        super().__init__("ancient_vigor", "活力锈迹", "每本人回合一次；先回血1/4，实得回血后可沿直线恰好移动4格。",
+                         max_uses_per_turn=1, target_mode="cell")
+
+    def destinations(self, battle: Battle, actor: Unit) -> list[Position]:
+        if actor.position is None or actor.cannot_move:
+            return []
+        spots = []
+        for dx, dy in ALL_DIRECTIONS:
+            destination = actor.position.offset(dx * 4, dy * 4)
+            if not battle.in_bounds(destination) or not battle.can_place_unit(actor, destination, ignore=actor, mover=actor):
+                continue
+            try:
+                battle.find_path(actor, destination, max_distance=4, exact_distance=4, straight_only=True)
+            except ActionError:
+                continue
+            spots.append(destination)
+        return spots
+
+    def can_use(self, battle: Battle, actor: Unit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok:
+            return ok, reason
+        if payload and payload.get("x") is not None:
+            destination = payload_position(payload)
+            if destination != actor.position and destination not in self.destinations(battle, actor):
+                return False, "活力锈迹只可选择合法的直线四格落点或原地放弃。"
+        return True, ""
+
+    def execute(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
+        healed = battle.heal(HealContext(source=actor, target=actor, amount=0.25, action_name=self.name, tags={"skill"}))
+        if healed.actual_heal <= 0 or payload.get("x") is None or actor.position is None:
+            return
+        destination = payload_position(payload)
+        if destination == actor.position:
+            return
+        try:
+            battle.move_unit(actor, destination, via_skill=True, max_distance=4, exact_distance=4, straight_only=True)
+        except ActionError:
+            battle.log_public_event(f"{actor.name} 已回血，但四格落点不再合法，位移落空。", source=actor)
+
+    def preview(self, battle: Battle, actor: Unit) -> dict[str, Any]:
+        cells = ([actor.position] if actor.position is not None else []) + self.destinations(battle, actor)
+        return {"cells": positions_to_dict(cells), "target_unit_ids": [], "secondary_cells": [],
+                "requires_target": True}
+
+    def get_target_cells_for_payload(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> list[Position]:
+        return [payload_position(payload)] if payload.get("x") is not None else battle.unit_cells(actor)
+
+
 def _slug_tail(source_row: int, name: str) -> str:
     ascii_tail = re.sub(r"[^0-9a-zA-Z_]+", "_", name).strip("_").lower()
     return ascii_tail or f"r{source_row:03d}"
@@ -13147,6 +13565,18 @@ def _special_skill_factory(spec: dict[str, Any], fragment: dict[str, Any]) -> Sk
             return HellDragonFireSkill()
         if name == "飞龙宝珠":
             return FlyingDragonOrbSkill()
+    if spec.get("code") == "excel_r249" and name == "万古的修整":
+        return AncientRepairSkill()
+    if spec.get("code") == "excel_r251" and name == "生锈的气味":
+        return AncientRustSkill()
+    if spec.get("code") == "excel_r250" and name == "溶解之颌":
+        return AncientJawSkill()
+    if spec.get("code") == "excel_r252" and name == "机械臂":
+        return AncientArmSkill()
+    if spec.get("code") == "excel_r252" and name == "活力锈迹":
+        return AncientVigorSkill()
+    if spec.get("code") in {"excel_r249", "excel_r250", "excel_r251", "excel_r252"} and name == "古代融合":
+        return AncientFusionSkill()
     if spec.get("code") == "excel_r221" and name == "卫星加农炮":
         return SatelliteCannonSkill()
     if spec.get("code") == "excel_r222" and name == "电子维修":
@@ -13446,9 +13876,9 @@ def _common_skill_factory(fragment: dict[str, Any]) -> Skill | None:
         return DashMoveSkill(
             "fly_leap",
             "飞跃",
-            "普通技能：费 1 魔，每回合最多 1 次，直线飞行移动恰好 4 格。",
-            max_distance=4,
-            exact_distance=4,
+            "普通技能：费 1 魔，每回合最多 1 次，直线飞行移动恰好 3 格。",
+            max_distance=3,
+            exact_distance=3,
             mana_cost=1,
             max_uses_per_turn=1,
             straight_only=True,
@@ -13543,6 +13973,14 @@ def _common_trait_factory(fragment: dict[str, Any]) -> Trait | None:
 
 def _special_trait_factory(spec: dict[str, Any], fragment: dict[str, Any]) -> Trait | None:
     text = _text(fragment.get("fragment"))
+    if spec.get("code") == "excel_r249" and "伤害计算阶段结束前" in text:
+        return AncientEngineerReactionLockTrait()
+    if spec.get("code") == "excel_r251" and text == "攻击4*4":
+        return AncientTurretAreaTrait()
+    if spec.get("code") == "excel_r250" and "此单位破坏的单位失去特性" in text:
+        return AncientBeastTheftTrait()
+    if spec.get("code") == "excel_r252" and text == "不受到技能伤害":
+        return RedLotusSkillDamageImmunityTrait()
     if spec.get("code") in {"excel_r238", "excel_r240"} and "被技能破坏后" in text:
         return HellRebirthTrait(spec["code"])
     if spec.get("code") == "excel_r242" and "被技能破坏后" in text:
@@ -13914,6 +14352,10 @@ IMPLEMENTED_EXCEL_HERO_CODES: frozenset[str] = frozenset(
         "excel_r246",
         "excel_r247",
         "excel_r248",
+        "excel_r249",
+        "excel_r250",
+        "excel_r251",
+        "excel_r252",
         "excel_r264",
         "excel_r291",
         "excel_r326",

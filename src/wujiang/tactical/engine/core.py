@@ -710,6 +710,8 @@ class Skill(BattleComponent, ABC):
             return False, "本回合使用次数已满。"
         if self.max_uses_per_battle is not None and self.uses_this_battle >= self.max_uses_per_battle:
             return False, "本场战斗使用次数已满。"
+        if getattr(self, "_ancient_stolen_charges", 1) <= 0:
+            return False, "夺得技能的一次使用权已用完。"
         if actor.current_mana + 1e-9 < self.mana_cost_for_payload(battle, actor, payload):
             return False, "魔力不足。"
         block_reason = battle.shared_stealth_action_block_reason(actor)
@@ -772,6 +774,8 @@ class Skill(BattleComponent, ABC):
         actor.spend_mana(self.mana_cost_for_payload(battle, actor, payload))
         self.uses_this_turn += 1
         self.uses_this_battle += 1
+        if hasattr(self, "_ancient_stolen_charges"):
+            self._ancient_stolen_charges -= 1
         if self.cooldown_turns:
             self.cooldown_remaining = self.cooldown_turns
 
@@ -3015,6 +3019,8 @@ class Battle:
         actor._paying_skill_cost = True
         try:
             skill.prepay_resources(self, actor, payload)
+            if skill.timing == "active":
+                actor._last_active_skill_code = skill.code
         finally:
             if previous:
                 actor._paying_skill_cost = previous
@@ -5095,8 +5101,6 @@ class Battle:
         return resolved
 
     def basic_attack_resource_allowed(self, actor: Unit, payload: dict[str, Any]) -> tuple[bool, str]:
-        if "real_men" in getattr(self, "special_mode_codes", ()):
-            return False, "真男人模式只能使用主动技能。"
         cost = int(payload.get("attack_cost", 1))
         if cost < 0:
             return False, "普攻次数消耗无效。"
@@ -5641,8 +5645,18 @@ class Battle:
     def available_reaction_options(self, unit: Unit, queued_action: QueuedAction) -> list[ReactionOption]:
         if self.shield_auto_blocks_chain(unit, queued_action):
             return []
+        source = self.units.get(queued_action.actor_id)
+        affected_by_source = set(queued_action.target_unit_ids)
+        affected_by_source.update(target.unit_id for target in self.effect_units_at_cells(queued_action.target_cells))
+        bystander_skill_locked = bool(
+            queued_action.action_type in {"attack", "skill", "skill_effect"}
+            and source is not None
+            and any(getattr(component, "blocks_bystander_reactions", False)
+                    for component in source.iter_components())
+            and unit.unit_id not in affected_by_source
+        )
         options: list[ReactionOption] = []
-        for skill in unit.skills:
+        for skill in ([] if bystander_skill_locked else unit.skills):
             ok, _ = skill.can_react_to(self, unit, queued_action)
             if not ok:
                 continue
@@ -6427,6 +6441,11 @@ class Battle:
             for summon in chained_summons:
                 summon.alive = False
                 self.log(f"{summon.name} 的召唤者已被击破，因此一并消散。")
+        for unit in self.all_units():
+            for status in list(unit.statuses):
+                if (getattr(status, "remove_when_source_destroyed", False)
+                        and self.units.get(getattr(status, "source_unit_id", "")) is None):
+                    unit.remove_status(status, self)
         self.hell_rebirth_unit_ids.intersection_update(
             unit.unit_id for unit in self.destroyed_units if not unit.alive
         )

@@ -79,6 +79,12 @@ export function onBoardClick(x, y, occupant) {
     return;
   }
 
+  if (action?.code === "ancient_fusion") {
+    if (occupant) inspectBoardUnit(occupant, { openInfo: false });
+    render();
+    return;
+  }
+
   if (occupant) inspectBoardUnit(occupant, { openInfo: false });
 
   if (!action) {

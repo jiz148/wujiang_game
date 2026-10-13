@@ -1,8 +1,14 @@
 ﻿# wujiang_game Project Map
 
+- 2026-10-13 Phase H R250/R252：用户报告中R248优化6/6回归、3场AI零高信号；R249/R251 6/7回归（一项`WitnessSkill`夹具漏说明参数已修）及6场AI零高信号。新将源文/保存答案/独立推断先锁JSON/XLSX；`heroes/excel_roster.py`接机械兽破魔撕咬五属性持续弱化、实际损血夺目标最后公开主动技、真击毁剥特性，以及机械巨人2×2、范5的2×2半破魔机械臂、实际回血后恰四格可选移动和仅技能伤害免疫；两者共用古代融合。`engine/core.py`记录真正声明的最近主动技能及一次性借技额度，`next_five.py`区域生成允许显式射程，`rooms/ai.py`计双方区域净值、夺技与弱化、回血条件和融合牺牲；通用飞跃4格错误对齐已锁3格。`NewBatch250252AncientBehaviorTests`八项待用户动态验证；公开池99/388，剩余289。
+
 - 2026-10-12 `dev-jinchi` 与 `master` BP 冲突合并：全体选择沿用 66 人池、系统禁级和等级预算，随机等级沿用逐轮抽级与可选同名规则；两种流程均抽特殊模式并在战斗界面展示。`multiplayer.py` 的同名可选完成性、合法等级缓存纳入本局池；`bp-ui.js` 的等级矩阵仅列本局池，补可展开池/禁级资料。`tests/test_behavior.py` 前端断言对齐矩阵界面；相关规则见 `docs/武将游戏规则.md` 和 `docs/BP特殊模式规则.md`。动态验证按现阶段约定待用户统一运行。
 
 Update this file after every new gameplay requirement or code change in `wujiang_game`. Keep entries concise and durable; do not paste full docs.
+
+- 2026-10-12 BP“真男人模式”修正：源表“只能使用主动技能”约束技能类型，不禁普攻。`engine/core.py::basic_attack_resource_allowed` 移除该模式对普攻的全局封锁；操作预览和 AI 候选沿用同一合法性判断。`rooms/special_modes.py`、BP 规则与武将游戏规则同步说明，`BPSpecialModeBehaviorTests` 覆盖玩家与 AI 普攻可用及动作声明；动态验证待统一运行。
+
+- 2026-10-12 Phase H R249/R251：源249/251、保存问卷和通用敌我范围先独立锁入设计JSON/XLSX。`excel_roster.py`接工兵机甲修整、伤害时旁观者技能封锁，以及两将共用真实死亡古代融合；炮台4×4双方普攻、下一次普攻破魔禁疗。`engine/core.py`在来源死亡后清理持续状态，`rooms/ai.py`评估修整、禁疗、区域友伤和融合牺牲，前端提供受体/技能融合选择。`NewBatch249251AncientBehaviorTests`静态写入待用户运行；公开池97/388，剩余291。R248优化仍待用户动态复跑。
 
 - 2026-10-12 R248复跑报告：6项定向行为5过，火焰AI评分场景因夹具未切到古龙本人轮，合法性预演两候选均`-1000`；现设正确轮槽。地狱之火AI原对大量5×5候选逐个完整回滚和逐目标探针，导致用户模拟久等；现按受体/多格命中去重、双方净值轻量预筛，仅前12组合完整预演。2/10场初始AI无高信号，整场报告未完成；静态修复待用户验证。
 

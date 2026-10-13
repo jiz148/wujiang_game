@@ -48,7 +48,7 @@ SUMMON_SKILL_CODES = {
     "summon_small_stone",
     "hell_dog",
 }
-HEAL_SKILL_CODES = {"heal", "heal_mount", "mech_enhancement"}
+HEAL_SKILL_CODES = {"heal", "heal_mount", "mech_enhancement", "ancient_repair", "ancient_vigor"}
 ALLY_BUFF_SKILL_CODES = {"blood_guard", "blood_art", "blood_dance", "defend_twice", "baptism", "chant", "experiment", "fried_inspire", "agency_contract", "rainbow_mirror"}
 SELF_BUFF_SKILL_CODES = {
     "hell_war_god",
@@ -91,6 +91,8 @@ MOVE_SKILL_CODES.update({"flash_slash", "bird_soul", "bird_soul_free"})
 MOVE_SKILL_CODES.add("hell_teleport")
 AREA_ESCAPE_REACTION_CODES = {"evasion", "backstep_shot", "card_transposition", "shadow_counter", "ghost_step"}
 DAMAGING_SKILL_CODES = {
+    "ancient_jaw",
+    "ancient_arm",
     "hell_dragon_fire",
     "hell_orb",
     "hell_orb_free",
@@ -832,6 +834,9 @@ def build_attack_candidates(
     profile: DifficultyProfile,
 ) -> list[AICandidate]:
     payloads = attack_payloads_for_action(battle, actor, action)
+    if any(trait.name == "古代炮台4×4普攻" for trait in actor.traits):
+        payloads = sorted(payloads, key=lambda item: ancient_turret_prefilter_score(battle, actor, item),
+                          reverse=True)[:20]
     candidates: list[AICandidate] = []
     for payload in payloads:
         if not payload_is_legal(battle, payload):
@@ -847,6 +852,13 @@ def build_attack_candidates(
         ):
             continue
         score = score_attack_payload(battle, actor, payload, profile)
+        if actor.has_status("生锈的气味预备"):
+            cells = preview_positions(payload.get("cells"))
+            score += sum(32.0 + (20.0 if any(skill.code in HEAL_SKILL_CODES for skill in unit.skills) else 0.0)
+                         for unit in battle.effect_units_at_cells(cells)
+                         if unit.player_id != actor.player_id and not unit.cannot_heal
+                         and not unit.physical_immunity and not unit.skill_non_damage_effects_blocked()
+                         and unit.dodge_charges <= 0)
         score -= stone_attack_spawn_penalty(battle, actor, payload)
         score *= wuchang_action_success_probability(battle, actor, payload)
         score -= cat_retaliation_action_penalty(battle, actor, attack_effect_units(battle, actor, payload))
@@ -881,6 +893,47 @@ def hell_dragon_fire_prefilter_score(battle: Battle, actor: Unit, payload: dict[
     return score - 8.0 if useful_enemy else -1000.0
 
 
+def ancient_turret_prefilter_score(battle: Battle, actor: Unit, payload: dict[str, Any]) -> float:
+    cells = preview_positions(payload.get("cells"))
+    if not cells:
+        return -1000.0
+    score = 0.0
+    for unit in battle.effect_units_at_cells(cells):
+        recipient = battle.effect_recipient(unit)
+        if not recipient.alive:
+            continue
+        if recipient.physical_immunity:
+            impact = 0.0
+        elif recipient.total_shields() > 0 and not actor.has_status("生锈的气味预备"):
+            impact = 20.0
+        elif recipient.player_id != actor.player_id and recipient.dodge_charges > 0:
+            impact = 12.0
+        else:
+            power = actor.stat("attack") + max(0, battle.unit_hit_count_for_cells(recipient, cells) - 1)
+            damage = min(recipient.current_hp, estimate_damage(battle, recipient, power))
+            impact = damage * 100.0 + (80.0 if damage >= recipient.current_hp else 0.0)
+        score += impact if recipient.player_id != actor.player_id else -impact * 1.6
+    return score
+
+
+def ancient_arm_prefilter_score(battle: Battle, actor: Unit, payload: dict[str, Any]) -> float:
+    cells = preview_positions(payload.get("cells"))
+    if not cells:
+        return -1000.0
+    score = 0.0
+    for target in battle.effect_units_at_cells(cells):
+        recipient = battle.effect_recipient(target)
+        if not recipient.alive or recipient.magic_immunity:
+            continue
+        power = actor.stat("attack") + max(0, battle.unit_hit_count_for_cells(recipient, cells) - 1)
+        damage = min(recipient.current_hp, estimate_damage(battle, recipient, power, half_ignore_shield=True))
+        impact = damage * 100.0 + (18.0 if recipient.total_shields() else 0.0)
+        if any(trait.name == "技能伤害免疫" for trait in recipient.traits):
+            impact = 18.0 if recipient.total_shields() else 0.0
+        score += impact if recipient.player_id != actor.player_id else -impact * 1.4
+    return score
+
+
 @with_enemy_view("actor")
 def build_skill_candidates(
     battle: Battle,
@@ -902,7 +955,7 @@ def build_skill_candidates(
             targets = tuple(unit.unit_id for unit in battle.effect_units_at_cells(cells[:1]))
             unique_shots.setdefault((str(shot_payload.get("choice_code") or ""), targets), shot_payload)
         payloads = list(unique_shots.values())
-    if code in {"battle_hurricane", "water_wave_cannon", "earth_shatter", "satellite_cannon", "hell_dragon_fire"}:
+    if code in {"battle_hurricane", "water_wave_cannon", "earth_shatter", "satellite_cannon", "hell_dragon_fire", "ancient_arm"}:
         payloads = dedupe_damage_area_payloads(battle, payloads)
     if code == "interference":
         payloads = dedupe_damage_area_payloads(battle, payloads)
@@ -920,6 +973,9 @@ def build_skill_candidates(
             key = repr(candidate)
             pre_scored[key] = score_skill_payload(battle, actor, action, candidate, profile, instant_only=instant_only)
             prequalified_payloads.add(key)
+    if code == "ancient_arm":
+        payloads = sorted(payloads, key=lambda item: ancient_arm_prefilter_score(battle, actor, item),
+                          reverse=True)[:12]
     elif (code.startswith("fusion_piercing_shot__") or code in {"paralysis_card", "poison_card", "drain_card", "sacrifice_ritual", "electronic_repair", "satellite_cannon", "descent_moment", "smoke_spray", "dragon_slash", "world_seed", "mimic_skill", "frey_quick_flash", "frey_god_stab", "frey_lion_spear", "royal_soldier", "agency_contract", "agency_borrowed_skill", "morning_holy_light", "lao_wave_bullet", "interference", "noise_wave", "fuma_shuriken", "fuma_trap", "fantasy_move", "rainbow_mirror", "true_blade_air_slash", "eagle_eye", "missile", "gladiator_claw", "gladiator_gale", "battle_hurricane", "flash_slash", "bird_dash", "bird_dash_free", "bird_soul", "bird_soul_free"}):
         if code == "frey_quick_flash":
             unique = {}
@@ -1183,6 +1239,9 @@ def skill_payloads_for_action(battle: Battle, actor: Unit, action: dict[str, Any
     base_payload = {"type": "skill", "unit_id": actor.unit_id, "skill_code": code}
     selection = dict(preview.get("selection") or {})
     mode = str(selection.get("mode") or "")
+    if code == "ancient_fusion":
+        return [{**base_payload, "target_unit_id": target["unit_id"], "copied_skill_code": skill["code"]}
+                for target in selection.get("targets", []) for skill in selection.get("skills", [])]
     if code == "mimic_skill":
         return mimic_skill_payloads(battle, actor, action)
     if code == "royal_soldier":
@@ -2407,6 +2466,90 @@ def _score_skill_payload(
     instant_only: bool,
 ) -> float:
     code = str(action.get("code") or payload.get("skill_code") or "")
+    if code == "ancient_jaw":
+        target = battle.units.get(str(payload.get("target_unit_id") or ""))
+        target = battle.effect_recipient(target) if target is not None else None
+        if target is None or target.player_id == actor.player_id or target.magic_immunity:
+            return -1000.0
+        skill = skill_from_ai_action(actor, action, code)
+        score = reviewed_r18_effect_score(battle, actor, skill, payload, profile)
+        if score <= -1000.0:
+            return score
+        if not target.skill_non_damage_effects_blocked() and target.dodge_charges <= 0:
+            layers = sum(status.name == "溶解之颌弱化" for status in target.statuses)
+            score += max(9.0, 42.0 - layers * 9.0) + target.stat("attack") * 3.0
+        last = target.skill_map().get(str(getattr(target, "_last_active_skill_code", "") or ""))
+        owned = actor.skill_map().get(last.code) if last is not None else None
+        if (last is not None and last.timing == "active"
+                and (owned is None or getattr(owned, "_ancient_stolen_charges", 1) <= 0)):
+            if actor.current_mana >= last.mana_cost:
+                score += 22.0 + (12.0 if last.code in DAMAGING_SKILL_CODES else 0.0)
+        return score
+    if code == "ancient_arm":
+        return reviewed_r18_effect_score(battle, actor, skill_from_ai_action(actor, action, code), payload, profile)
+    if code == "ancient_vigor":
+        missing = 0.0 if actor.cannot_heal else max(0.0, actor.max_health - actor.current_hp)
+        restored = min(0.25, missing)
+        if actor.attribute == "暗" or restored <= 0:
+            return -1000.0
+        destination = Position(int(payload["x"]), int(payload["y"])) if payload.get("x") is not None else actor.position
+        if destination is None:
+            return -1000.0
+        movement = 0.0
+        if destination != actor.position:
+            style = hero_style(actor)
+            movement = score_move_destination(battle, actor, destination, style, profile) - score_move_destination(
+                battle, actor, actor.position, style, profile)
+        return restored * (260.0 if actor.current_hp <= 0.5 else 175.0) + movement - 8.0
+    if code == "ancient_repair":
+        target = battle.units.get(str(payload.get("target_unit_id") or ""))
+        if target is None or target.player_id != actor.player_id or target.skill_non_damage_effects_blocked():
+            return -1000.0
+        heal = 0.0 if target.cannot_heal else min(0.25, max(0.0, target.max_health - target.current_hp))
+        mana = min(1.0, max(0.0, target.max_mana() - target.current_mana))
+        score = heal * 155.0 + mana * 26.0 + (19.0 if target.alive else 0.0)
+        return score if score > 21.0 else -1000.0
+    if code == "ancient_rust":
+        if actor.attacks_used >= actor.attack_actions_per_turn() or actor.cannot_attack:
+            return -14.0
+        enemies = [unit for unit in living_hostile_combatants(battle, actor.player_id)
+                   if unit.position is not None and not unit.cannot_heal
+                   and not unit.physical_immunity and battle.distance_between_units(actor, unit) <= actor.targeting_range()]
+        if not enemies:
+            return -12.0
+        return max(33.0 + min(30.0, max(0.0, unit.max_health - unit.current_hp) * 45.0)
+                   + (24.0 if any(skill.code in HEAL_SKILL_CODES for skill in unit.skills) else 0.0)
+                   for unit in enemies)
+    if code == "ancient_fusion":
+        target = battle.units.get(str(payload.get("target_unit_id") or ""))
+        selected_code = str(payload.get("copied_skill_code") or "")
+        if (target is None or target.player_id != actor.player_id or not target.alive
+                or target.skill_non_damage_effects_blocked() or target.summoner_id == actor.unit_id):
+            return -1000.0
+        skill = actor.skill_map().get(selected_code)
+        if skill is None:
+            return -1000.0
+        ability = {"shensu": 37.0, "pierce": 32.0, "protection": 34.0,
+                   "ancient_repair": 46.0, "ancient_rust": 38.0,
+                   "remote_dragon_breath": 42.0, "ancient_jaw": 47.0,
+                   "ancient_arm": 44.0, "ancient_vigor": 32.0,
+                   "dragon_breath": 40.0, "ancient_fusion": 8.0}.get(selected_code, 22.0)
+        if selected_code in target.skill_map():
+            ability = 0.0
+        trait_gain = sum(24.0 for trait in actor.traits if not any(t.name == trait.name for t in target.traits))
+        target_value = (36.0 + target.stat("attack") * 4.0 + target.stat("speed") * 3.0
+                        + (16.0 if target.turn_ready else 0.0))
+        donor_loss = actor.current_hp * 155.0 + (70.0 if actor.turn_ready and actor.attacks_used == 0 else 0.0)
+        if any(trait.name == "古代炮台4×4普攻" for trait in actor.traits):
+            donor_loss += 42.0
+        if actor.hero_code == "excel_r250":
+            donor_loss += 9.0 * sum(status.name == "溶解之颌弱化" and getattr(status, "source_unit_id", "") == actor.unit_id
+                                      for unit in battle.all_units() for status in unit.statuses)
+        if actor.hero_code == "excel_r252":
+            donor_loss += 32.0
+        if target.is_summon or target.is_clone:
+            target_value *= 0.6
+        return target_value + ability + trait_gain - donor_loss - 23.0
     if code == "hell_war_god":
         enemies = [unit for unit in living_hostile_combatants(battle, actor.player_id)
                    if unit.position is not None]
@@ -7323,6 +7466,9 @@ def skill_payload_has_effective_enemy_impact(
     if code in {"demon_blade", "nuclear_mutation", "gravity_field", "sanctuary_banish", "sanctuary_judgment"}:
         return r12_effect_score(battle, actor, skill, payload, difficulty_profile("standard")) > 0
     targets = [unit for unit in skill_effect_units(battle, actor, skill, payload) if unit.player_id != actor.player_id]
+    if code == "ancient_jaw":
+        return any(not target.magic_immunity and not target.skill_non_damage_effects_blocked()
+                   and target.dodge_charges <= 0 for target in targets)
     if code in {"hundred_bird_burial", "remi_chaos", "nian_large_dragon_breath", "nian_roar", "nian_jade_flash"}:
         return r13_effect_score(battle, actor, skill, payload, difficulty_profile("standard")) > 0
     if code == "sun_slash":
