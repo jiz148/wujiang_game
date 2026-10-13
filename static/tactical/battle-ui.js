@@ -1544,10 +1544,18 @@ export function renderChainPanel() {
   }
   if (isDamageChoiceMode()) {
     const prompt = state.battle.pending_damage_choice;
-    if (caption) caption.textContent = prompt.kind === "hell_sacrifice"
+    if (caption) caption.textContent = prompt.kind === "hell_dragon_first"
+      ? "古龙阵亡：选择第一名己方地狱单位，或放弃献祭。"
+      : prompt.kind === "hell_dragon_second"
+      ? "古龙阵亡：选择第二名不同的己方地狱单位，或放弃献祭。"
+      : prompt.kind === "hell_dragon_effect"
+      ? "两名献祭者中只可选择一名发动本次技能死亡后的特殊效果。"
+      : prompt.kind === "hell_sacrifice"
       ? "赤候可以技能破坏一名己方地狱单位，或放弃这次牺牲。"
       : prompt.kind === "hell_death_strike"
       ? "刺客临死可选周围一名单位连续反击两次，或放弃。"
+      : prompt.kind === "hell_rescue"
+      ? "猎人临死可在原格救回一名已破坏的地狱友军，或放弃；猎人仍将延迟回场。"
       : prompt.kind === "attack_swap"
       ? "亚历山大的普攻已完成，请选择一名有合法落点的友军交换位置。"
       : prompt.kind === "electronic_teleport"

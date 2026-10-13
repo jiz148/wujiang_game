@@ -1911,7 +1911,9 @@ class Battle:
         self.__dict__.setdefault("_separate_attack_sequences", {})
         self.__dict__.setdefault("pending_damage_choice", None)
         self.__dict__.setdefault("hell_rebirth_unit_ids", set())
+        self.__dict__.setdefault("hell_dragon_return_cells", {})
         self.__dict__.setdefault("_pending_turn_advance_after_hell_rebirth", False)
+        self.__dict__.setdefault("_pending_turn_end_after_effects_player_id", None)
         # Rebind after checkpoint loading or deepcopy; weak references are not saved.
         for unit in [*self.units.values(), *getattr(self, "destroyed_units", [])]:
             unit._battle_ref = weakref.ref(self)
@@ -1939,6 +1941,7 @@ class Battle:
         self._separate_attack_sequences: dict[str, dict[str, Any]] = {}
         self.pending_respawn_unit_ids: list[str] = []
         self.hell_rebirth_unit_ids: set[str] = set()
+        self.hell_dragon_return_cells: dict[str, list[Position]] = {}
         self._pending_turn_advance_after_hell_rebirth = False
         self.pending_damage_choice: Optional[dict[str, Any]] = None
         self.turn_order_unit_ids: list[str] = []
@@ -1952,6 +1955,7 @@ class Battle:
         self._log_suppression_depth = 0
         self._draining_followup_actions = False
         self._pending_end_turn_after_followups = False
+        self._pending_turn_end_after_effects_player_id: Optional[int] = None
         self._processed_any_turn_end_choices: set[tuple[str, str]] = set()
         self.visual_events: list[VisualEvent] = []
         self._next_visual_event_id = 1
@@ -2385,11 +2389,21 @@ class Battle:
             delattr(unit, "_hell_death_from_damage")
         if skill_death is None:
             skill_death = action is not None and action.action_type in {"skill", "reaction_skill", "skill_effect"}
-        if skill_death:
+        if (unit.hero_code == "excel_r248" and not unit.is_clone and not unit.is_summon
+                and not getattr(unit, "_hell_dragon_death_handled", False)):
+            unit._hell_dragon_death_handled = True
+            if not getattr(unit, "_suppress_hell_forced_skill_death", False):
+                for component in list(unit.iter_components()):
+                    callback = getattr(component, "on_hell_dragon_destroyed", None)
+                    if callable(callback):
+                        callback(self)
+        if skill_death and not getattr(unit, "_suppress_hell_forced_skill_death", False):
             for component in list(unit.iter_components()):
                 callback = getattr(component, "on_hell_forced_skill_death", None)
                 if callable(callback):
                     callback(self)
+        if hasattr(unit, "_suppress_hell_forced_skill_death"):
+            delattr(unit, "_suppress_hell_forced_skill_death")
         # Damage may temporarily use the declared origin; death belongs to the real body.
         unit.last_position = getattr(unit, "_resolution_actual_position", None) or unit.position
         unit.last_destroyed_cells = unit.footprint_cells_at(unit.last_position)
@@ -2937,6 +2951,13 @@ class Battle:
             hook = getattr(effect, "on_after_any_turn_end", None)
             if callable(hook):
                 hook(self, ending_player)
+        if self.pending_followup_actions:
+            self._pending_turn_end_after_effects_player_id = ending_player
+            self.advance_followup_actions()
+            return
+        self.complete_turn_end_after_effects(ending_player)
+
+    def complete_turn_end_after_effects(self, ending_player: int) -> None:
         if parse_army_slot(self.current_turn_slot_unit_id()) is None:
             self.advance_hell_rebirths(ending_player)
         self.enforce_sandstorm_stealth_rules()
@@ -3447,6 +3468,41 @@ class Battle:
         self.hell_rebirth_unit_ids.add(unit.unit_id)
         self.log(f"{unit.name} 将在下个敌方武将回合结束时选择回场位置。")
 
+    def hell_dragon_return_options_for(self, unit: Unit) -> list[Position]:
+        origins = self.hell_dragon_return_cells.get(unit.unit_id, [])
+        if unit.alive or unit.unit_id not in {body.unit_id for body in self.destroyed_units}:
+            return []
+        return [cell for cell in origins if self.can_place_unit(unit, cell, mover=unit)]
+
+    def restore_hell_dragon(self, unit: Unit, destination: Position) -> None:
+        if destination not in self.hell_dragon_return_options_for(unit):
+            raise ActionError("古龙献祭者的原格暂不能完整容纳古龙。")
+        for status in list(unit.statuses):
+            if status.duration is not None:
+                unit.remove_status(status, self)
+        unit.alive = True
+        unit.banished = False
+        unit.current_hp = unit.max_health
+        unit.current_mana = unit.max_mana()
+        unit.turn_ready = False
+        unit.can_act_on_entry_turn = True
+        unit.move_used = False
+        unit.normal_move_actions_used = 0
+        unit.normal_move_steps_used = 0
+        unit.attacks_used = 0
+        unit.performed_active_skill = False
+        unit.moved_this_turn = False
+        unit.actions_taken_this_turn = []
+        unit.clear_end_of_turn_shields()
+        unit.position = destination
+        unit._hell_dragon_death_handled = False
+        self.destroyed_units = [body for body in self.destroyed_units if body.unit_id != unit.unit_id]
+        self.hell_dragon_return_cells.pop(unit.unit_id, None)
+        self.units[unit.unit_id] = unit
+        self.log_public_event(f"{unit.name} 在献祭者原格 ({destination.x}, {destination.y}) 满状态复活。", target=unit)
+        self.notify_destroyed_hero_count_changed()
+        self.sync_linked_units()
+
     def hell_rebirth_options_for(self, unit: Unit) -> list[Position]:
         enemy_anchors_only = unit.hero_code in {"excel_r239", "excel_r244"}
         cells = {cell for anchor in self.all_units()
@@ -3463,7 +3519,8 @@ class Battle:
         pending_bodies = {unit.unit_id: unit for unit in [*self.destroyed_units, *self.all_units()]
                           if not unit.alive}
         for unit in pending_bodies.values():
-            if unit.unit_id not in self.hell_rebirth_unit_ids or unit.player_id == ended_player_id:
+            if (unit.unit_id not in self.hell_rebirth_unit_ids or unit.player_id == ended_player_id
+                    or getattr(unit, "_hell_rebirth_skip_turn_number", None) == self.turn_number):
                 continue
             if not self.hell_rebirth_options_for(unit):
                 self.log(f"{unit.name} 周围暂无合法回场格，等待下个敌方武将回合结束。")
@@ -3483,6 +3540,7 @@ class Battle:
         unit.banished = False
         unit.current_hp = unit.max_health
         unit.current_mana = 0
+        unit._hell_rebirth_skip_turn_number = None
         unit.turn_ready = False
         unit.can_act_on_entry_turn = True
         unit.move_used = False
@@ -3504,6 +3562,47 @@ class Battle:
                 callback(self)
         self.notify_destroyed_hero_count_changed()
         self.sync_linked_units()
+
+    def restore_destroyed_hell_ally(self, unit: Unit, destination: Position) -> bool:
+        """Bring back one destroyed original body at the hunter's old cell."""
+        if (unit.alive or unit not in self.destroyed_units
+                or (unit.is_summon and unit.summoner_id and not (
+                    self.units.get(unit.summoner_id) and self.units[unit.summoner_id].alive))
+                or not self.can_place_unit(unit, destination, mover=unit)):
+            return False
+        for status in list(unit.statuses):
+            if status.duration is not None:
+                unit.remove_status(status, self)
+        unit.alive = True
+        unit.banished = False
+        unit.current_hp = unit.max_health
+        unit.current_mana = 0
+        if unit.hero_code == "excel_r248":
+            unit._hell_dragon_death_handled = False
+            self.hell_dragon_return_cells.pop(unit.unit_id, None)
+        unit.turn_ready = False
+        unit.can_act_on_entry_turn = False
+        unit.move_used = False
+        unit.normal_move_actions_used = 0
+        unit.normal_move_steps_used = 0
+        unit.attacks_used = 0
+        unit.performed_active_skill = False
+        unit.moved_this_turn = False
+        unit.actions_taken_this_turn = []
+        unit.clear_end_of_turn_shields()
+        unit.position = destination
+        self.destroyed_units = [body for body in self.destroyed_units if body.unit_id != unit.unit_id]
+        self.hell_rebirth_unit_ids.discard(unit.unit_id)
+        self.pending_respawn_unit_ids = [unit_id for unit_id in self.pending_respawn_unit_ids if unit_id != unit.unit_id]
+        self.units[unit.unit_id] = unit
+        for component in list(unit.iter_components()):
+            callback = getattr(component, "on_hell_rescue", None)
+            if callable(callback):
+                callback(self)
+        self.log_public_event(f"{unit.name} 以0魔在 ({destination.x}, {destination.y}) 被地狱猎人救回。", target=unit)
+        self.notify_destroyed_hero_count_changed()
+        self.sync_linked_units()
+        return True
 
     def advance_respawn_queue(self) -> None:
         while True:
@@ -3531,7 +3630,7 @@ class Battle:
 
     def get_unit(self, unit_id: str) -> Unit:
         if unit_id not in self.units:
-            if unit_id in self.hell_rebirth_unit_ids:
+            if unit_id in self.hell_rebirth_unit_ids or unit_id in self.hell_dragon_return_cells:
                 pending = next((unit for unit in self.destroyed_units if unit.unit_id == unit_id), None)
                 if pending is not None:
                     return pending
@@ -5798,6 +5897,11 @@ class Battle:
                 and not self.pending_followup_actions):
             self._pending_end_turn_after_followups = False
             self.finish_any_turn_end_choices()
+        if (getattr(self, "_pending_turn_end_after_effects_player_id", None) is not None
+                and self.pending_chain is None and not self.pending_followup_actions):
+            ending_player = self._pending_turn_end_after_effects_player_id
+            self._pending_turn_end_after_effects_player_id = None
+            self.complete_turn_end_after_effects(ending_player)
 
     def present_reaction_window_or_resolve(self, queued_action: QueuedAction) -> None:
         if queued_action.payload.get("refresh_cell_targets"):
@@ -6167,6 +6271,15 @@ class Battle:
             if queued_action.action_type == "reaction_skill":
                 source_action = self.source_action_for_reaction(queued_action)
                 reaction_payload = dict(payload)
+                if payload.get("action_code") == "evasion":
+                    skill = actor.get_skill("evasion")
+                    destination = Position(int(payload["x"]), int(payload["y"]))
+                    if destination not in skill.evade_cells(self, actor):
+                        # A faster reaction may move this unit before its declared dodge resolves.
+                        # The paid attempt is spent, but the stale landing must not abort the chain.
+                        skill.finalize_use(self, actor)
+                        self.log(f"{actor.name} 的【回避】因之前的连锁改变位置而落空。")
+                        return
                 resolved_target = self.resolve_declared_target_unit(
                     actor,
                     payload,
@@ -6298,12 +6411,22 @@ class Battle:
             for summon in chained_summons:
                 summon.alive = False
                 self.log(f"{summon.name} \u7684\u53ec\u5524\u8005\u5df2\u88ab\u51fb\u7834\uff0c\u56e0\u6b64\u4e00\u5e76\u6d88\u6563\u3002")
-        dead_units = [unit for unit in self.all_units() if not unit.alive]
-        for unit in dead_units:
-            self.capture_destruction_position(unit)
-            if unit.unit_id not in {destroyed.unit_id for destroyed in self.destroyed_units}:
-                self.destroyed_units.append(unit)
-            self.remove_unit(unit)
+        while True:
+            dead_units = [unit for unit in self.all_units() if not unit.alive]
+            if not dead_units:
+                break
+            for unit in dead_units:
+                self.capture_destruction_position(unit)
+                if unit.unit_id not in {destroyed.unit_id for destroyed in self.destroyed_units}:
+                    self.destroyed_units.append(unit)
+                self.remove_unit(unit)
+            # Death traits can destroy additional units. Resolve their real
+            # deaths and dependent summons before judging victory.
+            chained_summons = [unit for unit in self.all_units()
+                               if unit.alive and unit.summoner_id in {body.unit_id for body in dead_units}]
+            for summon in chained_summons:
+                summon.alive = False
+                self.log(f"{summon.name} 的召唤者已被击破，因此一并消散。")
         self.hell_rebirth_unit_ids.intersection_update(
             unit.unit_id for unit in self.destroyed_units if not unit.alive
         )
@@ -6366,7 +6489,8 @@ class Battle:
             player_id
             for player_id in (1, 2)
             if (any(not bool(getattr(unit, "is_siege_structure", False)) for unit in self.hero_units(player_id))
-                or any(unit.player_id == player_id and unit.unit_id in self.hell_rebirth_unit_ids
+                or any(unit.player_id == player_id and (unit.unit_id in self.hell_rebirth_unit_ids
+                        or unit.unit_id in self.hell_dragon_return_cells)
                        for unit in self.destroyed_units))
         }
         if len(alive_players) == 1 and self.units:
@@ -6391,7 +6515,7 @@ class Battle:
         if pending is not None:
             if payload.get("type") != "damage_choice" or payload.get("unit_id") != pending["unit_id"]:
                 raise ActionError("请先完成本次伤害选择。")
-            if pending.get("kind") in {"rotation", "attack_swap", "formation", "optional_swap", "optional_placement", "end_dash", "electronic_teleport", "hell_sacrifice", "hell_death_strike"}:
+            if pending.get("kind") in {"rotation", "attack_swap", "formation", "optional_swap", "optional_placement", "end_dash", "electronic_teleport", "hell_sacrifice", "hell_death_strike", "hell_rescue", "hell_dragon_first", "hell_dragon_second", "hell_dragon_effect"}:
                 choice = str(payload.get("target_unit_id") or "")
                 if (choice == "decline" and pending.get("kind") in {"attack_swap", "formation"}) or (choice != "decline" and choice not in pending["options"]):
                     raise ActionError("请选择当前提示中的合法对象与落点。")
@@ -6576,6 +6700,15 @@ class Battle:
         if self.winner is not None:
             raise ActionError("对局已结束，请返回选将页面开始新的对局。")
         action_type = payload.get("type")
+        if action_type == "hell_dragon_return":
+            if (self.pending_damage_choice is not None or self.pending_chain is not None
+                    or self.pending_respawn_unit_ids or self.pending_followup_actions):
+                raise ActionError("请先完成当前连锁或选择，再让古龙复活。")
+            unit = self.get_unit(str(payload.get("unit_id") or ""))
+            if unit.hero_code != "excel_r248" or unit.unit_id not in self.hell_dragon_return_cells:
+                raise ActionError("这名古龙没有待使用的献祭复活权。")
+            self.restore_hell_dragon(unit, Position(int(payload["x"]), int(payload["y"])))
+            return
         if self.pending_respawn_unit_ids:
             if action_type != "respawn_select":
                 raise ActionError("当前需要先为消失单位选择重新出现的位置。")
@@ -6926,6 +7059,13 @@ class Battle:
             "field_effects": [effect.to_public_dict(self) for effect in self.field_effects],
             "pending_chain": self.pending_chain.to_public_dict(self) if self.pending_chain else None,
             "pending_respawn": respawn_prompt.to_public_dict() if respawn_prompt else None,
+            "hell_dragon_returns": [
+                {"unit_id": unit_id, "player_id": unit.player_id,
+                 "origins": [{"x": cell.x, "y": cell.y} for cell in origins],
+                 "options": [{"x": cell.x, "y": cell.y} for cell in self.hell_dragon_return_options_for(unit)]}
+                for unit_id, origins in self.hell_dragon_return_cells.items()
+                if (unit := next((body for body in self.destroyed_units if body.unit_id == unit_id), None)) is not None
+            ],
             "pending_damage_choice": (
                 {**{key: damage_prompt[key] for key in ("unit_id", "action_name", "damage", "event_index", "stats")},
                  "kind": damage_prompt.get("kind", "stat"), "options": damage_prompt.get("options", [])}

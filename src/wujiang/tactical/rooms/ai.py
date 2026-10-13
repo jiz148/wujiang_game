@@ -46,11 +46,13 @@ SUMMON_SKILL_CODES = {
     "summon_unicycle",
     "summon_medium_stone",
     "summon_small_stone",
+    "hell_dog",
 }
 HEAL_SKILL_CODES = {"heal", "heal_mount", "mech_enhancement"}
 ALLY_BUFF_SKILL_CODES = {"blood_guard", "blood_art", "blood_dance", "defend_twice", "baptism", "chant", "experiment", "fried_inspire", "agency_contract", "rainbow_mirror"}
 SELF_BUFF_SKILL_CODES = {
-    "weapon_transfer", "red_charge", "infinite", "infinite_armor", "infinite_robe",
+    "hell_war_god",
+    "weapon_transfer", "red_charge", "infinite", "infinite_armor", "infinite_robe", "flying_dragon_orb",
     "red_heat", "essence", "stillness",
     "shensu",
     "harden",
@@ -86,12 +88,16 @@ MOVE_SKILL_CODES = {"leap", "fly_leap", "fate_kick", "crazy_sand", "plasma_thrus
 MOVE_SKILL_CODES |= {"zero_dash", "fuma_pursuit", "true_blade_air_slash"}
 MOVE_SKILL_CODES.update({"iron_chain_path", "ghost_step", "frey_quick_flash"})
 MOVE_SKILL_CODES.update({"flash_slash", "bird_soul", "bird_soul_free"})
+MOVE_SKILL_CODES.add("hell_teleport")
 AREA_ESCAPE_REACTION_CODES = {"evasion", "backstep_shot", "card_transposition", "shadow_counter", "ghost_step"}
 DAMAGING_SKILL_CODES = {
+    "hell_dragon_fire",
     "hell_orb",
     "hell_orb_free",
     "hell_spear",
     "hell_spear_free",
+    "hell_ranged_spear",
+    "hell_ranged_spear_free",
     "paralyzing_glove",
     "machine_gun",
     "pierce",
@@ -469,6 +475,12 @@ def choose_damage_choice_action(battle: Battle) -> dict[str, Any]:
     if prompt.get("kind") == "hell_death_strike":
         with ai_enemy_view(battle, unit.player_id):
             return choose_hell_death_strike_action(battle, prompt, unit)
+    if prompt.get("kind") == "hell_rescue":
+        with ai_enemy_view(battle, unit.player_id):
+            return choose_hell_rescue_action(battle, prompt, unit)
+    if prompt.get("kind") in {"hell_dragon_first", "hell_dragon_second", "hell_dragon_effect"}:
+        with ai_enemy_view(battle, unit.player_id):
+            return choose_hell_dragon_sacrifice_action(battle, prompt, unit)
     if prompt.get("kind") in {"rotation", "attack_swap", "formation", "optional_swap", "optional_placement"}:
         with ai_enemy_view(battle, unit.player_id):
             return choose_rotation_damage_choice_action(battle, prompt, unit)
@@ -505,6 +517,88 @@ def choose_hell_sacrifice_action(battle: Battle, prompt: dict[str, Any], unit: U
         score = future_gain - immediate_loss
         if score > best[0] + 12.0:
             best = (score, unit_id)
+    return {"type": "damage_choice", "unit_id": unit.unit_id, "target_unit_id": best[1]}
+
+
+def choose_hell_dragon_sacrifice_action(battle: Battle, prompt: dict[str, Any], unit: Unit) -> dict[str, Any]:
+    kind = str(prompt.get("kind") or "")
+    options = [battle.units.get(str(unit_id)) for unit_id in prompt.get("options", [])]
+
+    def death_effect_value(target: Unit) -> float:
+        code = target.hero_code
+        value = 35.0 if code in {"excel_r238", "excel_r239", "excel_r240", "excel_r242",
+                                  "excel_r243", "excel_r244", "excel_r245", "excel_r246",
+                                  "excel_r247", "excel_r248"} else 0.0
+        if code == "excel_r245":
+            value += 55.0 * sum(body.player_id == target.player_id and "地狱" in body.name
+                                  and not body.alive for body in battle.destroyed_units)
+        elif code == "excel_r247":
+            value += 28.0 * sum(body.alive and body.summoner_id == target.unit_id
+                                  for body in battle.all_units())
+        elif code in {"excel_r244", "excel_r246"} and target.position is not None:
+            nearby = battle.units_at_cells(battle.neighbors(target.position))
+            value += 22.0 * sum(body.alive and body.player_id != target.player_id for body in nearby)
+            value -= 30.0 * sum(body.alive and body.player_id == target.player_id
+                                  and body.unit_id != target.unit_id for body in nearby)
+        return value
+
+    def loss(target: Unit) -> float:
+        recipient = battle.effect_recipient(target)
+        if (recipient is not target or recipient.magic_immunity or recipient.total_shields() > 0
+                or recipient.dodge_charges > 0 or recipient.skill_non_damage_effects_blocked()):
+            return 10000.0
+        return (target.current_hp * 95.0 + target.stat("attack") * 12.0
+                + (25.0 if target.turn_ready else 0.0) - death_effect_value(target))
+
+    viable = [target for target in options if target is not None and target.alive and loss(target) < 10000]
+    choice = "decline"
+    if kind == "hell_dragon_effect":
+        if viable:
+            choice = max(viable, key=lambda target: (death_effect_value(target), -loss(target), target.unit_id)).unit_id
+    elif kind == "hell_dragon_second":
+        if viable:
+            choice = min(viable, key=lambda target: (loss(target), target.unit_id)).unit_id
+    else:
+        ranked = sorted(viable, key=lambda target: (loss(target), target.unit_id))
+        if len(ranked) >= 2:
+            enemies = living_hostile_combatants(battle, unit.player_id)
+            return_value = 185.0 + unit.stat("attack") * 14.0
+            if enemies and return_value > loss(ranked[0]) + loss(ranked[1]) + 25.0:
+                choice = ranked[0].unit_id
+    return {"type": "damage_choice", "unit_id": unit.unit_id, "target_unit_id": choice}
+
+
+@with_enemy_view("unit")
+def choose_hell_dragon_return_action(battle: Battle, unit: Unit) -> Optional[dict[str, Any]]:
+    options = battle.hell_dragon_return_options_for(unit)
+    if not options:
+        return None
+    profile = difficulty_profile("标准")
+    scored = [(score_respawn_destination(battle, unit, cell, hero_style(unit), profile), cell) for cell in options]
+    best_score, destination = max(scored, key=lambda item: (item[0], -item[1].y, -item[1].x))
+    allies = [ally for ally in battle.player_units(unit.player_id) if ally.alive and ally.unit_id != unit.unit_id]
+    if allies and best_score < -125.0:
+        return None
+    return {"type": "hell_dragon_return", "unit_id": unit.unit_id,
+            "x": destination.x, "y": destination.y}
+
+
+def choose_hell_rescue_action(battle: Battle, prompt: dict[str, Any], unit: Unit) -> dict[str, Any]:
+    best = (0.0, "decline")
+    for unit_id in prompt.get("options", []):
+        target = next((body for body in battle.destroyed_units if body.unit_id == unit_id), None)
+        if target is None or target.alive or target.player_id != unit.player_id:
+            continue
+        if target.is_summon and target.summoner_id:
+            summoner = battle.units.get(target.summoner_id)
+            if summoner is None or not summoner.alive:
+                continue
+        score = (120.0 + target.stat("attack") * 18.0 + target.stat("defense") * 10.0
+                 + target.targeting_range() * 6.0)
+        if target.hero_code in {"excel_r238", "excel_r240", "excel_r242", "excel_r243", "excel_r244", "excel_r246"}:
+            score += 30.0
+        if score > best[0]:
+            best = (score, str(unit_id))
     return {"type": "damage_choice", "unit_id": unit.unit_id, "target_unit_id": best[1]}
 
 
@@ -760,6 +854,33 @@ def build_attack_candidates(
     return candidates
 
 
+def hell_dragon_fire_prefilter_score(battle: Battle, actor: Unit, payload: dict[str, Any]) -> float:
+    """Cheap two-team estimate; the finalists still get full action replay."""
+    cells = preview_positions(payload.get("cells"))
+    if not cells:
+        return -1000.0
+    score = 0.0
+    useful_enemy = False
+    for target in battle.effect_units_at_cells(cells):
+        recipient = battle.effect_recipient(target)
+        if recipient.magic_immunity or not recipient.alive:
+            continue
+        if recipient.total_shields() > 0:
+            impact = 20.0
+        elif recipient.player_id != actor.player_id and recipient.dodge_charges > 0:
+            impact = 12.0
+        else:
+            power = actor.stat("attack") + max(0, battle.unit_hit_count_for_cells(recipient, cells) - 1)
+            damage = min(recipient.current_hp, estimate_damage(battle, recipient, power))
+            impact = damage * 100.0 + (90.0 if damage >= recipient.current_hp else 0.0)
+        if recipient.player_id == actor.player_id:
+            score -= impact * 1.3
+        else:
+            useful_enemy |= impact > 0
+            score += impact
+    return score - 8.0 if useful_enemy else -1000.0
+
+
 @with_enemy_view("actor")
 def build_skill_candidates(
     battle: Battle,
@@ -781,7 +902,7 @@ def build_skill_candidates(
             targets = tuple(unit.unit_id for unit in battle.effect_units_at_cells(cells[:1]))
             unique_shots.setdefault((str(shot_payload.get("choice_code") or ""), targets), shot_payload)
         payloads = list(unique_shots.values())
-    if code in {"battle_hurricane", "water_wave_cannon", "earth_shatter", "satellite_cannon"}:
+    if code in {"battle_hurricane", "water_wave_cannon", "earth_shatter", "satellite_cannon", "hell_dragon_fire"}:
         payloads = dedupe_damage_area_payloads(battle, payloads)
     if code == "interference":
         payloads = dedupe_damage_area_payloads(battle, payloads)
@@ -791,7 +912,15 @@ def build_skill_candidates(
         payloads = dedupe_damage_area_payloads(battle, payloads)
     pre_scored: dict[str, float] = {}
     prequalified_payloads: set[str] = set()
-    if (code.startswith("fusion_piercing_shot__") or code in {"paralysis_card", "poison_card", "drain_card", "sacrifice_ritual", "electronic_repair", "satellite_cannon", "descent_moment", "smoke_spray", "dragon_slash", "world_seed", "mimic_skill", "frey_quick_flash", "frey_god_stab", "frey_lion_spear", "royal_soldier", "agency_contract", "agency_borrowed_skill", "morning_holy_light", "lao_wave_bullet", "interference", "noise_wave", "fuma_shuriken", "fuma_trap", "fantasy_move", "rainbow_mirror", "true_blade_air_slash", "eagle_eye", "missile", "gladiator_claw", "gladiator_gale", "battle_hurricane", "flash_slash", "bird_dash", "bird_dash_free", "bird_soul", "bird_soul_free"}):
+    if code == "hell_dragon_fire":
+        ranked = sorted(((hell_dragon_fire_prefilter_score(battle, actor, candidate), candidate)
+                         for candidate in payloads), key=lambda item: item[0], reverse=True)
+        payloads = [candidate for score, candidate in ranked if score > -1000.0][:12]
+        for candidate in payloads:
+            key = repr(candidate)
+            pre_scored[key] = score_skill_payload(battle, actor, action, candidate, profile, instant_only=instant_only)
+            prequalified_payloads.add(key)
+    elif (code.startswith("fusion_piercing_shot__") or code in {"paralysis_card", "poison_card", "drain_card", "sacrifice_ritual", "electronic_repair", "satellite_cannon", "descent_moment", "smoke_spray", "dragon_slash", "world_seed", "mimic_skill", "frey_quick_flash", "frey_god_stab", "frey_lion_spear", "royal_soldier", "agency_contract", "agency_borrowed_skill", "morning_holy_light", "lao_wave_bullet", "interference", "noise_wave", "fuma_shuriken", "fuma_trap", "fantasy_move", "rainbow_mirror", "true_blade_air_slash", "eagle_eye", "missile", "gladiator_claw", "gladiator_gale", "battle_hurricane", "flash_slash", "bird_dash", "bird_dash_free", "bird_soul", "bird_soul_free"}):
         if code == "frey_quick_flash":
             unique = {}
             skill = skill_from_ai_action(actor, action, code)
@@ -2245,14 +2374,26 @@ def hell_shuffle_score(battle: Battle, actor: Unit, payload: dict[str, Any]) -> 
     if (not recipient.alive or recipient.total_shields() > 0 or recipient.dodge_charges > 0
             or recipient.skill_non_damage_effects_blocked()):
         return -1000.0
-    if recipient.hero_code not in {"excel_r238", "excel_r239", "excel_r240", "excel_r242", "excel_r243", "excel_r244"}:
+    if recipient.hero_code not in {"excel_r238", "excel_r239", "excel_r240", "excel_r242", "excel_r243", "excel_r244", "excel_r245", "excel_r246", "excel_r247"}:
         return -1000.0
     if not battle.hell_rebirth_options_for(recipient):
         return -1000.0
     rebirth_value = {"excel_r238": 92.0, "excel_r239": 112.0, "excel_r240": 93.0,
-                     "excel_r242": 70.0, "excel_r243": 115.0, "excel_r244": 102.0}[recipient.hero_code]
+                     "excel_r242": 70.0, "excel_r243": 115.0, "excel_r244": 102.0,
+                     "excel_r245": 112.0, "excel_r246": 105.0, "excel_r247": 85.0}[recipient.hero_code]
     lost_position = 16.0 if recipient.turn_ready else 0.0
     current_value = recipient.current_hp * 120.0 + recipient.current_mana * 13.0 + lost_position
+    if recipient.hero_code == "excel_r247":
+        dogs = [unit for unit in battle.all_units() if unit.alive and not unit.banished and unit.position is not None
+                and unit.hero_code == "hell_dog_summon" and unit.summoner_id == recipient.unit_id]
+        for dog in dogs:
+            ring = set(battle.neighbors(dog.position))
+            for unit in battle.effect_units_at_cells(list(ring)):
+                if unit.unit_id == recipient.unit_id or unit.unit_id == dog.unit_id:
+                    continue
+                impact = min(unit.current_hp, battle.damage_rule.calculate_damage(3, unit.stat("defense"))) * 100.0
+                rebirth_value += impact if unit.player_id != actor.player_id else -impact
+        rebirth_value -= len(dogs) * 28.0
     return rebirth_value - current_value - 22.0
 
 
@@ -2266,6 +2407,22 @@ def _score_skill_payload(
     instant_only: bool,
 ) -> float:
     code = str(action.get("code") or payload.get("skill_code") or "")
+    if code == "hell_war_god":
+        enemies = [unit for unit in living_hostile_combatants(battle, actor.player_id)
+                   if unit.position is not None]
+        if not enemies:
+            return -1000.0
+        contact = min(battle.distance_between_units(actor, enemy) for enemy in enemies)
+        reach = actor.targeting_range() + actor.remaining_normal_move_distance(battle)
+        if contact > reach + 2:
+            return -1000.0
+        score = 52.0 + (38.0 if contact <= reach else 12.0)
+        if actor.attacks_used >= actor.attack_actions_per_turn() and actor.performed_active_skill:
+            score -= 45.0
+        if actor.current_hp <= 0.25 and contact <= 1:
+            # A nearby basic attack kills without triggering skill-death rebirth.
+            score -= 35.0 if actor.attacks_used < actor.attack_actions_per_turn() else 90.0
+        return score
     if code == "hell_shuffle":
         return hell_shuffle_score(battle, actor, payload)
     if code == "electronic_fusion":
@@ -2317,6 +2474,8 @@ def _score_skill_payload(
         return r21_winged_leap_score(battle, actor, payload)
     if code == "missile" or (actor.hero_code in {"excel_r264", "excel_r326"} and code in {"pierce", "remote_pierce"}):
         return reviewed_r18_effect_score(battle, actor, skill_from_ai_action(actor, action, code), payload, profile)
+    if code == "hell_dragon_fire":
+        return r23_paid_skill_value(battle, actor, payload)
     if code in {"machine_gun", "electronic_laser", "vitality_blast", "dragon_breath", "remote_dragon_breath", "hell_orb", "hell_orb_free"}:
         return reviewed_r18_effect_score(battle, actor, skill_from_ai_action(actor, action, code), payload, profile)
     if code == "black_cat_paw":
@@ -2539,7 +2698,7 @@ def _score_skill_payload(
         return agency_contract_score(battle, actor, payload, profile)
     if code == "weapon_copy":
         return weapon_copy_score(battle, actor, payload, profile)
-    if code in {"weapon_transfer", "red_charge", "infinite", "infinite_armor", "infinite_robe"}:
+    if code in {"weapon_transfer", "red_charge", "infinite", "infinite_armor", "infinite_robe", "flying_dragon_orb"}:
         return red_preparation_score(battle, actor, code, profile)
     if code == "deadly_bow":
         return deadly_bow_score(battle, actor, action, payload, profile)
@@ -2606,6 +2765,17 @@ def _score_skill_payload(
             return -5.0
         origin_score = score_move_destination(battle, actor, actor.position, role, profile) if actor.position is not None else 0.0
         score = score_move_destination(battle, actor, destination, role, profile) - origin_score - 1.0
+        if code == "hell_teleport":
+            enemies = living_hostile_combatants(battle, actor.player_id)
+            def danger_at(cell: Position) -> float:
+                return sum(max(0.0, enemy.stat("attack") - actor.stat("defense") + 1.0) * 15.0
+                           for enemy in enemies if enemy.position is not None
+                           and distance_to_position(battle, enemy, cell)
+                           <= enemy.normal_move_distance() + enemy.targeting_range())
+            if actor.position is None:
+                return -1000.0
+            avoided = danger_at(actor.position) - danger_at(destination)
+            return score + avoided * (1.7 if actor.current_hp <= 0.5 else 0.9) - 42.0
         if code == "fate_kick" and actor.position is not None:
             dx, dy = destination.x - actor.position.x, destination.y - actor.position.y
             if dx or dy:
@@ -2639,6 +2809,10 @@ def _score_skill_payload(
         return world_seed_score(battle, actor, payload, profile)
     if code in SUMMON_SKILL_CODES:
         destination = payload_destination(payload)
+        if code == "hell_dog":
+            if destination is None:
+                return -1000.0
+            return hell_dog_summon_score(battle, actor, destination)
         if code == "summon_remi_bat":
             if destination is None:
                 return -1000.0
@@ -2808,7 +2982,7 @@ def score_reaction_payload(
     code = str(option.get("action_code") or "")
     if reactor.hero_code == "excel_r192" and code == "gladiator_roar":
         return andrew_reaction_score(battle, reactor, queued_action, payload, code)
-    if (reactor.hero_code == "excel_r337" and code == "light_wall") or (reactor.hero_code == "excel_r239" and code in {"hell_wall", "hell_wall_free"}) or (reactor.hero_code == "excel_r352" and code == "evasion"):
+    if (reactor.hero_code == "excel_r337" and code == "light_wall") or (reactor.hero_code in {"excel_r239", "excel_r247"} and code in {"hell_wall", "hell_wall_free"}) or (reactor.hero_code == "excel_r352" and code == "evasion"):
         return r22_paid_reaction_score(battle, reactor, queued_action, payload, code)
     if reactor.hero_code in {"excel_r327", "excel_r337", "excel_r352"} and code == "counter":
         source = battle.get_unit(queued_action.actor_id)
@@ -4069,7 +4243,7 @@ def skill_damage_score(
                 reward = next((trait for trait in actor.traits if trait.name == "击破重置"), None)
                 if reward is not None and not reward.used_this_turn and reward._eligible_target(unit):
                     score += 55.0
-    if code in {"judgment_fire", "great_funeral", "laser", "missile", "machine_gun", "pierce", "hell_spear", "hell_spear_free", "large_pierce_plus", "remote_dragon_breath", "dragon_breath", "magnetic_wave", "whirlwind_attack"}:
+    if code in {"judgment_fire", "great_funeral", "laser", "missile", "machine_gun", "pierce", "hell_spear", "hell_spear_free", "hell_ranged_spear", "hell_ranged_spear_free", "large_pierce_plus", "remote_dragon_breath", "dragon_breath", "magnetic_wave", "whirlwind_attack"}:
         score += len([unit for unit in affected if unit.player_id != actor.player_id]) * 18.0
     if hero_style(actor) != "support":
         score += profile.aggressive_bonus
@@ -5057,7 +5231,11 @@ def r21_barrier_position_value(battle: Battle, actor: Unit) -> float:
                     attacker.position = origin
                     if not battle.attack_target_allowed(attacker, target)[0]:
                         continue
-                    payload = {"target_unit_id": target.unit_id}
+                    declared = battle.declared_cell_for_target(attacker, target, {"type": "attack", "unit_id": attacker.unit_id})
+                    if declared is None:
+                        continue
+                    payload = {"type": "attack", "unit_id": attacker.unit_id,
+                               "target_unit_id": target.unit_id, "x": declared.x, "y": declared.y}
                     power = battle.basic_attack_preview_power(attacker, payload)
                     protected = probe_attack_damage_impact(battle, attacker, target, payload, attack_power=power).damage
                     battle.field_effects = [effect for effect in battle.field_effects if effect not in fields]
@@ -6131,15 +6309,15 @@ def red_preparation_score(battle: Battle, actor: Unit, code: str, profile: Diffi
                     actor.gain_mana_points(1)
                     best_after = max(best_after, deadly_bow_score(battle, actor, {"code": bow.code}, payload, profile))
         return max(28.0, best_after + 30.0) if best_after > best_before + 3 else 24.0
-    if code in {"infinite_armor", "infinite_robe"}:
-        if (code == "infinite_armor" and (actor.physical_immunity or actor.has_status("无限铠甲"))
+    if code in {"infinite_armor", "infinite_robe", "flying_dragon_orb"}:
+        if (code in {"infinite_armor", "flying_dragon_orb"} and (actor.physical_immunity or actor.has_status("无限铠甲") or actor.has_status("飞龙宝珠"))
                 or code == "infinite_robe" and actor.magic_immunity):
             return -20.0
         def exposure():
             result = 0.0
             for enemy in living_hostile_combatants(battle, actor.player_id):
                 distance = distance_between_units(battle, actor, enemy)
-                if code == "infinite_armor":
+                if code in {"infinite_armor", "flying_dragon_orb"}:
                     if not enemy.cannot_attack and distance <= enemy.targeting_range() + enemy.normal_move_distance():
                         result += estimate_attack_damage(battle, enemy, actor, {}, attack_power=enemy.stat("attack")) * enemy.attack_actions_per_turn()
                 elif distance <= max(5, enemy.targeting_range()) + enemy.normal_move_distance() and not enemy.cannot_use_skills:
@@ -6895,6 +7073,28 @@ def summon_position_score(battle: Battle, actor: Unit, destination: Position) ->
     return max(0.0, 4.0 - nearest) * 8.0
 
 
+def hell_dog_summon_score(battle: Battle, actor: Unit, destination: Position) -> float:
+    enemies = [unit for unit in living_hostile_combatants(battle, actor.player_id)
+               if unit.position is not None]
+    if not enemies:
+        return -1000.0
+    nearest = min(distance_to_position(battle, enemy, destination) for enemy in enemies)
+    if nearest > 6:
+        return -12.0
+    dogs = [unit for unit in battle.all_units() if unit.alive and not unit.banished and unit.hero_code == "hell_dog_summon"
+            and unit.summoner_id == actor.unit_id]
+    ring = set(battle.neighbors(destination))
+    blast_value = sum((1.0 if unit.player_id != actor.player_id else -1.4)
+                      * min(unit.current_hp, battle.damage_rule.calculate_damage(3, unit.stat("defense"))) * 90.0
+                      for unit in battle.effect_units_at_cells(list(ring))
+                      if unit.unit_id != actor.unit_id)
+    threatened = any(actor.position is not None and distance_between_units(battle, actor, enemy)
+                     <= enemy.normal_move_distance() + enemy.targeting_range() for enemy in enemies)
+    mana_reserve = 28.0 if threatened and actor.current_mana <= 1 else 0.0
+    return (24.0 + max(0.0, 5.0 - nearest) * 12.0 + blast_value * 0.25
+            - len(dogs) * 9.0 - mana_reserve)
+
+
 def stone_summon_score(battle: Battle, actor: Unit, code: str,
                        payload: dict[str, Any], profile: DifficultyProfile) -> float:
     if payload.get("x") is None or payload.get("y") is None:
@@ -6948,15 +7148,19 @@ def score_respawn_destination(
     profile: DifficultyProfile,
 ) -> float:
     enemies = living_hostile_combatants(battle, unit.player_id)
-    if unit.hero_code in {"excel_r238", "excel_r239", "excel_r240", "excel_r242", "excel_r243", "excel_r244"}:
+    if unit.hero_code in {"excel_r238", "excel_r239", "excel_r240", "excel_r242", "excel_r243", "excel_r244", "excel_r247", "excel_r248"}:
         nearest_enemy = min((distance_to_position(battle, enemy, destination) for enemy in enemies), default=8)
         effective_defense = 4.0 if unit.hero_code == "excel_r243" else unit.stat("defense")
         danger = sum(max(0.0, enemy.stat("attack") - effective_defense + 1.0) * 12.0
                      for enemy in enemies if distance_to_position(battle, enemy, destination)
                      <= enemy.normal_move_distance() + enemy.targeting_range())
         pressure = (22.0 if unit.hero_code in {"excel_r238", "excel_r243", "excel_r244"} else 13.0)
-        safety = 1.3 if unit.hero_code in {"excel_r242", "excel_r239"} else 0.8
-        return -nearest_enemy * pressure - danger * safety
+        safety = 1.3 if unit.hero_code in {"excel_r242", "excel_r239", "excel_r247"} else 0.8
+        dog_space = (sum(battle.in_bounds(destination.offset(dx, dy))
+                         and battle.can_place_unit(unit, destination.offset(dx, dy), ignore=unit, mover=unit)
+                         for dx in (-1, 0, 1) for dy in (-1, 0, 1) if dx or dy)
+                     if unit.hero_code == "excel_r247" else 0)
+        return -nearest_enemy * pressure - danger * safety + dog_space * 3.0
     allies = [ally for ally in battle.player_units(unit.player_id) if ally.unit_id != unit.unit_id and ally.alive and ally.position is not None and not ally.banished]
     nearest_enemy = min((distance_to_position(battle, enemy, destination) for enemy in enemies), default=8)
     nearest_ally = min((distance_to_position(battle, ally, destination) for ally in allies), default=8)
@@ -7377,7 +7581,7 @@ def probe_skill_damage_impact(
             half_ignore_shield=half_ignore_shield,
             ignore_magic_immunity=skill.ignores_magic_immunity_for_payload(battle, probe_actor, payload),
             cannot_evade=skill.cannot_evade_for_payload(battle, probe_actor, payload),
-            ignore_targeting_restrictions=str(skill.code) in {"great_funeral", "judgment_fire", "wind_sand", "crazy_sand", "dragon_breath", "remote_dragon_breath", "hell_orb", "hell_orb_free", "rending", "complete_burn", "blizzard", "machine_gun", "missile", "laser", "magnetic_wave", "frey_quick_flash", "frey_god_stab", "frey_lion_spear", "demon_blade", "nuclear_mutation", "gravity_field"},
+            ignore_targeting_restrictions=str(skill.code) in {"great_funeral", "judgment_fire", "wind_sand", "crazy_sand", "dragon_breath", "remote_dragon_breath", "hell_orb", "hell_orb_free", "hell_dragon_fire", "rending", "complete_burn", "blizzard", "machine_gun", "missile", "laser", "magnetic_wave", "frey_quick_flash", "frey_god_stab", "frey_lion_spear", "demon_blade", "nuclear_mutation", "gravity_field"},
             resolve_defenses=False,
             damage_target=True,
             tags=set(target_tags),

@@ -12191,6 +12191,26 @@ class HellSpearSkill(PierceSkill):
         return ok, reason
 
 
+class HellRangedSpearSkill(RemotePierceSkill):
+    def __init__(self, *, free: bool = False) -> None:
+        super().__init__()
+        self.free = free
+        self.code = "hell_ranged_spear_free" if free else "hell_ranged_spear"
+        self.name = "魔枪（远程0魔免费）" if free else "魔枪（远程）"
+        self.description = ("当前魔恰为0时，每2本人轮免费使用一次远程穿刺。" if free
+                            else "沿用远程穿刺：1.5魔，每本人轮最多2次。")
+        if free:
+            self.mana_cost = 0
+            self.max_uses_per_turn = 1
+            self.cooldown_turns = 2
+
+    def can_use(self, battle: Battle, actor: Unit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if ok and self.free and actor.current_mana != 0:
+            return False, "只有当前魔为0时才可免费使用远程魔枪。"
+        return ok, reason
+
+
 class HellPressureSkill(KnockbackSkill):
     def __init__(self, *, free: bool = False) -> None:
         super().__init__()
@@ -12368,6 +12388,20 @@ class HellRebirthGuardStatus(StatusEffect):
         return value + 1
 
 
+class HellSnowManaStatus(StatusEffect):
+    def __init__(self) -> None:
+        super().__init__("地狱再临·自然回魔", "再临后接下来三个本人轮开始各自然回魔1。",
+                         duration=3, tick_scope="owner_turn_start")
+
+    def on_owner_turn_start(self, battle: Battle) -> None:
+        if self.owner is not None and self.owner.alive:
+            gained = self.owner.gain_mana(1)
+            if gained:
+                battle.log_public_event(f"{self.owner.name} 地狱再临自然回魔 +{gained}。",
+                                        source=self.owner, target=self.owner)
+        self.decrement(battle)
+
+
 class HellRebirthTrait(Trait):
     def __init__(self, code: str) -> None:
         self.hero_code = code
@@ -12498,6 +12532,390 @@ class HellAssassinRebirthTrait(HellRebirthTrait):
         battle.clear_all_stealth_if_all_heroes_stealthed()
         battle.log(f"{owner.name} 隐身地狱再临。")
 
+    def on_hell_rescue(self, battle: Battle) -> None:
+        if self.owner is not None:
+            self.owner._hell_assassin_strike_scheduled = False
+
+
+class HellDogSummon(AbstractHero):
+    hero_code = "hell_dog_summon"
+    hero_name = "地狱犬"
+    role = "召唤物"
+    attribute = "暗"
+    race = "恶魔"
+    level = 1
+    base_stats = Stats(attack=3, defense=3, speed=4, attack_range=1, mana=0)
+
+    def __init__(self, player_id: int) -> None:
+        super().__init__(player_id, is_summon=True)
+
+    def build_skills(self) -> list[Skill]:
+        return []
+
+    def build_traits(self) -> list[Trait]:
+        return [PermanentMagicImmunityTrait()]
+
+
+class HellDogSkill(Skill):
+    def __init__(self) -> None:
+        super().__init__("hell_dog", "地狱犬", "花1魔在本体周围合法空格召唤攻3守3速4、魔免的地狱犬。",
+                         mana_cost=1, target_mode="cell")
+
+    def available_cells(self, battle: Battle, actor: Unit) -> list[Position]:
+        probe = HellDogSummon(actor.player_id)
+        return [cell for cell in square_around_cells(battle, battle.unit_cells(actor), radius=1)
+                if battle.can_place_unit(probe, cell)]
+
+    def can_use(self, battle: Battle, actor: Unit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok:
+            return ok, reason
+        options = self.available_cells(battle, actor)
+        if not options:
+            return False, "本体周围没有合法的地狱犬落点。"
+        if payload and any(key in payload for key in ("x", "y", "cells")):
+            try:
+                if payload_position(payload) not in options:
+                    return False, "地狱犬只能召唤到本体周围的完整合法空格。"
+            except (ActionError, ValueError, TypeError, KeyError):
+                return False, "地狱犬需要选择一个合法落点。"
+        return True, ""
+
+    def prepay_resources(self, battle: Battle, actor: Unit, payload: dict[str, Any] | None = None) -> None:
+        if payload_position(payload or {}) not in self.available_cells(battle, actor):
+            raise ActionError("地狱犬落点已失效。")
+        super().prepay_resources(battle, actor, payload)
+
+    def execute(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
+        destination = payload_position(payload)
+        if destination not in self.available_cells(battle, actor):
+            raise ActionError("地狱犬只能召唤到本体周围的完整合法空格。")
+        dog = HellDogSummon(actor.player_id)
+        battle.summon_unit(dog, destination, summoner=actor)
+        battle.log_public_event(f"{actor.name} 在 ({destination.x}, {destination.y}) 召唤地狱犬。",
+                                source=actor, target=dog)
+
+    def preview(self, battle: Battle, actor: Unit) -> dict[str, Any]:
+        return {"cells": positions_to_dict(self.available_cells(battle, actor)),
+                "target_unit_ids": [], "secondary_cells": [], "requires_target": True}
+
+    def get_target_cells_for_payload(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> list[Position]:
+        return [payload_position(payload)]
+
+
+class HellTeleportSkill(Skill):
+    def __init__(self) -> None:
+        super().__init__("hell_teleport", "瞬移", "大招：每场一次，瞬移到全场任意完整合法空格；不造成伤害。",
+                         max_uses_per_battle=1, target_mode="cell")
+
+    def available_cells(self, battle: Battle, actor: Unit) -> list[Position]:
+        if actor.position is None or actor.cannot_move or getattr(actor, "standable_terrain", False):
+            return []
+        return [Position(x, y) for y in range(battle.height) for x in range(battle.width)
+                if Position(x, y) != actor.position
+                and battle.terrain_step_allowed(actor, actor.position, Position(x, y))
+                and battle.can_place_unit(actor, Position(x, y), ignore=actor, mover=actor)]
+
+    def can_use(self, battle: Battle, actor: Unit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok:
+            return ok, reason
+        if not self.available_cells(battle, actor):
+            return False, "当前没有合法瞬移落点。"
+        if payload and any(key in payload for key in ("x", "y", "cells")):
+            try:
+                if payload_position(payload) not in self.available_cells(battle, actor):
+                    return False, "请选择完整合法的瞬移落点。"
+            except (ActionError, ValueError, TypeError, KeyError):
+                return False, "请选择完整合法的瞬移落点。"
+        return True, ""
+
+    def prepay_resources(self, battle: Battle, actor: Unit, payload: dict[str, Any] | None = None) -> None:
+        if payload_position(payload or {}) not in self.available_cells(battle, actor):
+            raise ActionError("瞬移落点已失效。")
+        super().prepay_resources(battle, actor, payload)
+
+    def execute(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
+        destination = payload_position(payload)
+        if destination not in self.available_cells(battle, actor):
+            raise ActionError("瞬移落点已失效。")
+        battle.move_unit(actor, destination, via_skill=True, allow_anywhere=True,
+                         max_distance=max(battle.width, battle.height), tags={"hell_teleport"})
+        battle.log_public_event(f"{actor.name} 瞬移到 ({destination.x}, {destination.y})。",
+                                source=actor, target=actor)
+
+    def preview(self, battle: Battle, actor: Unit) -> dict[str, Any]:
+        return {"cells": positions_to_dict(self.available_cells(battle, actor)),
+                "target_unit_ids": [], "secondary_cells": [], "requires_target": True}
+
+    def get_target_cells_for_payload(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> list[Position]:
+        return []
+
+
+def resolve_hell_dog_death_burst(battle: Battle, actor: Unit, queued_action: Any) -> None:
+    cells = battle.payload_positions(queued_action.payload, "cells")
+    for recipient in battle.effect_units_at_cells(cells):
+        battle.resolve_damage(DamageContext(
+            source=actor, target=recipient, attack_power=3,
+            is_skill=False, from_field_effect=True, action_name=queued_action.display_name,
+            tags={"hell_dog_death_burst", "death_trait"},
+        ))
+
+
+class HellSnowRebirthTrait(HellRebirthTrait):
+    def __init__(self) -> None:
+        super().__init__("excel_r247")
+        self.name = "地狱犬群再临"
+        self.description = "被技能破坏时，本人现存地狱犬各在旧格爆破；下个敌方武将回合末0魔回场，三本人轮自然回魔并重置瞬移。"
+
+    def on_after_damage(self, battle: Battle, ctx: DamageContext) -> None:
+        owner = self.owner
+        if (owner is None or ctx.target.unit_id != owner.unit_id or owner.alive
+                or not ctx.is_skill or ctx.from_field_effect):
+            return
+        super().on_after_damage(battle, ctx)
+        self.burst_dogs(battle)
+
+    def on_hell_forced_skill_death(self, battle: Battle) -> None:
+        super().on_hell_forced_skill_death(battle)
+        self.burst_dogs(battle)
+
+    def burst_dogs(self, battle: Battle) -> None:
+        owner = self.owner
+        if owner is None or getattr(owner, "_hell_dog_burst_scheduled", False):
+            return
+        owner._hell_dog_burst_scheduled = True
+        dogs = [unit for unit in battle.all_units() if unit.alive and not unit.banished and unit.position is not None
+                and unit.hero_code == "hell_dog_summon" and unit.summoner_id == owner.unit_id]
+        for index, dog in enumerate(dogs, start=1):
+            body = set(battle.unit_cells(dog))
+            ring = sorted((cell for cell in square_around_cells(battle, list(body), radius=1)
+                           if cell not in body), key=lambda cell: (cell.y, cell.x))
+            dog.alive = False
+            battle.log_public_event(f"{dog.name} 随{owner.name}的技能死亡而破坏并爆破。",
+                                    source=owner, target=dog)
+            if ring:
+                battle.queue_skill_effect_action(
+                    actor=owner, display_name=f"地狱犬死亡爆破·{index}", effect_code="hell_dog_death_burst",
+                    payload={"after_death_effect": True, "cells": positions_to_dict(ring),
+                             "refresh_cell_targets": True, "attack_power": 3},
+                    target_cells=ring, speed=1, segment_index=index, segment_count=len(dogs),
+                    effect_resolver=resolve_hell_dog_death_burst,
+                )
+
+    def on_hell_rebirth(self, battle: Battle) -> None:
+        owner = self.owner
+        if owner is None:
+            return
+        owner._hell_dog_burst_scheduled = False
+        teleport = next((skill for skill in owner.skills if skill.code == "hell_teleport"), None)
+        if teleport is not None:
+            teleport.uses_this_battle = 0
+        status = HellSnowManaStatus()
+        status.is_skill_effect = False
+        owner.add_status(status, source=owner)
+        battle.log_public_event(f"{owner.name} 地狱再临，瞬移已重置，并获得三轮自然回魔。",
+                                source=owner, target=owner)
+
+
+def resolve_hell_hunter_rescue(battle: Battle, actor: Unit, queued_action: Any) -> None:
+    target_id = str(queued_action.payload.get("rescued_unit_id") or "")
+    target = next((unit for unit in battle.destroyed_units if unit.unit_id == target_id), None)
+    cells = battle.payload_positions(queued_action.payload, "cells")
+    if target is None or not cells or not battle.restore_destroyed_hell_ally(target, cells[0]):
+        battle.log(f"{actor.name} 的死亡救援因原格失效而落空。")
+
+
+class HellHunterRescueTrait(HellRebirthTrait):
+    requires_damage_choice = True
+
+    def __init__(self) -> None:
+        super().__init__("excel_r245")
+        self.name = "地狱猎人救援"
+        self.description = "技能死亡时先在原格救回一名已破坏的其他地狱友军，之后本人于下个敌方武将回合末0魔回场。"
+
+    def rescue_options(self, battle: Battle, origin: Position) -> list[str]:
+        owner = self.owner
+        if owner is None:
+            return []
+        return [unit.unit_id for unit in battle.destroyed_units
+                if not unit.alive and unit.unit_id != owner.unit_id
+                and unit.player_id == owner.player_id and "地狱" in unit.name
+                and (not unit.is_summon or not unit.summoner_id
+                     or (unit.summoner_id in battle.units and battle.units[unit.summoner_id].alive))
+                and battle.can_place_unit(unit, origin, mover=unit)]
+
+    def offer_rescue(self, battle: Battle) -> None:
+        owner = self.owner
+        if owner is None or getattr(owner, "_hell_hunter_rescue_scheduled", False):
+            return
+        owner._hell_hunter_rescue_scheduled = True
+        origin = owner.position or owner.last_position
+        if origin is None:
+            return
+        options = self.rescue_options(battle, origin)
+        choice = battle.optional_position_choice(owner, options, action_name="地狱猎人死亡救援",
+                                                 kind="hell_rescue")
+        if choice not in options:
+            battle.log(f"{owner.name} 没有选择可救回的地狱友军。")
+            return
+        target = next((unit for unit in battle.destroyed_units if unit.unit_id == choice), None)
+        if target is None:
+            return
+        battle.queue_skill_effect_action(
+            actor=owner, display_name="地狱猎人死亡救援", effect_code="hell_hunter_rescue",
+            payload={"after_death_effect": True, "rescued_unit_id": choice, "cells": [origin.to_dict()]},
+            target_cells=[origin], include_cell_units=False, hostile=False,
+            effect_resolver=resolve_hell_hunter_rescue,
+        )
+        battle.log_public_event(f"{owner.name} 临死选择救回{target.name}。", source=owner, target=target)
+
+    def on_after_damage(self, battle: Battle, ctx: DamageContext) -> None:
+        owner = self.owner
+        if (owner is None or ctx.target.unit_id != owner.unit_id or owner.alive
+                or not ctx.is_skill or ctx.from_field_effect):
+            return
+        super().on_after_damage(battle, ctx)
+        self.offer_rescue(battle)
+
+    def on_hell_forced_skill_death(self, battle: Battle) -> None:
+        super().on_hell_forced_skill_death(battle)
+        self.offer_rescue(battle)
+
+    def on_hell_rebirth(self, battle: Battle) -> None:
+        if self.owner is not None:
+            self.owner._hell_hunter_rescue_scheduled = False
+
+    def on_hell_rescue(self, battle: Battle) -> None:
+        if self.owner is not None:
+            self.owner._hell_hunter_rescue_scheduled = False
+
+
+class HellWarGodStatus(StatusEffect):
+    def __init__(self) -> None:
+        super().__init__("武神", "攻守各+1；再经历2个敌方武将回合末后由武神技能破坏本人。")
+        self.remaining_enemy_ends = 2
+
+    def modify_stat(self, stat_name: str, value: float) -> float:
+        return value + 1 if stat_name in {"attack", "defense"} else value
+
+    def on_any_turn_end(self, battle: Battle, ended_player_id: int) -> None:
+        owner = self.owner
+        if (owner is None or not owner.alive or owner.player_id == ended_player_id
+                or battle.is_army_turn()):
+            return
+        self.remaining_enemy_ends -= 1
+        if self.remaining_enemy_ends > 0:
+            battle.log(f"{owner.name} 的武神还剩 {self.remaining_enemy_ends} 个敌方武将回合末。")
+            return
+        owner.current_hp = 0
+        owner.alive = False
+        owner._hell_rebirth_skip_turn_number = battle.turn_number
+        battle.log_public_event(f"{owner.name} 的武神到期，技能破坏了本人。", source=owner, target=owner)
+        for component in list(owner.iter_components()):
+            callback = getattr(component, "on_hell_forced_skill_death", None)
+            if callable(callback):
+                callback(battle)
+        owner.remove_status(self, battle)
+
+    def to_public_dict(self, battle: Battle) -> dict[str, Any]:
+        data = super().to_public_dict(battle)
+        data["remaining_enemy_ends"] = self.remaining_enemy_ends
+        return data
+
+
+class HellWarGodSkill(Skill):
+    def __init__(self) -> None:
+        super().__init__("hell_war_god", "武神", "大招：本场一次，攻守各+1；2个敌方武将回合末后技能破坏本人。",
+                         max_uses_per_battle=1)
+
+    def execute(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
+        actor.add_status(HellWarGodStatus(), source=actor)
+        battle.log_public_event(f"{actor.name} 发动武神，攻守各+1，两次敌方武将回合末后将自毁。", source=actor)
+
+    def preview(self, battle: Battle, actor: Unit) -> dict[str, Any]:
+        return {"cells": positions_to_dict(battle.unit_cells(actor)), "target_unit_ids": [actor.unit_id],
+                "secondary_cells": [], "requires_target": False}
+
+
+def resolve_hell_war_god_death_sweep(battle: Battle, actor: Unit, queued_action: Any) -> None:
+    cells = battle.payload_positions(queued_action.payload, "cells")
+    for recipient in battle.effect_units_at_cells(cells):
+        if recipient.player_id == actor.player_id:
+            continue
+        battle.resolve_damage(DamageContext(
+            source=actor, target=recipient, attack_power=float(queued_action.payload["attack_power"]),
+            is_skill=True, action_name=queued_action.display_name,
+            tags={"hell_war_god_death_sweep", "death_trait"},
+        ))
+
+
+class HellWarGodRebirthTrait(HellRebirthTrait):
+    def __init__(self) -> None:
+        super().__init__("excel_r246")
+        self.name = "武神再临"
+        self.description = "技能死亡时对原身体外邻敌方单位逐一造成技能伤害，再于下个敌方武将末0魔回场；大招不重置。"
+
+    def offer_death_sweep(self, battle: Battle) -> None:
+        owner = self.owner
+        if owner is None or getattr(owner, "_hell_war_death_sweep_scheduled", False):
+            return
+        owner._hell_war_death_sweep_scheduled = True
+        origin = owner.position or owner.last_position
+        if origin is None:
+            return
+        body = set(battle.unit_cells_at(owner, origin))
+        cells = sorted({neighbor for cell in body for neighbor in battle.neighbors(cell)
+                        if neighbor not in body}, key=lambda cell: (cell.y, cell.x))
+        targets = [unit for unit in battle.effect_units_at_cells(cells) if unit.player_id != owner.player_id]
+        for target in targets:
+            cell = next((body_cell for body_cell in battle.unit_cells(target) if body_cell in cells), None)
+            if cell is None:
+                continue
+            battle.queue_skill_effect_action(
+                actor=owner, display_name="武神死亡扫击", effect_code="hell_war_god_death_sweep",
+                payload={"after_death_effect": True, "cells": [cell.to_dict()],
+                         "attack_power": owner.stat("attack")},
+                target_units=[target], target_cells=[cell], include_cell_units=False, hostile=True,
+                effect_resolver=resolve_hell_war_god_death_sweep,
+            )
+        if not targets:
+            return
+        battle.log_public_event(f"{owner.name} 临死扫击周围敌方单位。", source=owner)
+
+    def on_after_damage(self, battle: Battle, ctx: DamageContext) -> None:
+        owner = self.owner
+        if owner is None or ctx.target.unit_id != owner.unit_id or owner.alive:
+            return
+        if ctx.is_skill and not ctx.from_field_effect:
+            super().on_after_damage(battle, ctx)
+            self.offer_death_sweep(battle)
+        for status in list(owner.statuses):
+            if isinstance(status, HellWarGodStatus):
+                owner.remove_status(status, battle)
+
+    def on_hell_forced_skill_death(self, battle: Battle) -> None:
+        super().on_hell_forced_skill_death(battle)
+        self.offer_death_sweep(battle)
+        if self.owner is not None:
+            for status in list(self.owner.statuses):
+                if isinstance(status, HellWarGodStatus):
+                    self.owner.remove_status(status, battle)
+
+    def on_hell_rebirth(self, battle: Battle) -> None:
+        if self.owner is not None:
+            self.owner._hell_war_death_sweep_scheduled = False
+            for status in list(self.owner.statuses):
+                if isinstance(status, HellWarGodStatus):
+                    self.owner.remove_status(status, battle)
+
+    def on_hell_rescue(self, battle: Battle) -> None:
+        if self.owner is not None:
+            self.owner._hell_war_death_sweep_scheduled = False
+            for status in list(self.owner.statuses):
+                if isinstance(status, HellWarGodStatus):
+                    self.owner.remove_status(status, battle)
+
 
 class HellSikaSacrificeTrait(HellRebirthTrait):
     requires_damage_choice = True
@@ -12556,6 +12974,141 @@ class HellSikaSacrificeTrait(HellRebirthTrait):
         battle.cleanup_dead_units()
 
 
+class HellDragonBreathSkill(DragonBreathSkill):
+    def __init__(self) -> None:
+        super().__init__()
+        self.name = "龙吸"
+        self.description = "普通技能：沿近身龙息的2×2范围和2魔、每本人轮两次额度结算。"
+
+
+class HellDragonFireSkill(DeclaredAreaSkillMixin, Skill):
+    target_cells_are_geometry_only = True
+
+    def __init__(self) -> None:
+        super().__init__("hell_dragon_fire", "地狱之火",
+                         "普通技能：2轮一次；范内远程选择5×5区域，按当前攻伤双方。",
+                         cooldown_turns=2, target_mode="cell")
+
+    def patterns(self, battle: Battle, actor: Unit) -> list[list[Position]]:
+        return remote_rectangle_patterns(battle, actor, 5, 5)
+
+    def execute(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
+        cells = self.chosen_cells(battle, actor, payload)
+        battle.queue_area_damage_effect(actor=actor, display_name=self.name, cells=cells,
+                                        attack_power=actor.stat("attack"), tags={"skill", self.code})
+
+    def get_target_cells_for_payload(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> list[Position]:
+        return self.chosen_cells(battle, actor, payload)
+
+    def get_target_units_for_payload(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> list[Unit]:
+        return battle.effect_units_at_cells(self.chosen_cells(battle, actor, payload))
+
+    def preview(self, battle: Battle, actor: Unit) -> dict[str, Any]:
+        patterns = self.patterns(battle, actor)
+        preview = pattern_selection_preview(patterns)
+        affected = battle.effect_units_at_cells([cell for pattern in patterns for cell in pattern])
+        preview.update({"target_unit_ids": [unit.unit_id for unit in affected],
+                        "secondary_cells": [], "requires_target": True})
+        return preview
+
+
+class FlyingDragonOrbStatus(PhysicalImmunityStatus):
+    def __init__(self) -> None:
+        super().__init__()
+        self.name = "飞龙宝珠"
+        self.description = "三个本人轮内物免；敌方技能仍可影响。"
+
+    def on_targeted(self, battle: Battle, ctx: TargetContext) -> None:
+        if self.owner is not None and ctx.actor is not None and ctx.actor.player_id == self.owner.player_id:
+            return
+        super().on_targeted(battle, ctx)
+
+    def on_before_damage(self, battle: Battle, ctx: DamageContext) -> None:
+        if self.owner is not None and ctx.source is not None and ctx.source.player_id == self.owner.player_id:
+            return
+        super().on_before_damage(battle, ctx)
+
+
+class FlyingDragonOrbSkill(Skill):
+    def __init__(self) -> None:
+        super().__init__("flying_dragon_orb", "飞龙宝珠", "大招：本场一次，物免3轮。",
+                         max_uses_per_battle=1, target_mode="self")
+
+    def execute(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
+        actor.add_status(FlyingDragonOrbStatus())
+
+
+class HellDragonSacrificeTrait(Trait):
+    requires_damage_choice = True
+
+    def __init__(self) -> None:
+        super().__init__("古龙献祭再临", "真死亡后可技能破坏两名己方地狱单位，只放行一名死亡效果，之后任意时间于原格满状态复活。")
+
+    def sacrifice_candidates(self, battle: Battle) -> list[Unit]:
+        owner = self.owner
+        if owner is None:
+            return []
+        return [unit for unit in battle.all_units()
+                if unit.unit_id != owner.unit_id and unit.player_id == owner.player_id
+                and unit.alive and not unit.banished and unit.position is not None
+                and "地狱" in unit.name and battle.effect_recipient(unit) is unit
+                and (not unit.is_summon or not unit.summoner_id
+                     or (battle.units.get(unit.summoner_id) is not None
+                         and battle.units[unit.summoner_id].alive))]
+
+    def on_hell_dragon_destroyed(self, battle: Battle) -> None:
+        owner = self.owner
+        if owner is None or owner.unit_id in battle.hell_dragon_return_cells:
+            return
+        candidates = self.sacrifice_candidates(battle)
+        if len(candidates) < 2:
+            battle.log_public_event(f"{owner.name} 已阵亡，场上不足两名可献祭的地狱友军。", target=owner)
+            return
+        ids = [unit.unit_id for unit in candidates]
+        first = battle.optional_position_choice(owner, ids, action_name="古龙献祭第一名", kind="hell_dragon_first")
+        if first not in ids:
+            battle.log_public_event(f"{owner.name} 放弃本次地狱献祭。", target=owner)
+            return
+        second_options = [unit_id for unit_id in ids if unit_id != first]
+        second = battle.optional_position_choice(owner, second_options, action_name="古龙献祭第二名", kind="hell_dragon_second")
+        if second not in second_options:
+            battle.log_public_event(f"{owner.name} 未完成双人献祭。", target=owner)
+            return
+        allowed = battle.optional_position_choice(owner, [first, second],
+                                                  action_name="选择一名可发动死亡效果", kind="hell_dragon_effect")
+        if allowed not in {first, second}:
+            allowed = first
+        originals = [battle.units.get(first), battle.units.get(second)]
+        if any(unit is None or not unit.alive or unit.position is None for unit in originals):
+            return
+        origins = [unit.position for unit in originals if unit is not None]
+        destroyed: list[Unit] = []
+        for target in originals:
+            if target is None:
+                continue
+            result = battle.validate_target(owner, target, action_name="古龙献祭", is_skill=True,
+                                            is_hostile=True, ignore_targeting_restrictions=True,
+                                            damage_target=True,
+                                            record_effect_on_validation=False)
+            recipient = result.target
+            if result.cancelled or recipient is not target or recipient.skill_non_damage_effects_blocked():
+                battle.log_public_event(result.reason or f"{recipient.name} 挡下古龙献祭。",
+                                        source=owner, target=recipient)
+                continue
+            recipient.current_hp = 0
+            recipient.alive = False
+            recipient._hell_death_from_damage = True
+            if target.unit_id != allowed:
+                recipient._suppress_hell_forced_skill_death = True
+            destroyed.append(recipient)
+            battle.log_public_event(f"{owner.name} 献祭了{recipient.name}。", source=owner, target=recipient)
+        if len({unit.unit_id for unit in destroyed}) == 2:
+            battle.hell_dragon_return_cells[owner.unit_id] = list(dict.fromkeys(origins))
+            battle.log_public_event(f"{owner.name} 取得待复活权，可在两名献祭者的原格择时满状态复活。", target=owner)
+        else:
+            battle.log_public_event(f"{owner.name} 未能真正破坏两名目标，未取得复活权。", target=owner)
+
+
 def _slug_tail(source_row: int, name: str) -> str:
     ascii_tail = re.sub(r"[^0-9a-zA-Z_]+", "_", name).strip("_").lower()
     return ascii_tail or f"r{source_row:03d}"
@@ -12564,11 +13117,15 @@ def _slug_tail(source_row: int, name: str) -> str:
 def _special_skill_factory(spec: dict[str, Any], fragment: dict[str, Any]) -> Skill | None:
     name = _text(fragment.get("name"))
     source = _text(fragment.get("fragment"))
-    if spec.get("code") in {"excel_r238", "excel_r240", "excel_r242", "excel_r243", "excel_r244"}:
+    if spec.get("code") in {"excel_r238", "excel_r240", "excel_r242", "excel_r243", "excel_r244", "excel_r246"}:
         if name == "魔枪":
             return HellSpearSkill()
         if name == "魔压":
             return HellPressureSkill()
+    if spec.get("code") == "excel_r245" and name == "魔枪":
+        return HellRangedSpearSkill()
+    if spec.get("code") == "excel_r246" and name == "武神":
+        return HellWarGodSkill()
     if spec.get("code") == "excel_r239":
         if name == "魔动球":
             return HellOrbSkill()
@@ -12576,6 +13133,20 @@ def _special_skill_factory(spec: dict[str, Any], fragment: dict[str, Any]) -> Sk
             return HellWallSkill()
         if name == "地狱洗牌":
             return HellShuffleSkill()
+    if spec.get("code") == "excel_r247":
+        if name == "[1地狱犬":
+            return HellDogSkill()
+        if name == "魔墙":
+            return HellWallSkill()
+        if name == "瞬移":
+            return HellTeleportSkill()
+    if spec.get("code") == "excel_r248":
+        if name == "龙吸":
+            return HellDragonBreathSkill()
+        if name == "地狱之火":
+            return HellDragonFireSkill()
+        if name == "飞龙宝珠":
+            return FlyingDragonOrbSkill()
     if spec.get("code") == "excel_r221" and name == "卫星加农炮":
         return SatelliteCannonSkill()
     if spec.get("code") == "excel_r222" and name == "电子维修":
@@ -12982,6 +13553,14 @@ def _special_trait_factory(spec: dict[str, Any], fragment: dict[str, Any]) -> Tr
         return HellKnightRebirthTrait()
     if spec.get("code") == "excel_r244" and "被技能破坏时" in text:
         return HellAssassinRebirthTrait()
+    if spec.get("code") == "excel_r245" and "被技能破坏时" in text:
+        return HellHunterRescueTrait()
+    if spec.get("code") == "excel_r246" and "被技能破坏时" in text:
+        return HellWarGodRebirthTrait()
+    if spec.get("code") == "excel_r247" and "被技能破坏时" in text:
+        return HellSnowRebirthTrait()
+    if spec.get("code") == "excel_r248" and "此单位被破坏后" in text:
+        return HellDragonSacrificeTrait()
     if spec.get("code") == "excel_r223" and text == "每回不限制移动次数":
         return ElectronicWingMovementTrait()
     if spec.get("code") == "excel_r221" and "瞬移到任意一个己方单位周围" in text:
@@ -13188,10 +13767,14 @@ def _make_build_skills(spec: dict[str, Any]) -> Callable[[AbstractHero], list[Sk
             skills.append(BoxerBlockCounterSkill())
         if spec.get("code") == "excel_r219":
             skills.extend([BirdDashSkill(free=True), BirdSoulSkill(free=True)])
-        if spec.get("code") in {"excel_r238", "excel_r240", "excel_r242", "excel_r243", "excel_r244"}:
+        if spec.get("code") in {"excel_r238", "excel_r240", "excel_r242", "excel_r243", "excel_r244", "excel_r246"}:
             skills.extend([HellSpearSkill(free=True), HellPressureSkill(free=True)])
+        if spec.get("code") == "excel_r245":
+            skills.append(HellRangedSpearSkill(free=True))
         if spec.get("code") == "excel_r239":
             skills.extend([HellOrbSkill(free=True), HellWallSkill(free=True)])
+        if spec.get("code") == "excel_r247":
+            skills.append(HellWallSkill(free=True))
         return skills
 
     return build_skills
@@ -13327,6 +13910,10 @@ IMPLEMENTED_EXCEL_HERO_CODES: frozenset[str] = frozenset(
         "excel_r242",
         "excel_r243",
         "excel_r244",
+        "excel_r245",
+        "excel_r246",
+        "excel_r247",
+        "excel_r248",
         "excel_r264",
         "excel_r291",
         "excel_r326",

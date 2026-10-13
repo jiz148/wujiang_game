@@ -37,6 +37,7 @@ from wujiang.tactical.heroes.registry import RoomBattleEntry, create_room_battle
 from wujiang.tactical.rooms.ai import (
     choose_chain_reaction,
     choose_damage_choice_action,
+    choose_hell_dragon_return_action,
     choose_instant_action,
     choose_respawn_action,
     choose_turn_bundle_action,
@@ -638,6 +639,12 @@ def battle_state_for_viewer(
     viewer_seat_id: Optional[int] = None,
 ) -> dict[str, Any]:
     state = battle.to_public_dict()
+    state["hell_dragon_returns"] = [
+        {**entry, "can_control": bool(viewer_player_id == entry["player_id"] and
+         (viewer_seat_id is None or battle_unit_owner_seat_id(
+             battle, battle.get_unit(entry["unit_id"])) == viewer_seat_id))}
+        for entry in state.get("hell_dragon_returns", [])
+    ]
     input_player = state["input_player"]
     state["viewer_player_id"] = viewer_player_id
     hidden_unit_ids = {
@@ -678,7 +685,11 @@ def battle_state_for_viewer(
         ]
     elif viewer_player_id is not None:
         instant_units = _instant_units_for_viewer(battle, viewer_player_id)
-        if instant_units:
+        dragon_returns = [entry for entry in state.get("hell_dragon_returns", [])
+                          if entry["player_id"] == viewer_player_id and entry["options"]
+                          and (viewer_seat_id is None or battle_unit_owner_seat_id(
+                              battle, battle.get_unit(entry["unit_id"])) == viewer_seat_id)]
+        if instant_units or dragon_returns:
             state["input_player"] = viewer_player_id
             state["active_units"] = [
                 {
@@ -1909,6 +1920,8 @@ class GameRoom:
                 return action_code or "连锁"
         if action_type == "respawn_select":
             return "重新出现"
+        if action_type == "hell_dragon_return":
+            return "古龙满状态复活"
         if action_type == "damage_choice":
             if payload.get("target_unit_id"):
                 if "@" in str(payload.get("target_unit_id") or ""):
@@ -2194,6 +2207,10 @@ class GameRoom:
                 difficulty = seat.ai_difficulty_override or self.default_ai_difficulty
                 payload = choose_chain_reaction(self.battle, reactor, options, difficulty)
                 return (payload or {"type": "chain_skip"}, "ai_chain", reactor)
+            dragon_payload = self._choose_ai_dragon_return_payload()
+            if dragon_payload is not None:
+                actor = self.battle.get_unit(str(dragon_payload["unit_id"]))
+                return dragon_payload, "ai_hell_dragon_return", actor
             instant_payload = self._choose_ai_instant_payload()
             if instant_payload is not None:
                 actor = self.battle.get_unit(str(instant_payload.get("unit_id") or ""))
@@ -3187,6 +3204,12 @@ class GameRoom:
     def allows_instant_action_override(self, seat: PlayerSeat, payload: dict[str, Any]) -> bool:
         if self.battle is None or self.battle.pending_damage_choice is not None or self.battle.pending_chain is not None or self.battle.current_respawn_prompt() is not None:
             return False
+        if payload.get("type") == "hell_dragon_return":
+            unit_id = str(payload.get("unit_id") or "")
+            if unit_id not in self.battle.hell_dragon_return_cells:
+                return False
+            actor = self.battle.get_unit(unit_id)
+            return actor.player_id == seat.team_id and self._unit_owner_seat_id(actor) == seat.player_id
         if payload.get("type") != "skill":
             return False
         actor_unit_id = payload.get("unit_id")
@@ -3226,6 +3249,21 @@ class GameRoom:
                 continue
             difficulty = seat.ai_difficulty_override or self.default_ai_difficulty
             payload = choose_instant_action(self.battle, owned_units, difficulty)
+            if payload is not None:
+                return payload
+        return None
+
+    def _choose_ai_dragon_return_payload(self) -> Optional[dict[str, Any]]:
+        if (self.battle is None or self.battle.pending_damage_choice is not None
+                or self.battle.pending_chain is not None or self.battle.current_respawn_prompt() is not None
+                or self.battle.pending_followup_actions):
+            return None
+        for unit_id in list(self.battle.hell_dragon_return_cells):
+            unit = self.battle.get_unit(unit_id)
+            seat = self._seat_for_actor(unit)
+            if seat is None or not seat.is_ai_controlled:
+                continue
+            payload = choose_hell_dragon_return_action(self.battle, unit)
             if payload is not None:
                 return payload
         return None
@@ -3580,8 +3618,12 @@ class GameRoom:
                     self._perform_battle_action(payload or {"type": "chain_skip"}, reason="ai_chain")
                     steps += 1
                 else:
-                    instant_payload = self._choose_ai_instant_payload()
-                    if instant_payload is not None:
+                    dragon_payload = self._choose_ai_dragon_return_payload()
+                    instant_payload = None if dragon_payload is not None else self._choose_ai_instant_payload()
+                    if dragon_payload is not None:
+                        self._perform_battle_action(dragon_payload, reason="ai_hell_dragon_return")
+                        steps += 1
+                    elif instant_payload is not None:
                         self._perform_battle_action(instant_payload, reason="ai_instant")
                         steps += 1
                     elif self.battle.is_army_turn():

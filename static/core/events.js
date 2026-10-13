@@ -1621,6 +1621,8 @@ export function renderHeader() {
       ? "赤候可以技能破坏一名己方地狱单位，或放弃。"
       : prompt.kind === "hell_death_strike"
       ? "刺客临死可选周围一名单位连续反击两次，或放弃。"
+      : prompt.kind === "hell_rescue"
+      ? "猎人临死可在原格救回一名已破坏的地狱友军，或放弃；猎人仍将延迟回场。"
       : prompt.kind === "rotation"
       ? `安德鲁因【${prompt.action_name}】实际损失 ${prompt.damage} 点生命。请选择队友交换位置，或保持位置。`
       : `拉奥将受到 ${prompt.damage} 点【${prompt.action_name}】伤害。请选择降低一项能力抵消，或承受伤害。`;

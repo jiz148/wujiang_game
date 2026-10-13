@@ -1531,6 +1531,10 @@ export function restartFromGameOver() {
 
 export function onActionClick(action) {
   if (!canInteract()) return;
+  if (action.kind === "hell_dragon_return") {
+    performAction({ type: "hell_dragon_return", unit_id: action.unit_id, x: action.x, y: action.y });
+    return;
+  }
   if (action.kind === "damage_choice") {
     performAction({ type: "damage_choice", unit_id: state.battle.pending_damage_choice.unit_id,
       stat_name: action.stat_name, target_unit_id: action.target_unit_id });

@@ -24538,6 +24538,20 @@ class DevelopedHeroReviewR21BehaviorTests(unittest.TestCase):
             unit.max_health = unit.current_hp = 10
         return battle, actor, enemy
 
+    def test_barrier_move_probe_supplies_declared_attack_cell(self):
+        from wujiang.tactical.rooms.ai import score_move_destination
+        from wujiang.tactical.heroes.excel_roster import ElectronicBarrierAuraField
+
+        battle, actor, enemy = self.fixture()
+        # A protected ally and a reachable attacker make the shield-value probe
+        # estimate an attack both with and without the barrier field.
+        actor.position, enemy.position = Position(3, 3), Position(6, 3)
+        self.assertTrue(any(isinstance(effect, ElectronicBarrierAuraField)
+                            and effect.source_unit_id == actor.unit_id for effect in battle.field_effects))
+        profile = difficulty_profile("standard")
+        score = score_move_destination(battle, actor, Position(4, 3), "support", profile)
+        self.assertLess(abs(score), 1_000_000)
+
     def extra(self, battle, player, position, code="bard"):
         unit = create_hero(code, player)
         unit.max_health = unit.current_hp = 10
@@ -29916,7 +29930,7 @@ class NewBatch238240242HellBehaviorTests(unittest.TestCase):
         self.assertEqual(actor.total_shields(), 1)
 
 
-class NewBatch239243244HellBehaviorTests(unittest.TestCase):
+class NewBatch239243244HellBehaviorBase:
     """Source-locked hell mage, knight mount, and assassin death sequence."""
 
     def fixture(self, code: str, *, ally_code: str | None = None):
@@ -29938,6 +29952,513 @@ class NewBatch239243244HellBehaviorTests(unittest.TestCase):
         self.assertFalse(actor.alive)
         self.assertIn(actor.unit_id, battle.hell_rebirth_unit_ids)
 
+    def test_kaki_pressure_makes_earlier_declared_ally_evasion_land_stale(self):
+        battle = create_battle(["excel_r244", "excel_r264"], "excel_r223")
+        kaki = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r244")
+        evader = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r264")
+        attacker = primary_hero(battle, 2)
+        kaki.position, evader.position, attacker.position = Position(1, 3), Position(2, 4), Position(3, 3)
+        for unit in (kaki, evader, attacker):
+            unit.max_health = unit.current_hp = 10
+        battle.active_player = 2
+        battle._exclusive_turn_unit_id = attacker.unit_id
+        attacker.turn_ready = True
+        battle.perform_action({"type": "skill", "unit_id": attacker.unit_id, "skill_code": "machine_gun",
+                               "cells": [{"x": 2, "y": 4}, {"x": 1, "y": 3}, {"x": 0, "y": 2}]})
+        self.assertEqual(battle.pending_chain.current_unit_id(), evader.unit_id)
+        battle.perform_action({"type": "chain_react", "unit_id": evader.unit_id,
+                               "action_code": "evasion", "x": 2, "y": 3})
+        self.assertEqual(battle.pending_chain.current_unit_id(), kaki.unit_id)
+        battle.perform_action({"type": "chain_react", "unit_id": kaki.unit_id,
+                               "action_code": "hell_pressure"})
+        self.assertIsNone(battle.pending_chain)
+        self.assertNotEqual(evader.position, Position(2, 3))
+        self.assertEqual(evader.get_skill("evasion").uses_this_turn, 1)
+        self.assertTrue(any("回避" in line and "落空" in line for line in battle.logs))
+
+
+class NewBatch245246HellBehaviorTests(unittest.TestCase):
+    """Hunter rescue and the war god's two-enemy-end bargain."""
+
+    def fixture(self, code, *, ally_code=None):
+        battle = create_battle([code, ally_code] if ally_code else code, "elite_soldier")
+        battle.width, battle.height = 12, 9
+        actor = next(unit for unit in battle.hero_units(1) if unit.hero_code == code)
+        ally = next((unit for unit in battle.hero_units(1) if unit.unit_id != actor.unit_id), None)
+        enemy = primary_hero(battle, 2)
+        actor.position, enemy.position = Position(3, 3), Position(4, 3)
+        if ally is not None:
+            ally.position = Position(2, 5)
+        for unit in (actor, ally, enemy):
+            if unit is not None:
+                unit.max_health = unit.current_hp = 10
+        return battle, actor, ally, enemy
+
+    def skill_kill(self, battle, victim, enemy):
+        victim.current_hp = 0.25
+        battle.resolve_damage(DamageContext(source=enemy, target=victim, attack_power=10,
+                                            is_skill=True, action_name="测试法术", tags={"skill"}))
+
+    def test_brao_remote_pierce_uses_full_range_and_strict_free_clock(self):
+        battle, actor, _, enemy = self.fixture("excel_r245")
+        battle.active_player = actor.player_id
+        battle._exclusive_turn_unit_id = actor.unit_id
+        actor.turn_ready = True
+        enemy.position = Position(7, 3)
+        skills = actor.skill_map()
+        self.assertTrue({"evasion", "hell_ranged_spear", "hell_ranged_spear_free"}.issubset(skills))
+        self.assertEqual((skills["hell_ranged_spear"].mana_cost,
+                          skills["hell_ranged_spear"].max_uses_per_turn), (1.5, 2))
+        self.assertTrue(any(enemy.position in pattern for pattern in skills["hell_ranged_spear"].patterns(battle, actor)))
+        self.assertFalse(skills["hell_ranged_spear_free"].can_use(battle, actor, {})[0])
+        actor.current_mana = 0
+        self.assertTrue(skills["hell_ranged_spear_free"].can_use(battle, actor, {})[0])
+        self.assertEqual(skills["hell_ranged_spear_free"].cooldown_turns, 2)
+
+    def test_brao_skill_death_rescues_original_ally_and_still_schedules_self(self):
+        battle, actor, ally, enemy = self.fixture("excel_r245", ally_code="excel_r238")
+        self.skill_kill(battle, ally, enemy)
+        self.assertIn(ally, battle.destroyed_units)
+        battle._damage_choice_active = True
+        battle._damage_choice_decisions = [ally.unit_id]
+        battle._damage_choice_event_index = 0
+        self.skill_kill(battle, actor, enemy)
+        self.assertEqual(len(battle.pending_followup_actions), 1)
+        battle.advance_followup_actions()
+        self.assertTrue(ally.alive)
+        self.assertIs(battle.units[ally.unit_id], ally)
+        self.assertEqual((ally.position, ally.current_mana, ally.turn_ready), (Position(3, 3), 0, False))
+        self.assertNotIn(ally.unit_id, battle.hell_rebirth_unit_ids)
+        self.assertIn(actor.unit_id, battle.hell_rebirth_unit_ids)
+        self.assertFalse(actor.alive)
+
+    def test_brao_no_corpse_keeps_only_delayed_rebirth(self):
+        battle, actor, _, enemy = self.fixture("excel_r245")
+        self.skill_kill(battle, actor, enemy)
+        self.assertIn(actor.unit_id, battle.hell_rebirth_unit_ids)
+        self.assertFalse(battle.pending_followup_actions)
+        self.assertIn("hell_rescue_decline", frontend_module("vfx.js"))
+
+    def test_brao_blocked_old_cell_excludes_rescue_but_preserves_self_rebirth(self):
+        battle, actor, ally, enemy = self.fixture("excel_r245", ally_code="excel_r238")
+        self.skill_kill(battle, ally, enemy)
+        battle.blocked_cells.add((actor.position.x, actor.position.y))
+        self.skill_kill(battle, actor, enemy)
+        self.assertFalse(battle.pending_followup_actions)
+        self.assertFalse(ally.alive)
+        self.assertIn(actor.unit_id, battle.hell_rebirth_unit_ids)
+
+    def test_brao_basic_death_does_not_rescue_or_rebirth(self):
+        battle, actor, _, enemy = self.fixture("excel_r245")
+        actor.current_hp = 0.25
+        battle.resolve_damage(DamageContext(source=enemy, target=actor, attack_power=10,
+                                            is_skill=False, action_name="测试普攻", tags={"attack"}))
+        self.assertNotIn(actor.unit_id, battle.hell_rebirth_unit_ids)
+        self.assertFalse(battle.pending_followup_actions)
+
+    def test_brao_ai_selects_legal_old_ally_and_declines_empty_choice(self):
+        from wujiang.tactical.rooms.ai import choose_hell_rescue_action
+        battle, actor, ally, enemy = self.fixture("excel_r245", ally_code="excel_r238")
+        prompt = {"unit_id": actor.unit_id, "kind": "hell_rescue", "options": []}
+        self.assertEqual(choose_hell_rescue_action(battle, prompt, actor)["target_unit_id"], "decline")
+        self.skill_kill(battle, ally, enemy)
+        prompt["options"] = [ally.unit_id]
+        self.assertEqual(choose_hell_rescue_action(battle, prompt, actor)["target_unit_id"], ally.unit_id)
+
+    def test_galder_ultimate_counts_enemy_ends_and_preserves_usage_after_rebirth(self):
+        battle, actor, _, enemy = self.fixture("excel_r246")
+        battle.active_player = actor.player_id
+        battle._exclusive_turn_unit_id = actor.unit_id
+        actor.turn_ready = True
+        battle.perform_action({"type": "skill", "unit_id": actor.unit_id, "skill_code": "hell_war_god"})
+        self.assertEqual((actor.stat("attack"), actor.stat("defense")), (5, 5))
+        status = next(status for status in actor.statuses if status.name == "武神")
+        self.assertEqual(status.remaining_enemy_ends, 2)
+        with mock.patch.object(battle, "is_army_turn", return_value=True):
+            status.on_any_turn_end(battle, enemy.player_id)
+        self.assertEqual(status.remaining_enemy_ends, 2)
+        battle._exclusive_turn_unit_id = None
+        battle.turn_slot_index = battle.turn_order_unit_ids.index(enemy.unit_id)
+        battle.active_player = enemy.player_id
+        battle.resolve_turn_end()
+        self.assertTrue(actor.alive)
+        self.assertEqual(status.remaining_enemy_ends, 1)
+        battle.turn_slot_index = battle.turn_order_unit_ids.index(enemy.unit_id)
+        battle.active_player = enemy.player_id
+        battle.resolve_turn_end()
+        resolve_pending_chain(battle)
+        self.assertFalse(actor.alive)
+        self.assertIn(actor.unit_id, battle.hell_rebirth_unit_ids)
+        self.assertNotIn(actor.unit_id, battle.pending_respawn_unit_ids)
+        self.assertEqual(actor.get_skill("hell_war_god").uses_this_battle, 1)
+        destination = battle.hell_rebirth_options_for(actor)[0]
+        battle.restore_hell_rebirth(actor, destination)
+        self.assertEqual((actor.current_mana, actor.stat("attack"), actor.stat("defense")), (0, 4, 4))
+        self.assertEqual(actor.get_skill("hell_war_god").uses_this_battle, 1)
+
+    def test_galder_death_sweep_queues_enemy_only_old_cells(self):
+        battle, actor, _, enemy = self.fixture("excel_r246")
+        friend = create_hero("bard", 1)
+        battle.add_unit(friend, Position(3, 4))
+        friend.max_health = friend.current_hp = 10
+        self.skill_kill(battle, actor, enemy)
+        queued = list(battle.pending_followup_actions)
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0].target_unit_ids, [enemy.unit_id])
+        self.assertEqual(queued[0].target_cells, [Position(4, 3)])
+        battle.advance_followup_actions()
+        resolve_pending_chain(battle)
+        self.assertEqual(friend.current_hp, 10)
+        self.assertLess(enemy.current_hp, 10)
+
+    def test_galder_external_skill_death_preserves_ultimate_until_rebirth(self):
+        battle, actor, _, enemy = self.fixture("excel_r246")
+        actor.get_skill("hell_war_god").execute(battle, actor, {})
+        actor.get_skill("hell_war_god").uses_this_battle = 1
+        self.skill_kill(battle, actor, enemy)
+        self.assertFalse(any(status.name == "武神" for status in actor.statuses))
+        self.assertEqual(len(battle.pending_followup_actions), 1)
+        self.assertIn(actor.unit_id, battle.hell_rebirth_unit_ids)
+        battle.advance_followup_actions()
+        resolve_pending_chain(battle)
+        destination = battle.hell_rebirth_options_for(actor)[0]
+        battle.restore_hell_rebirth(actor, destination)
+        self.assertEqual(actor.get_skill("hell_war_god").uses_this_battle, 1)
+        self.assertEqual((actor.stat("attack"), actor.stat("defense")), (4, 4))
+
+    def test_galder_basic_death_does_not_sweep_or_rebirth(self):
+        battle, actor, _, enemy = self.fixture("excel_r246")
+        actor.current_hp = 0.25
+        battle.resolve_damage(DamageContext(source=enemy, target=actor, attack_power=10,
+                                            is_skill=False, action_name="测试普攻", tags={"attack"}))
+        self.assertFalse(battle.pending_followup_actions)
+        self.assertNotIn(actor.unit_id, battle.hell_rebirth_unit_ids)
+
+    def test_galder_ai_opens_ultimate_near_contact_but_not_across_map(self):
+        from wujiang.tactical.rooms.ai import score_skill_payload
+        battle, actor, _, enemy = self.fixture("excel_r246")
+        skill = actor.get_skill("hell_war_god")
+        action = {"code": skill.code, "target_mode": "none", "preview": skill.preview(battle, actor)}
+        payload = {"type": "skill", "unit_id": actor.unit_id, "skill_code": skill.code}
+        profile = difficulty_profile("standard")
+        self.assertGreater(score_skill_payload(battle, actor, action, payload, profile,
+                                               instant_only=False), 0)
+        enemy.position = Position(11, 8)
+        self.assertLess(score_skill_payload(battle, actor, action, payload, profile,
+                                            instant_only=False), 0)
+
+class NewBatch247HellBehaviorTests(unittest.TestCase):
+    """SNOW's dog economy, death burst, original-body rebirth, and AI choices."""
+
+    def fixture(self, *, ally=False):
+        battle = create_battle(["excel_r247", "bard"] if ally else "excel_r247", "elite_soldier")
+        battle.width, battle.height = 12, 9
+        snow = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r247")
+        friend = next((unit for unit in battle.hero_units(1) if unit.unit_id != snow.unit_id), None)
+        enemy = primary_hero(battle, 2)
+        snow.position, enemy.position = Position(3, 3), Position(7, 3)
+        if friend is not None:
+            friend.position = Position(2, 5)
+        for unit in (snow, friend, enemy):
+            if unit is not None:
+                unit.max_health = unit.current_hp = 10
+        return battle, snow, friend, enemy
+
+    def skill_kill(self, battle, snow, enemy):
+        snow.current_hp = 0.25
+        battle.resolve_damage(DamageContext(source=enemy, target=snow, attack_power=10,
+                                            is_skill=True, action_name="测试法术", tags={"skill"}))
+
+    def test_snow_dog_cost_stats_immunity_preview_and_no_inventory_cap(self):
+        from wujiang.tactical.heroes.excel_roster import HellDogSummon
+
+        battle, snow, _, _ = self.fixture()
+        skill = snow.get_skill("hell_dog")
+        self.assertEqual((skill.mana_cost, skill.max_uses_per_turn), (1, None))
+        self.assertEqual(set(skill.preview(battle, snow)),
+                         {"cells", "target_unit_ids", "secondary_cells", "requires_target"})
+        cells = skill.available_cells(battle, snow)
+        self.assertGreaterEqual(len(cells), 2)
+        battle.active_player = snow.player_id
+        battle._exclusive_turn_unit_id = snow.unit_id
+        snow.turn_ready = True
+        starting_mana = snow.current_mana
+        battle.perform_action({"type": "skill", "unit_id": snow.unit_id,
+                               "skill_code": "hell_dog", "x": cells[0].x, "y": cells[0].y})
+        resolve_pending_chain(battle)
+        dog = next(unit for unit in battle.all_units() if unit.hero_code == "hell_dog_summon")
+        self.assertEqual(snow.current_mana, starting_mana - 1)
+        self.assertIsInstance(dog, HellDogSummon)
+        self.assertEqual((dog.stat("attack"), dog.stat("defense"), dog.stat("speed"),
+                          dog.stat("attack_range"), dog.current_mana), (3, 3, 4, 1, 0))
+        self.assertTrue(dog.magic_immunity)
+        self.assertEqual(dog.summoner_id, snow.unit_id)
+        self.assertIn(cells[1], skill.available_cells(battle, snow))
+
+    def test_snow_paid_and_strict_zero_mana_wall_are_distinct(self):
+        battle, snow, _, enemy = self.fixture()
+        paid, free = snow.get_skill("hell_wall"), snow.get_skill("hell_wall_free")
+        self.assertEqual((paid.mana_cost, paid.timing, free.mana_cost, free.max_uses_per_turn),
+                         (1, "passive", 0, 2))
+        queued = QueuedAction(action_type="skill", actor_id=enemy.unit_id, display_name="测试法术",
+                              speed=1, payload={}, target_unit_ids=[snow.unit_id],
+                              source_player_id=2, hostile=True)
+        self.assertFalse(free.can_react_to(battle, snow, queued)[0])
+        snow.current_mana = 0
+        self.assertTrue(free.can_react_to(battle, snow, queued)[0])
+        free._uses_turn_number = battle.turn_number
+        free.uses_this_turn = 2
+        self.assertFalse(free.can_react_to(battle, snow, queued)[0])
+
+    def test_snow_teleport_is_global_once_and_no_damage(self):
+        battle, snow, _, enemy = self.fixture()
+        skill = snow.get_skill("hell_teleport")
+        battle.active_player = snow.player_id
+        battle._exclusive_turn_unit_id = snow.unit_id
+        snow.turn_ready = True
+        destination = Position(10, 7)
+        self.assertIn(destination, skill.available_cells(battle, snow))
+        self.assertFalse(skill.can_use(battle, snow, {"x": enemy.position.x, "y": enemy.position.y})[0])
+        original_hp = enemy.current_hp
+        battle.perform_action({"type": "skill", "unit_id": snow.unit_id,
+                               "skill_code": "hell_teleport", "x": destination.x, "y": destination.y})
+        resolve_pending_chain(battle)
+        self.assertEqual((snow.position, enemy.current_hp, skill.uses_this_battle),
+                         (destination, original_hp, 1))
+        self.assertFalse(skill.can_use(battle, snow, {})[0])
+
+    def test_snow_skill_death_destroys_own_dogs_and_queues_old_rings_for_both_sides(self):
+        from wujiang.tactical.heroes.excel_roster import HellDogSummon
+
+        battle, snow, friend, enemy = self.fixture(ally=True)
+        friend.position, enemy.position = Position(5, 4), Position(5, 3)
+        dogs = [HellDogSummon(1), HellDogSummon(1)]
+        for dog, cell in zip(dogs, (Position(4, 3), Position(4, 4))):
+            battle.summon_unit(dog, cell, summoner=snow)
+        other_dog = HellDogSummon(2)
+        battle.summon_unit(other_dog, Position(8, 6), summoner=enemy)
+        absent_dog = HellDogSummon(1)
+        battle.summon_unit(absent_dog, Position(9, 7), summoner=snow)
+        battle.banish_unit(absent_dog, 2)
+        self.skill_kill(battle, snow, enemy)
+        queued = list(battle.pending_followup_actions)
+        self.assertEqual(len(queued), 2)
+        self.assertEqual([item.payload["segment_index"] for item in queued], [1, 2])
+        self.assertTrue(all(item.payload["after_death_effect"] for item in queued))
+        self.assertTrue(all({friend.unit_id, enemy.unit_id}.issubset(item.target_unit_ids) for item in queued))
+        self.assertTrue(all(not dog.alive for dog in dogs))
+        self.assertTrue(other_dog.alive)
+        self.assertFalse(absent_dog.alive)
+        self.assertIn(snow.unit_id, battle.hell_rebirth_unit_ids)
+        battle.advance_followup_actions()
+        resolve_pending_chain(battle)
+        self.assertLess(friend.current_hp, 10)
+        self.assertLess(enemy.current_hp, 10)
+
+    def test_snow_skill_death_without_dogs_rebirths_but_basic_death_does_not(self):
+        battle, snow, _, enemy = self.fixture()
+        self.skill_kill(battle, snow, enemy)
+        self.assertIn(snow.unit_id, battle.hell_rebirth_unit_ids)
+        self.assertFalse(battle.pending_followup_actions)
+        battle, snow, _, enemy = self.fixture()
+        snow.current_hp = 0.25
+        battle.resolve_damage(DamageContext(source=enemy, target=snow, attack_power=10,
+                                            is_skill=False, action_name="测试普攻", tags={"attack"}))
+        self.assertNotIn(snow.unit_id, battle.hell_rebirth_unit_ids)
+        self.assertFalse(battle.pending_followup_actions)
+
+    def test_snow_rebirth_resets_only_ultimate_and_grants_three_owner_starts(self):
+        battle, snow, _, enemy = self.fixture()
+        snow.get_skill("hell_teleport").uses_this_battle = 1
+        snow.get_skill("hell_dog").uses_this_battle = 1
+        self.skill_kill(battle, snow, enemy)
+        self.assertTrue(battle.hell_rebirth_options_for(snow))
+        original = snow
+        battle.restore_hell_rebirth(snow, battle.hell_rebirth_options_for(snow)[0])
+        self.assertIs(battle.units[snow.unit_id], original)
+        self.assertEqual((snow.current_mana, snow.get_skill("hell_teleport").uses_this_battle,
+                          snow.get_skill("hell_dog").uses_this_battle), (0, 0, 1))
+        status = next(item for item in snow.statuses if item.name == "地狱再临·自然回魔")
+        for expected in (1, 2, 3):
+            status.on_owner_turn_start(battle)
+            self.assertEqual(snow.current_mana, expected)
+        self.assertNotIn(status, snow.statuses)
+        self.assertEqual(snow.current_mana, 3)
+
+    def test_snow_ai_prefers_forward_dog_to_far_or_friendly_blast(self):
+        from wujiang.tactical.rooms.ai import hell_dog_summon_score, skill_payloads_for_action
+
+        battle, snow, friend, enemy = self.fixture(ally=True)
+        enemy.position = Position(6, 3)
+        friend.position = Position(4, 4)
+        skill = snow.get_skill("hell_dog")
+        action = {"code": skill.code, "target_mode": "cell", "preview": skill.preview(battle, snow)}
+        payloads = skill_payloads_for_action(battle, snow, action)
+        self.assertTrue(payloads)
+        self.assertTrue(all(Position(item["x"], item["y"]) in skill.available_cells(battle, snow)
+                            for item in payloads))
+        self.assertGreater(hell_dog_summon_score(battle, snow, Position(4, 3)),
+                           hell_dog_summon_score(battle, snow, Position(2, 3)))
+
+
+class NewBatch248HellDragonBehaviorTests(unittest.TestCase):
+    """The ancient dragon's area fire, one-use guard and two-body return bargain."""
+
+    def fixture(self):
+        battle = create_battle(["excel_r248", "excel_r238", "excel_r240"], "elite_soldier")
+        battle.width, battle.height = 12, 10
+        dragon = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r248")
+        first = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r238")
+        second = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r240")
+        enemy = primary_hero(battle, 2)
+        dragon.position, first.position, second.position, enemy.position = (
+            Position(2, 2), Position(4, 3), Position(6, 4), Position(8, 4))
+        for unit in (dragon, first, second, enemy):
+            unit.max_health = unit.current_hp = 10
+        return battle, dragon, first, second, enemy
+
+    def kill_with_choices(self, battle, dragon, first, second, enemy, *, effect=None):
+        battle._damage_choice_active = True
+        battle._damage_choice_decisions = [first.unit_id, second.unit_id, (effect or first).unit_id]
+        battle._damage_choice_event_index = 0
+        dragon.current_hp = 0.25
+        battle.resolve_damage(DamageContext(source=enemy, target=dragon, attack_power=10,
+                                            is_skill=False, action_name="测试普攻", tags={"attack"}))
+        battle._damage_choice_active = False
+
+    def test_dragon_skill_shape_cost_cooldown_and_orb(self):
+        from wujiang.tactical.heroes.registry import list_heroes
+
+        self.assertIn("excel_r248", {str(hero["code"]) for hero in list_heroes()})
+        battle, dragon, first, second, enemy = self.fixture()
+        self.assertTrue({"dragon_breath", "knockback", "hell_dragon_fire", "flying_dragon_orb"}.issubset(dragon.skill_map()))
+        breath, fire, orb = (dragon.get_skill(code) for code in
+                             ("dragon_breath", "hell_dragon_fire", "flying_dragon_orb"))
+        self.assertEqual(breath.name, "龙吸")
+        self.assertEqual((breath.mana_cost, breath.max_uses_per_turn, fire.cooldown_turns,
+                          orb.max_uses_per_battle), (2, 2, 2, 1))
+        self.assertTrue(any(len(pattern) == 25 and first.position in pattern and enemy.position in pattern
+                            for pattern in fire.patterns(battle, dragon)))
+        orb.execute(battle, dragon, {})
+        self.assertEqual(dragon.get_status("飞龙宝珠").duration, 3)
+        before = dragon.current_hp
+        battle.resolve_damage(DamageContext(source=enemy, target=dragon, attack_power=10,
+                                            is_skill=False, action_name="敌方普攻", tags={"attack"}))
+        self.assertEqual(dragon.current_hp, before)
+        battle.resolve_damage(DamageContext(source=enemy, target=dragon, attack_power=3,
+                                            is_skill=True, action_name="敌方技能", tags={"skill"}))
+        self.assertLess(dragon.current_hp, before)
+
+    def test_dragon_fire_queues_old_cells_and_both_sides(self):
+        battle, dragon, first, second, enemy = self.fixture()
+        fire = dragon.get_skill("hell_dragon_fire")
+        pattern = next(pattern for pattern in fire.patterns(battle, dragon)
+                       if len(pattern) == 25 and first.position in pattern and enemy.position in pattern)
+        fire.execute(battle, dragon, {"cells": [{"x": cell.x, "y": cell.y} for cell in pattern]})
+        self.assertEqual(len(battle.pending_followup_actions), 1)
+        queued = battle.pending_followup_actions[0]
+        self.assertIn(first.unit_id, queued.target_unit_ids)
+        self.assertIn(enemy.unit_id, queued.target_unit_ids)
+        self.assertEqual({(cell["x"], cell["y"]) for cell in queued.payload["cells"]},
+                         {(cell.x, cell.y) for cell in pattern})
+
+    def test_dragon_ai_fire_values_real_enemy_over_friendly_only(self):
+        from wujiang.tactical.rooms.ai import build_skill_candidates, difficulty_profile, score_skill_payload
+
+        battle, dragon, first, second, enemy = self.fixture()
+        second.position = Position(4, 7)
+        battle.configure_turn_order([dragon.unit_id, first.unit_id, second.unit_id, enemy.unit_id])
+        battle.start_current_turn()
+        fire = dragon.get_skill("hell_dragon_fire")
+        enemy_only = next(pattern for pattern in fire.patterns(battle, dragon)
+                          if enemy.position in pattern and first.position not in pattern
+                          and second.position not in pattern and dragon.position not in pattern)
+        friendly_only = next(pattern for pattern in fire.patterns(battle, dragon)
+                             if first.position in pattern and enemy.position not in pattern)
+        action = {"code": fire.code, "target_mode": "cell", "preview": fire.preview(battle, dragon)}
+        def payload(pattern):
+            return {"type": "skill", "unit_id": dragon.unit_id, "skill_code": fire.code,
+                    "cells": [{"x": cell.x, "y": cell.y} for cell in pattern]}
+        profile = difficulty_profile("standard")
+        self.assertGreater(score_skill_payload(battle, dragon, action, payload(enemy_only), profile,
+                                               instant_only=False),
+                           score_skill_payload(battle, dragon, action, payload(friendly_only), profile,
+                                               instant_only=False))
+        candidates = build_skill_candidates(battle, dragon, action, profile, instant_only=False)
+        self.assertLessEqual(len(candidates), 12)
+        self.assertTrue(any(candidate.score > 0 and
+                            {"x": enemy.position.x, "y": enemy.position.y} in candidate.payload.get("cells", [])
+                            for candidate in candidates))
+
+    def test_two_real_deaths_one_effect_and_anytime_original_return(self):
+        from wujiang.tactical.rooms.ai import choose_hell_dragon_return_action
+        from wujiang.tactical.rooms.multiplayer import battle_state_for_viewer
+
+        battle, dragon, first, second, enemy = self.fixture()
+        origin_first, origin_second = first.position, second.position
+        dragon.get_skill("flying_dragon_orb").uses_this_battle = 1
+        self.kill_with_choices(battle, dragon, first, second, enemy)
+        self.assertFalse(dragon.alive)
+        self.assertFalse(first.alive)
+        self.assertFalse(second.alive)
+        self.assertEqual(battle.hell_dragon_return_cells[dragon.unit_id], [origin_first, origin_second])
+        self.assertIn(first.unit_id, battle.hell_rebirth_unit_ids)
+        self.assertNotIn(second.unit_id, battle.hell_rebirth_unit_ids)
+        self.assertIsNone(battle.winner)
+        public = battle_state_for_viewer(battle, 1)
+        self.assertTrue(public["hell_dragon_returns"][0]["can_control"])
+        self.assertEqual(len(public["hell_dragon_returns"][0]["options"]), 2)
+        self.assertFalse(battle_state_for_viewer(battle, 2)["hell_dragon_returns"][0]["can_control"])
+        payload = choose_hell_dragon_return_action(battle, dragon)
+        self.assertIsNotNone(payload)
+        battle.perform_action(payload)
+        self.assertIs(battle.units[dragon.unit_id], dragon)
+        self.assertIn(dragon.position, (origin_first, origin_second))
+        self.assertEqual((dragon.current_hp, dragon.current_mana), (dragon.max_health, dragon.max_mana()))
+        self.assertEqual(dragon.get_skill("flying_dragon_orb").uses_this_battle, 1)
+        self.assertNotIn(dragon.unit_id, battle.hell_dragon_return_cells)
+
+    def test_shielded_sacrifice_fails_and_blocked_old_cells_wait(self):
+        battle, dragon, first, second, enemy = self.fixture()
+        second.shields = 1
+        self.kill_with_choices(battle, dragon, first, second, enemy)
+        self.assertNotIn(dragon.unit_id, battle.hell_dragon_return_cells)
+        self.assertFalse(first.alive)
+        self.assertTrue(second.alive)
+        battle, dragon, first, second, enemy = self.fixture()
+        self.kill_with_choices(battle, dragon, first, second, enemy)
+        from wujiang.tactical.heroes.excel_roster import HellDogSummon
+        for cell in (first.last_position, second.last_position):
+            dog = HellDogSummon(2)
+            battle.add_unit(dog, cell)
+        self.assertFalse(battle.hell_dragon_return_options_for(dragon))
+        with self.assertRaises(ActionError):
+            battle.perform_action({"type": "hell_dragon_return", "unit_id": dragon.unit_id,
+                                   "x": first.last_position.x, "y": first.last_position.y})
+        self.assertIn(dragon.unit_id, battle.hell_dragon_return_cells)
+
+    def test_unchosen_dragon_sacrifice_cannot_start_another_death_bargain(self):
+        battle = create_battle(["excel_r248", "excel_r248", "excel_r238",
+                                "excel_r240", "excel_r242"], "elite_soldier")
+        dragons = [body for body in battle.hero_units(1) if body.hero_code == "excel_r248"]
+        dragon, offered = dragons
+        chosen = next(body for body in battle.hero_units(1) if body.hero_code == "excel_r238")
+        enemy = primary_hero(battle, 2)
+        dragon.current_hp = 0.25
+        battle._damage_choice_active = True
+        battle._damage_choice_decisions = [offered.unit_id, chosen.unit_id, chosen.unit_id]
+        battle._damage_choice_event_index = 0
+        try:
+            battle.resolve_damage(DamageContext(source=enemy, target=dragon, attack_power=10,
+                                                is_skill=False, action_name="测试普攻", tags={"attack"}))
+        finally:
+            battle._damage_choice_active = False
+        self.assertIn(dragon.unit_id, battle.hell_dragon_return_cells)
+        self.assertNotIn(offered.unit_id, battle.hell_dragon_return_cells)
+        self.assertFalse(offered.alive)
+
+
+class NewBatch239243244HellBehaviorTests(NewBatch239243244HellBehaviorBase, unittest.TestCase):
     def test_buron_paid_and_zero_mana_skills_are_separate(self):
         battle, actor, _, _ = self.fixture("excel_r239")
         skills = actor.skill_map()
