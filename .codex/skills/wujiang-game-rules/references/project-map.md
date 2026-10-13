@@ -1,5 +1,7 @@
 ﻿# wujiang_game Project Map
 
+- 2026-10-12 `dev-jinchi` 与 `master` BP 冲突合并：全体选择沿用 66 人池、系统禁级和等级预算，随机等级沿用逐轮抽级与可选同名规则；两种流程均抽特殊模式并在战斗界面展示。`multiplayer.py` 的同名可选完成性、合法等级缓存纳入本局池；`bp-ui.js` 的等级矩阵仅列本局池，补可展开池/禁级资料。`tests/test_behavior.py` 前端断言对齐矩阵界面；相关规则见 `docs/武将游戏规则.md` 和 `docs/BP特殊模式规则.md`。动态验证按现阶段约定待用户统一运行。
+
 Update this file after every new gameplay requirement or code change in `wujiang_game`. Keep entries concise and durable; do not paste full docs.
 
 - 2026-10-12 R248复跑报告：6项定向行为5过，火焰AI评分场景因夹具未切到古龙本人轮，合法性预演两候选均`-1000`；现设正确轮槽。地狱之火AI原对大量5×5候选逐个完整回滚和逐目标探针，导致用户模拟久等；现按受体/多格命中去重、双方净值轻量预筛，仅前12组合完整预演。2/10场初始AI无高信号，整场报告未完成；静态修复待用户验证。

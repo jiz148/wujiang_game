@@ -26788,7 +26788,8 @@ class BPSpecialModeBehaviorTests(unittest.TestCase):
             function bpChoose(){}
             function setBpCaptain(){}
             const state={heroes:[{code:'one',name:'一号',level:1},{code:'two',name:'二号',level:5}], room:{mode:'bp',status:'bp',room_id:'TEST',viewer_player_id:1,
-              bp:{phase:'assign',team_size:3,level_cap:15,show_win_count:false,
+              bp:{phase:'draft',team_size:3,level_cap:15,show_win_count:false,
+                current_kind:'pick',current_team_id:1,step_index:0,step_count:12,
                 special_modes:[{name:'来把快速',description:'所有单位速10'}],
                 hero_pool_codes:['one','two'],hero_pool_levels:{1:1,5:1},
                 total_levels:{1:0,2:0},picks:{1:[],2:[]},actions:[]},seats:[]}};
@@ -26797,7 +26798,7 @@ class BPSpecialModeBehaviorTests(unittest.TestCase):
         ctx.eval("renderBpPanel()")
         self.assertTrue(ctx.eval("panel.children.some(item => item.className === 'bp-special-modes')"))
         self.assertTrue(ctx.eval("panel.children.some(item => item.textContent.includes('本局武将池 2 名'))"))
-        self.assertTrue(ctx.eval("panel.children.some(item => item.className === 'bp-content' && item.children[0].children.some(group => group.className === 'bp-pool-list' && group.children[1].children.length === 2))"))
+        self.assertTrue(ctx.eval("panel.children.some(item => item.className === 'bp-pool-list' && item.children[1].children.length === 2)"))
         ctx.eval("state.room.status='battle'; renderBpPanel()")
         self.assertIn("来把快速", ctx.eval("banner.children[0].textContent"))
 
