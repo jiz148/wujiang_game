@@ -43,3 +43,31 @@ class ReviewPacketTests(unittest.TestCase):
                     main(["--targets", "excel_r126", "--summarize-only", "--out", temporary])
                 self.assertEqual(error.exception.code, 2)
                 audit.assert_not_called()
+
+    def test_failed_focused_regression_keeps_log_and_skips_ai_matches(self):
+        from wujiang.tools.all_hero_deep_audit import run_all_hero_deep_audit
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+
+            def failed_regression(run_dir, *, regression_filter):
+                self.assertEqual(regression_filter, "NewBatch253")
+                (run_dir / "regression_tests.log").write_text("ERROR: fixture\nfull traceback\n", encoding="utf-8")
+                (run_dir / "regression_tests.json").write_text(
+                    json.dumps({"passed": False, "return_code": 1, "test_count": 7}), encoding="utf-8")
+                return {"passed": False, "return_code": 1, "test_count": 7}
+
+            with patch("wujiang.tools.all_hero_deep_audit.public_hero_codes", return_value=["excel_r253"]), \
+                 patch("wujiang.tools.all_hero_deep_audit.run_consolidated_regression",
+                       side_effect=failed_regression), \
+                 patch("wujiang.tools.all_hero_deep_audit.run_per_hero_ai_debug") as matches:
+                self.assertEqual(run_all_hero_deep_audit(
+                    ["excel_r253"], output_dir=output, regression_filter="NewBatch253"), output)
+                matches.assert_not_called()
+
+            self.assertEqual((output / "regression_tests.log").read_text(encoding="utf-8"),
+                             "ERROR: fixture\nfull traceback\n")
+            overview = json.loads((output / "deep_audit_overview.json").read_text(encoding="utf-8"))
+            self.assertEqual(overview["ai_audit_skipped"], "focused_regression_failed")
+            self.assertEqual(overview["match_count"], 0)
+            self.assertTrue((output / "review_packet.md").exists())

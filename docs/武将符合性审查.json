@@ -3,21 +3,24 @@
   "review_process": "原73名设计优先检查修改及第三轮武将线动态复测已完成。2026-10-02用户授权新增武将：每批先锁源设计，再实现战斗、AI、前端和行为场景；助手不运行动态测试，由用户执行仅覆盖新增批次的命令，报告保存在共享工作区。",
   "validation_policy": {
     "mode": "new_hero_batch_user_validation",
-    "scope": "原73名第三轮复测通过；R248用户优化复跑6项行为全过、3场AI零高信号；R249/R251用户报告7项中6项通过、一项测试夹具缺说明参数已修正待复跑、6场AI零高信号；R250/R252静态实施待用户专场",
+    "scope": "原73名第三轮复测通过；R253用户复跑NewBatch253九项全过、3/3场对局完成且零高信号；融合与再召三场无有效机会，保留P2覆盖观察。R254/R255源设计已锁、战斗/AI/预览/行为场景静态实施，等待用户专场。",
     "per_batch_test_gate": false,
-    "final_command": "python detail_test_all_wujiangs.py --targets excel_r250,excel_r252 --regression-filter NewBatch250252 --matches-per-hero 3 --max-steps 150 --out reports/new-batch-250252-20261013",
+    "final_command": "python detail_test_all_wujiangs.py --targets excel_r254,excel_r255 --regression-filter NewBatch254255 --matches-per-hero 3 --max-steps 150 --out reports/new-batch-254255-20261013",
     "user_override_date": "2026-10-05"
   },
   "current_hero_codes": [
-    "excel_r250",
-    "excel_r252"
+    "excel_r254",
+    "excel_r255"
   ],
   "developed_hero_inspection_progress": {
     "definition": "完成新设计优先流程：独立记录并锁定设计初衷，随后对照审查战斗实现、武将专属与通用AI、测试，并完成所有必要修改；用户复测签收单独统计",
-    "developed_public_total": 99,
-    "inspected_and_modified": 99,
+    "developed_public_total": 102,
+    "inspected_and_modified": 102,
     "remaining_to_inspect_and_modify": 0,
     "inspected_and_modified_codes": [
+      "excel_r254",
+      "excel_r255",
+      "excel_r253",
       "excel_r250",
       "excel_r252",
       "excel_r249",
@@ -120,10 +123,13 @@
     ],
     "remaining_set_rule": "原73名第三轮复测通过；R191/R195/R194/R197/R215定向通过；R192/R193/R196/R219待复测；R221/R222/R223待定向；R238/R240/R242与R239/R243/R244各首报告一处共用错误已静态修正；R245/R246跨将异常待复跑；R247首轮专场完成；R248优化及R249/R251待专场。",
     "focused_retest_accepted": 78,
-    "awaiting_consolidated_test": 18,
+    "awaiting_consolidated_test": 19,
     "awaiting_consolidated_test_definition": "R192/R193/R196夹具、R219失效受体待复测；R221/R222/R223待定向；R238/R240/R242及R239/R243/R244首报告共用错误各一处已静态修复待复测；R245/R246跨将异常待复跑；R247首轮定向7项通过、10场AI零高信号，2场步数上限另存观察；R248评分夹具与候选慢静态修复待复跑；R249/R251静态实施待用户专场。"
   },
   "heroes": [
+    {"code":"excel_r254","name":"巨盾弩兵","batch":"H14-new-20261013","design_baseline":"docs/武将设计思想.json#excel_r254","baseline_locked_at":"2026-10-13","review_status":"源设计先锁；平射四轮降守、远程抛射、举盾及破魔/邻接特性已静态接入。","acceptance_status":"pending_focused_user_validation","audit_evidence":"源254、保存R254-Q001=b与独立Q002–004；NewBatch254255定向场景；助手未运行动态测试。","items":[{"layer":"战斗/远程火力","requirement":"平射一次、四轮不叠减守；3×3抛射双方；本人所有伤害破魔","evidence":"GiantShieldFlatShotSkill、GiantShieldLobSkill、GiantShieldAllPierceTrait；旧格预览及定向场景","verdict":"静态符合待动态验证"},{"layer":"防护/AI/前端","requirement":"半魔5×5己方快照举盾近远减伤一轮，邻巨盾本人减伤+1；AI评敌友净值和真实防护机会","evidence":"GiantShieldRaiseSkill/Status、GiantShieldNeighborTrait、专属评分与编队站位；通用区域选择和受益预览","verdict":"静态符合待动态验证"}]},
+    {"code":"excel_r255","name":"巨盾长矛兵","batch":"H14-new-20261013","design_baseline":"docs/武将设计思想.json#excel_r255","baseline_locked_at":"2026-10-13","review_status":"源设计先锁；共享举盾、选伴盾墙、守4及公开1/3格挡、动态拆墙已静态接入。","acceptance_status":"pending_focused_user_validation","audit_evidence":"源255、保存R255-Q001=a/Q002=b与独立Q003–005；NewBatch254255定向场景；助手未运行动态测试。","items":[{"layer":"战斗/共盾","requirement":"选择邻近己方巨盾，两人各保留HP/行动，受伤守4且享矛兵格挡，分开或死亡解除","evidence":"GiantShieldWallSkill/Status显式伙伴与即时邻接检查、移动/死亡清理；定向场景","verdict":"静态符合待动态验证"},{"layer":"随机/AI/前端","requirement":"每次可损血命中服务端掷1/3并公开，AI只按期望值，举盾和盾墙只在真实保护机会使用","evidence":"DamageContext完整格挡字段与伤害后判定、AI探针期望值、专属评分与伙伴预览","verdict":"静态符合待动态验证"}]},
+    {"code":"excel_r253","name":"古代机械骑士","batch":"H13-new-20261013","design_baseline":"docs/武将设计思想.json#excel_r253","baseline_locked_at":"2026-10-13","review_status":"源设计先锁；机械马、双攻、锈迹和伤害类别适应及AI已静态实施。","acceptance_status":"focused_pass_with_coverage_gap","audit_evidence":"源253及保存/独立裁定；用户报告reports/new-batch-253-20261013-rerun：NewBatch253九项全过、3/3场对局完成、零高信号；融合与马再召三场无有效候选，P2覆盖观察。助手未运行测试。","items":[{"layer":"战斗/坐骑与行动","requirement":"开局纵向1×2机械马、骑乘受体、双次普攻；马毁后隔一个本人回合重召","evidence":"AncientMechanicalHorse、StartTrait、Cooldown与公开目录场景；静态检查了1×2落位和死亡清理","verdict":"定向场景通过；对局覆盖按报告边界解释"},{"layer":"战斗/锈迹与伤害适应","requirement":"旧格7×7双方非机甲真武将当前血减半、破盾不越魔免；普攻或技能真实损血后到本回合末仅再受同类生命伤害","evidence":"AncientCursedRustSkill先按真武将筛选再映射乘骑受体，伤害按当前血计算；AncientDamageModeTrait/Status按实际损血及轮末清理；定向场景覆盖","verdict":"定向场景通过；对局覆盖按报告边界解释"},{"layer":"AI/融合/预览","requirement":"锈迹友敌净值、无效目标与乘骑价值；融合不传开局马身份，公开旧格预览","evidence":"AI专属锈迹/机械马/融合估值和反应威胁保护；融合只传可见能力；七项定向场景","verdict":"定向场景通过；对局覆盖按报告边界解释"}]},
     {"code":"excel_r250","name":"古代机械兽","batch":"H12-new-20261013","design_baseline":"docs/武将设计思想.json#excel_r250","baseline_locked_at":"2026-10-13","review_status":"源设计先锁；溶解弱化/来源清理、实际伤害夺上次公开主动技、真击毁剥特性和共用融合已静态实施。","acceptance_status":"pending_focused_user_validation","audit_evidence":"源250、保存Q001–004及新增Q005–007独立裁定；NewBatch250252八项场景含战斗与AI；助手未运行动态测试。","items":[{"layer":"战斗/弱化","requirement":"范2一次破魔当前攻，实际受击随机五属性-1，来源真死清除","evidence":"AncientJawSkill、AncientJawWeaknessStatus；范围、破盾、魔免和来源死亡场景","verdict":"静态符合待动态验证"},{"layer":"战斗/夺技与剥特性","requirement":"实际损血读取受体上次已用可见主动技，本人独立费用/次数和一份使用权；本人真正击毁剥特性","evidence":"Battle.prepay_skill_resources记录最近主动技，AncientBeastTheftTrait在on_after_damage按归因复制并在目标死亡时清现有特性；双场景覆盖","verdict":"静态符合待动态验证"},{"layer":"AI/预览/融合","requirement":"选择能兑现弱化和可用夺技，不虚估自杀后状态，技能/融合公开可选","evidence":"AI的ancient_jaw和ancient_fusion专属估值、技能和融合预览、独立一次额度；定向AI场景","verdict":"静态符合待动态验证"}]},
     {"code":"excel_r252","name":"古代机械巨人","batch":"H12-new-20261013","design_baseline":"docs/武将设计思想.json#excel_r252","baseline_locked_at":"2026-10-13","review_status":"源设计先锁；2×2占格、机械臂2×2半破魔、回血后定长合法位移、技能伤害免疫和融合已静态实施。","acceptance_status":"pending_focused_user_validation","audit_evidence":"源252、保存Q001–003及新增Q004–006独立裁定；NewBatch250252八项场景含战斗与AI；助手未运行动态测试。","items":[{"layer":"战斗/占格与机械臂","requirement":"原生2×2、范5旧格2×2双方技能伤及按盾半破魔","evidence":"规格身形、AncientArmSkill固定选区和逐受体半破魔；友敌同伤场景","verdict":"静态符合待动态验证"},{"layer":"战斗/回血位移与免伤","requirement":"实际回血后可拒绝或恰四格全身合法位移，只免技能生命伤","evidence":"AncientVigorSkill用HealContext.actual_heal与move_unit精确路径，RedLotusSkillDamageImmunityTrait保留后效；定向场景","verdict":"静态符合待动态验证"},{"layer":"AI/预览/融合","requirement":"区域按双方实际净值、无实得回血不虚估移动、融合不传身形","evidence":"AI机械臂12候选预筛后完整预演、活力实得判断和融合牺牲估值；2×2预览与AI定向场景","verdict":"静态符合待动态验证"}]},
     {"code":"excel_r249","name":"古代的工兵","batch":"H11-new-20261012","design_baseline":"docs/武将设计思想.json#excel_r249","baseline_locked_at":"2026-10-12","review_status":"源设计先锁；修整、真实死亡融合、传承及非目标技能连锁封锁已静态实施。","acceptance_status":"pending_focused_user_validation","audit_evidence":"源249、保存R249-Q001至Q004及通用澄清；NewBatch249251场景覆盖公开名单、修整资格和期限、融合独立技能额度、AI价值；助手未运行测试。","items":[]},

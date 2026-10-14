@@ -6,6 +6,10 @@
 
 Update this file after every new gameplay requirement or code change in `wujiang_game`. Keep entries concise and durable; do not paste full docs.
 
+- 2026-10-13 R253首份用户报告：`reports/new-batch-253-20261013/regression_tests.log`七项六过，一项AI评分场景漏导入`score_skill_payload`已补；非战斗/AI缺陷。`tools/all_hero_deep_audit.py`定向回归失败后保存完整日志与摘要并跳过耗时AI对局，`test_audit_review_packet.py`加失败早停场景。用户新目录复跑前仅静态检查，R253动态验收仍待完成。
+
+- 2026-10-13 R253再次专场七项回归全过、第一场32步零高信号，第二场搭档R127未结算。`FantasyMoveSkill.queued_payload_metadata`原每个声明重列全棋盘4步落点，现只验选定格；`rooms/ai.py::build_skill_candidates`对幻想复用完整效果分数，免再次回滚，仍按原效果评分排序及限制64候选。`tools/match_audit.py`每步写`match_progress.json`，`per_hero_ai_debug.py`开场输出路径。用户以`--resume`续跑原R253报告；助手仅静态检查。
+
 - 2026-10-12 BP“真男人模式”修正：源表“只能使用主动技能”约束技能类型，不禁普攻。`engine/core.py::basic_attack_resource_allowed` 移除该模式对普攻的全局封锁；操作预览和 AI 候选沿用同一合法性判断。`rooms/special_modes.py`、BP 规则与武将游戏规则同步说明，`BPSpecialModeBehaviorTests` 覆盖玩家与 AI 普攻可用及动作声明；动态验证待统一运行。
 
 - 2026-10-12 Phase H R249/R251：源249/251、保存问卷和通用敌我范围先独立锁入设计JSON/XLSX。`excel_roster.py`接工兵机甲修整、伤害时旁观者技能封锁，以及两将共用真实死亡古代融合；炮台4×4双方普攻、下一次普攻破魔禁疗。`engine/core.py`在来源死亡后清理持续状态，`rooms/ai.py`评估修整、禁疗、区域友伤和融合牺牲，前端提供受体/技能融合选择。`NewBatch249251AncientBehaviorTests`静态写入待用户运行；公开池97/388，剩余291。R248优化仍待用户动态复跑。
@@ -716,3 +720,7 @@ The codebase was reorganised by domain on 2026-08-27. Every phase record further
 - Run the relevant behavior scenarios after targeted tests.
 - Run `python -m unittest discover -s tests` before final response when feasible.
 - `git diff --check` may show LF/CRLF warnings on this Windows repo; treat actual whitespace errors separately from those warnings.
+
+- 2026-10-13 Phase H R253：源253、保存Q001–003、通用骑士乘骑/真武将/特殊扣血和独立Q004–006先锁JSON/XLSX；`heroes/excel_roster.py`接开局1×2机械马、双普攻、死后隔一本人轮再召、旧格7×7双方非机甲真武将当前血减半破魔与本实际回合普攻/技能伤害类别锁；融合不传部署身份。`rooms/ai.py`按真实受体敌友净值、马与融合代价估分，并减少对已被类别锁挡下伤害的保护。`NewBatch253AncientBehaviorTests`七项待用户运行；公开池100/388，剩余288。
+- 2026-10-13 Phase H R254/R255：源254/255及保存R254-Q001=b、R255-Q001=a/Q002=b先锁JSON/XLSX设计；excel_roster.py接平射降守、3×3双方抛射、5×5快照举盾、动态巨盾邻接及选伴守4盾墙；engine/core.py在通常防御后公开逐次1/3格挡，AI预演只取期望；rooms/ai.py评估敌我净值、保护机会与邻接站位；NewBatch254255定向场景静态完成待用户运行。公开池102/388，未实现286。R253用户复跑9/9场景、3/3对局零高信号，融合/再召无有效机会保留P2覆盖观察。
+- 2026-10-13 R254/R255首次用户专场：九项中七过；平射预览与直接执行两项共因是测试夹具(3,2)到(6,4)不满足点单位直线规则，非战斗/AI已证实缺陷。夹具改为(6,2)，并明确覆盖(6,4)的预览排除/声明拒绝；待用户新目录复跑，AI对局尚未执行。
