@@ -133,6 +133,7 @@ def battle_observer_snapshot(battle: Battle) -> dict[str, Any]:
         if not unit.alive or unit.position is None or unit.banished:
             continue
         units.append({"id": unit.unit_id, "name": unit.name, "player_id": unit.player_id,
+                      "hero_code": str(getattr(unit, "hero_code", "") or ""),
                       "position": unit.position.to_dict(), "alive": True, "banished": False,
                       "occupied_cells": [cell.to_dict() for cell in battle.unit_cells(unit)],
                       "hp": unit.current_hp, "max_hp": unit.max_health,
@@ -212,6 +213,17 @@ class AutoChessState:
         self.next_match_cursor = 0
         self.version = 0
 
+    def use_board_size(self, width: int, height: int) -> None:
+        from dataclasses import replace
+        self.config = replace(self.config, board_width=max(6, int(width)), board_height=max(6, int(height)))
+
+    def use_preparation_seconds(self, seconds: int) -> None:
+        from dataclasses import replace
+        value = int(seconds)
+        if value not in {0, 30, 45, 60, 90}:
+            value = 90
+        self.config = replace(self.config, preparation_seconds=value)
+
     def _change(self) -> None:
         self.version += 1
 
@@ -273,7 +285,8 @@ class AutoChessState:
             player.ready = False
             player.shop = self._draw_shop(player.level)
         self.phase = "preparation"
-        self.deadline_at = time.time() + self.config.preparation_seconds
+        seconds = int(self.config.preparation_seconds or 0)
+        self.deadline_at = time.time() + seconds if seconds > 0 else None
         self._change()
 
     def _piece(self, player: ChessPlayer, piece_id: str) -> ChessPiece:
@@ -314,8 +327,26 @@ class AutoChessState:
                 return False
         return True
 
-    def buy(self, seat_id: int, slot: int, target_piece_id: str | None = None) -> None:
+    def _shopping(self, seat_id: int) -> ChessPlayer:
+        if self.phase not in {"preparation", "battle"}:
+            _error("当前不能购买。")
+        player = self._player(seat_id)
+        if self.phase == "preparation" and player.ready:
+            _error("本轮已确认，不能继续更改。")
+        return player
+
+    def _mutable_piece(self, seat_id: int, piece_id: str) -> tuple[ChessPlayer, ChessPiece]:
+        if self.phase == "battle":
+            player = self._shopping(seat_id)
+            piece = self._piece(player, piece_id)
+            if piece.x is not None:
+                _error("已上场的武将在交战中不能操作。")
+            return player, piece
         player = self._preparing(seat_id)
+        return player, self._piece(player, piece_id)
+
+    def buy(self, seat_id: int, slot: int, target_piece_id: str | None = None) -> None:
+        player = self._shopping(seat_id)
         if not 0 <= slot < len(player.shop) or player.shop[slot] is None:
             _error("商店格无可购买武将。")
         code = str(player.shop[slot])
@@ -329,6 +360,8 @@ class AutoChessState:
                 _error("所选强化目标与商店武将不同。")
         else:
             target = min(owned, key=lambda piece: (piece.x is None, -piece.star)) if owned else None
+        if self.phase == "battle" and target is not None and target.x is not None:
+            target = next((piece for piece in owned if piece.x is None), None)
         bench_full = len([piece for piece in player.pieces if piece.x is None]) >= self.config.bench_capacity
         if bench_full and target is None:
             _error("后备席已满，请先上场或出售武将。")
@@ -342,7 +375,7 @@ class AutoChessState:
         self._change()
 
     def reroll(self, seat_id: int) -> None:
-        player = self._preparing(seat_id)
+        player = self._shopping(seat_id)
         if player.gold < self.config.reroll_cost:
             _error("金币不足。")
         player.gold -= self.config.reroll_cost
@@ -350,7 +383,7 @@ class AutoChessState:
         self._change()
 
     def level_up(self, seat_id: int) -> None:
-        player = self._preparing(seat_id)
+        player = self._shopping(seat_id)
         if player.level >= len(self.config.level_budgets):
             _error("玩家等级已达上限。")
         cost = self.config.level_costs[player.level - 1]
@@ -361,8 +394,7 @@ class AutoChessState:
         self._change()
 
     def choose_upgrade(self, seat_id: int, piece_id: str, stat: str) -> None:
-        player = self._preparing(seat_id)
-        piece = self._piece(player, piece_id)
+        player, piece = self._mutable_piece(seat_id, piece_id)
         if piece.pending_upgrades <= 0 or stat not in STATS:
             _error("该能力值升级选择无效。")
         piece.pending_upgrades -= 1
@@ -383,15 +415,14 @@ class AutoChessState:
         self._change()
 
     def sell(self, seat_id: int, piece_id: str) -> None:
-        player = self._preparing(seat_id)
-        piece = self._piece(player, piece_id)
+        player, piece = self._mutable_piece(seat_id, piece_id)
         player.gold += (hero_cost(hero_catalog()[piece.code]["level"]) + 1) // 2
         player.equipment_inventory.extend(piece.equipment)
         player.pieces.remove(piece)
         self._change()
 
     def draw_equipment(self, seat_id: int) -> None:
-        player = self._preparing(seat_id)
+        player = self._shopping(seat_id)
         if not EQUIPMENT_CATALOG:
             _error("装备表无法读取，暂不能抽取装备；不会扣除金币。")
         if player.equipment_drawn_round == self.round_number:
@@ -409,8 +440,7 @@ class AutoChessState:
         self._change()
 
     def equip(self, seat_id: int, piece_id: str, code: str) -> None:
-        player = self._preparing(seat_id)
-        piece = self._piece(player, piece_id)
+        player, piece = self._mutable_piece(seat_id, piece_id)
         if code not in EQUIPMENT_CATALOG or code not in player.equipment_inventory:
             _error("该装备不在背包中。")
         if len(piece.equipment) >= self.config.equipment_slots:
@@ -423,8 +453,7 @@ class AutoChessState:
         self._change()
 
     def unequip(self, seat_id: int, piece_id: str, code: str) -> None:
-        player = self._preparing(seat_id)
-        piece = self._piece(player, piece_id)
+        player, piece = self._mutable_piece(seat_id, piece_id)
         if code not in piece.equipment:
             _error("该武将没有这件装备。")
         piece.equipment.remove(code)
@@ -555,7 +584,25 @@ class AutoChessState:
         self.next_match_cursor = 0
         self._change()
 
-    def _advance_match(self, match: ChessMatch) -> None:
+    def _run_battle_slice(self, seconds: float, *, step_limit: int) -> None:
+        """Give every open board a fixed run of actions, then stop.
+
+        The client only draws the latest snapshot, so extra steps move the
+        fight forward instead of filling a local playback queue. The time
+        limit keeps one poll from holding the request if a single action is slow.
+        """
+        deadline = time.perf_counter() + max(0.0, seconds)
+        per_match = max(1, step_limit)
+        for match in self.matches:
+            if match.result is not None or time.perf_counter() >= deadline:
+                continue
+            for _ in range(per_match):
+                if match.result is not None or time.perf_counter() >= deadline:
+                    break
+                if not self._advance_match(match):
+                    break
+
+    def _advance_match(self, match: ChessMatch) -> bool:
         if match.runner is None:
             match.runner = self._create_match_battle(match)
             if match.runner is None:
@@ -566,13 +613,15 @@ class AutoChessState:
                 match.result = {"winner": side, "damage": max(1, left_count if side == 1 else right_count),
                                 "criterion": "empty_board", "scores": {}}
             self._change()
-            return
+            return True
         steps = match.runner.resolve_ai_until_human_input(max_steps=1)
         if steps:
             self._change()
-        if match.runner.battle.winner is not None:
+        if match.runner.battle is not None and match.runner.battle.winner is not None:
             self._settle_match(match)
             self._change()
+            return True
+        return bool(steps)
 
     def _settle_match(self, match: ChessMatch) -> None:
         battle = match.runner.battle if match.runner else None
@@ -649,7 +698,8 @@ class AutoChessState:
         self._change()
 
     def tick(self, seats: dict[int, Any], *, now: float | None = None,
-             action_budget: int = 2, prepare_budget: int = 1) -> bool:
+             action_budget: int = 2, prepare_budget: int = 1,
+             battle_slice_seconds: float | None = None) -> bool:
         before = self.version
         if self.phase == "preparation":
             due = (now if now is not None else time.time()) >= (self.deadline_at or float("inf"))
@@ -663,32 +713,44 @@ class AutoChessState:
             if all(self.players[seat_id].ready for seat_id in self._living()):
                 self._begin_battles()
         if self.phase == "battle" and action_budget > 0:
-            for _ in range(action_budget):
-                unfinished = [match for match in self.matches if match.result is None]
-                if not unfinished:
-                    break
-                index = getattr(self, "next_match_cursor", 0) % len(self.matches)
-                for offset in range(len(self.matches)):
-                    candidate = self.matches[(index + offset) % len(self.matches)]
-                    if candidate.result is None:
-                        match = candidate
-                        self.next_match_cursor = (index + offset + 1) % len(self.matches)
+            if battle_slice_seconds and battle_slice_seconds > 0:
+                self._run_battle_slice(float(battle_slice_seconds), step_limit=action_budget)
+            else:
+                for _ in range(action_budget):
+                    unfinished = [match for match in self.matches if match.result is None]
+                    if not unfinished:
                         break
-                self._advance_match(match)
-            if all(match.result is not None for match in self.matches):
+                    index = getattr(self, "next_match_cursor", 0) % len(self.matches)
+                    for offset in range(len(self.matches)):
+                        candidate = self.matches[(index + offset) % len(self.matches)]
+                        if candidate.result is None:
+                            match = candidate
+                            self.next_match_cursor = (index + offset + 1) % len(self.matches)
+                            break
+                    self._advance_match(match)
+            if self.matches and all(match.result is not None for match in self.matches):
                 self._finish_round()
         return self.version != before
 
     def public(self, viewer_id: int | None, seats: dict[int, Any]) -> dict[str, Any]:
         catalog = hero_catalog()
         viewer = self.players.get(viewer_id) if viewer_id is not None else None
-        visible_codes = ({piece.code for piece in viewer.pieces} |
-                         {code for code in viewer.shop if code}) if viewer else set()
+        visible_codes = {piece.code for player in self.players.values() for piece in player.fielded()}
+        if viewer is not None:
+            visible_codes.update(piece.code for piece in viewer.pieces)
+            visible_codes.update(code for code in viewer.shop if code)
+        for match in self.matches:
+            battle = match.runner.battle if match.runner else None
+            if battle is None:
+                continue
+            visible_codes.update(str(getattr(unit, "hero_code", "") or "") for unit in battle.all_units())
+        visible_codes.discard("")
+        visible_codes = {code for code in visible_codes if code in catalog}
         players = []
         for seat_id, player in self.players.items():
             seat = seats[seat_id]
             public = {"seat_id": seat_id, "name": seat.name, "is_ai": seat.is_ai,
-                      "health": max(0, player.health), "gold": player.gold if viewer_id == seat_id else None,
+                      "health": max(0, player.health), "gold": player.gold,
                       "level": player.level, "wins": player.wins, "losses": player.losses,
                       "win_streak": player.win_streak, "loss_streak": player.loss_streak,
                       "ready": player.ready, "eliminated": player.eliminated,
@@ -729,4 +791,7 @@ class AutoChessState:
                            "equipment_draw_cost": self.config.equipment_draw_cost,
                            "equipment_slots": self.config.equipment_slots,
                            "bench_capacity": self.config.bench_capacity,
+                           "board_width": self.config.board_width,
+                           "board_height": self.config.board_height,
+                           "deployment_width": self.config.deployment_width,
                            "battle_round_limit": self.config.battle_round_limit}}

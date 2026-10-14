@@ -177,6 +177,7 @@ export async function refreshState({ preserveScreen = true } = {}) {
           room.mode,
           room.updated_at,
           room.occupied_seat_count,
+          room.human_seat_count,
           room.seat_count,
           room.player_count,
           room.is_full,

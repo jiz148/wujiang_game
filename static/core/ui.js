@@ -82,6 +82,7 @@ export function syncScreen({ preferBattle = false } = {}) {
       return;
     }
     state.screen = target.screen;
+    if (target.libraryTab) state.libraryTab = target.libraryTab;
     if (target.flow) state.homeFlow = target.flow;
     return;
   }

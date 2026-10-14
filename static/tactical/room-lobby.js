@@ -10,7 +10,7 @@ import { $ } from '../core/dom.js';
 import { fetchJson, hasRoom, viewerPlayerId } from '../core/net.js';
 import { render } from '../core/render.js';
 import { state } from '../core/state.js';
-import { applyRoomPayload, autoConfigureRoom, availableRoomModes, isRandomRoomMode, reportRoomError, selectRoomHero, setBpSettings, setRandomRosterSize, setRoomArmyEnabled, setRoomBoardSize, setRoomHeroLimit, setRoomMode, setRoomSeatCount, setRoomTurnTimeout } from '../tactical/room-api.js';
+import { applyRoomPayload, autoConfigureRoom, availableRoomModes, isRandomRoomMode, reportRoomError, selectRoomHero, setBpSettings, setRandomRosterSize, setRoomArmyEnabled, setRoomBoardSize, setRoomChessPrep, setRoomHeroLimit, setRoomMode, setRoomSeatCount, setRoomTurnTimeout } from '../tactical/room-api.js';
 import { randomRoomRosterSize, seatHeroCount, seatIdentityLabel, setRoomEditSeat } from '../tactical/targeting.js';
 import { bindHeroHover, hideHeroHover } from './hero-hover.js';
 
@@ -105,10 +105,14 @@ export function openRoomSetup() {
       ? state.room.bp.tier_pool.map(Number)
       : [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
     bpTierRounds: String(Math.max(1, Math.min(12, Number(state.room.bp?.tier_rounds) || 3))),
+    bpRuleMode: state.room.bp?.rule_mode === "fixed" ? "fixed" : "random",
+    bpFixedRule: state.room.bp?.fixed_rule || "none",
+    bpRulePool: Array.isArray(state.room.bp?.rule_pool) ? state.room.bp.rule_pool.map(String) : [],
     heroLimitEnabled: currentLimit > 0,
     heroLimit: String(currentLimit > 0 ? currentLimit : 5),
     armyEnabled: Boolean(state.room.army_enabled),
     turnTimeout: String(Number(state.room.turn_timeout_seconds ?? 0)),
+    chessPrep: String(Number(state.room.chess_prep_seconds ?? 90)),
     boardWidth: String(Number(state.room.board_width || 10)),
     boardHeight: String(Number(state.room.board_height || 10)),
   };
@@ -230,6 +234,9 @@ export async function confirmRoomSetup() {
   const nextBpAllowSameHero = Boolean(draft.bpAllowSameHero);
   const nextBpTierPool = [...new Set((draft.bpTierPool || []).map(Number))].filter((level) => level >= 1 && level <= 10).sort((left, right) => left - right);
   const nextBpTierRounds = Math.max(1, Math.min(12, Number.parseInt(draft.bpTierRounds, 10) || 3));
+  const nextBpRuleMode = draft.bpRuleMode === "fixed" ? "fixed" : "random";
+  const nextBpFixedRule = String(draft.bpFixedRule || "none");
+  const nextBpRulePool = [...new Set((draft.bpRulePool || []).map(String))];
   const nextHeroLimit = draft.heroLimitEnabled
     ? Math.max(1, Math.min(20, Number.parseInt(draft.heroLimit, 10) || 1))
     : 0;
@@ -247,6 +254,9 @@ export async function confirmRoomSetup() {
     || nextBpAllowSameHero !== Boolean(state.room?.bp?.allow_same_hero)
     || nextBpTierPool.join(",") !== (state.room?.bp?.tier_pool || [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]).map(Number).sort((left, right) => left - right).join(",")
     || nextBpTierRounds !== Math.max(1, Math.min(12, Number(state.room?.bp?.tier_rounds) || 3))
+    || nextBpRuleMode !== (state.room?.bp?.rule_mode === "fixed" ? "fixed" : "random")
+    || nextBpFixedRule !== String(state.room?.bp?.fixed_rule || "none")
+    || nextBpRulePool.join(",") !== (state.room?.bp?.rule_pool || []).map(String).join(",")
   )) {
     await setBpSettings({
       teamSize: nextBpTeamSize,
@@ -256,6 +266,9 @@ export async function confirmRoomSetup() {
       allowSameHero: nextBpAllowSameHero,
       tierPool: nextBpTierPool,
       tierRounds: nextBpTierRounds,
+      ruleMode: nextBpRuleMode,
+      fixedRule: nextBpFixedRule,
+      rulePool: nextBpRulePool,
     });
   }
   if (!["bp", "autochess"].includes(state.room?.mode) && nextHeroLimit !== Number(state.room?.hero_limit || 0)) await setRoomHeroLimit(nextHeroLimit);
@@ -264,13 +277,19 @@ export async function confirmRoomSetup() {
     ? Number.parseInt(draft.turnTimeout, 10)
     : 0;
   if (state.room?.mode !== "autochess" && nextTurnTimeout !== Number(state.room?.turn_timeout_seconds ?? 0)) await setRoomTurnTimeout(nextTurnTimeout);
+  const nextChessPrep = [0, 30, 45, 60, 90].includes(Number.parseInt(draft.chessPrep, 10))
+    ? Number.parseInt(draft.chessPrep, 10)
+    : 90;
+  if (state.room?.mode === "autochess" && nextChessPrep !== Number(state.room?.chess_prep_seconds ?? 90)) {
+    await setRoomChessPrep(nextChessPrep);
+  }
   const clampBoard = (value) => Math.max(6, Math.min(100, Number.parseInt(value, 10) || 10));
   const nextWidth = clampBoard(draft.boardWidth);
   const nextHeight = clampBoard(draft.boardHeight);
-  if (state.room?.mode !== "autochess" && (
+  if (
     nextWidth !== Number(state.room?.board_width || 10)
     || nextHeight !== Number(state.room?.board_height || 10)
-  )) {
+  ) {
     await setRoomBoardSize(nextWidth, nextHeight);
   }
   render();
@@ -281,12 +300,66 @@ export function updateRoomSetupDraft(field, value) {
   state.roomSetupDraft[field] = String(value);
 }
 
+function renderBpRules(draft) {
+  const control = $("bp-rule-control");
+  const visible = draft.mode === "bp";
+  control?.classList.toggle("hidden", !visible);
+  if (!visible) return;
+  const mode = draft.bpRuleMode === "fixed" ? "fixed" : "random";
+  const modeSelect = $("bp-rule-mode");
+  if (modeSelect && document.activeElement !== modeSelect) modeSelect.value = mode;
+  const catalog = Array.isArray(state.room?.bp?.rule_catalog) ? state.room.bp.rule_catalog : [];
+  const fixedField = $("bp-fixed-rule-field");
+  if (fixedField) fixedField.classList.toggle("hidden", mode !== "fixed");
+  const fixedSelect = $("bp-fixed-rule");
+  if (fixedSelect && mode === "fixed" && document.activeElement !== fixedSelect) {
+      fixedSelect.replaceChildren();
+      catalog.forEach((rule) => {
+        const option = document.createElement("option");
+        option.value = rule.code;
+        option.textContent = rule.name;
+        fixedSelect.append(option);
+      });
+      if ([...fixedSelect.options].some((option) => option.value === draft.bpFixedRule)) {
+        fixedSelect.value = draft.bpFixedRule;
+      }
+  }
+  const pool = $("bp-rule-pool");
+  if (!pool) return;
+  pool.classList.toggle("hidden", mode !== "random");
+  const selected = new Set((draft.bpRulePool || []).map(String));
+  const poolKey = `${mode}|${catalog.map((rule) => `${rule.code}:${selected.has(rule.code) ? 1 : 0}`).join(",")}`;
+  if (pool.dataset.viewKey === poolKey) return;
+  pool.dataset.viewKey = poolKey;
+  pool.replaceChildren();
+  if (mode !== "random") return;
+  catalog.forEach((rule) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = `bp-tier-chip${selected.has(rule.code) ? " is-on" : ""}`;
+    chip.dataset.rule = rule.code;
+    chip.setAttribute("aria-pressed", selected.has(rule.code) ? "true" : "false");
+    chip.title = rule.description || rule.name;
+    const title = document.createElement("strong");
+    title.textContent = rule.name;
+    chip.append(title);
+    pool.append(chip);
+  });
+}
+
 function renderBpTierPool(draft) {
   const host = $("bp-tier-pool");
   if (!host) return;
-  host.replaceChildren();
-  if (draft.mode !== "bp" || draft.bpFormat !== "tier") return;
+  if (draft.mode !== "bp" || draft.bpFormat !== "tier") {
+    host.replaceChildren();
+    host.dataset.viewKey = "";
+    return;
+  }
   const selected = new Set((draft.bpTierPool || []).map(Number));
+  const poolKey = [...selected].sort((left, right) => left - right).join(",");
+  if (host.dataset.viewKey === poolKey) return;
+  host.dataset.viewKey = poolKey;
+  host.replaceChildren();
   const counts = {};
   for (let level = 1; level <= 10; level += 1) counts[level] = 0;
   (state.heroes || []).forEach((hero) => {
@@ -348,6 +421,14 @@ export function renderRoomSetupDialog() {
   const randomInput = $("random-roster-size-input");
   randomControl?.classList.toggle("hidden", draft.mode !== "random");
   const bpFormat = draft.bpFormat === "tier" ? "tier" : "full";
+  const bpMode = draft.mode === "bp";
+  $("setup-block-bp")?.classList.toggle("hidden", !bpMode);
+  $("setup-block-rule")?.classList.toggle("hidden", !bpMode);
+  $("setup-block-field")?.classList.toggle("hidden", false);
+  $("room-army-switch")?.classList.toggle("hidden", draft.mode === "bp" || draft.mode === "autochess");
+  $("room-turn-timeout-select")?.closest("label")?.classList.toggle("hidden", draft.mode === "autochess");
+  $("room-chess-prep-field")?.classList.toggle("hidden", draft.mode !== "autochess");
+  $("room-board-width-input")?.closest(".field")?.classList.toggle("hidden", false);
   $("bp-format-control")?.classList.toggle("hidden", draft.mode !== "bp");
   const bpFormatSelect = $("bp-format-select");
   if (bpFormatSelect && document.activeElement !== bpFormatSelect) bpFormatSelect.value = bpFormat;
@@ -362,6 +443,7 @@ export function renderRoomSetupDialog() {
   if (tierRoundsInput && document.activeElement !== tierRoundsInput) {
     tierRoundsInput.value = String(draft.bpTierRounds || 3);
   }
+  renderBpRules(draft);
   renderBpTierPool(draft);
   $("bp-team-size-control")?.classList.toggle("hidden", draft.mode !== "bp" || bpFormat !== "full");
   const bpSizeSelect = $("bp-team-size-select");
@@ -382,8 +464,9 @@ export function renderRoomSetupDialog() {
   limitControl?.classList.toggle("hidden", ["bp", "autochess"].includes(draft.mode) || !draft.heroLimitEnabled);
   $("room-hero-limit-switch")?.classList.toggle("hidden", ["bp", "autochess"].includes(draft.mode));
   $("room-turn-timeout-select")?.closest("label")?.classList.toggle("hidden", draft.mode === "autochess");
-  $("room-board-width-input")?.closest(".field")?.classList.toggle("hidden", draft.mode === "autochess");
-  $("room-army-switch")?.classList.toggle("hidden", draft.mode === "bp");
+  $("room-chess-prep-field")?.classList.toggle("hidden", draft.mode !== "autochess");
+  $("room-board-width-input")?.closest(".field")?.classList.remove("hidden");
+  $("room-army-switch")?.classList.toggle("hidden", draft.mode === "bp" || draft.mode === "autochess");
   const armyEnabled = $("room-army-enabled");
   if (armyEnabled) armyEnabled.checked = Boolean(draft.armyEnabled);
   if (limitInput && document.activeElement !== limitInput) {
@@ -392,6 +475,10 @@ export function renderRoomSetupDialog() {
   const timeoutSelect = $("room-turn-timeout-select");
   if (timeoutSelect && document.activeElement !== timeoutSelect) {
     timeoutSelect.value = String(draft.turnTimeout ?? "0");
+  }
+  const prepSelect = $("room-chess-prep-select");
+  if (prepSelect && document.activeElement !== prepSelect) {
+    prepSelect.value = String(draft.chessPrep ?? "90");
   }
   const widthInput = $("room-board-width-input");
   if (widthInput && document.activeElement !== widthInput) {

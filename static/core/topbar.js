@@ -14,6 +14,8 @@ import { state } from './state.js';
 import { setScreen } from './ui.js';
 import { effectiveProfileName, openProfileModal } from '../platform/auth.js';
 import { logoutAuth } from '../platform/home.js';
+import { hasRoom } from './net.js';
+import { leaveRoom } from '../tactical/room-api.js';
 
 let accountMenu = null;
 let primaryButton = null;
@@ -21,7 +23,7 @@ let primaryButton = null;
 async function confirmLogout() {
   const ok = await confirmDialog({
     title: "退出登录",
-    body: "退出后需要重新登录才能继续。进行中的战役与房间会保留，用同一账号登录即可恢复。",
+    body: "退出后会先离开当前房间，并需要重新登录才能继续。房间还在，其他人可以继续使用。",
     confirmLabel: "退出登录",
     tone: "danger",
   });
@@ -46,6 +48,10 @@ function build(host) {
     items: [
       { id: "profile", label: "用户信息", onClick: () => openProfileModal() },
       { id: "menu", label: "返回主菜单", onClick: () => {
+        if (hasRoom()) {
+          void leaveRoom();
+          return;
+        }
         state.strategyCampaign = null;
         state.strategySelectedCityId = "";
         state.strategySelectedCampaignId = 0;
@@ -85,6 +91,10 @@ export function renderTopbar() {
   }
 
   accountMenu.setLabel(effectiveProfileName());
-  // 菜单项按当前是否可用出没，而不是常驻一个点了没反应的入口。
-  accountMenu.itemEls.get("menu")?.classList.toggle("hidden", state.screen === "menu");
+  const inRoom = hasRoom();
+  const menuItem = accountMenu.itemEls.get("menu");
+  if (menuItem) {
+    menuItem.textContent = inRoom ? "退出房间" : "返回主菜单";
+    menuItem.classList.toggle("hidden", !inRoom && state.screen === "menu");
+  }
 }

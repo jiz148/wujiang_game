@@ -9,6 +9,11 @@ const REPLAY_OPTIONS = [
   ["full", "完整回放"],
 ];
 
+const AI_OPTIONS = [
+  ["simple", "简化"],
+  ["full", "完整"],
+];
+
 export function renderSettings() {
   const panel = $("settings-panel");
   if (!panel) return;
@@ -24,7 +29,7 @@ export function renderSettings() {
       })
       .catch((error) => {
         state.settingsError = error.error || "读取设置失败。";
-        state.settings = state.settings || { replay_recording: "" };
+        state.settings = state.settings || { replay_recording: "", simple_ai: false };
       })
       .finally(() => {
         state.settingsBusy = false;
@@ -39,33 +44,57 @@ export function renderSettings() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "ghost";
-    button.dataset.replay = value;
+    button.dataset.value = value;
     button.textContent = label;
     button.addEventListener("click", () => saveReplay(value, button));
     host.append(button);
   }
   paintReplay();
+  paintAi();
 }
 
-function paintReplay() {
-  const current = state.settings?.replay_recording || "";
-  for (const button of document.querySelectorAll("#settings-replay button")) {
-    const selected = button.dataset.replay === current;
+function paintSegment(selector, current) {
+  for (const button of document.querySelectorAll(selector)) {
+    const selected = button.dataset.value === current;
     button.classList.toggle("primary", selected);
     button.classList.toggle("ghost", !selected);
     button.disabled = Boolean(state.settingsBusy);
   }
 }
 
-async function saveReplay(value, button) {
-  if (state.settingsBusy || state.settings?.replay_recording === value) return;
+function paintReplay() {
+  paintSegment("#settings-replay button", state.settings?.replay_recording || "");
+}
+
+function currentAiValue() {
+  return state.settings?.simple_ai === true ? "simple" : "full";
+}
+
+function paintAi() {
+  const host = $("settings-ai");
+  if (!host) return;
+  if (!host.childElementCount) for (const [value, label] of AI_OPTIONS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ghost";
+    button.dataset.value = value;
+    button.textContent = label;
+    button.addEventListener("click", () => saveAi(value, button));
+    host.append(button);
+  }
+  paintSegment("#settings-ai button", currentAiValue());
+}
+
+async function saveSetting(button, unchanged, body) {
+  if (state.settingsBusy || unchanged) return;
   state.settingsBusy = true;
   button.classList.add("is-busy");
   paintReplay();
+  paintAi();
   try {
     state.settings = await fetchJson("/api/settings", {
       method: "POST",
-      body: JSON.stringify({ replay_recording: value }),
+      body: JSON.stringify(body),
     });
     state.settingsError = "";
   } catch (error) {
@@ -74,7 +103,16 @@ async function saveReplay(value, button) {
     state.settingsBusy = false;
     button.classList.remove("is-busy");
     paintReplay();
+    paintAi();
     const message = $("settings-message");
     if (message) message.textContent = state.settingsError || "";
   }
+}
+
+async function saveReplay(value, button) {
+  await saveSetting(button, state.settings?.replay_recording === value, { replay_recording: value });
+}
+
+async function saveAi(value, button) {
+  await saveSetting(button, currentAiValue() === value, { simple_ai: value === "simple" });
 }

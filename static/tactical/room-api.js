@@ -91,6 +91,9 @@ export function applyRoomPayload(payload, { preserveScreen = false } = {}) {
   const hadBattle = Boolean(state.liveBattle || state.battle);
   const previousScreen = state.screen;
   const previousBoardKey = state.battle ? `${state.battle.board.width}x${state.battle.board.height}` : "";
+  const previousChessBoardKey = state.room?.mode === "autochess"
+    ? `chess:${state.room.autochess?.config?.board_width || 0}x${state.room.autochess?.config?.board_height || 0}`
+    : "";
   const previousRoomId = state.room?.room_id || "";
   const previousChessPhase = state.room?.autochess?.phase || "";
   const previousBattle = state.liveBattle;
@@ -182,7 +185,16 @@ export function applyRoomPayload(payload, { preserveScreen = false } = {}) {
     }
   }
   const nextBoardKey = state.battle ? `${state.battle.board.width}x${state.battle.board.height}` : "";
-  if (!state.battle || nextBoardKey !== previousBoardKey) {
+  const nextChessBoardKey = state.room?.mode === "autochess"
+    ? `chess:${state.room.autochess?.config?.board_width || 0}x${state.room.autochess?.config?.board_height || 0}`
+    : "";
+  if (state.room?.mode === "autochess") {
+    if (previousChessBoardKey && nextChessBoardKey !== previousChessBoardKey) {
+      state.boardZoom = 1;
+      state.boardPanX = 0;
+      state.boardPanY = 0;
+    }
+  } else if (!state.battle || nextBoardKey !== previousBoardKey) {
     state.boardZoom = 1;
     state.boardPanX = 0;
     state.boardPanY = 0;
@@ -612,7 +624,7 @@ async function postBpAction(action, fields) {
 }
 
 export const setBpTeamSize = (teamSize) => postBpAction("team-size", {team_size: teamSize});
-export const setBpSettings = ({teamSize, levelCap, showWinCount, format, allowSameHero, tierPool, tierRounds}) => postBpAction("settings", {
+export const setBpSettings = ({teamSize, levelCap, showWinCount, format, allowSameHero, tierPool, tierRounds, ruleMode, fixedRule, rulePool}) => postBpAction("settings", {
   team_size: teamSize,
   level_cap: levelCap,
   show_win_count: showWinCount,
@@ -620,6 +632,9 @@ export const setBpSettings = ({teamSize, levelCap, showWinCount, format, allowSa
   allow_same_hero: allowSameHero,
   tier_pool: tierPool,
   tier_rounds: tierRounds,
+  rule_mode: ruleMode,
+  fixed_rule: fixedRule,
+  rule_pool: rulePool,
 });
 export const setBpCaptain = (teamId, seatId) => postBpAction("captain", {team_id: teamId, seat_id: seatId});
 export const bpChoose = (heroCode) => postBpAction("choose", {hero_code: heroCode});
@@ -792,6 +807,31 @@ export async function setRoomBoardSize(width, height) {
   }
 }
 
+export async function setRoomChessPrep(seconds) {
+  if (!hasRoom() || !state.playerToken || !state.room?.viewer_is_host) return;
+  const allowed = [0, 30, 45, 60, 90];
+  const next = allowed.includes(Number(seconds)) ? Number(seconds) : 90;
+  if (next === Number(state.room?.chess_prep_seconds ?? 90)) return;
+  try {
+    const payload = await fetchJson("/api/rooms/set-chess-prep", {
+      method: "POST",
+      body: JSON.stringify({
+        room_id: state.room.room_id,
+        player_token: state.playerToken,
+        chess_prep_seconds: next,
+      }),
+    });
+    applyRoomPayload(payload, { preserveScreen: true });
+    render();
+  } catch (error) {
+    if (error.state) {
+      applyRoomPayload(error.state, { preserveScreen: true });
+      render();
+    }
+    reportRoomError(error.error || "设置备战时间失败。");
+  }
+}
+
 export async function autoConfigureRoom(options = {}) {
   if (!hasRoom() || !state.playerToken || !state.room?.viewer_is_host || state.room?.status !== "lobby") return;
   const method = options.method === "points" ? "points" : "count";
@@ -862,6 +902,14 @@ export async function setRoomSeatTeam(seatId, teamId) {
       render();
     }
     reportRoomError(error.error || "调整席位队伍失败。");
+  }
+}
+
+export async function fillEmptySeatsWithAi() {
+  if (!hasRoom() || !state.playerToken || !state.room?.viewer_is_host) return;
+  const seats = (state.room.seats || []).filter((seat) => !seat.occupied && !seat.is_human && !seat.is_ai);
+  for (const seat of seats) {
+    await setRoomSeatController(seat.player_id, "ai");
   }
 }
 
@@ -1054,7 +1102,8 @@ export function renderRoomListActive() {
       actions.append(resumeBtn);
     }
 
-    if (Number(room.owner_user_id) === Number(state.authUser?.id || 0)) {
+    const emptyRoom = Number(room.human_seat_count || 0) === 0;
+    if (!emptyRoom && Number(room.owner_user_id) === Number(state.authUser?.id || 0)) {
       const remove = document.createElement("button");
       remove.className = "ghost";
       remove.textContent = "删除";
@@ -1064,8 +1113,31 @@ export function renderRoomListActive() {
 
     main.append(actions);
     card.append(plate, main);
+    if (emptyRoom) card.append(roomCardMore(room.room_id));
     list.append(card);
   });
+}
+
+function roomCardMore(roomId) {
+  const more = document.createElement("div");
+  more.className = "room-card-more";
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "room-card-more__toggle";
+  toggle.textContent = "⋯";
+  toggle.setAttribute("aria-label", "房间操作");
+  const menu = document.createElement("div");
+  menu.className = "room-card-more__menu";
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.textContent = "删除房间";
+  remove.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void deleteListedRoom(roomId);
+  });
+  menu.append(remove);
+  more.append(toggle, menu);
+  return more;
 }
 
 function roomModeFace(room) {

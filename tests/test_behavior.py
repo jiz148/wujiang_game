@@ -2920,10 +2920,18 @@ class RoomBehaviorTests(unittest.TestCase):
             params={"session_token": self.default_session_token()},
         )
         self.assertEqual(current["replay_recording"], "full")
+        self.assertFalse(current["simple_ai"])
         saved = self.api_post("/api/settings", {
             "replay_recording": "off",
             "session_token": self.default_session_token(),
         })
+        self.assertEqual(saved["replay_recording"], "off")
+        self.assertFalse(saved["simple_ai"])
+        saved = self.api_post("/api/settings", {
+            "simple_ai": True,
+            "session_token": self.default_session_token(),
+        })
+        self.assertTrue(saved["simple_ai"])
         self.assertEqual(saved["replay_recording"], "off")
         created = self.api_post("/api/rooms/create", {"player_name": "Host", "mode": "bp"})
         self.assertEqual(created["room"]["mode"], "bp")
@@ -26768,6 +26776,14 @@ class BPSpecialModeBehaviorTests(unittest.TestCase):
         self.assertEqual(len(modes), 3)
         self.assertEqual(len(set(modes)), 3)
         self.assertNotIn("none", modes)
+        from wujiang.tactical.rooms.multiplayer import GameRoom
+        room = GameRoom("BPRULE", mode="bp")
+        room.bp_rule_mode = "fixed"
+        room.bp_fixed_rule = "slow"
+        self.assertEqual(room._roll_bp_special_modes(), ("slow",))
+        room.bp_rule_mode = "random"
+        room.bp_rule_pool = ("mages",)
+        self.assertEqual(room._roll_bp_special_modes(), ("mages",))
         ordinary = self.battle("none")
         self.assertEqual(ordinary.special_mode_codes, ("none",))
         self.assertFalse(any(effect.name.startswith("BP特殊模式") for effect in ordinary.field_effects))
@@ -26796,11 +26812,11 @@ class BPSpecialModeBehaviorTests(unittest.TestCase):
         """)
         ctx.eval(strip_module_syntax(frontend_module("bp-ui.js")))
         ctx.eval("renderBpPanel()")
-        self.assertTrue(ctx.eval("panel.children.some(item => item.className === 'bp-special-modes')"))
-        self.assertTrue(ctx.eval("panel.children.some(item => item.textContent.includes('本局武将池 2 名'))"))
-        self.assertTrue(ctx.eval("panel.children.some(item => item.className === 'bp-pool-list' && item.children[1].children.length === 2)"))
+        self.assertFalse(ctx.eval("panel.children.some(item => item.className === 'bp-special-modes')"))
+        self.assertFalse(ctx.eval("panel.children.some(item => String(item.textContent || '').includes('本局武将池'))"))
+        self.assertIn("来把快速", ctx.eval("JSON.stringify(panel)"))
         ctx.eval("state.room.status='battle'; renderBpPanel()")
-        self.assertIn("来把快速", ctx.eval("banner.children[0].textContent"))
+        self.assertIn("来把快速", ctx.eval("JSON.stringify(banner)"))
 
     def test_prebattle_selection_and_fast_turn_order(self):
         normal = self.battle()

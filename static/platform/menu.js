@@ -49,10 +49,13 @@ const ENTRY_DEFS = [
     onClick: () => goto("skirmish"),
   },
   {
-    id: "archive",
-    title: "战绩与回放",
-    desc: "历史对局",
-    onClick: () => goto("archive"),
+    id: "library",
+    title: "数据库",
+    desc: "武将与回放",
+    onClick: () => {
+      state.libraryTab = "heroes";
+      goto("library");
+    },
   },
   {
     id: "settings",

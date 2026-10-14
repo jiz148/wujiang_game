@@ -305,28 +305,41 @@ function renderBoardAlert() {
 }
 
 export function renderBattleEffects() {
-  const node = $("battle-effects");
+  const overlay = $("battle-effects");
+  overlay?.classList.add("hidden");
+  const node = $("battle-field-list");
   if (!node) return;
-  node.innerHTML = "";
-  if (!state.battle || state.screen !== "battle") {
-    node.classList.add("hidden");
-    return;
-  }
-  const effects = fieldEffects();
+  const effects = state.screen === "battle" ? fieldEffects() : [];
+  const signature = effects.map((effect) => `${effect.name}|${fieldEffectDuration(effect)}|${effect.description || ""}`).join("\n");
+  if (node.dataset.viewKey === signature) return;
+  const open = new Set([...node.querySelectorAll("details[open]")].map((item) => item.dataset.effectKey));
+  node.dataset.viewKey = signature;
+  node.replaceChildren();
   if (!effects.length) {
-    node.classList.add("hidden");
+    const empty = document.createElement("p");
+    empty.className = "meta-note";
+    empty.textContent = "当前没有战场效果。";
+    node.append(empty);
     return;
   }
-  node.classList.remove("hidden");
   effects.forEach((effect) => {
-    const chip = document.createElement("div");
-    chip.className = "effect-pill";
-    chip.title = effect.description || effect.name;
-    chip.innerHTML = `
-      <strong>${effect.name}</strong>
-      <span>${fieldEffectDuration(effect)}</span>
-    `;
-    node.append(chip);
+    const key = effect.name || "";
+    const item = document.createElement("details");
+    item.className = "battle-field-effect";
+    item.dataset.effectKey = key;
+    if (open.has(key)) item.open = true;
+    item.addEventListener("toggle", () => {
+      const next = new Set((node.dataset.openKeys || "").split("\n").filter(Boolean));
+      if (item.open) next.add(key);
+      else next.delete(key);
+      node.dataset.openKeys = [...next].join("\n");
+    });
+    const summary = document.createElement("summary");
+    summary.textContent = `${effect.name} · ${fieldEffectDuration(effect)}`;
+    const body = document.createElement("p");
+    body.textContent = effect.description || "没有额外说明。";
+    item.append(summary, body);
+    node.append(item);
   });
 }
 
@@ -766,8 +779,12 @@ export function renderBoard() {
 export function renderActionPanel() {
   const panel = $("action-panel");
   if (!panel) return;
-  panel.innerHTML = "";
   const actions = displayActions();
+  const signature = `${canInteract()}|${state.selectedActionCode || ""}|${actions.map((action) => `${action.code}|${action.available}|${action.description || ""}`).join("\n")}`;
+  if (panel.dataset.viewKey === signature && panel.childElementCount) return;
+  const scroll = panel.scrollTop;
+  panel.dataset.viewKey = signature;
+  panel.innerHTML = "";
   if (!actions.length) {
     const empty = document.createElement("div");
     empty.className = "queue-item";
@@ -809,6 +826,7 @@ export function renderActionPanel() {
     });
     panel.append(btn);
   });
+  panel.scrollTop = scroll;
 }
 
 function estimatedSummaryDamage(attackPower, defense) {
@@ -1050,11 +1068,15 @@ export function renderHoverCard() {
   const action = !unit ? actionByCode(state.hoveredActionCode) : null;
   if ((!unit && !action) || !state.battle || state.screen !== "battle") {
     card.classList.add("is-empty");
+    card.dataset.viewKey = "";
     card.innerHTML = "";
     return;
   }
   card.classList.remove("is-empty");
-  card.innerHTML = unit ? renderUnitHoverCard(unit) : renderActionHoverCard(action);
+  const markup = unit ? renderUnitHoverCard(unit) : renderActionHoverCard(action);
+  if (card.dataset.viewKey === markup) return;
+  card.dataset.viewKey = markup;
+  card.innerHTML = markup;
 }
 
 function tooltipNode() {
@@ -1605,13 +1627,20 @@ export function renderChainPanel() {
 
 export function renderLogs() {
   const logs = $("logs");
-  logs.innerHTML = "";
-  (state.battle?.logs || []).slice().reverse().forEach((line) => {
+  if (!logs) return;
+  const lines = (state.battle?.logs || []).slice().reverse();
+  const signature = lines.join("\n");
+  if (logs.dataset.viewKey === signature) return;
+  const scroll = logs.scrollTop;
+  logs.dataset.viewKey = signature;
+  logs.replaceChildren();
+  lines.forEach((line) => {
     const item = document.createElement("div");
     item.className = "log";
     item.textContent = line;
     logs.append(item);
   });
+  logs.scrollTop = scroll;
 }
 
 function formatPostgameValue(value) {

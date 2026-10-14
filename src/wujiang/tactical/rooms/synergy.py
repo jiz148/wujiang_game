@@ -47,7 +47,9 @@ def synergy_counts(pieces: list[Any], catalog: dict[str, dict[str, Any]]) -> lis
             result.append({"category": category, "category_name": CATEGORY_LABELS[category],
                            "name": key, "count": count, "tier": tier,
                            "next_threshold": 3 if count < 3 else 6 if count < 6 else None,
-                           "effect": synergy_description(category, key, tier) if tier else ""})
+                           "effect": synergy_description(category, key, tier) if tier else "",
+                           "first": synergy_description(category, key, 1),
+                           "second": synergy_description(category, key, 2)})
     return result
 
 
