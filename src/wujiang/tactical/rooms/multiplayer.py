@@ -34,10 +34,10 @@ from wujiang.tactical.engine.core import (
     Unit,
 )
 from wujiang.tactical.heroes.registry import RoomBattleEntry, create_room_battle, list_heroes
-from wujiang.tactical.rooms.ai import (
+from wujiang.tactical.rooms.ai import choose_hell_dragon_return_action
+from wujiang.tactical.rooms.ai_router import (
     choose_chain_reaction,
     choose_damage_choice_action,
-    choose_hell_dragon_return_action,
     choose_instant_action,
     choose_respawn_action,
     choose_turn_bundle_action,
@@ -46,7 +46,15 @@ from wujiang.tactical.rooms.replay import ReplayRecorder
 from wujiang.tactical.rooms.postgame import build_postgame_summary
 from wujiang.tactical.rooms.launch import is_campaign_launch, make_launch_context, public_launch_context
 from wujiang.tactical.rooms.tutorial import TUTORIAL_ID, next_tutorial_step_id, tutorial_step
-from wujiang.tactical.rooms.special_modes import choose_bp_special_modes, public_special_modes
+from wujiang.tactical.rooms.special_modes import (
+    SPECIAL_MODE_BY_CODE,
+    choose_bp_special_modes,
+    normalize_bp_rule_code,
+    normalize_bp_rule_mode,
+    normalize_bp_rule_pool,
+    public_special_modes,
+    special_mode_catalog,
+)
 
 
 ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -923,6 +931,65 @@ class PlayerSeat:
         }
 
 
+_CHESS_WORKERS: dict[str, threading.Thread] = {}
+_CHESS_WORKER_GUARD = threading.Lock()
+
+
+def _ensure_autochess_worker(room: "GameRoom") -> None:
+    chess = room.autochess
+    if chess is None or chess.phase != "battle":
+        return
+    with _CHESS_WORKER_GUARD:
+        current = _CHESS_WORKERS.get(room.room_id)
+        if current is not None and current.is_alive():
+            return
+        thread = threading.Thread(
+            target=_autochess_battle_worker,
+            args=(room,),
+            name=f"autochess-{room.room_id}",
+            daemon=True,
+        )
+        _CHESS_WORKERS[room.room_id] = thread
+        thread.start()
+
+
+def _autochess_battle_worker(room: "GameRoom") -> None:
+    """Step chess fights beside the request threads.
+
+    One AI decision can search for a while. Doing that inside the state
+    request holds the room lock, so the browser's periodic /api/rooms/state
+    calls stall and show as failed until the search returns.
+    """
+    try:
+        while True:
+            with room._lock:
+                chess = room.autochess
+                if chess is None or chess.phase != "battle":
+                    return
+                pending = [match for match in chess.matches if match.result is None]
+                if not pending:
+                    if chess.matches:
+                        chess._finish_round()
+                        room.status = chess.phase
+                        room.touch(persist_chess=True)
+                    return
+                cursor = int(getattr(chess, "next_match_cursor", 0))
+                match = pending[cursor % len(pending)]
+                chess.next_match_cursor = cursor + 1
+                chess._advance_match(match)
+                if chess.matches and all(item.result is not None for item in chess.matches):
+                    chess._finish_round()
+                    room.status = chess.phase
+                    room.touch(persist_chess=True)
+                    if chess.phase != "battle":
+                        return
+            time.sleep(0)
+    finally:
+        with _CHESS_WORKER_GUARD:
+            if _CHESS_WORKERS.get(room.room_id) is threading.current_thread():
+                _CHESS_WORKERS.pop(room.room_id, None)
+
+
 class GameRoom:
     def __init__(self, room_id: str, *, mode: str = DEFAULT_ROOM_MODE, seat_count: int = MIN_ROOM_SEAT_COUNT) -> None:
         self.room_id = normalize_room_id(room_id)
@@ -949,12 +1016,16 @@ class GameRoom:
         self.bp_auto_banned_levels: tuple[int, ...] = ()
         self.bp_hero_pool: tuple[str, ...] = ()
         self.bp_special_modes: tuple[str, ...] = ()
+        self.bp_rule_mode = "random"
+        self.bp_fixed_rule = "none"
+        self.bp_rule_pool = tuple(SPECIAL_MODE_BY_CODE)
         self.bp_actions: list[dict[str, Any]] = []
         self.bp_assignments: dict[str, int | str] = {}
         self.bp_assign_opened = False
         self.bp_team_ai = {1: True, 2: True}
         self.bp_virtual_seat_ids: list[int] = []
         self.autochess = None
+        self.chess_prep_seconds = 90
         self.board_width = DEFAULT_BOARD_WIDTH
         self.board_height = DEFAULT_BOARD_HEIGHT
         self.turn_timeout_seconds = DEFAULT_TURN_TIMEOUT_SECONDS
@@ -1041,6 +1112,12 @@ class GameRoom:
             self.bp_hero_pool = ()
         if not hasattr(self, "bp_special_modes"):
             self.bp_special_modes = ()
+        if not hasattr(self, "bp_rule_mode"):
+            self.bp_rule_mode = "random"
+        if not hasattr(self, "bp_fixed_rule"):
+            self.bp_fixed_rule = "none"
+        if not hasattr(self, "bp_rule_pool"):
+            self.bp_rule_pool = tuple(SPECIAL_MODE_BY_CODE)
         if not hasattr(self, "bp_actions"):
             self.bp_actions = []
         if not hasattr(self, "bp_assignments"):
@@ -1053,6 +1130,8 @@ class GameRoom:
             self.bp_virtual_seat_ids = []
         if not hasattr(self, "autochess"):
             self.autochess = None
+        if not hasattr(self, "chess_prep_seconds"):
+            self.chess_prep_seconds = 90
         self._lock = threading.RLock()
 
     def checkpoint_bytes(self) -> bytes:
@@ -1118,7 +1197,8 @@ class GameRoom:
 
     def set_bp_settings(self, token: str, *, team_size: Any, level_cap: Any, show_win_count: Any,
                         bp_format: Any = None, allow_same_hero: Any = None, tier_pool: Any = None,
-                        tier_rounds: Any = None) -> None:
+                        tier_rounds: Any = None, rule_mode: Any = None,
+                        fixed_rule: Any = None, rule_pool: Any = None) -> None:
         with self._lock:
             self.require_host(token)
             if self.status != "lobby" or self.mode != "bp":
@@ -1139,13 +1219,22 @@ class GameRoom:
                 next_same = allow_same_hero
             next_pool = self.bp_tier_pool if tier_pool is None else normalize_bp_tier_pool(tier_pool)
             next_rounds = self.bp_tier_rounds if tier_rounds is None else normalize_bp_tier_rounds(tier_rounds)
+            try:
+                next_rule_mode = self.bp_rule_mode if rule_mode is None else normalize_bp_rule_mode(rule_mode)
+                next_fixed_rule = self.bp_fixed_rule if fixed_rule is None else normalize_bp_rule_code(fixed_rule)
+                next_rule_pool = self.bp_rule_pool if rule_pool is None else normalize_bp_rule_pool(rule_pool)
+            except ValueError as exc:
+                raise RoomError(str(exc)) from exc
             cap = int(level_cap)
             if (size == self.bp_team_size and cap == self.bp_level_caps[size]
                     and show_win_count == self.bp_show_win_count
                     and next_format == self.bp_format
                     and next_same == bool(self.bp_allow_same_hero)
                     and tuple(next_pool) == tuple(self.bp_tier_pool)
-                    and next_rounds == int(self.bp_tier_rounds)):
+                    and next_rounds == int(self.bp_tier_rounds)
+                    and next_rule_mode == self.bp_rule_mode
+                    and next_fixed_rule == self.bp_fixed_rule
+                    and tuple(next_rule_pool) == tuple(self.bp_rule_pool)):
                 return
             self.bp_team_size = size
             self.bp_level_caps[size] = cap
@@ -1154,6 +1243,9 @@ class GameRoom:
             self.bp_allow_same_hero = next_same
             self.bp_tier_pool = tuple(next_pool)
             self.bp_tier_rounds = next_rounds
+            self.bp_rule_mode = next_rule_mode
+            self.bp_fixed_rule = next_fixed_rule
+            self.bp_rule_pool = tuple(next_rule_pool)
             self._bp_pair_cache = None
             self._bp_legal_cache = None
             self.invalidate_readiness()
@@ -1479,6 +1571,18 @@ class GameRoom:
             return "review"
         return "assign"
 
+    def _roll_bp_special_modes(self) -> tuple[str, ...]:
+        if self.bp_rule_mode == "fixed":
+            code = self.bp_fixed_rule if self.bp_fixed_rule in SPECIAL_MODE_BY_CODE else "none"
+            return choose_bp_special_modes((code,))
+        pool = tuple(self.bp_rule_pool)
+        if not pool:
+            raise RoomError("请至少勾选一条可随机的规则。")
+        try:
+            return choose_bp_special_modes(pool)
+        except ValueError as exc:
+            raise RoomError("请至少勾选一条可随机的规则。") from exc
+
     def _begin_bp(self) -> None:
         if self.bp_format == BP_FORMAT_TIER:
             self._begin_tier_bp()
@@ -1490,7 +1594,7 @@ class GameRoom:
             self.bp_hero_pool = ()
             raise RoomError("当前可用武将无法组成满足等级限制的66人武将池。")
         self.bp_auto_banned_levels = secrets.choice(pairs)
-        self.bp_special_modes = choose_bp_special_modes()
+        self.bp_special_modes = self._roll_bp_special_modes()
         self.bp_first_pick_team = secrets.choice(TEAM_IDS)
         self.bp_actions = []
         self.bp_assignments = {}
@@ -1510,7 +1614,7 @@ class GameRoom:
         self.bp_tier_plan = plan
         self.bp_auto_banned_levels = ()
         self.bp_hero_pool = ()
-        self.bp_special_modes = choose_bp_special_modes()
+        self.bp_special_modes = self._roll_bp_special_modes()
         self.bp_actions = []
         self.bp_assignments = {}
         self.bp_assign_opened = False
@@ -1649,6 +1753,10 @@ class GameRoom:
             "hero_pool_codes": list(self.bp_hero_pool),
             "hero_pool_levels": dict(sorted(Counter(int(known[code]["level"]) for code in self.bp_hero_pool).items())),
             "special_modes": public_special_modes(self.bp_special_modes),
+            "rule_mode": self.bp_rule_mode,
+            "fixed_rule": self.bp_fixed_rule,
+            "rule_pool": list(self.bp_rule_pool),
+            "rule_catalog": special_mode_catalog(),
             "legal_levels": self._bp_legal_levels(),
             "step_index": index,
             "step_count": len(sequence),
@@ -2739,6 +2847,24 @@ class GameRoom:
             self.board_height = next_height
             self.touch()
 
+    def set_chess_prep_seconds(self, token: str, seconds: Any) -> None:
+        with self._lock:
+            self.require_host(token)
+            if self.mode != "autochess":
+                raise RoomError("只有自走棋房间可以设置备战时间。")
+            if self.status != "lobby":
+                raise RoomError("只有在大厅中才能设置备战时间。")
+            try:
+                normalized = int(seconds)
+            except (TypeError, ValueError) as exc:
+                raise RoomError("备战时间必须是整数。") from exc
+            if normalized not in {0, 30, 45, 60, 90}:
+                raise RoomError("备战时间只能是 30、45、60、90 秒或无限。")
+            if normalized == int(getattr(self, "chess_prep_seconds", 90) or 0):
+                return
+            self.chess_prep_seconds = normalized
+            self.touch()
+
     def auto_configure(
         self,
         token: str,
@@ -3327,7 +3453,14 @@ class GameRoom:
 
     def _start_blocker(self) -> Optional[str]:
         if self.mode == "autochess":
-            return None if self.status == "lobby" else "自走棋已开局。"
+            if self.status != "lobby":
+                return "自走棋已开局。"
+            if self.human_seat_count() <= 0:
+                return "当前至少需要一个真人席位才能开始。"
+            waiting = [seat.name or f"席位 {seat.player_id}" for seat in self.seats.values() if seat.is_human and not seat.ready]
+            if waiting:
+                return f"等待真人席位确认准备：{'、'.join(waiting)}。"
+            return None
         if self.mode == "bp" and self.status == "bp":
             return self._bp_assignment_blocker()
         blocker = self._configuration_blocker()
@@ -3437,9 +3570,14 @@ class GameRoom:
                 self.require_host(token)
                 if self.status != "lobby" or self.autochess is None:
                     raise RoomError("自走棋已经开局。")
+                blocker = self._start_blocker()
+                if blocker is not None:
+                    raise RoomError(blocker)
                 for seat in self.seats.values():
                     if not seat.occupied:
                         seat.set_ai()
+                self.autochess.use_board_size(self.board_width, self.board_height)
+                self.autochess.use_preparation_seconds(int(getattr(self, "chess_prep_seconds", 90) or 0))
                 self.autochess.start()
                 self.status = "preparation"
                 self.touch()
@@ -3962,15 +4100,19 @@ class GameRoom:
         if self.autochess is None:
             raise RoomError("自走棋状态不存在。")
         prior_phase = self.autochess.phase
-        if advance and self.autochess.tick(self.seats):
-            self.status = self.autochess.phase
-            should_persist = (self.autochess.phase != prior_phase or
-                              time.time() - float(getattr(self, "_last_chess_persist_at", 0)) >= 5)
-            self.touch(persist_chess=should_persist)
+        if advance:
+            if self.autochess.phase != "battle" and self.autochess.tick(self.seats):
+                self.status = self.autochess.phase
+                should_persist = (self.autochess.phase != prior_phase or
+                                  time.time() - float(getattr(self, "_last_chess_persist_at", 0)) >= 5)
+                self.touch(persist_chess=should_persist)
+            if self.autochess.phase == "battle":
+                _ensure_autochess_worker(self)
         viewer = self.seat_for_token(viewer_token)
         viewer_id = viewer.player_id if viewer else None
         catalog = hero_lookup()
         chess = self.autochess.public(viewer_id, self.seats)
+        waiting = [seat.name or f"席位 {seat.player_id}" for seat in self.seats.values() if seat.is_human and not seat.ready]
         room_state = {
             "room_id": self.room_id, "match_id": self.current_match_id,
             "status": self.status, "mode": "autochess", "mode_name": "自走棋",
@@ -3987,10 +4129,17 @@ class GameRoom:
             "occupied_seat_count": self.occupied_seat_count(),
             "human_seat_count": self.human_seat_count(), "ai_seat_count": self.ai_seat_count(),
             "is_full": all(seat.occupied for seat in self.seats.values()),
-            "can_start": self.status == "lobby", "configuration_ready": self.status == "lobby",
-            "start_blocker": None if self.status == "lobby" else "自走棋已开局。",
+            "can_start": self.status == "lobby" and self.human_seat_count() > 0 and not waiting,
+            "configuration_ready": self.status == "lobby",
+            "start_blocker": (
+                None if self.status != "lobby"
+                else ("当前至少需要一个真人席位才能开始。" if self.human_seat_count() <= 0
+                      else (f"等待真人席位确认准备：{'、'.join(waiting)}。" if waiting else None))
+            ),
             "can_rematch": False, "hero_limit": 0,
-            "board_width": 10, "board_height": 10, "turn_timeout_seconds": 0,
+            "board_width": int(getattr(self, "board_width", 10) or 10),
+            "board_height": int(getattr(self, "board_height", 10) or 10), "turn_timeout_seconds": 0,
+            "chess_prep_seconds": int(getattr(self, "chess_prep_seconds", 90) or 0),
             "seats": [seat.to_public_dict(catalog, self.host_player_id) for seat in self.seats.values()],
             "autochess": chess, "bp": None,
         }
@@ -4196,7 +4345,7 @@ class RoomRegistry:
                 raise RoomError("房间不存在，可能是房间码输错了。")
             owner = getattr(room, "owner_user_id", None)
             is_owner = owner_user_id is not None and owner is not None and int(owner) == int(owner_user_id)
-            if not is_owner:
+            if not is_owner and room.human_seat_count() > 0:
                 room.require_host(token)
             del self._rooms[normalized]
             if room.mode == "autochess":

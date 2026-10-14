@@ -920,6 +920,14 @@ class MultiplayerRoomTests(unittest.TestCase):
         with self.assertRaises(RoomError):
             self.registry.get_room(room.room_id)
 
+    def test_anyone_can_delete_a_room_with_no_humans(self) -> None:
+        room, _, host_token = self.registry.create_room("Alice")
+        self.registry.leave_room(room.room_id, host_token)
+        self.assertEqual(room.human_seat_count(), 0)
+        self.registry.delete_room(room.room_id, "")
+        with self.assertRaises(RoomError):
+            self.registry.get_room(room.room_id)
+
     def test_guest_can_leave_lobby_and_free_their_seat(self) -> None:
         room, _, host_token = self.registry.create_room("Alice")
         _, guest_token = room.join("Bob")

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>武将</title>
     <link rel="stylesheet" href="/theme.css?v=r27" />
-    <link rel="stylesheet" href="/styles.css?v=r86" />
+    <link rel="stylesheet" href="/styles.css?v=r113" />
   </head>
   <!-- 哪一屏该显示，要等 /api/auth/me 回来才知道。在那之前先什么都不显示，
        否则标记里默认可见的那一屏会先闪出来，再被换掉。 -->
@@ -86,9 +86,56 @@
                 <span class="settings-row__label">对战记录</span>
                 <div id="settings-replay" class="settings-seg" role="group" aria-label="对战记录"></div>
               </div>
+              <div class="settings-row">
+                <div class="settings-row__text">
+                  <span class="settings-row__label">AI 决策</span>
+                  <p class="settings-row__hint">简化只在武将已给出的行动里挑选。完整沿用原来的评分。</p>
+                </div>
+                <div id="settings-ai" class="settings-seg" role="group" aria-label="AI 决策"></div>
+              </div>
               <p id="settings-message" class="meta-note"></p>
             </section>
-            <section id="recent-matches-panel" class="recent-matches-panel hidden" aria-labelledby="recent-matches-title">
+            <section id="library-panel" class="library-panel flow-panel hidden">
+              <aside class="library-nav" aria-label="数据库">
+                <button id="library-tab-heroes" class="library-nav__item is-on" type="button">武将列表</button>
+                <button id="library-tab-replays" class="library-nav__item" type="button">回放</button>
+              </aside>
+              <div class="library-main">
+                <div id="library-heroes" class="library-heroes">
+                  <div class="library-toolbar">
+                    <label class="library-filter"><span>等级</span>
+                      <select id="library-level" class="select">
+                        <option value="0">全部</option>
+                        <option value="1">1</option>
+                        <option value="2">2</option>
+                        <option value="3">3</option>
+                        <option value="4">4</option>
+                        <option value="5">5</option>
+                        <option value="6">6</option>
+                        <option value="7">7</option>
+                        <option value="8">8</option>
+                        <option value="9">9</option>
+                        <option value="10">10</option>
+                      </select>
+                    </label>
+                    <label class="library-filter"><span>排序</span>
+                      <select id="library-sort" class="select">
+                        <option value="level">等级</option>
+                        <option value="attack">攻击</option>
+                        <option value="defense">防御</option>
+                        <option value="speed">速度</option>
+                        <option value="attack_range">范围</option>
+                        <option value="mana">魔力</option>
+                        <option value="name">名称</option>
+                      </select>
+                    </label>
+                    <button id="library-sort-dir" class="ghost" type="button">正序</button>
+                    <input id="library-hero-search" class="input library-search" type="search" placeholder="搜索武将" aria-label="搜索武将" />
+                  </div>
+                  <div id="library-hero-list" class="library-hero-list"></div>
+                  <article id="library-hero-detail" class="library-hero-detail"></article>
+                </div>
+                <div id="recent-matches-panel" class="library-replays recent-matches-panel hidden">
               <!-- 标题由页头承担。这一层只留操作与一条补充说明的悬浮提示。 -->
               <div class="section-head recent-matches-head">
                 <h3 id="recent-matches-title" class="visually-hidden">最近战绩与回放</h3>
@@ -105,6 +152,8 @@
                 <div id="mastery-next-goal" class="mastery-next-goal"></div>
                 <div id="mastery-hero-list" class="mastery-hero-list"></div>
               </section>
+                </div>
+              </div>
             </section>
             <section id="strategy-panel" class="strategy-panel hidden">
               <!-- 这三个按钮的可用性判断只写一处，战役屏里的资源条和推进条都照抄
@@ -164,7 +213,6 @@
                 </div>
               </div>
               <div class="rule-divider" role="separator"></div>
-              <div class="room-side__kicker">房间配置</div>
               <span id="viewer-seat-label" class="visually-hidden">访客</span>
               <span id="viewer-seat-note" class="visually-hidden"></span>
               <span id="room-status-label" class="visually-hidden">等待双方进入</span>
@@ -175,6 +223,10 @@
                 <span class="room-setup__fact">
                   <span class="room-setup__label">模式</span>
                   <strong id="room-mode-label" class="room-setup__value">标准选将</strong>
+                </span>
+                <span id="room-bp-rule-fact" class="room-setup__fact hidden">
+                  <span class="room-setup__label">规则</span>
+                  <strong id="room-bp-rule-label" class="room-setup__value">随机</strong>
                 </span>
                 <span class="room-setup__fact">
                   <span class="room-setup__label">席位数</span>
@@ -189,7 +241,7 @@
                   <strong id="room-hero-limit-label" class="room-setup__value">5</strong>
                 </span>
                 <span class="room-setup__fact">
-                  <span class="room-setup__label">回合时限</span>
+                  <span id="room-time-fact-label" class="room-setup__label">回合时限</span>
                   <strong id="room-turn-timeout-label" class="room-setup__value">无限</strong>
                 </span>
                 <span class="room-setup__fact">
@@ -200,6 +252,7 @@
             </section>
             <div class="room-side__actions">
                 <button id="open-room-setup" class="room-side__action" type="button">修改设置</button>
+                <button id="fill-empty-ai" class="room-side__action hidden" type="button">设置空位为 AI</button>
                 <button id="auto-configure-room" class="room-side__action hidden" type="button">自动配置</button>
             </div>
             <div class="rule-divider" role="separator"></div>
@@ -395,6 +448,7 @@
               <aside id="battle-right-rail" class="battle-dock is-collapsed" aria-label="战场信息">
                 <nav class="battle-dock__tabs" role="tablist">
                   <button type="button" class="battle-dock__tab is-active" data-battle-tab="info" role="tab" aria-selected="true">信息</button>
+                  <button type="button" class="battle-dock__tab" data-battle-tab="field" role="tab" aria-selected="false">战场</button>
                   <button type="button" class="battle-dock__tab" data-battle-tab="queue" role="tab" aria-selected="false">行动</button>
                   <button type="button" class="battle-dock__tab hidden" data-battle-tab="army" role="tab" aria-selected="false">军队</button>
                   <button type="button" class="battle-dock__tab" data-battle-tab="log" role="tab" aria-selected="false">记录</button>
@@ -405,6 +459,9 @@
                   <div id="battle-left-rail" class="battle-dock__page" data-battle-page="info">
                     <div id="battle-connection-summary" class="battle-connection-summary hidden" role="status" aria-live="polite"></div>
                     <div id="selected-card" class="selected-card"></div>
+                  </div>
+                  <div class="battle-dock__page hidden" data-battle-page="field">
+                    <div id="battle-field-list" class="battle-field-list"></div>
                   </div>
                   <div class="battle-dock__page hidden" data-battle-page="queue">
                     <p id="chain-caption"></p>
@@ -486,11 +543,12 @@
     <!-- 房间设置。改完按确定才生效：席位数一改就增删席位，中途的过渡值不该
          被当成一次真实的调整发给服务端。 -->
     <div id="room-setup-dialog" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="room-setup-title">
-      <div class="modal-card modal-card--narrow">
+      <div class="modal-card modal-card--setup">
         <div class="modal-card__head">
           <h2 id="room-setup-title" class="modal-card__title">房间设置</h2>
         </div>
         <div class="modal-card__body">
+          <div class="setup-grid">
           <label class="field" for="room-mode-select">
             <span class="field__label">模式</span>
             <select id="room-mode-select" class="select"></select>
@@ -503,6 +561,17 @@
             <span class="field__label">每队随机武将数</span>
             <input id="random-roster-size-input" class="input" type="number" min="1" step="1" value="1" />
           </label>
+          </div>
+          <section id="setup-block-bp" class="setup-block hidden">
+            <h3 id="setup-section-bp" class="setup-section">BP类型</h3>
+            <div class="setup-grid">
+          <label id="bp-format-control" class="field hidden" for="bp-format-select">
+            <span class="field__label">BP 类型</span>
+            <select id="bp-format-select" class="select">
+              <option value="full">全体选择</option>
+              <option value="tier">随机等级</option>
+            </select>
+          </label>
           <label id="bp-team-size-control" class="field hidden" for="bp-team-size-select">
             <span>BP每队武将数</span>
             <select id="bp-team-size-select" class="select"><option value="3">3v3</option><option value="5">5v5</option></select>
@@ -510,13 +579,6 @@
           <label id="bp-level-cap-control" class="field hidden" for="bp-level-cap-input">
             <span>每队总等级上限</span>
             <input id="bp-level-cap-input" class="input" type="number" min="1" max="50" step="1" value="15" />
-          </label>
-          <label id="bp-format-control" class="field hidden" for="bp-format-select">
-            <span class="field__label">BP 类型</span>
-            <select id="bp-format-select" class="select">
-              <option value="full">全体选择</option>
-              <option value="tier">随机等级</option>
-            </select>
           </label>
           <label id="bp-same-hero-control" class="switch hidden" for="bp-allow-same-hero">
             <input id="bp-allow-same-hero" type="checkbox" />
@@ -526,18 +588,42 @@
           <label id="bp-tier-rounds-control" class="field hidden" for="bp-tier-rounds-input">
             <span class="field__label">轮数</span>
             <input id="bp-tier-rounds-input" class="input" type="number" min="1" max="12" step="1" value="3" />
-            <span class="field__hint">一共抽几轮。每一轮双方只在抽到的等级里各选 1 名。</span>
           </label>
-          <div id="bp-tier-pool-control" class="field hidden">
-            <span class="field__label">可随机的等级</span>
-            <div id="bp-tier-pool" class="bp-tier-pool"></div>
-            <span class="field__hint">人够就各禁 2 再各选 1，少一点就各禁 1，太少就不禁。抽过的等级还可以再抽到。</span>
-          </div>
           <label id="bp-win-count-control" class="switch hidden" for="bp-show-win-count">
             <input id="bp-show-win-count" type="checkbox" checked />
             <span class="switch__track" aria-hidden="true"></span>
             <span class="switch__text">显示双方胜场数</span>
           </label>
+          <div id="bp-tier-pool-control" class="field setup-span hidden">
+            <span class="field__label">可随机的等级</span>
+            <div id="bp-tier-pool" class="bp-tier-pool"></div>
+          </div>
+            </div>
+          </section>
+          <section id="setup-block-rule" class="setup-block hidden">
+            <h3 id="setup-section-rule" class="setup-section">规则</h3>
+            <div class="setup-grid">
+          <div id="bp-rule-control" class="field setup-span hidden">
+            <div class="setup-grid">
+            <label class="field" for="bp-rule-mode">
+              <span class="field__label">规则方式</span>
+              <select id="bp-rule-mode" class="select">
+                <option value="fixed">固定规则</option>
+                <option value="random">随机规则</option>
+              </select>
+            </label>
+            <label id="bp-fixed-rule-field" class="field" for="bp-fixed-rule">
+              <span class="field__label">具体规则</span>
+              <select id="bp-fixed-rule" class="select"></select>
+            </label>
+            <div id="bp-rule-pool" class="bp-tier-pool setup-span"></div>
+            </div>
+          </div>
+            </div>
+          </section>
+          <section id="setup-block-field" class="setup-block">
+            <h3 id="setup-section-field" class="setup-section">战场配置</h3>
+            <div class="setup-grid">
           <label id="room-army-switch" class="switch" for="room-army-enabled">
             <input id="room-army-enabled" type="checkbox" />
             <span class="switch__track" aria-hidden="true"></span>
@@ -551,6 +637,16 @@
           <label id="room-hero-limit-control" class="field hidden" for="room-hero-limit-input">
             <span class="field__label">每席最多</span>
             <input id="room-hero-limit-input" class="input" type="number" min="1" max="20" step="1" value="5" />
+          </label>
+          <label id="room-chess-prep-field" class="field hidden" for="room-chess-prep-select">
+            <span class="field__label">备战时间</span>
+            <select id="room-chess-prep-select" class="select">
+              <option value="30">30 秒</option>
+              <option value="45">45 秒</option>
+              <option value="60">60 秒</option>
+              <option value="90" selected>90 秒</option>
+              <option value="0">无限</option>
+            </select>
           </label>
           <label class="field" for="room-turn-timeout-select">
             <span class="field__label">回合时限</span>
@@ -568,8 +664,9 @@
               <span class="board-size-sep" aria-hidden="true">×</span>
               <input id="room-board-height-input" class="input" type="number" min="6" max="100" step="1" value="10" aria-label="战场高度" />
             </div>
-            <span class="field__hint">宽 × 高，每边 6 到 100 格。默认 10×10。</span>
           </div>
+            </div>
+          </section>
         </div>
         <div class="modal-card__actions">
           <button id="room-setup-cancel" class="ghost" type="button">取消</button>
@@ -684,6 +781,6 @@
     <script src="/platform/home-ui.js?v=r13" defer></script>
     <script src="/tactical/replay-ui.js?v=r14" defer></script>
     <script src="/tactical/battle-feedback.js?v=r15" defer></script>
-    <script type="module" src="/app.js?v=r70"></script>
+    <script type="module" src="/app.js?v=r94"></script>
   </body>
 </html>

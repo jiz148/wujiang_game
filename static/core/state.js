@@ -115,6 +115,12 @@ export const state = {
   strategyTurnToastTimer: 0,
   aiPreview: null,
   homeFlow: "",
+  libraryTab: "heroes",
+  libraryHeroQuery: "",
+  libraryHeroCode: "",
+  libraryLevel: "0",
+  librarySort: "level",
+  librarySortDir: "asc",
   // 首页数据加载失败时的提示。置位后，页头文案不再按流程覆盖它。
   homeLoadError: "",
   quickStartBusy: false,

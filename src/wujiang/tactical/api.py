@@ -777,7 +777,10 @@ def _post_bp_room_action(ctx: RequestContext, action: str) -> None:
                                  bp_format=payload.get("bp_format") if "bp_format" in payload else None,
                                  allow_same_hero=payload.get("allow_same_hero") if "allow_same_hero" in payload else None,
                                  tier_pool=payload.get("tier_pool") if "tier_pool" in payload else None,
-                                 tier_rounds=payload.get("tier_rounds") if "tier_rounds" in payload else None)
+                                 tier_rounds=payload.get("tier_rounds") if "tier_rounds" in payload else None,
+                                 rule_mode=payload.get("rule_mode") if "rule_mode" in payload else None,
+                                 fixed_rule=payload.get("fixed_rule") if "fixed_rule" in payload else None,
+                                 rule_pool=payload.get("rule_pool") if "rule_pool" in payload else None)
         elif action == "team-size":
             room.set_bp_team_size(token, payload.get("team_size"))
         elif action == "captain":
@@ -1024,6 +1027,35 @@ def post_rooms_set_board_size(ctx: RequestContext) -> None:
     try:
         room = ROOMS.get_room(str(room_id))
         room.set_board_size(str(player_token or ""), width, height)
+    except RoomError as exc:
+        room = None
+        try:
+            room = ROOMS.get_room(str(room_id))
+        except RoomError:
+            pass
+        error_payload = {"error": str(exc)}
+        if room is not None:
+            error_payload["state"] = room.serialize_state(str(player_token or ""), base_url=request_base_url(handler))
+        json_response(handler, HTTPStatus.BAD_REQUEST, error_payload)
+        return
+    json_response(
+        handler,
+        HTTPStatus.OK,
+        room_state_with_strategy_sync(room, str(player_token or ""), base_url=request_base_url(handler)),
+    )
+    return
+
+
+@post("/api/rooms/set-chess-prep")
+def post_rooms_set_chess_prep(ctx: RequestContext) -> None:
+    handler = ctx.handler
+    payload = ctx.payload
+    room_id = payload.get("room_id", "")
+    player_token = payload.get("player_token")
+    seconds = payload.get("chess_prep_seconds", payload.get("seconds", 90))
+    try:
+        room = ROOMS.get_room(str(room_id))
+        room.set_chess_prep_seconds(str(player_token or ""), seconds)
     except RoomError as exc:
         room = None
         try:

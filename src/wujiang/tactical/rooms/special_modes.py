@@ -31,13 +31,69 @@ SPECIAL_MODE_BY_CODE = {code: {"code": code, "name": name, "description": descri
                         for code, name, description in SPECIAL_MODES}
 
 
-def choose_bp_special_modes() -> tuple[str, ...]:
-    """Draw one workbook row; Double Down draws two distinct actual effects."""
-    code = secrets.choice(SPECIAL_MODES)[0]
-    if code == "double_down":
-        choices = [item[0] for item in SPECIAL_MODES if item[0] not in {"double_down", "none"}]
-        return ("double_down", *secrets.SystemRandom().sample(choices, 2))
-    return (code,)
+def resolve_special_mode(code: str) -> tuple[str, ...]:
+    """一条规则展开成实际生效的代码。Double Down 会再抽两条不同的效果。"""
+    if code not in SPECIAL_MODE_BY_CODE:
+        raise ValueError(code)
+    if code != "double_down":
+        return (code,)
+    choices = [item[0] for item in SPECIAL_MODES if item[0] not in {"double_down", "none"}]
+    return ("double_down", *secrets.SystemRandom().sample(choices, 2))
+
+
+def choose_bp_special_modes(pool: Sequence[str] | None = None) -> tuple[str, ...]:
+    """从规则表抽一条。不传名单时沿用整张表；传入名单时只在名单里抽。"""
+    if pool is None:
+        code = secrets.choice(SPECIAL_MODES)[0]
+    else:
+        choices = [str(code) for code in pool if str(code) in SPECIAL_MODE_BY_CODE]
+        if not choices:
+            raise ValueError("empty special mode pool")
+        code = secrets.choice(choices)
+    return resolve_special_mode(code)
+
+
+def special_mode_catalog() -> list[dict[str, str]]:
+    return [{"code": code, "name": name, "description": description} for code, name, description in SPECIAL_MODES]
+
+
+def normalize_bp_rule_mode(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    aliases = {
+        "fixed": "fixed",
+        "固定": "fixed",
+        "固定规则": "fixed",
+        "random": "random",
+        "随机": "random",
+        "随机规则": "random",
+    }
+    mapped = aliases.get(text)
+    if mapped is None:
+        raise ValueError("规则方式只能是固定规则或随机规则。")
+    return mapped
+
+
+def normalize_bp_rule_code(value: Any) -> str:
+    text = str(value or "").strip()
+    if text in SPECIAL_MODE_BY_CODE:
+        return text
+    for code, name, _description in SPECIAL_MODES:
+        if text == name:
+            return code
+    raise ValueError("未知的规则。")
+
+
+def normalize_bp_rule_pool(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        value = [part for part in value.replace("，", ",").split(",") if part.strip()]
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ValueError("请至少勾选一条可随机的规则。")
+    codes: list[str] = []
+    for item in value:
+        code = normalize_bp_rule_code(item)
+        if code not in codes:
+            codes.append(code)
+    return tuple(codes)
 
 
 def public_special_modes(codes: Sequence[str]) -> list[dict[str, Any]]:

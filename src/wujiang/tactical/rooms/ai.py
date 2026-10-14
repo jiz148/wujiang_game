@@ -731,6 +731,36 @@ def choose_electronic_teleport_action(battle: Battle, prompt: dict[str, Any], un
     return {"type": "damage_choice", "unit_id": unit.unit_id, "target_unit_id": best[1]}
 
 
+FAST_AI_MOVE_LIMIT = 12
+
+
+def fast_move_shortlist(battle: Battle, actor: Unit, cells: list[Position], role: str) -> list[Position]:
+    """Keep a bounded set of destinations instead of scoring the whole board.
+
+    Melee steps toward the nearest enemy, ranged heroes look for their
+    preferred distance, and support hangs back. The rest of the reachable
+    area is ignored.
+    """
+    if len(cells) <= FAST_AI_MOVE_LIMIT or actor.position is None:
+        return cells
+    enemies = living_hostile_combatants(battle, actor.player_id)
+    if not enemies:
+        return cells[:FAST_AI_MOVE_LIMIT]
+    preferred = max(1, int(actor.targeting_range()))
+    origin = actor.position
+
+    def rank(cell: Position) -> tuple[float, int]:
+        enemy_distance = min(distance_to_position(battle, enemy, cell) for enemy in enemies)
+        step = cell.distance_to(origin)
+        if role == "support":
+            return (abs(enemy_distance - (preferred + 2)), step)
+        if preferred <= 1:
+            return (float(enemy_distance), step)
+        return (abs(enemy_distance - preferred), step)
+
+    return sorted(cells, key=rank)[:FAST_AI_MOVE_LIMIT]
+
+
 def build_move_candidates(
     battle: Battle,
     actor: Unit,
@@ -744,7 +774,10 @@ def build_move_candidates(
     candidates: list[AICandidate] = []
     if getattr(actor, "hero_code", "") == "excel_r118":
         candidates.extend(build_zero_crossing_move_candidates(battle, actor, role, profile))
-    for cell in preview_positions(action.get("preview", {}).get("cells")):
+    cells = preview_positions(action.get("preview", {}).get("cells"))
+    if getattr(battle, "fast_ai_simulation", False):
+        cells = fast_move_shortlist(battle, actor, cells, role)
+    for cell in cells:
         payload = {"type": "move", "unit_id": actor.unit_id, "x": cell.x, "y": cell.y}
         if not payload_is_legal(battle, payload):
             continue
@@ -2111,6 +2144,8 @@ def score_move_destination(
         score += max(0.0, nearest_enemy - 1.0) * profile.support_bonus
     elif role != "support":
         score += max(0.0, 4.0 - nearest_enemy) * (4.0 + profile.aggressive_bonus / 6.0)
+    if getattr(battle, "fast_ai_simulation", False):
+        return score
     if actor.hero_code == "soul_wraith":
         with ai_probe_rollback(battle):
             actor.position = destination

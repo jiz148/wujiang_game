@@ -21,7 +21,8 @@
     if (!panel || !message || !list || !refresh) return;
     const visible = loggedIn
       && state.screen === "draft"
-      && state.homeFlow === "archive"
+      && state.homeFlow === "library"
+      && state.libraryTab === "replays"
       && !state.historicalMatchId;
     panel.classList.toggle("hidden", !visible);
     if (!visible) return;

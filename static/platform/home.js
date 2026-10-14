@@ -1,11 +1,12 @@
 // Home screen: entry points, recent matches and onboarding.
 import { $ } from '../core/dom.js';
-import { fetchJson, recordProductEvent } from '../core/net.js';
+import { fetchJson, recordProductEvent, roomNameKey, roomTokenKey, syncLocation } from '../core/net.js';
 import { render } from '../core/render.js';
 import { AUTH_TOKEN_KEY, LAST_TUTORIAL_ROOM_KEY, state } from '../core/state.js';
 import { saveProfileName, userLoggedIn } from '../platform/auth.js';
 import { clearStrategyState, refreshStrategyCampaigns } from '../strategic/api.js';
 import { renderRecentMatches } from '../strategic/ui-base.js';
+import { renderLibrary } from './library.js';
 import { renderPostgameSummary } from '../tactical/battle-ui.js';
 import { loadStoredIdentity } from '../tactical/session.js';
 
@@ -15,7 +16,7 @@ const FLOW_PANELS = {
   campaign: "strategy-panel",
   skirmish: "skirmish-panel",
   tutorial: "quick-start-panel",
-  archive: "recent-matches-panel",
+  library: "library-panel",
   settings: "settings-panel",
 };
 
@@ -26,7 +27,7 @@ const FLOW_HEADINGS = {
   skirmish: ["房间大厅", null],
   settings: ["设置", null],
   tutorial: ["新手教学", "用固定阵容和地图走一遍战场操作。"],
-  archive: ["战绩与回放", "最近 10 场已结束对局，以及武将熟练度。"],
+  library: ["数据库", null],
 };
 
 export function renderHomeFlow() {
@@ -60,6 +61,7 @@ export function renderHomeFlow() {
     }
   }
   $("lobby-bar")?.classList.toggle("hidden", creating);
+  renderLibrary();
   $("room-create-step")?.classList.toggle("hidden", !creating);
   const createButton = $("create-room");
   if (createButton) {
@@ -277,6 +279,32 @@ export async function logoutAuth() {
   if (state.authBusy) return;
   state.authBusy = true;
   render();
+  const roomId = state.room?.room_id;
+  const token = state.playerToken;
+  if (roomId && token && state.room?.viewer_player_id != null) {
+    try {
+      await fetchJson("/api/rooms/leave", {
+        method: "POST",
+        body: JSON.stringify({ room_id: roomId, player_token: token }),
+      });
+    } catch (_error) {
+      // 登录会话仍然要结束。席位释放失败时，本地也不再占着这个房间。
+    }
+  }
+  if (roomId) {
+    const tokenKey = roomTokenKey(roomId);
+    const nameKey = roomNameKey(roomId);
+    sessionStorage.removeItem(tokenKey);
+    sessionStorage.removeItem(nameKey);
+    localStorage.removeItem(tokenKey);
+    localStorage.removeItem(nameKey);
+  }
+  state.playerToken = "";
+  state.room = null;
+  state.battle = null;
+  state.liveBattle = null;
+  state.replayMode = false;
+  if (roomId) syncLocation("menu", "");
   try {
     await fetchJson("/api/auth/logout", {
       method: "POST",
@@ -287,6 +315,7 @@ export async function logoutAuth() {
   } finally {
     clearAuthSession("已退出登录。");
     state.authBusy = false;
+    if (roomId) state.screen = "menu";
     render();
   }
 }
