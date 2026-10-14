@@ -101,6 +101,21 @@ def run_match_audit(
     battle = create_battle(roster1, roster2, mode=CLASSIC_BATTLE_MODE)
     run_dir = Path(output_dir) if output_dir is not None else default_output_dir(seed=seed, label=label)
     run_dir.mkdir(parents=True, exist_ok=True)
+    progress_path = run_dir / "match_progress.json"
+    started = time.perf_counter()
+
+    def record_progress(stage: str, current_step: int, decision: Optional[dict[str, Any]] = None) -> None:
+        payload = dict((decision or {}).get("payload") or {})
+        write_json(progress_path, {
+            "stage": stage,
+            "step": current_step,
+            "max_steps": max_steps,
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+            "phase": current_phase(battle),
+            "action_type": payload.get("type"),
+            "skill_code": payload.get("skill_code"),
+            "actor": (decision or {}).get("actor"),
+        })
 
     findings = FindingRecorder()
     trace_events: list[dict[str, Any]] = []
@@ -118,6 +133,7 @@ def run_match_audit(
 
     step = 0
     while battle.winner is None and step < max_steps:
+        record_progress("building_decision", step)
         decision = next_decision(battle, difficulty, findings, step=step)
         if decision is None:
             findings.add(
@@ -129,10 +145,12 @@ def run_match_audit(
                 evidence={"phase": current_phase(battle)},
             )
             break
+        record_progress("applying_action", step, decision)
         event = apply_decision(battle, decision, findings, step)
         trace_events.append(event)
         report_lines.extend(report_lines_for_event(event))
         step += 1
+        record_progress("step_complete", step, decision)
 
     if battle.winner is None and step >= max_steps:
         completed_turns = int(getattr(battle, "completed_turns", 0) or 0)
@@ -151,6 +169,8 @@ def run_match_audit(
             },
         )
 
+    record_progress("match_complete" if battle.winner is not None else "match_stopped", step)
+
     manifest = {
         "seed": seed,
         "difficulty": difficulty,
@@ -167,6 +187,7 @@ def run_match_audit(
             "battle_report": "battle_report.md",
             "findings_jsonl": "findings.jsonl",
             "findings_markdown": "findings.md",
+            "progress": "match_progress.json",
         },
     }
     report_lines.extend(

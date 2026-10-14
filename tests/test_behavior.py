@@ -30636,6 +30636,220 @@ class NewBatch249251AncientBehaviorTests(unittest.TestCase):
                                             instant_only=False), 0)
 
 
+class NewBatch253AncientBehaviorTests(unittest.TestCase):
+    """Ancient knight: initial mount, direct rust loss, and per-turn damage mode."""
+
+    def fixture(self, *, ally=False):
+        team = ["excel_r253", "bard"] if ally else "excel_r253"
+        battle = create_battle(team, ["bard", "excel_r249"])
+        knight = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r253")
+        horse = summon_by_code(battle, 1, "ancient_mechanical_horse")
+        enemy = next(unit for unit in battle.hero_units(2) if unit.hero_code == "bard")
+        mech = next(unit for unit in battle.hero_units(2) if unit.hero_code == "excel_r249")
+        knight.position = horse.position = Position(3, 3)
+        enemy.position, mech.position = Position(5, 3), Position(6, 3)
+        for unit in (knight, horse, enemy, mech):
+            unit.max_health = unit.current_hp = 2
+        return battle, knight, horse, enemy, mech
+
+    def test_public_registry_mount_and_complete_skill_contract(self):
+        from wujiang.tactical.heroes.registry import list_heroes
+
+        battle, knight, horse, _, _ = self.fixture()
+        self.assertIn("excel_r253", {entry["code"] for entry in list_heroes()})
+        self.assertTrue({"mechanical_horse", "pierce", "protection", "ancient_cursed_rust",
+                         "ancient_fusion"}.issubset(knight.skill_map()))
+        self.assertEqual((horse.stat("attack"), horse.stat("defense"), horse.stat("speed")), (4, 5, 4))
+        self.assertEqual((horse.footprint_width, horse.footprint_height), (1, 2))
+        self.assertEqual((horse.is_mount, knight.mounted_on_unit_id, horse.mount_owner_id),
+                         (True, horse.unit_id, knight.unit_id))
+        self.assertEqual(knight.attack_actions_per_turn(), 2)
+        self.assertEqual(knight.get_skill("ancient_cursed_rust").max_uses_per_turn, 1)
+        self.assertEqual(knight.get_skill("mechanical_horse").mana_cost, 0)
+
+    def test_ridden_damage_maps_once_to_horse_and_cooldown_requires_full_turn_gap(self):
+        battle, knight, horse, enemy, _ = self.fixture()
+        battle.configure_turn_order([knight.unit_id, enemy.unit_id])
+        battle.start_current_turn()
+        before_rider = knight.current_hp
+        battle.resolve_damage(DamageContext(source=enemy, target=knight, attack_power=7,
+                                           is_skill=False, action_name="普攻", tags={"attack"}))
+        self.assertEqual(knight.current_hp, before_rider)
+        self.assertLess(horse.current_hp, horse.max_health)
+        horse.alive, horse.current_hp = False, 0
+        battle.cleanup_dead_units()
+        self.assertTrue(knight.has_status("机械马召回冷却"))
+        summon = knight.get_skill("mechanical_horse")
+        self.assertFalse(summon.can_use(battle, knight, {})[0])
+        cooldown = knight.get_status("机械马召回冷却")
+        self.assertEqual(cooldown.duration, 2)
+        cooldown.on_owner_turn_end(battle)
+        self.assertFalse(summon.can_use(battle, knight, {})[0])
+        cooldown.on_owner_turn_end(battle)
+        self.assertTrue(summon.can_use(battle, knight, {})[0])
+        summon.execute(battle, knight, {})
+        self.assertIsNotNone(battle.mounted_unit_for(knight))
+
+    def test_cursed_rust_hits_both_non_mech_heroes_and_pierces_only_one_shield(self):
+        battle, knight, horse, enemy, mech = self.fixture(ally=True)
+        ally = next(unit for unit in battle.hero_units(1) if unit.hero_code == "bard")
+        ally.position = Position(4, 3)
+        ally.max_health = ally.current_hp = 2
+        enemy.shields = 2
+        rust = knight.get_skill("ancient_cursed_rust")
+        enemy.is_army_soldier = True
+        self.assertNotIn(enemy.unit_id, rust.preview(battle, knight)["target_unit_ids"])
+        enemy.is_army_soldier = False
+        preview = rust.preview(battle, knight)
+        self.assertIn(enemy.unit_id, preview["target_unit_ids"])
+        self.assertIn(ally.unit_id, preview["target_unit_ids"])
+        self.assertNotIn(mech.unit_id, preview["target_unit_ids"])
+        battle.configure_turn_order([knight.unit_id, enemy.unit_id])
+        battle.start_current_turn()
+        battle.perform_action({"type": "skill", "unit_id": knight.unit_id, "skill_code": rust.code})
+        battle.advance_followup_actions()
+        resolve_pending_chain(battle)
+        self.assertAlmostEqual(enemy.current_hp, 1)
+        self.assertAlmostEqual(ally.current_hp, 1)
+        self.assertEqual(enemy.shields, 1)
+        self.assertEqual(mech.current_hp, 2)
+        self.assertEqual(horse.current_hp, 2)
+
+    def test_cursed_rust_respects_magic_immunity_and_freezes_declared_area(self):
+        battle, knight, horse, enemy, _ = self.fixture()
+        rust = knight.get_skill("ancient_cursed_rust")
+        enemy.magic_immunity = True
+        rust.execute(battle, knight, {})
+        battle.advance_followup_actions()
+        resolve_pending_chain(battle)
+        self.assertEqual(enemy.current_hp, 2)
+        enemy.magic_immunity = False
+        declared = rust.queued_payload_metadata(battle, knight, {})
+        knight.position = horse.position = Position(0, 6)
+        self.assertIn(enemy.position, rust.chosen_cells(battle, knight,
+                                                       {"queued_resolution": True, **declared}))
+        rust.execute(battle, knight, {"queued_resolution": True, **declared})
+        battle.advance_followup_actions()
+        resolve_pending_chain(battle)
+        self.assertAlmostEqual(enemy.current_hp, 1)
+
+    def test_actual_damage_sets_mode_but_shield_and_field_damage_do_not(self):
+        battle, knight, horse, enemy, _ = self.fixture()
+        horse.shields = 1
+        battle.resolve_damage(DamageContext(source=enemy, target=knight, attack_power=8,
+                                           is_skill=False, action_name="打盾", tags={"attack"}))
+        self.assertFalse(horse.has_status("古代伤害适应·普攻"))
+        battle.resolve_damage(DamageContext(source=enemy, target=knight, attack_power=8,
+                                           is_skill=False, action_name="普攻", tags={"attack"}))
+        self.assertTrue(horse.has_status("古代伤害适应·普攻"))
+        before = horse.current_hp
+        blocked = battle.resolve_damage(DamageContext(source=enemy, target=knight, attack_power=0,
+                                                      raw_damage=0.5, is_skill=True,
+                                                      action_name="技能", tags={"skill"}))
+        self.assertEqual(horse.current_hp, before)
+        self.assertFalse(blocked.cancelled)
+        self.assertEqual(blocked.actual_damage, 0)
+        battle.resolve_damage(DamageContext(source=enemy, target=knight, attack_power=0,
+                                           raw_damage=0.25, is_skill=False, from_field_effect=True,
+                                           action_name="场地"))
+        self.assertLess(horse.current_hp, before)
+        horse.get_status("古代伤害适应·普攻").on_any_turn_end(battle, enemy.player_id)
+        self.assertFalse(horse.has_status("古代伤害适应·普攻"))
+
+    def test_fusion_transfers_printed_mode_not_deployment_horse(self):
+        battle = create_battle(["excel_r253", "excel_r250"], "bard")
+        knight = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r253")
+        beast = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r250")
+        knight.get_skill("ancient_fusion").execute(battle, knight,
+            {"target_unit_id": beast.unit_id, "copied_skill_code": "ancient_cursed_rust"})
+        self.assertTrue(any(trait.name == "古代伤害适应" for trait in beast.traits))
+        self.assertFalse(any(trait.name == "机械马开局乘骑" for trait in beast.traits))
+        self.assertIn("ancient_cursed_rust", beast.skill_map())
+        enemy = primary_hero(battle, 2)
+        beast.max_health = beast.current_hp = 2
+        battle.resolve_damage(DamageContext(source=enemy, target=beast, attack_power=8,
+                                           is_skill=False, action_name="普攻", tags={"attack"}))
+        self.assertTrue(beast.has_status("古代伤害适应·普攻"))
+        before = beast.current_hp
+        battle.resolve_damage(DamageContext(source=enemy, target=beast, attack_power=0,
+                                           raw_damage=0.25, is_skill=True,
+                                           action_name="技能", tags={"skill"}))
+        self.assertEqual(beast.current_hp, before)
+        ridden = create_battle(["excel_r249", "excel_r253"], "bard")
+        engineer = next(unit for unit in ridden.hero_units(1) if unit.hero_code == "excel_r249")
+        mounted_knight = next(unit for unit in ridden.hero_units(1) if unit.hero_code == "excel_r253")
+        mounted_horse = summon_by_code(ridden, 1, "ancient_mechanical_horse")
+        horse_attack, rider_attack = mounted_horse.stat("attack"), mounted_knight.stat("attack")
+        selection = engineer.get_skill("ancient_fusion").preview(ridden, engineer)["selection"]
+        self.assertEqual(next(target for target in selection["targets"]
+                              if target["unit_id"] == mounted_knight.unit_id)["recipient_name"], mounted_horse.name)
+        engineer.get_skill("ancient_fusion").execute(ridden, engineer,
+            {"target_unit_id": mounted_knight.unit_id, "copied_skill_code": "ancient_repair"})
+        self.assertEqual(mounted_horse.stat("attack"), horse_attack + 1)
+        self.assertEqual(mounted_knight.stat("attack"), rider_attack)
+        self.assertIn("ancient_repair", mounted_horse.skill_map())
+
+    def test_ai_values_effective_rust_and_mount_but_rejects_friendly_loss(self):
+        from wujiang.tactical.rooms.ai import score_skill_payload, skill_payload_has_effective_enemy_impact
+
+        battle, knight, horse, enemy, _ = self.fixture(ally=True)
+        ally = next(unit for unit in battle.hero_units(1) if unit.hero_code == "bard")
+        ally.position = Position(7, 7)
+        profile = difficulty_profile("standard")
+        rust = knight.get_skill("ancient_cursed_rust")
+        action = {"code": rust.code, "target_mode": "self", "preview": rust.preview(battle, knight)}
+        payload = {"type": "skill", "unit_id": knight.unit_id, "skill_code": rust.code}
+        self.assertTrue(skill_payload_has_effective_enemy_impact(battle, knight, action, payload))
+        self.assertGreater(score_skill_payload(battle, knight, action, payload, profile, instant_only=False), 0)
+        ally.position = Position(4, 3)
+        ally.current_hp = 2
+        enemy.current_hp = 0.25
+        self.assertLess(score_skill_payload(battle, knight, action, payload, profile, instant_only=False), 0)
+        enemy.magic_immunity = True
+        self.assertFalse(skill_payload_has_effective_enemy_impact(battle, knight, action, payload))
+        horse.alive, horse.current_hp = False, 0
+        battle.cleanup_dead_units()
+        knight.remove_status(knight.get_status("机械马召回冷却"), battle)
+        mount = knight.get_skill("mechanical_horse")
+        mount_action = {"code": mount.code, "target_mode": "self", "preview": mount.preview(battle, knight)}
+        mount_payload = {"type": "skill", "unit_id": knight.unit_id, "skill_code": mount.code}
+        self.assertGreater(score_skill_payload(battle, knight, mount_action, mount_payload, profile,
+                                               instant_only=False), 0)
+
+    def test_partner_fantasy_validates_only_the_declared_landing(self):
+        battle = create_battle("excel_r127", "bard")
+        battle.width, battle.height = 12, 10
+        bird, enemy = primary_hero(battle, 1), primary_hero(battle, 2)
+        bird.position, enemy.position = Position(1, 2), Position(3, 2)
+        skill = bird.get_skill("fantasy_move")
+        base = {"type": "skill", "unit_id": bird.unit_id, "skill_code": skill.code,
+                "target_unit_id": enemy.unit_id}
+        with mock.patch.object(skill, "legal_destinations", side_effect=AssertionError("board scan")):
+            self.assertEqual(skill.queued_payload_metadata(
+                battle, bird, {**base, "x": 7, "y": 2}),
+                {"fantasy_landing": {"x": 7, "y": 2}})
+            with self.assertRaises(ActionError):
+                skill.queued_payload_metadata(battle, bird, {**base, "x": 4, "y": 2})
+
+    def test_partner_fantasy_ai_scores_each_landing_once(self):
+        from wujiang.tactical.rooms.ai import skill_payloads_for_action
+
+        battle = create_battle("excel_r127", "bard")
+        battle.width, battle.height = 12, 10
+        bird, enemy = primary_hero(battle, 1), primary_hero(battle, 2)
+        bird.position, enemy.position = Position(1, 2), Position(3, 2)
+        battle.configure_turn_order([bird.unit_id, enemy.unit_id])
+        battle.start_current_turn()
+        action = next(item for item in battle.action_snapshot_for(bird)["actions"]
+                      if item["code"] == "fantasy_move")
+        payloads = skill_payloads_for_action(battle, bird, action)
+        with mock.patch("wujiang.tactical.rooms.ai.reviewed_r17_effect_score", return_value=42.0) as scorer:
+            candidates = build_skill_candidates(
+                battle, bird, action, difficulty_profile("standard"), instant_only=False)
+        self.assertTrue(candidates)
+        self.assertEqual(scorer.call_count, len(payloads))
+
+
 class NewBatch250252AncientBehaviorTests(unittest.TestCase):
     """Mechanical beast and giant: visible theft, source lifetimes, large-area combat."""
 
@@ -30989,3 +31203,173 @@ class FriendlyEffectDefaultBehaviorTests(unittest.TestCase):
         battle.resolve_queued_action(queued)
         self.assertLess(ally.current_hp, 10)
         self.assertLess(enemy.current_hp, 10)
+
+
+class NewBatch254255GiantShieldBehaviorTests(unittest.TestCase):
+    """Design-locked bow and spear rules, including shared protection and AI."""
+
+    def fixture(self):
+        battle = create_battle(["excel_r254", "excel_r255"], "bard")
+        bow = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r254")
+        spear = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r255")
+        enemy = primary_hero(battle, 2)
+        bow.position, spear.position, enemy.position = Position(3, 2), Position(2, 2), Position(6, 2)
+        for unit in (bow, spear, enemy):
+            unit.max_health = unit.current_hp = 3
+        return battle, bow, spear, enemy
+
+    def test_public_contract_and_target_previews(self):
+        from wujiang.tactical.heroes.registry import list_heroes
+
+        battle, bow, spear, enemy = self.fixture()
+        public = {entry["code"] for entry in list_heroes()}
+        self.assertTrue({"excel_r254", "excel_r255"}.issubset(public))
+        self.assertEqual({"shield_flat_shot", "shield_lob", "shield_raise"}, set(bow.skill_map()))
+        self.assertEqual({"shield_raise", "shield_wall"}, set(spear.skill_map()))
+        self.assertEqual(bow.get_skill("shield_flat_shot").max_uses_per_turn, 1)
+        self.assertEqual(bow.get_skill("shield_lob").max_uses_per_turn, 1)
+        self.assertEqual(spear.get_skill("shield_wall").mana_cost, 0.5)
+        self.assertIn(enemy.unit_id, bow.get_skill("shield_flat_shot").preview(battle, bow)["target_unit_ids"])
+        self.assertEqual(spear.get_skill("shield_wall").preview(battle, spear)["target_unit_ids"], [bow.unit_id])
+        enemy.position = Position(6, 4)
+        self.assertNotIn(enemy.unit_id, bow.get_skill("shield_flat_shot").preview(battle, bow)["target_unit_ids"])
+        with self.assertRaises(ActionError):
+            bow.get_skill("shield_flat_shot").declared_cell(battle, bow,
+                {"target_unit_id": enemy.unit_id})
+
+    def test_name_match_includes_clones_on_either_side_but_wall_partner_must_be_ally(self):
+        from wujiang.tactical.heroes.excel_roster import shield_named_neighbor
+
+        battle, bow, spear, _ = self.fixture()
+        bow.position = Position(7, 7)
+        hostile_clone = create_hero("excel_r254", 2)
+        hostile_clone.is_clone = True
+        battle.add_unit(hostile_clone, Position(3, 2))
+        self.assertTrue(shield_named_neighbor(battle, spear))
+        self.assertNotIn(hostile_clone.unit_id, spear.get_skill("shield_wall").preview(battle, spear)["target_unit_ids"])
+        friendly_clone = create_hero("excel_r254", 1)
+        friendly_clone.is_clone = True
+        battle.add_unit(friendly_clone, Position(1, 2))
+        self.assertIn(friendly_clone.unit_id, spear.get_skill("shield_wall").preview(battle, spear)["target_unit_ids"])
+
+    def test_flat_shot_pierces_one_shield_refreshes_four_turn_debuff_and_respects_magic_immunity(self):
+        battle, bow, _, enemy = self.fixture()
+        enemy.shields = 2
+        shot = bow.get_skill("shield_flat_shot")
+        payload = {"target_unit_id": enemy.unit_id, "x": enemy.position.x, "y": enemy.position.y}
+        base_defense = enemy.stat("defense")
+        shot.execute(battle, bow, payload)
+        self.assertEqual(enemy.shields, 1)
+        self.assertLess(enemy.current_hp, 3)
+        self.assertEqual(enemy.stat("defense"), base_defense - 1)
+        self.assertEqual(enemy.get_status("平射降守").duration, 4)
+        shot.execute(battle, bow, payload)
+        self.assertEqual(sum(status.name == "平射降守" for status in enemy.statuses), 1)
+        self.assertEqual(enemy.get_status("平射降守").duration, 4)
+        enemy.get_status("平射降守").on_owner_turn_end(battle)
+        self.assertEqual(enemy.get_status("平射降守").duration, 3)
+        enemy.magic_immunity = True
+        before = enemy.current_hp
+        shot.execute(battle, bow, payload)
+        self.assertEqual(enemy.current_hp, before)
+        self.assertEqual(enemy.get_status("平射降守").duration, 3)
+
+    def test_lob_freezes_remote_three_by_three_and_hits_both_sides_once(self):
+        battle, bow, spear, enemy = self.fixture()
+        spear.position = Position(5, 2)
+        enemy.position = Position(4, 2)
+        lob = bow.get_skill("shield_lob")
+        pattern = next(cells for cells in lob.patterns(battle, bow)
+                       if spear.position in cells and enemy.position in cells and bow.position not in cells)
+        payload = {"cells": [cell.to_dict() for cell in pattern]}
+        frozen = lob.queued_payload_metadata(battle, bow, payload)
+        self.assertEqual({unit.unit_id for unit in lob.get_target_units_for_payload(battle, bow, payload)},
+                         {spear.unit_id, enemy.unit_id})
+        with mock.patch("wujiang.tactical.engine.core.random.random", return_value=0.99):
+            lob.execute(battle, bow, {**payload, **frozen, "queued_resolution": True})
+        self.assertLess(spear.current_hp, 3)
+        self.assertLess(enemy.current_hp, 3)
+        self.assertEqual(bow.current_hp, 3)
+
+    def test_raise_shield_snapshots_friendly_five_by_five_and_neighbor_adds_one(self):
+        battle, bow, spear, enemy = self.fixture()
+        raise_shield = bow.get_skill("shield_raise")
+        self.assertEqual({unit.unit_id for unit in raise_shield.beneficiaries(battle, bow)},
+                         {bow.unit_id, spear.unit_id})
+        raise_shield.execute(battle, bow, {})
+        self.assertTrue(bow.has_status("举盾"))
+        self.assertTrue(spear.has_status("举盾"))
+        self.assertFalse(enemy.has_status("举盾"))
+        far = battle.resolve_damage(DamageContext(source=enemy, target=bow, attack_power=3,
+                                                   is_skill=False, action_name="远袭", tags={"attack"}))
+        self.assertAlmostEqual(far.raw_damage, 0.125)
+        spear.position = Position(7, 7)
+        closer = battle.resolve_damage(DamageContext(source=enemy, target=bow, attack_power=3,
+                                                      is_skill=False, action_name="远袭", tags={"attack"}))
+        self.assertAlmostEqual(closer.raw_damage, 0.25)
+        enemy.position = Position(4, 2)
+        melee = battle.resolve_damage(DamageContext(source=enemy, target=bow, attack_power=3,
+                                                     is_skill=False, action_name="近身", tags={"attack"}))
+        self.assertAlmostEqual(melee.raw_damage, 0.5)
+        raise_shield.execute(battle, bow, {})
+        self.assertEqual(sum(status.name == "举盾" for status in bow.statuses), 1)
+
+    def test_wall_uses_defense_four_then_disappears_when_partners_separate(self):
+        battle, bow, spear, enemy = self.fixture()
+        wall = spear.get_skill("shield_wall")
+        wall.execute(battle, spear, {"target_unit_id": bow.unit_id})
+        self.assertTrue(bow.has_status("盾墙"))
+        self.assertTrue(spear.has_status("盾墙"))
+        with mock.patch("wujiang.tactical.engine.core.random.random", return_value=0.99):
+            hit = battle.resolve_damage(DamageContext(source=enemy, target=bow, attack_power=3,
+                                                       is_skill=False, action_name="普攻", tags={"attack"}))
+        self.assertEqual(hit.defense_override, 4)
+        self.assertAlmostEqual(hit.raw_damage, 0.25)
+        battle.move_unit(bow, Position(4, 2), via_skill=True)
+        self.assertFalse(bow.has_status("盾墙"))
+        self.assertFalse(spear.has_status("盾墙"))
+        self.assertTrue(wall.can_use(battle, spear, {})[0] is False)
+
+    def test_wall_clears_from_survivor_when_partner_is_destroyed(self):
+        battle, bow, spear, _ = self.fixture()
+        spear.get_skill("shield_wall").execute(battle, spear, {"target_unit_id": bow.unit_id})
+        bow.current_hp, bow.alive = 0, False
+        battle.cleanup_dead_units()
+        self.assertFalse(spear.has_status("盾墙"))
+
+    def test_block_is_public_and_ai_probe_uses_expectation(self):
+        from wujiang.tactical.engine.core import battle_state_rollback
+
+        battle, bow, spear, enemy = self.fixture()
+        with mock.patch("wujiang.tactical.engine.core.random.random", return_value=0.0):
+            blocked = battle.resolve_damage(DamageContext(source=enemy, target=spear, attack_power=4,
+                                                           is_skill=False, action_name="普攻", tags={"attack"}))
+        self.assertEqual(blocked.actual_damage, 0)
+        self.assertIn("complete_block", blocked.modifier_receipts)
+        self.assertTrue(any("完全格挡" in entry for entry in battle.logs))
+        with battle_state_rollback(battle), mock.patch("wujiang.tactical.engine.core.random.random",
+                                                       side_effect=AssertionError("AI may not read random")):
+            forecast = battle.resolve_damage(DamageContext(source=enemy, target=spear, attack_power=4,
+                                                            is_skill=False, action_name="普攻", tags={"attack"}))
+            self.assertGreater(forecast.actual_damage, 0)
+            self.assertLess(forecast.actual_damage, 1)
+
+    def test_ai_values_real_guard_and_wall_opportunities(self):
+        from wujiang.tactical.rooms.ai import score_skill_payload
+
+        battle, bow, spear, enemy = self.fixture()
+        profile = difficulty_profile("standard")
+        guard = bow.get_skill("shield_raise")
+        guard_action = {"code": guard.code, "target_mode": "self", "preview": guard.preview(battle, bow)}
+        guard_payload = {"type": "skill", "unit_id": bow.unit_id, "skill_code": guard.code}
+        self.assertGreater(score_skill_payload(battle, bow, guard_action, guard_payload, profile,
+                                               instant_only=False), 0)
+        guard.execute(battle, bow, {})
+        self.assertLess(score_skill_payload(battle, bow, guard_action, guard_payload, profile,
+                                            instant_only=False), 0)
+        wall = spear.get_skill("shield_wall")
+        wall_action = {"code": wall.code, "target_mode": "ally", "preview": wall.preview(battle, spear)}
+        wall_payload = {"type": "skill", "unit_id": spear.unit_id, "skill_code": wall.code,
+                        "target_unit_id": bow.unit_id}
+        self.assertGreater(score_skill_payload(battle, spear, wall_action, wall_payload, profile,
+                                               instant_only=False), 0)
