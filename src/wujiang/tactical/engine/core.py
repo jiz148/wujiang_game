@@ -1059,6 +1059,9 @@ class DamageContext:
     actual_damage: float = 0.0
     declared_source_attack: Optional[float] = None
     modifier_receipts: set[str] = field(default_factory=set)
+    defense_override: Optional[float] = None
+    complete_block_chance: float = 0.0
+    complete_block_label: str = ""
 
     @property
     def damage(self) -> float:
@@ -4382,10 +4385,25 @@ class Battle:
                 notify_confirmed_destruction()
                 self.cleanup_dead_units()
                 return ctx
-            damage_amount = self.damage_rule.calculate_damage(ctx.attack_power, ctx.target.stat("defense"))
+            defense = ctx.defense_override if ctx.defense_override is not None else ctx.target.stat("defense")
+            damage_amount = self.damage_rule.calculate_damage(ctx.attack_power, defense)
             if ctx.raw_damage is not None:
                 damage_amount = ctx.raw_damage
             ctx.raw_damage = ctx.target.damage_fraction_after_limits(damage_amount)
+            if ctx.raw_damage > 0 and ctx.complete_block_chance > 0:
+                if getattr(self, "_ai_probe_active", False):
+                    # Forecast an independent random guard by expectation; do not
+                    # let AI inspect the next live random result through rollback.
+                    ctx.raw_damage = round(ctx.raw_damage * (1 - ctx.complete_block_chance), 4)
+                else:
+                    blocked = random.random() < ctx.complete_block_chance
+                    self.log_public_event(
+                        f"{ctx.target.name} 的【{ctx.complete_block_label or '格挡'}】判定：{'完全格挡' if blocked else '未格挡'}。",
+                        source=ctx.source, target=ctx.target,
+                    )
+                    if blocked:
+                        ctx.raw_damage = 0.0
+                        ctx.modifier_receipts.add("complete_block")
             old_hp = ctx.target.current_hp
             if ctx.raw_damage >= old_hp and old_hp > 0:
                 retained = [value for component in list(ctx.target.iter_components())

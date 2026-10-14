@@ -79,7 +79,7 @@ def current_batch_output_dir(codes: Iterable[str]) -> Path:
 
 
 def run_consolidated_regression(run_dir: Path, *, regression_filter: str | None = None) -> dict[str, Any]:
-    """Preserve verbose test output without blocking the selected hero AI audit."""
+    """Preserve verbose test output; focused failures stop costly AI matches."""
     command = [sys.executable, "-m", "unittest", "discover", "-s", "tests",
                "-p", "test_behavior.py" if regression_filter else "test_*.py", "-v"]
     if regression_filter:
@@ -130,7 +130,8 @@ def run_consolidated_regression(run_dir: Path, *, regression_filter: str | None 
         "skipped_tests": skipped_tests,
         "launch_error": launch_error,
         "log": "regression_tests.log",
-        "note": "Regression failures do not stop the per-hero AI audit; inspect the log and review queue together.",
+        "note": ("Failed focused regression stops AI matches; inspect the full regression log."
+                 if regression_filter else "Full regression failures do not stop the per-hero AI audit."),
     }
     write_json(run_dir / "regression_tests.json", summary)
     print(
@@ -540,6 +541,28 @@ def run_all_hero_deep_audit(
     run_dir = Path(output_dir) if output_dir is not None else default_output_dir(seed)
     run_dir.mkdir(parents=True, exist_ok=True)
     regression = run_consolidated_regression(run_dir, regression_filter=regression_filter)
+    if regression_filter and not regression["passed"]:
+        write_json(run_dir / "deep_audit_overview.json", {
+            "output_dir": str(run_dir),
+            "target_count": len(target_codes),
+            "match_count": 0,
+            "high_signal_count": 0,
+            "ai_audit_skipped": "focused_regression_failed",
+            "regression": regression,
+            "files": {"regression_summary": "regression_tests.json",
+                      "regression_log": "regression_tests.log",
+                      "review_packet": "review_packet.md"},
+        })
+        (run_dir / "review_packet.md").write_text(
+            "# Focused regression failed\n\n"
+            "AI matches were skipped because the focused behavior scenarios failed. "
+            "The complete test output is in `regression_tests.log`; "
+            "the machine-readable result is in `regression_tests.json`.\n",
+            encoding="utf-8",
+        )
+        print(f"[regression] failed; AI matches skipped; complete details={run_dir / 'regression_tests.log'}",
+              flush=True)
+        return run_dir
     base = run_per_hero_ai_debug(
         target_codes,
         seed=seed,
@@ -614,7 +637,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--design", type=Path, default=DEFAULT_DESIGN_PATH)
     parser.add_argument("--review-state", type=Path, default=DEFAULT_REVIEW_STATE_PATH)
     parser.add_argument("--regression-filter", default=None,
-                        help="Run only matching behavior tests (unittest -k) before auditing --targets; all output stays in the report.")
+                        help="Run only matching behavior tests (unittest -k) before auditing --targets; failures log fully and skip AI matches.")
     parser.add_argument("--resume", action="store_true", help="Reuse completed match folders under --out after interruption.")
     parser.add_argument("--summarize-only", action="store_true", help="Index saved results and current Git changes without running tests or matches.")
     args = parser.parse_args(argv)
@@ -661,14 +684,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 1
     if args.current:
         print(f"current review batch only: {', '.join(targets)}")
+    if args.regression_filter:
+        overview = read_json(run_dir / "deep_audit_overview.json")
+        if not overview["regression"]["passed"]:
+            return 1
+        match_summary = read_json(run_dir / "summary.json")
+        if any(match.get("error") for match in match_summary["matches"]):
+            return 1
     print(f"deep audit complete: {run_dir}")
     print(f"open {run_dir / 'regression_tests.log'} for the complete ordinary test output")
     print(f"open {run_dir / 'review_packet.md'} first")
-    if args.regression_filter:
-        overview = read_json(run_dir / "deep_audit_overview.json")
-        match_summary = read_json(run_dir / "summary.json")
-        if not overview["regression"]["passed"] or any(match.get("error") for match in match_summary["matches"]):
-            return 1
     return 0
 
 

@@ -135,6 +135,13 @@ def run_per_hero_ai_debug(
             f"{sanitize_label('-'.join(match['team1']))}-vs-{sanitize_label('-'.join(match['team2']))}"
         )
         match_dir = run_dir / sanitize_label(target) / match_label
+        if progress:
+            print(
+                f"  [{int(match['target_match_index'])}/{matches_per_hero}] starting; "
+                f"team1={','.join(match['team1'])}; team2={','.join(match['team2'])}; "
+                f"live-progress={match_dir / 'match_progress.json'}",
+                flush=True,
+            )
         try:
             manifest = (
                 completed_audit_manifest(
