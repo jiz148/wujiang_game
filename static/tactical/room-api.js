@@ -95,16 +95,21 @@ export function applyRoomPayload(payload, { preserveScreen = false } = {}) {
     ? `chess:${state.room.autochess?.config?.board_width || 0}x${state.room.autochess?.config?.board_height || 0}`
     : "";
   const previousRoomId = state.room?.room_id || "";
+  const previousMatchId = String(state.room?.match_id || "");
   const previousChessPhase = state.room?.autochess?.phase || "";
   const previousBattle = state.liveBattle;
   // 对局进行中，轮询带来的新棋盘会盖掉本地棋盘。
   // 一旦服务端把这场战斗拿掉，或本地已经钉住终局，就不再跟着切画面。
   const sameRoom = Boolean(previousRoomId && String(payload?.room?.room_id || "") === String(previousRoomId));
+  const nextMatchId = String(payload?.room?.match_id || "");
+  const nextFight = Boolean(payload?.battle && !payload.battle.winner && nextMatchId && nextMatchId !== previousMatchId);
+  if (nextFight) state.holdBattleView = false;
   const keepLocalBattle = Boolean(
     previousScreen === "battle"
     && state.battle
     && !state.replayMode
     && sameRoom
+    && !nextFight
     && (state.holdBattleView || !payload.battle)
   );
   const frozenBattle = keepLocalBattle ? state.battle : null;
@@ -804,6 +809,31 @@ export async function setRoomBoardSize(width, height) {
       render();
     }
     reportRoomError(error.error || "设置战场大小失败。");
+  }
+}
+
+export async function setRoomChessBattleSpeed(speed) {
+  if (!hasRoom() || !state.playerToken || !state.room?.viewer_is_host) return;
+  const allowed = [0.5, 1, 2, 4, 6, 8, 16];
+  const next = allowed.includes(Number(speed)) ? Number(speed) : 1;
+  if (next === Number(state.room?.chess_battle_speed ?? 1)) return;
+  try {
+    const payload = await fetchJson("/api/rooms/set-chess-speed", {
+      method: "POST",
+      body: JSON.stringify({
+        room_id: state.room.room_id,
+        player_token: state.playerToken,
+        chess_battle_speed: next,
+      }),
+    });
+    applyRoomPayload(payload, { preserveScreen: true });
+    render();
+  } catch (error) {
+    if (error.state) {
+      applyRoomPayload(error.state, { preserveScreen: true });
+      render();
+    }
+    reportRoomError(error.error || "设置交战速度失败。");
   }
 }
 

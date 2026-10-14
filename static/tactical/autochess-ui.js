@@ -5,7 +5,7 @@ import { render } from '../core/render.js';
 import { state } from '../core/state.js';
 import { setScreen } from '../core/ui.js';
 import { bindHeroHover, hideHeroHover, renderHeroDetails } from './hero-hover.js';
-import { applyRoomPayload } from './room-api.js';
+import { applyRoomPayload, setRoomChessBattleSpeed } from './room-api.js';
 
 let selectedPieceId = '';
 let selectedHeroCode = '';
@@ -137,6 +137,7 @@ function renderStatus(chess, me) {
   const phase = node('span', `chess-phase${preparing ? ' is-prep' : ''}${fighting ? ' is-battle' : ''}${chess.phase === 'finished' ? ' is-done' : ''}`,
     preparing ? '准备阶段' : fighting ? '交战阶段' : chess.phase === 'finished' ? '结束' : '等待');
   rowA.append(phase);
+  if (chess.phase === 'preparation' || chess.phase === 'battle') rowA.append(battleSpeedControl());
   if (me && chess.phase !== 'lobby') {
     rowA.append(statPill('gold', me.gold));
     rowA.append(statPill('health', me.health));
@@ -148,6 +149,27 @@ function renderStatus(chess, me) {
   if (rowB.childElementCount) facts.append(rowB);
   box.append(clock, facts);
   return box;
+}
+
+function battleSpeedControl() {
+  const label = node('label', 'chess-speed');
+  label.append(node('span', '', '速度'));
+  const select = document.createElement('select');
+  select.className = 'chess-speed__select';
+  const current = Number(state.room?.chess_battle_speed ?? 1);
+  for (const value of [0.5, 1, 2, 4, 6, 8, 16]) {
+    const option = document.createElement('option');
+    option.value = String(value);
+    option.textContent = `${value}x`;
+    if (value === current) option.selected = true;
+    select.append(option);
+  }
+  select.disabled = !state.room?.viewer_is_host;
+  select.addEventListener('change', () => {
+    void setRoomChessBattleSpeed(select.value);
+  });
+  label.append(select);
+  return label;
 }
 
 function chessOpponentLabel(chess, seatId) {
@@ -251,7 +273,7 @@ function renderPieces(chess, me, locked) {
       choice.append(node('span', '', `${piece.name} 强化（待选 ${piece.pending_upgrades} 次）`));
       for (const [stat, label] of [['attack','攻击'], ['defense','防御'], ['speed','速度'],
                                    ['attack_range','范围'], ['mana','魔法']]) {
-        choice.append(button(label, 'upgrade', {pieceId: piece.id, stat}, pieceLocked));
+        choice.append(button(label, 'upgrade', {pieceId: piece.id, stat}, chess.phase === 'battle' || pieceLocked));
       }
       card.append(choice);
     }
@@ -546,8 +568,17 @@ function renderBattleBoard(battle, previews, viewerSide = 1) {
       const shown = visualX(x);
       const cell = node('div', `cell ${shown >= Math.floor(width / 2) ? 'autochess-friendly-cell' : 'autochess-enemy-cell'}`);
       if (unit) cell.classList.add('has-unit');
+      cell.dataset.x = String(shown);
+      cell.dataset.y = String(y);
       cell.style.gridColumn = String(shown + 1);
       cell.style.gridRow = String(y + 1);
+      const marks = (battle.field_effects || []).filter((effect) => (effect.cells || []).some((item) => item.x === x && item.y === y));
+      if (marks.length) {
+        cell.classList.add('has-field-effect');
+        const stack = node('div', 'cell-effects');
+        marks.forEach((effect) => stack.append(node('span', 'cell-effect-tag', effect.board_marker || String(effect.name || '').slice(0, 2))));
+        cell.append(stack);
+      }
       cell.title = '';
       board.append(cell);
     }
@@ -704,12 +735,63 @@ export function renderAutoChessPanel() {
   panel.append(shell);
   updateCountdown();
   paintChessCamera();
+  const watched = (chess.matches || []).find((item) => item.left === focus?.seat_id || item.right === focus?.seat_id) || chess.matches?.[0];
+  const stage = panel.querySelector('.autochess-board-stage');
+  if (chess.phase === 'battle' && stage && watched?.battle) {
+    playChessEffects(stage, watched.battle, `${state.room?.room_id || ''}:${watched.index}`, watched.right === focus?.seat_id ? 2 : 1);
+  } else {
+    chessVfxKey = '';
+    document.getElementById('chess-battle-vfx')?.replaceChildren();
+  }
 }
 
 let chessDock = 'pack';
 let leftDockOpen = true;
 let rightDockOpen = true;
 let pieceView = 'card';
+
+let chessVfxKey = '';
+let chessVfxSeen = 0;
+
+function playChessEffects(stage, battle, key, viewerSide) {
+  const screen = document.getElementById('autochess-screen');
+  if (!screen) return;
+  let layer = document.getElementById('chess-battle-vfx');
+  if (!layer) {
+    layer = document.createElement('div');
+    layer.id = 'chess-battle-vfx';
+    layer.className = 'battle-vfx';
+    screen.append(layer);
+  }
+  const events = battle.visual_events || [];
+  const newest = events.reduce((max, event) => Math.max(max, Number(event.id || 0)), 0);
+  if (key !== chessVfxKey || newest < chessVfxSeen) {
+    chessVfxKey = key;
+    chessVfxSeen = newest;
+    return;
+  }
+  const fresh = events.filter((event) => Number(event.id || 0) > chessVfxSeen);
+  chessVfxSeen = Math.max(chessVfxSeen, newest);
+  if (!fresh.length) return;
+  const width = Number(battle.board?.width || 10);
+  const flip = Number(viewerSide) === 1;
+  const visualX = (x) => flip ? width - 1 - x : x;
+  const host = screen.getBoundingClientRect();
+  fresh.slice(-8).forEach((event) => {
+    const cells = (event.target_cells && event.target_cells.length) ? event.target_cells : (event.source_cell ? [event.source_cell] : []);
+    cells.forEach((cell) => {
+      const node = stage.querySelector(`.cell[data-x="${visualX(cell.x)}"][data-y="${cell.y}"]`);
+      if (!node || typeof node.getBoundingClientRect !== 'function') return;
+      const rect = node.getBoundingClientRect();
+      const burst = document.createElement('div');
+      burst.className = `battle-vfx-burst theme-${event.kind === 'defense' ? 'barrier' : 'attack'}`;
+      burst.style.left = `${rect.left - host.left + rect.width / 2}px`;
+      burst.style.top = `${rect.top - host.top + rect.height / 2}px`;
+      layer.append(burst);
+      window.setTimeout(() => burst.remove(), 900);
+    });
+  });
+}
 
 function paintChessCamera() {
   const world = document.querySelector('.autochess-board-world');

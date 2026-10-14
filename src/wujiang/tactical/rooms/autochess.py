@@ -140,7 +140,9 @@ def battle_observer_snapshot(battle: Battle) -> dict[str, Any]:
                       "is_mount": unit.is_mount})
     return {"board": {"width": battle.width, "height": battle.height},
             "round_number": battle.round_number, "winner": battle.winner,
-            "units": units, "logs": battle.logs[-12:]}
+            "units": units, "logs": battle.logs[-12:],
+            "field_effects": [effect.to_public_dict(battle) for effect in battle.field_effects],
+            "visual_events": [event.to_public_dict() for event in battle.visual_events[-12:]]}
 
 
 @dataclass
@@ -360,8 +362,6 @@ class AutoChessState:
                 _error("所选强化目标与商店武将不同。")
         else:
             target = min(owned, key=lambda piece: (piece.x is None, -piece.star)) if owned else None
-        if self.phase == "battle" and target is not None and target.x is not None:
-            target = next((piece for piece in owned if piece.x is None), None)
         bench_full = len([piece for piece in player.pieces if piece.x is None]) >= self.config.bench_capacity
         if bench_full and target is None:
             _error("后备席已满，请先上场或出售武将。")
@@ -394,6 +394,8 @@ class AutoChessState:
         self._change()
 
     def choose_upgrade(self, seat_id: int, piece_id: str, stat: str) -> None:
+        if self.phase != "preparation":
+            _error("交战结束后才能选择升级。")
         player, piece = self._mutable_piece(seat_id, piece_id)
         if piece.pending_upgrades <= 0 or stat not in STATS:
             _error("该能力值升级选择无效。")

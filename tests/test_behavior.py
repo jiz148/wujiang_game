@@ -29539,7 +29539,31 @@ class AutoChessBehaviorTests(unittest.TestCase):
         self.assertEqual(snapshot["board"], {"width": 10, "height": 10})
         self.assertEqual(len(snapshot["logs"]), 12)
         self.assertEqual(len(snapshot["units"]), 1)
-        self.assertEqual(set(snapshot), {"board", "round_number", "winner", "units", "logs"})
+        self.assertEqual(set(snapshot), {"board", "round_number", "winner", "units", "logs", "field_effects", "visual_events"})
+
+    def test_battle_buy_merges_and_upgrade_waits_until_preparation(self):
+        from wujiang.tactical.rooms.autochess import AutoChessState, ChessPiece
+        from wujiang.tactical.rooms.multiplayer import RoomError
+
+        chess = AutoChessState(4, seed=31)
+        chess.start()
+        player = chess.players[1]
+        code = player.shop[0]
+        self.assertTrue(code)
+        piece = ChessPiece("fielded", code, x=0, y=0)
+        player.pieces = [piece]
+        player.gold = 80
+        chess.phase = "battle"
+        chess.buy(1, 0)
+        self.assertEqual(len(player.pieces), 1)
+        self.assertEqual((piece.star, piece.pending_upgrades), (2, 1))
+        with self.assertRaises(RoomError):
+            chess.choose_upgrade(1, piece.id, "attack")
+        self.assertEqual(piece.pending_upgrades, 1)
+        chess.phase = "preparation"
+        chess.choose_upgrade(1, piece.id, "attack")
+        self.assertEqual(piece.pending_upgrades, 0)
+        self.assertEqual(piece.upgrades.get("attack"), 1)
 
     def test_player_sees_capacity_hero_synergies_and_mounted_entry_shape(self):
         from types import SimpleNamespace
