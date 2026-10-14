@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>武将</title>
     <link rel="stylesheet" href="/theme.css?v=r27" />
-    <link rel="stylesheet" href="/styles.css?v=r113" />
+    <link rel="stylesheet" href="/styles.css?v=r115" />
   </head>
   <!-- 哪一屏该显示，要等 /api/auth/me 回来才知道。在那之前先什么都不显示，
        否则标记里默认可见的那一屏会先闪出来，再被换掉。 -->
@@ -291,7 +291,6 @@
 
       <section id="battle-screen" class="screen battle-screen hidden" aria-labelledby="battle-screen-title">
         <h2 id="battle-screen-title" class="visually-hidden">战场</h2>
-        <section id="bp-battle-mode" class="bp-battle-mode hidden" aria-label="本局特殊模式"></section>
         <p id="board-caption" class="visually-hidden"></p>
         <section class="arena">
           <div id="battle-console" class="battle-console is-collapsed" aria-label="战场操纵板">
@@ -363,6 +362,7 @@
                 <div id="battle-turn-banner" class="battle-turn-banner hidden" role="status" aria-live="polite"></div>
                 <div id="battle-turn-timer" class="battle-turn-timer hidden" role="timer" aria-live="polite"></div>
                 <button id="skip-chain" class="ghost hidden">放弃连锁</button>
+                <section id="bp-battle-mode" class="bp-battle-mode hidden" aria-label="本局特殊模式"></section>
                 <button id="end-turn" class="primary">结束回合</button>
                 <button id="toggle-battle-console" type="button" class="ghost" aria-expanded="false" title="展开控制">展开控制</button>
               </div>
@@ -781,6 +781,6 @@
     <script src="/platform/home-ui.js?v=r13" defer></script>
     <script src="/tactical/replay-ui.js?v=r14" defer></script>
     <script src="/tactical/battle-feedback.js?v=r15" defer></script>
-    <script type="module" src="/app.js?v=r94"></script>
+    <script type="module" src="/app.js?v=r96"></script>
   </body>
 </html>

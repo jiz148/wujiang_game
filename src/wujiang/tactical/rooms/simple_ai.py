@@ -24,12 +24,12 @@ def choose_turn_bundle_action(
         if not unit.can_take_turn_actions(battle):
             continue
         snapshot = battle.action_snapshot_for(unit)
+        skill = _skill_payload(battle, unit, snapshot, timing="active")
+        if skill is not None:
+            return skill, unit
         attack = _attack_payload(battle, unit, snapshot)
         if attack is not None:
             return attack, unit
-        skill = _skill_payload(battle, unit, snapshot)
-        if skill is not None:
-            return skill, unit
         move = _move_payload(battle, unit, snapshot)
         if move is not None:
             return move, unit
@@ -40,14 +40,9 @@ def choose_instant_action(battle: Battle, units: Iterable[Unit], difficulty: str
     del difficulty
     for unit in list(units)[:4]:
         snapshot = battle.action_snapshot_for(unit)
-        for action in snapshot.get("actions", []):
-            if not action.get("available") or action.get("kind") != "skill":
-                continue
-            if str(action.get("timing") or "") != "instant":
-                continue
-            payload = _targeted_payload(battle, unit, action, "skill")
-            if payload is not None:
-                return payload
+        payload = _skill_payload(battle, unit, snapshot, timing="instant")
+        if payload is not None:
+            return payload
     return None
 
 
@@ -111,16 +106,102 @@ def _attack_payload(battle: Battle, actor: Unit, snapshot: dict[str, Any]) -> Op
     return None
 
 
-def _skill_payload(battle: Battle, actor: Unit, snapshot: dict[str, Any]) -> Optional[dict[str, Any]]:
+def _skill_payload(
+    battle: Battle,
+    actor: Unit,
+    snapshot: dict[str, Any],
+    *,
+    timing: str,
+) -> Optional[dict[str, Any]]:
+    """One shared rule for every hero: use a skill the unit already listed.
+
+    Only the first few usable skills are considered. A skill is usable when
+    its own preview already names a legal unit or cell, or when it needs no
+    target. Pattern and forced-direction skills are left alone.
+    """
+    seen = 0
     for action in snapshot.get("actions", []):
         if action.get("kind") != "skill" or not action.get("available"):
             continue
-        if str(action.get("timing") or "") == "passive":
+        if str(action.get("timing") or "") != timing:
             continue
-        payload = _targeted_payload(battle, actor, action, "skill")
+        if str(action.get("direction_mode") or "none") == "required":
+            continue
+        if action.get("max_uses_per_turn") is None and int(action.get("uses_this_turn") or 0) >= 1:
+            continue
+        seen += 1
+        if seen > 4:
+            break
+        payload = _skill_from_preview(battle, actor, action)
         if payload is not None:
             return payload
     return None
+
+
+def _skill_from_preview(battle: Battle, actor: Unit, action: dict[str, Any]) -> Optional[dict[str, Any]]:
+    preview = action.get("preview") or {}
+    mode = str(action.get("target_mode") or "none")
+    listed = [str(item) for item in (preview.get("target_unit_ids") or [])]
+    if mode in {"enemy", "unit"}:
+        target = _listed_unit(battle, actor, listed, allies=False)
+        if target is None and mode == "unit":
+            target = _listed_unit(battle, actor, listed, allies=True)
+        return _skill_at_unit(actor, action, target) if target is not None else None
+    if mode == "ally":
+        target = _listed_unit(battle, actor, listed, allies=True)
+        return _skill_at_unit(actor, action, target) if target is not None else None
+    if mode in {"none", "self"} and not preview.get("requires_target"):
+        return {"type": "skill", "unit_id": actor.unit_id, "skill_code": str(action.get("code") or "")}
+    if mode == "cell":
+        cells = _positions(preview.get("cells"))[:8]
+        if not cells or actor.position is None:
+            return None
+        enemies = _enemies(battle, actor.player_id)
+        chosen = min(
+            cells,
+            key=lambda cell: min(
+                (cell.distance_to(enemy.position) for enemy in enemies if enemy.position is not None),
+                default=0,
+            ),
+        )
+        return {
+            "type": "skill",
+            "unit_id": actor.unit_id,
+            "skill_code": str(action.get("code") or ""),
+            "x": chosen.x,
+            "y": chosen.y,
+        }
+    return None
+
+
+def _skill_at_unit(actor: Unit, action: dict[str, Any], target: Unit) -> Optional[dict[str, Any]]:
+    if target.position is None:
+        return None
+    return {
+        "type": "skill",
+        "unit_id": actor.unit_id,
+        "skill_code": str(action.get("code") or ""),
+        "target_unit_id": target.unit_id,
+        "x": target.position.x,
+        "y": target.position.y,
+    }
+
+
+def _listed_unit(battle: Battle, actor: Unit, raw_ids: list[str], *, allies: bool) -> Optional[Unit]:
+    found: list[Unit] = []
+    for raw in raw_ids:
+        unit = battle.units.get(str(raw))
+        if unit is None or not unit.alive or unit.banished or unit.position is None:
+            continue
+        same_side = unit.player_id == actor.player_id
+        if allies and not same_side:
+            continue
+        if not allies and same_side:
+            continue
+        found.append(unit)
+    if not found or actor.position is None:
+        return None
+    return min(found, key=lambda unit: (unit.current_hp, unit.position.distance_to(actor.position)))
 
 
 def _targeted_payload(

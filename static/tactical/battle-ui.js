@@ -437,7 +437,13 @@ function placeMarchPiece(piece, x, y) {
     return;
   }
   const host = boardCellAt(x, y);
-  if (!host) return;
+  if (!host) {
+    piece.classList.remove("is-in-cell");
+    piece.style.gridColumn = `${x + 1} / span ${width}`;
+    piece.style.gridRow = `${y + 1} / span ${height}`;
+    ($("board-pieces") || $("board"))?.append(piece);
+    return;
+  }
   host.classList.add("has-unit");
   host.append(piece);
 }
@@ -469,6 +475,10 @@ function ensureArmyMarchPlayback() {
     return traces;
   }
   if (state.armyMarch?.id !== marchId) {
+    if (ui.armyMarchTimer) {
+      window.clearTimeout(ui.armyMarchTimer);
+      ui.armyMarchTimer = 0;
+    }
     state.lastArmyMarchId = marchId;
     state.armyMarch = { id: marchId, tick: 0 };
   }
@@ -479,7 +489,9 @@ function armyMarchCellForUnit(unit, traces) {
   if (!state.armyMarch || !traces.length) return null;
   const trace = traces.find((item) => String(item.unit_id) === String(unit.id));
   if (!trace) return null;
-  return trace.path[Math.min(state.armyMarch.tick, trace.path.length - 1)] || null;
+  const last = trace.path.length - 1;
+  if (Number(state.armyMarch.tick || 0) >= last) return null;
+  return trace.path[Math.min(state.armyMarch.tick, last)] || null;
 }
 
 function applyArmyMarchFrame(traces, tick) {
@@ -504,6 +516,7 @@ function playArmyMarchIfNeeded() {
   const step = () => {
     if (!state.armyMarch || state.armyMarch.id !== marchId) {
       ui.armyMarchTimer = 0;
+      flushPendingArmyVfx();
       return;
     }
     state.armyMarch.tick += 1;

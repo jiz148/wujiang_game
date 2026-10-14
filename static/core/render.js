@@ -44,46 +44,60 @@ export function render() {
   ensureSelectedUnit();
   const preserveRoomConfig = isRoomConfigControlActive();
   const preserveStrategyControl = isStrategyControlActive();
-  renderScreens();
-  renderTopbar();
-  renderProfilePanel();
-  renderHomeFlow();
-  renderSettings();
-  renderRecentMatches();
-  if (!preserveStrategyControl) renderStrategyPanel();
-  renderProfileModal();
-  if (!preserveRoomConfig) renderRoomPanels();
-  renderRoomSetupDialog();
-  renderAutoConfigureDialog();
-  renderHeroPicker();
-  renderHeroDetail();
-  syncModalIsolation();
-  renderResumePanel();
-  renderRoomListActive();
-  renderHeader();
-  renderConnectionAndTurnState();
-  renderBattleTurnBanner();
-  renderBattleConsole();
-  renderBoardZoomControls();
-  renderMessage();
-  renderBattleEffects();
-  renderBoard();
-  renderBoardOverlays();
-  renderHoverCard();
-  renderSidebarPanels();
-  renderSelectedCard();
-  renderActionPanel();
-  renderActionForecast();
-  renderUnitStrip();
-  renderArmyOrderBar();
-  renderChainPanel();
-  renderLogs();
-  renderGameOverOverlay();
-  renderReplayToolbar();
-  renderTutorialGuide();
-  renderRoomActionButtons();
-  renderTargetCancelButton();
-  renderTargetCompleteButton();
+  // 特效在状态到达时就已经画上。如果这里前面某一步抛错，棋盘会停在旧位置，
+  // 看起来就像只有特效在动。棋盘单独画，不跟着旁边的面板一起失败。
+  try {
+    renderScreens();
+    renderTopbar();
+    renderProfilePanel();
+    renderHomeFlow();
+    renderSettings();
+    renderRecentMatches();
+    if (!preserveStrategyControl) renderStrategyPanel();
+    renderProfileModal();
+    if (!preserveRoomConfig) renderRoomPanels();
+    renderRoomSetupDialog();
+    renderAutoConfigureDialog();
+    renderHeroPicker();
+    renderHeroDetail();
+    syncModalIsolation();
+    renderResumePanel();
+    renderRoomListActive();
+    renderHeader();
+    renderConnectionAndTurnState();
+    renderBattleTurnBanner();
+    renderBattleConsole();
+    renderBoardZoomControls();
+    renderMessage();
+    renderBattleEffects();
+  } catch (error) {
+    console.error(error);
+  }
+  try {
+    renderBoard();
+    renderBoardOverlays();
+  } catch (error) {
+    console.error(error);
+  }
+  try {
+    renderHoverCard();
+    renderSidebarPanels();
+    renderSelectedCard();
+    renderActionPanel();
+    renderActionForecast();
+    renderUnitStrip();
+    renderArmyOrderBar();
+    renderChainPanel();
+    renderLogs();
+    renderGameOverOverlay();
+    renderReplayToolbar();
+    renderTutorialGuide();
+    renderRoomActionButtons();
+    renderTargetCancelButton();
+    renderTargetCompleteButton();
+  } catch (error) {
+    console.error(error);
+  }
   const tutorialStepId = tutorialState()?.step_id;
   const endTurn = $("end-turn");
   const reviewResults = Boolean(isGameOver() && state.battle && state.screen === "battle");

@@ -1046,6 +1046,35 @@ def post_rooms_set_board_size(ctx: RequestContext) -> None:
     return
 
 
+@post("/api/rooms/set-chess-speed")
+def post_rooms_set_chess_speed(ctx: RequestContext) -> None:
+    handler = ctx.handler
+    payload = ctx.payload
+    room_id = payload.get("room_id", "")
+    player_token = payload.get("player_token")
+    speed = payload.get("chess_battle_speed", payload.get("speed", 1))
+    try:
+        room = ROOMS.get_room(str(room_id))
+        room.set_chess_battle_speed(str(player_token or ""), speed)
+    except RoomError as exc:
+        room = None
+        try:
+            room = ROOMS.get_room(str(room_id))
+        except RoomError:
+            pass
+        error_payload = {"error": str(exc)}
+        if room is not None:
+            error_payload["state"] = room.serialize_state(str(player_token or ""), base_url=request_base_url(handler))
+        json_response(handler, HTTPStatus.BAD_REQUEST, error_payload)
+        return
+    json_response(
+        handler,
+        HTTPStatus.OK,
+        room_state_with_strategy_sync(room, str(player_token or ""), base_url=request_base_url(handler)),
+    )
+    return
+
+
 @post("/api/rooms/set-chess-prep")
 def post_rooms_set_chess_prep(ctx: RequestContext) -> None:
     handler = ctx.handler

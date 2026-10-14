@@ -983,7 +983,8 @@ def _autochess_battle_worker(room: "GameRoom") -> None:
                     room.touch(persist_chess=True)
                     if chess.phase != "battle":
                         return
-            time.sleep(0)
+                speed = float(getattr(room, "chess_battle_speed", DEFAULT_SIMULATION_SPEED) or DEFAULT_SIMULATION_SPEED)
+            time.sleep(max(0.05, 0.9 / max(speed, 0.1)))
     finally:
         with _CHESS_WORKER_GUARD:
             if _CHESS_WORKERS.get(room.room_id) is threading.current_thread():
@@ -1026,6 +1027,7 @@ class GameRoom:
         self.bp_virtual_seat_ids: list[int] = []
         self.autochess = None
         self.chess_prep_seconds = 90
+        self.chess_battle_speed = DEFAULT_SIMULATION_SPEED
         self.board_width = DEFAULT_BOARD_WIDTH
         self.board_height = DEFAULT_BOARD_HEIGHT
         self.turn_timeout_seconds = DEFAULT_TURN_TIMEOUT_SECONDS
@@ -1132,6 +1134,8 @@ class GameRoom:
             self.autochess = None
         if not hasattr(self, "chess_prep_seconds"):
             self.chess_prep_seconds = 90
+        if not hasattr(self, "chess_battle_speed"):
+            self.chess_battle_speed = DEFAULT_SIMULATION_SPEED
         self._lock = threading.RLock()
 
     def checkpoint_bytes(self) -> bytes:
@@ -2865,6 +2869,17 @@ class GameRoom:
             self.chess_prep_seconds = normalized
             self.touch()
 
+    def set_chess_battle_speed(self, token: str, speed: Any) -> None:
+        with self._lock:
+            self.require_host(token)
+            if self.mode != "autochess":
+                raise RoomError("只有自走棋房间可以设置交战速度。")
+            normalized = normalize_simulation_speed(speed)
+            if normalized == float(getattr(self, "chess_battle_speed", DEFAULT_SIMULATION_SPEED) or DEFAULT_SIMULATION_SPEED):
+                return
+            self.chess_battle_speed = normalized
+            self.touch()
+
     def auto_configure(
         self,
         token: str,
@@ -4140,6 +4155,7 @@ class GameRoom:
             "board_width": int(getattr(self, "board_width", 10) or 10),
             "board_height": int(getattr(self, "board_height", 10) or 10), "turn_timeout_seconds": 0,
             "chess_prep_seconds": int(getattr(self, "chess_prep_seconds", 90) or 0),
+            "chess_battle_speed": float(getattr(self, "chess_battle_speed", DEFAULT_SIMULATION_SPEED) or DEFAULT_SIMULATION_SPEED),
             "seats": [seat.to_public_dict(catalog, self.host_player_id) for seat in self.seats.values()],
             "autochess": chess, "bp": None,
         }
