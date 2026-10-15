@@ -531,6 +531,12 @@ function playArmyMarchIfNeeded() {
   ui.armyMarchTimer = window.setTimeout(step, 110);
 }
 
+function sideTone(playerId) {
+  const viewer = viewerTeamId();
+  if (viewer == null) return Number(playerId) === 1 ? "is-friendly" : "is-hostile";
+  return Number(playerId) === Number(viewer) ? "is-friendly" : "is-hostile";
+}
+
 export function renderBoard() {
   const board = $("board");
   const piecesLayer = $("board-pieces");
@@ -651,7 +657,7 @@ export function renderBoard() {
         ghostStack.className = "ghost-stack";
         ghostUnits.forEach((ghostUnit) => {
           const ghost = document.createElement("div");
-          ghost.className = `ghost-piece player-${ghostUnit.player_id}`;
+          ghost.className = `ghost-piece player-${ghostUnit.player_id} ${sideTone(ghostUnit.player_id)}`;
           ghost.textContent = `${ghostUnit.name} · 消失${ghostUnit.banish_turns_remaining > 0 ? `(${ghostUnit.banish_turns_remaining})` : ""}`;
           ghostStack.append(ghost);
         });
@@ -727,6 +733,7 @@ export function renderBoard() {
         "piece",
         "board-piece",
         `player-${unit.player_id}`,
+        sideTone(unit.player_id),
         largeFootprint ? "is-footprint" : "",
         mountedRider ? "is-mounted-rider" : "",
         standingOnTerrain ? "is-terrain-occupant" : "",
@@ -762,12 +769,11 @@ export function renderBoard() {
       piece.style.zIndex = String(boardPieceZIndex(unit));
       piece.style.setProperty("--hp-angle", `${hpRatio(unit) * 360}deg`);
       const hideMana = Boolean(kind);
+      const face = pieceCoreMarkup(unit);
       piece.innerHTML = `
         ${footprintCellsMarkup}
         <div class="piece-ring ${isStealthed ? "is-stealthed" : ""}">
-          <div class="piece-core">
-            ${pieceCoreMarkup(unit)}
-          </div>
+          ${kind ? `<div class="piece-core">${face}</div>` : face}
         </div>
         ${hideMana ? "" : `
         <div class="${manaDisplayClass(unit)}" aria-label="魔力 ${unit.unbounded_mana ? "无限" : `${trimNumber(unit.mana)} / ${trimNumber(unit.max_mana || unit.base_stats?.mana || unit.stats?.max_mana || unit.stats?.mana || unit.mana)}`} ">
@@ -1244,7 +1250,7 @@ export function renderSelectedCard() {
   const sideLabel = viewer == null
     ? `玩家 ${unit.player_id}`
     : (unit.player_id === viewer ? "己方" : "对方");
-  panel.className = unit.id !== state.selectedUnitId ? "selected-card is-inspecting" : "selected-card";
+  panel.className = `${unit.id !== state.selectedUnitId ? "selected-card is-inspecting" : "selected-card"} ${sideTone(unit.player_id)}`;
   panel.innerHTML = `
     <div class="selected-card__head">
       <div class="selected-card__who">

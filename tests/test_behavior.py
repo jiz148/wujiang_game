@@ -29537,7 +29537,7 @@ class AutoChessBehaviorTests(unittest.TestCase):
         battle.logs = [str(index) for index in range(20)]
         snapshot = battle_observer_snapshot(battle)
         self.assertEqual(snapshot["board"], {"width": 10, "height": 10})
-        self.assertEqual(len(snapshot["logs"]), 12)
+        self.assertEqual(snapshot["logs"], [str(index) for index in range(20)])
         self.assertEqual(len(snapshot["units"]), 1)
         self.assertEqual(set(snapshot), {"board", "round_number", "winner", "units", "logs", "field_effects", "visual_events"})
 

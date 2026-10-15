@@ -83,10 +83,29 @@ def simple_ai_enabled() -> bool:
     return False
 
 
+AI_FULL = "full"
+AI_SIMPLE = "simple"
+AI_TENDENCY = "tendency"
+AI_MODES = (AI_FULL, AI_SIMPLE, AI_TENDENCY)
+
+
+def ai_decision_mode() -> str:
+    """full keeps the old scorer, simple is the fixed list, tendency picks an intent."""
+    override = os.environ.get("WUJIANG_AI_MODE", "").strip().lower()
+    if override in AI_MODES:
+        return override
+    stored = str(_load().get("ai_mode") or "").strip().lower()
+    if stored in AI_MODES:
+        return stored
+    return AI_SIMPLE if simple_ai_enabled() else AI_FULL
+
+
 def public_settings() -> dict:
+    mode = ai_decision_mode()
     return {
         "replay_recording": replay_recording(),
-        "simple_ai": simple_ai_enabled(),
+        "simple_ai": mode == AI_SIMPLE,
+        "ai_mode": mode,
     }
 
 
@@ -112,8 +131,17 @@ def update_settings(patch: dict) -> dict:
             raise ValueError("对战记录只能是 off、actions 或 full。")
         payload["replay_recording"] = value
         touched = True
-    if "simple_ai" in patch:
-        payload["simple_ai"] = _as_bool(patch.get("simple_ai"))
+    if "ai_mode" in patch:
+        mode = str(patch.get("ai_mode") or "").strip().lower()
+        if mode not in AI_MODES:
+            raise ValueError("AI 决策只能是 full、simple 或 tendency。")
+        payload["ai_mode"] = mode
+        payload["simple_ai"] = mode == AI_SIMPLE
+        touched = True
+    elif "simple_ai" in patch:
+        enabled = _as_bool(patch.get("simple_ai"))
+        payload["simple_ai"] = enabled
+        payload["ai_mode"] = AI_SIMPLE if enabled else AI_FULL
         touched = True
     if not touched:
         raise ValueError("没有可保存的设置。")

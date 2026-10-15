@@ -6612,6 +6612,19 @@ class Battle:
         self._damage_choice_event_index = 0
         try:
             self._perform_action_steps(deepcopy(payload))
+        except DamageChoiceRequired as required:
+            self.pending_damage_choice = {
+                "prompt_id": f"damage-{next(_id_counter)}",
+                "unit_id": required.unit_id,
+                "kind": required.kind,
+                "action_name": required.action_name,
+                "damage": required.damage,
+                "event_index": required.event_index,
+                "stats": required.stats,
+                "options": required.options,
+                "action_payload": deepcopy(payload),
+                "decisions": list(decisions),
+            }
         finally:
             self._damage_choice_active = False
             self._damage_choice_decisions = []

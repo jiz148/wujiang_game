@@ -137,10 +137,15 @@ def battle_observer_snapshot(battle: Battle) -> dict[str, Any]:
                       "position": unit.position.to_dict(), "alive": True, "banished": False,
                       "occupied_cells": [cell.to_dict() for cell in battle.unit_cells(unit)],
                       "hp": unit.current_hp, "max_hp": unit.max_health,
-                      "is_mount": unit.is_mount})
+                      "is_mount": unit.is_mount,
+                      "mounted_on_unit_id": unit.mounted_on_unit_id,
+                      "chess_star": int(getattr(unit, "chess_star", 0) or 0),
+                      "chess_upgrades": {key: int(value) for key, value in dict(getattr(unit, "chess_upgrades", {}) or {}).items()},
+                      "synergy_lines": [status.description for status in unit.statuses
+                                       if isinstance(status, SynergyStatus) and status.tier]})
     return {"board": {"width": battle.width, "height": battle.height},
             "round_number": battle.round_number, "winner": battle.winner,
-            "units": units, "logs": battle.logs[-12:],
+            "units": units, "logs": list(battle.logs),
             "field_effects": [effect.to_public_dict(battle) for effect in battle.field_effects],
             "visual_events": [event.to_public_dict() for event in battle.visual_events[-12:]]}
 
@@ -554,6 +559,8 @@ class AutoChessState:
                 for synergy in active_synergies:
                     if str(catalog[piece.code][synergy["category"]]) == synergy["name"]:
                         unit.add_status(SynergyStatus(synergy["category"], synergy["name"], synergy["tier"]))
+                unit.chess_star = int(piece.star)
+                unit.chess_upgrades = {key: int(value) for key, value in piece.upgrades.items()}
                 unit.current_mana = unit.max_mana()
                 x = int(piece.x) + (0 if side == 1 else self.config.board_width - self.config.deployment_width)
                 battle.add_unit(unit, Position(x, int(piece.y)))
@@ -564,10 +571,11 @@ class AutoChessState:
         sorted_right = sort_units_for_classic(units_by_side[2])
         turn_order = interleaved_classic_turn_order(sorted_left, sorted_right)
         battle.configure_turn_order([unit.unit_id for unit in turn_order])
-        battle.turn_timeout_limit = 100000
-        battle.chess_round_cap = self.config.battle_round_limit
         battle.chess_tie_winner = self.rng.choice((1, 2))
         battle.start_battle()
+        # 自走棋一场打到一方全灭为止。武将回合上限和完整战斗轮上限都会中途判胜负。
+        battle.turn_timeout_limit = 0
+        battle.chess_round_cap = 0
         runner = GameRoom(f"{match.left}{match.right}{self.round_number:04d}", seat_count=2)
         for seat in runner.seats.values():
             seat.set_ai()

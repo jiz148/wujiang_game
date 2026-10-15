@@ -29,6 +29,7 @@ from wujiang.tactical.engine.army import (
 from wujiang.tactical.engine.core import (
     ActionError,
     Battle,
+    DamageChoiceRequired,
     Position,
     SKIRMISH_HERO_TURN_LIMIT,
     Unit,
@@ -2306,7 +2307,10 @@ class GameRoom:
                     return None
                 difficulty = seat.ai_difficulty_override or self.default_ai_difficulty
                 payload = choose_respawn_action(self.battle, unit, options, difficulty)
-                return (payload, "ai_respawn", unit) if payload is not None else None
+                if payload is None:
+                    fallback = options[0]
+                    payload = {"type": "respawn_select", "unit_id": unit.unit_id, "x": fallback.x, "y": fallback.y}
+                return payload, "ai_respawn", unit
             if self.battle.pending_chain is not None:
                 seat = self._current_prompt_seat()
                 if seat is None or not seat.is_ai_controlled:
@@ -3754,7 +3758,8 @@ class GameRoom:
                     difficulty = seat.ai_difficulty_override or self.default_ai_difficulty
                     payload = choose_respawn_action(self.battle, unit, options, difficulty)
                     if payload is None:
-                        break
+                        fallback = options[0]
+                        payload = {"type": "respawn_select", "unit_id": unit.unit_id, "x": fallback.x, "y": fallback.y}
                     self._perform_battle_action(payload, reason="ai_respawn")
                     steps += 1
                 elif self.battle.pending_chain is not None:
@@ -3800,6 +3805,10 @@ class GameRoom:
                             reason="ai_turn",
                         )
                         steps += 1
+            except DamageChoiceRequired:
+                if self.battle is None or self.battle.pending_damage_choice is None:
+                    break
+                steps += 1
             except ActionError:
                 seat = self._current_prompt_seat()
                 if seat is None or not seat.is_ai:

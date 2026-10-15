@@ -128,7 +128,7 @@ export function bindEvents() {
     adjustBoardZoom(0.15);
   });
   $("sim-speed")?.addEventListener("change", (event) => {
-    if (!state.room?.simulation?.can_control) return;
+    if (!state.room?.viewer_is_host) return;
     controlSimulation("set_speed", Number(event.target.value || 1));
   });
   $("replay-step-back").addEventListener("click", () => {
@@ -799,9 +799,9 @@ export function renderBoardZoomControls() {
   zoomReset.disabled = Math.abs(zoom - 1) < 0.01;
   const speed = $("sim-speed");
   if (speed && document.activeElement !== speed) {
-    const current = String(state.room?.simulation?.speed ?? 1);
+    const current = String(Number(state.room?.simulation?.speed ?? 1));
     if ([...speed.options].some((option) => option.value === current)) speed.value = current;
-    speed.disabled = !state.room?.simulation?.can_control;
+    speed.disabled = !state.room?.viewer_is_host;
   }
 }
 
@@ -1117,16 +1117,10 @@ function createSeatCard(seat) {
   head.className = "seat-head";
   const name = document.createElement("strong");
   name.className = "seat-name";
-  name.textContent = `席位 ${seat.player_id}`;
-  const badges = document.createElement("div");
-  badges.className = "seat-badges";
-  if (seat.team_name && state.room.mode !== "autochess") badges.append(createSeatBadge(seat.team_name));
-  head.append(name, badges);
+  name.textContent = seat.occupied && seat.name ? seat.name : `席位 ${seat.player_id}`;
+  head.append(name);
   if (isViewer) card.dataset.viewerSeat = "true";
-  const player = document.createElement("div");
-  player.className = "seat-player";
-  player.textContent = seat.name || "空位";
-  title.append(head, player);
+  title.append(head);
   card.append(title);
 
   const roster = document.createElement("div");
@@ -1267,7 +1261,10 @@ function createSeatCard(seat) {
         statusField.selectEl.disabled = Boolean(seat.is_human || isViewer || locked);
         controls.append(statusField);
       }
+      if (controls.childElementCount) head.append(controls);
       if (showTeam && isRandomRoomMode()) {
+        const quotaRow = document.createElement("div");
+        quotaRow.className = "seat-controls";
         const quotaField = document.createElement("label");
         quotaField.className = "seat-control";
         const quotaLabel = document.createElement("span");
@@ -1287,9 +1284,9 @@ function createSeatCard(seat) {
           if (event.key === "Enter") commitQuota();
         });
         quotaField.append(quotaLabel, quotaInput);
-        controls.append(quotaField);
+        quotaRow.append(quotaField);
+        config.append(quotaRow);
       }
-      config.append(controls);
     }
     if (seat.occupied) {
       const ready = Boolean(seat.ready || seat.is_ai);

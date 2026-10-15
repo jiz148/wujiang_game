@@ -10,8 +10,9 @@ const REPLAY_OPTIONS = [
 ];
 
 const AI_OPTIONS = [
-  ["simple", "简化"],
   ["full", "完整"],
+  ["simple", "简化"],
+  ["tendency", "倾向"],
 ];
 
 export function renderSettings() {
@@ -67,12 +68,17 @@ function paintReplay() {
 }
 
 function currentAiValue() {
+  const mode = state.settings?.ai_mode;
+  if (mode === "simple" || mode === "tendency" || mode === "full") return mode;
   return state.settings?.simple_ai === true ? "simple" : "full";
 }
 
 function paintAi() {
   const host = $("settings-ai");
   if (!host) return;
+  if (host.childElementCount !== AI_OPTIONS.length) {
+    host.replaceChildren();
+  }
   if (!host.childElementCount) for (const [value, label] of AI_OPTIONS) {
     const button = document.createElement("button");
     button.type = "button";
@@ -114,5 +120,5 @@ async function saveReplay(value, button) {
 }
 
 async function saveAi(value, button) {
-  await saveSetting(button, currentAiValue() === value, { simple_ai: value === "simple" });
+  await saveSetting(button, currentAiValue() === value, { ai_mode: value });
 }

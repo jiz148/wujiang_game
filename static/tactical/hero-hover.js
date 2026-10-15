@@ -1,9 +1,9 @@
 let hoverCard = null;
 let activeAnchor = null;
 
-function detail(label, value) {
+function detail(label, value, extraClass = '') {
   const row = document.createElement('div');
-  row.className = 'hero-hover__row';
+  row.className = `hero-hover__row${extraClass ? ` ${extraClass}` : ''}`;
   const caption = document.createElement('span');
   caption.className = 'hero-hover__label';
   caption.textContent = label;
@@ -20,22 +20,44 @@ export function hideHeroHover(anchor = null) {
   activeAnchor = null;
 }
 
+function statRow(hero) {
+  const row = document.createElement('div');
+  row.className = 'hero-hover__row';
+  const caption = document.createElement('span');
+  caption.className = 'hero-hover__label';
+  caption.textContent = '数值';
+  const body = document.createElement('span');
+  const stats = hero.stats || {};
+  const upgrades = hero.upgrades || {};
+  [['attack', '攻'], ['defense', '守'], ['speed', '速'], ['attack_range', '范'], ['mana', '魔']].forEach(([key, label], index) => {
+    if (index) body.append(' · ');
+    body.append(`${label}${stats[key] ?? 0}`);
+    const plus = Number(upgrades[key] || 0);
+    if (plus > 0) {
+      const mark = document.createElement('b');
+      mark.className = 'hero-hover__plus';
+      mark.textContent = `+${plus}`;
+      body.append(mark);
+    }
+  });
+  row.append(caption, body);
+  return row;
+}
+
 function heroDetailNodes(hero) {
   const title = document.createElement('strong');
   title.className = 'hero-hover__title';
   title.textContent = `${hero.name} · Lv ${hero.level}`;
+  const synergies = (hero.active_synergies || []).filter(Boolean);
   return [
     title,
     detail('定位', [hero.role, hero.attribute, hero.race].filter(Boolean).join(' / ')),
-    detail('数值', `攻 ${hero.stats?.attack ?? 0} · 守 ${hero.stats?.defense ?? 0} · 速 ${hero.stats?.speed ?? 0} · 范 ${hero.stats?.attack_range ?? 0} · 魔 ${hero.stats?.mana ?? 0}`),
+    statRow(hero),
+    ...(synergies.length ? [detail('羁绊', synergies.join('；'), 'is-synergy')] : []),
     detail('技能', hero.raw_skill_text),
     detail('特性', hero.raw_trait_text),
     ...(hero.weather_effect_text ? [detail('天气效果', hero.weather_effect_text)] : []),
     ...(hero.entry_companion ? [detail('开场召唤', hero.entry_companion)] : []),
-    ...((hero.synergies || []).map((item) => detail(
-      `${item.category_name}羁绊 · ${item.name}`,
-      `3名：${item.first}；6名：${item.second}`,
-    ))),
   ];
 }
 
@@ -51,6 +73,12 @@ export function showHeroHover(hero, anchor) {
   card.className = 'hero-hover';
   card.setAttribute('role', 'tooltip');
   card.append(...heroDetailNodes(hero));
+  if (Number(hero.star) > 0) {
+    const badge = document.createElement('span');
+    badge.className = 'hero-hover__star';
+    badge.textContent = `★${hero.star}`;
+    card.append(badge);
+  }
   document.body.append(card);
   hoverCard = card;
   const anchorRect = anchor.getBoundingClientRect();
