@@ -1,0 +1,13 @@
+{
+  "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\制裁者.npz",
+  "train_rows": 10,
+  "test_rows": 2,
+  "test_replays": 0,
+  "test_accuracy": 0.0,
+  "frequency_baseline": 0.0,
+  "skill_accuracy": null,
+  "skill_frequency_baseline": null,
+  "choice_accuracy": 0.0,
+  "choice_frequency_baseline": 0.0,
+  "final_loss": 0.638
+}

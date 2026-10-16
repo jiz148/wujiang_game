@@ -1,0 +1,13 @@
+{
+  "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\火葬者.npz",
+  "train_rows": 12,
+  "test_rows": 3,
+  "test_replays": 0,
+  "test_accuracy": 0.667,
+  "frequency_baseline": 0.667,
+  "skill_accuracy": 1.0,
+  "skill_frequency_baseline": 0.5,
+  "choice_accuracy": 0.667,
+  "choice_frequency_baseline": 0.667,
+  "final_loss": 1.2818
+}

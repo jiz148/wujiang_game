@@ -1,0 +1,13 @@
+{
+  "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\普通步兵.npz",
+  "train_rows": 3377,
+  "test_rows": 833,
+  "test_replays": 34,
+  "test_accuracy": 0.944,
+  "frequency_baseline": 0.944,
+  "skill_accuracy": null,
+  "skill_frequency_baseline": null,
+  "choice_accuracy": 0.929,
+  "choice_frequency_baseline": 0.929,
+  "final_loss": 0.1952
+}

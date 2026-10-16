@@ -1,0 +1,13 @@
+{
+  "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\丰收之神。索拉.npz",
+  "train_rows": 252,
+  "test_rows": 62,
+  "test_replays": 31,
+  "test_accuracy": 1.0,
+  "frequency_baseline": 0.5,
+  "skill_accuracy": 1.0,
+  "skill_frequency_baseline": 1.0,
+  "choice_accuracy": 1.0,
+  "choice_frequency_baseline": 0.5,
+  "final_loss": 0.3486
+}
