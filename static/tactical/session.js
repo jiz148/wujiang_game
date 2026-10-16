@@ -134,9 +134,6 @@ export function clearActionSelection() {
   state.selectedActionSnapshot = null;
   state.mimicChoice = null;
   state.hoveredActionCode = "";
-  state.hoveredUnitId = "";
-  state.hoverPointer = null;
-  state.hoveredBoardCell = null;
   state.stagedPayload = null;
 }
 

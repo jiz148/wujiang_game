@@ -137,10 +137,15 @@ def battle_observer_snapshot(battle: Battle) -> dict[str, Any]:
                       "position": unit.position.to_dict(), "alive": True, "banished": False,
                       "occupied_cells": [cell.to_dict() for cell in battle.unit_cells(unit)],
                       "hp": unit.current_hp, "max_hp": unit.max_health,
-                      "is_mount": unit.is_mount})
+                      "is_mount": unit.is_mount,
+                      "mounted_on_unit_id": unit.mounted_on_unit_id,
+                      "chess_star": int(getattr(unit, "chess_star", 0) or 0),
+                      "chess_upgrades": {key: int(value) for key, value in dict(getattr(unit, "chess_upgrades", {}) or {}).items()},
+                      "synergy_lines": [status.description for status in unit.statuses
+                                       if isinstance(status, SynergyStatus) and status.tier]})
     return {"board": {"width": battle.width, "height": battle.height},
             "round_number": battle.round_number, "winner": battle.winner,
-            "units": units, "logs": battle.logs[-12:],
+            "units": units, "logs": list(battle.logs),
             "field_effects": [effect.to_public_dict(battle) for effect in battle.field_effects],
             "visual_events": [event.to_public_dict() for event in battle.visual_events[-12:]]}
 
@@ -524,6 +529,21 @@ class AutoChessState:
             self.equip(seat_id, candidate.id, code)
         self.ready(seat_id)
 
+    def _economy_ai_for_seat(self, seat: Any) -> bool:
+        if bool(getattr(seat, "ai_takeover", False)):
+            return True
+        status = getattr(seat, "connection_status", None)
+        return callable(status) and status() == "offline"
+
+    def _lock_present_preparation(self, seat_id: int) -> None:
+        player = self._player(seat_id)
+        if player.ready:
+            return
+        for piece in list(player.pieces):
+            while piece.pending_upgrades:
+                self.choose_upgrade(seat_id, piece.id, "attack")
+        self.ready(seat_id)
+
     def _create_match_battle(self, match: ChessMatch) -> Any:
         from wujiang.tactical.rooms.multiplayer import GameRoom
         left = self.players[match.left]
@@ -554,6 +574,8 @@ class AutoChessState:
                 for synergy in active_synergies:
                     if str(catalog[piece.code][synergy["category"]]) == synergy["name"]:
                         unit.add_status(SynergyStatus(synergy["category"], synergy["name"], synergy["tier"]))
+                unit.chess_star = int(piece.star)
+                unit.chess_upgrades = {key: int(value) for key, value in piece.upgrades.items()}
                 unit.current_mana = unit.max_mana()
                 x = int(piece.x) + (0 if side == 1 else self.config.board_width - self.config.deployment_width)
                 battle.add_unit(unit, Position(x, int(piece.y)))
@@ -564,20 +586,27 @@ class AutoChessState:
         sorted_right = sort_units_for_classic(units_by_side[2])
         turn_order = interleaved_classic_turn_order(sorted_left, sorted_right)
         battle.configure_turn_order([unit.unit_id for unit in turn_order])
-        battle.turn_timeout_limit = 100000
-        battle.chess_round_cap = self.config.battle_round_limit
         battle.chess_tie_winner = self.rng.choice((1, 2))
         battle.start_battle()
+        # 自走棋一场打到一方全灭为止。武将回合上限和完整战斗轮上限都会中途判胜负。
+        battle.turn_timeout_limit = 0
+        battle.chess_round_cap = 0
         runner = GameRoom(f"{match.left}{match.right}{self.round_number:04d}", seat_count=2)
         for seat in runner.seats.values():
             seat.set_ai()
         runner.battle = battle
         runner.status = "battle"
-        # 这些子局同时开好几场，又跑在拉房间状态的那条请求里。逐步录像会在每一步
-        # 把整张棋盘序列化多份，是战斗阶段卡住的主要开销。它们本来也不是回放。
-        runner.replay_forced = "off"
         runner.fast_ai_simulation = True
         battle.fast_ai_simulation = True
+        from wujiang.platform.app_settings import autochess_replay_enabled, replay_recording
+        # 默认不记。打开设置后才按「对战记录」的档位存每一步，方便回看和训练。
+        if autochess_replay_enabled() and replay_recording() != "off":
+            runner.replay_mode_name = "autochess"
+            runner.record_fast_replay_steps = True
+            runner._bind_replay_checkpoint()
+            runner._record_replay_step("battle_start")
+        else:
+            runner.replay_forced = "off"
         return runner
 
     def _begin_battles(self) -> None:
@@ -642,6 +671,46 @@ class AutoChessState:
                               if event.get("kind") == "defeat" and
                               event.get("target_player_id") == 3 - match.result["winner"])
         match.result["hero_kills"] = defeated_heroes
+        runner = match.runner
+        if runner is not None and getattr(runner, "replay", None) is not None and battle.winner is not None:
+            runner._ensure_replay_saved()
+
+    def force_finish_open_matches(self) -> None:
+        """End every unfinished fight in this round using the stall score.
+
+        Damage is the living-body difference. Equal counts fall through the
+        same health, damage, then seeded-coin order and cost 1.
+        """
+        if self.phase != "battle":
+            _error("当前没有进行中的战斗。")
+        pending = [match for match in self.matches if match.result is None]
+        if not pending:
+            _error("本轮战斗已经结束。")
+        for match in pending:
+            battle = match.runner.battle if match.runner is not None else None
+            if battle is None:
+                left_count = len(self.players[match.left].fielded())
+                right_count = len(self.players[match.right].fielded())
+                if left_count != right_count:
+                    side = 1 if left_count > right_count else 2
+                    damage = abs(left_count - right_count)
+                    criterion = "units"
+                else:
+                    side = self.rng.choice((1, 2))
+                    damage = 1
+                    criterion = "seeded_coin"
+                match.result = {"winner": side, "damage": max(1, damage), "criterion": criterion,
+                                "scores": {}, "hero_kills": 0}
+                continue
+            battle.cleanup_dead_units()
+            result = chess_timeout_result(battle)
+            battle.chess_timeout_result = result
+            battle.winner = int(result["winner"])
+            battle.win_reason_code = "chess_force_end"
+            battle.log("本轮战斗被强行结束。")
+            self._settle_match(match)
+        if self.matches and all(item.result is not None for item in self.matches):
+            self._finish_round()
 
     def _finish_round(self) -> None:
         outcomes: dict[int, list[dict[str, Any]]] = {seat_id: [] for seat_id in self._living()}
@@ -709,9 +778,16 @@ class AutoChessState:
             for seat_id in self._living():
                 if prepared >= prepare_budget:
                     break
-                if not self.players[seat_id].ready and (due or seats[seat_id].is_ai):
+                seat = seats[seat_id]
+                if self.players[seat_id].ready or not (due or seat.is_ai):
+                    continue
+                # 倒计时结束只托管真正缺席的席位。还在看盘的真人只锁定当前布阵，
+                # 不能替他花金币买将、刷新或升级。
+                if seat.is_ai or (due and self._economy_ai_for_seat(seat)):
                     self._ai_prepare(seat_id)
-                    prepared += 1
+                elif due:
+                    self._lock_present_preparation(seat_id)
+                prepared += 1
             if all(self.players[seat_id].ready for seat_id in self._living()):
                 self._begin_battles()
         if self.phase == "battle" and action_budget > 0:

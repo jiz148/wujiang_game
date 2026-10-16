@@ -8,14 +8,20 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Optional
 
-from wujiang.platform.app_settings import simple_ai_enabled
+from wujiang.platform.app_settings import ai_decision_mode
 from wujiang.tactical.engine.core import Battle, Position, Unit
 from wujiang.tactical.rooms import ai as detailed
 from wujiang.tactical.rooms import simple_ai
+from wujiang.tactical.rooms import tendency
 
 
 def _picker():
-    return simple_ai if simple_ai_enabled() else detailed
+    mode = ai_decision_mode()
+    if mode == "tendency":
+        return tendency
+    if mode == "simple":
+        return simple_ai
+    return detailed
 
 
 def choose_turn_bundle_action(

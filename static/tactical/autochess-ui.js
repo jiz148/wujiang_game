@@ -27,6 +27,21 @@ function companionName(description) {
   return String(description || '').match(/召唤出自己的([^，。]+)/)?.[1] || '召唤物';
 }
 
+function matchingSynergies(hero, synergies) {
+  if (!hero) return [];
+  return (synergies || []).filter((item) => Number(item.tier) > 0 && (
+    (item.category === 'role' && item.name === hero.role)
+    || (item.category === 'attribute' && item.name === hero.attribute)
+    || (item.category === 'race' && item.name === hero.race)
+  )).map((item) => item.effect).filter(Boolean);
+}
+
+function withPieceGrowth(hero, piece, synergies) {
+  if (!hero) return null;
+  const lines = piece?.synergyLines || matchingSynergies(hero, synergies);
+  return {...hero, upgrades: piece?.upgrades || {}, active_synergies: lines, star: Number(piece?.star || 0)};
+}
+
 function updateCountdown() {
   const clock = $('autochess-countdown');
   const chess = state.room?.mode === 'autochess' ? state.room.autochess : null;
@@ -84,6 +99,17 @@ const PIECE_ICON = {
   sell: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 5.1v5.8M6.3 6.5c.3-.5.9-.8 1.7-.8 1 0 1.7.5 1.7 1.2S9 8.2 8 8.2 6.3 8.7 6.3 9.5s.8 1.3 1.7 1.3c.7 0 1.3-.3 1.6-.7" fill="none" stroke="currentColor" stroke-width="1.15" stroke-linecap="round"/></svg>',
 };
 
+function upgradeButton(glyph, tone, title, values, disabled) {
+  const element = button(glyph, 'upgrade', values, disabled);
+  element.className = `chess-upgrade-btn ${tone}`;
+  element.setAttribute('aria-label', title);
+  element.addEventListener('mouseenter', () => showActionTip(element, title));
+  element.addEventListener('mouseleave', hideActionTip);
+  element.addEventListener('focus', () => showActionTip(element, title));
+  element.addEventListener('blur', hideActionTip);
+  return element;
+}
+
 function pieceIconButton(action, icon, tone, values, disabled, label) {
   const element = button('', action, values, disabled);
   element.className = `chess-icon-btn ${tone}`;
@@ -137,7 +163,6 @@ function renderStatus(chess, me) {
   const phase = node('span', `chess-phase${preparing ? ' is-prep' : ''}${fighting ? ' is-battle' : ''}${chess.phase === 'finished' ? ' is-done' : ''}`,
     preparing ? '准备阶段' : fighting ? '交战阶段' : chess.phase === 'finished' ? '结束' : '等待');
   rowA.append(phase);
-  if (chess.phase === 'preparation' || chess.phase === 'battle') rowA.append(battleSpeedControl());
   if (me && chess.phase !== 'lobby') {
     rowA.append(statPill('gold', me.gold));
     rowA.append(statPill('health', me.health));
@@ -145,6 +170,7 @@ function renderStatus(chess, me) {
     field.innerHTML = `当前上场 <b>${me.budget_used}</b><span>/</span><b>${me.budget}</b>`;
     rowB.append(field);
   }
+  if (chess.phase === 'preparation' || chess.phase === 'battle') rowB.append(battleSpeedControl());
   facts.append(rowA);
   if (rowB.childElementCount) facts.append(rowB);
   box.append(clock, facts);
@@ -166,7 +192,9 @@ function battleSpeedControl() {
   }
   select.disabled = !state.room?.viewer_is_host;
   select.addEventListener('change', () => {
-    void setRoomChessBattleSpeed(select.value);
+    const value = select.value;
+    select.blur();
+    void setRoomChessBattleSpeed(value);
   });
   label.append(select);
   return label;
@@ -213,7 +241,8 @@ function renderShop(chess, me, locked) {
     item.className = 'chess-block';
     item.append(node('strong', '', entry.name));
     item.append(node('small', '', `${entry.level}级 · ${entry.cost}金 · ${hero?.role || '—'} / ${hero?.attribute || '—'} / ${hero?.race || '—'}`));
-    if (hero) bindHeroHover(item, hero);
+    if (matching.length) item.append(node('em', 'chess-upgrade-tag', '可升级'));
+    if (hero) bindHeroHover(item, withPieceGrowth(hero, target, me.synergies));
     list.append(item);
   });
   section.append(list);
@@ -250,7 +279,7 @@ function renderPieces(chess, me, locked) {
       tag.className = `chess-piece-tag${piece.x !== null ? ' is-fielded' : ''}${piece.id === selectedPieceId ? ' is-on' : ''}`;
       tag.append(node('span', '', piece.name), node('em', 'chess-cost-tag', String(piece.level ?? '')));
       const hero = chess.hero_previews?.[piece.code];
-      if (hero) bindHeroHover(tag, hero);
+      if (hero) bindHeroHover(tag, withPieceGrowth(hero, piece, me.synergies));
       tags.append(tag);
     }
     section.append(tags);
@@ -264,17 +293,25 @@ function renderPieces(chess, me, locked) {
       const name = button('', 'select', {pieceId: piece.id});
       name.className = 'autochess-hero-name';
       name.append(node('strong', '', `${piece.name} ★${piece.star}`), node('em', 'chess-cost-tag', String(piece.level ?? '')));
-      if (hero) bindHeroHover(name, hero);
+      if (hero) bindHeroHover(name, withPieceGrowth(hero, piece, me.synergies));
       card.append(name);
       if (piece.entry_companion) card.append(node('small', 'autochess-companion', `开场带 ${companionName(piece.entry_companion)}：${piece.entry_companion}`));
     }
     if (piece.pending_upgrades) {
-      const choice = node('div', 'autochess-actions');
-      choice.append(node('span', '', `${piece.name} 强化（待选 ${piece.pending_upgrades} 次）`));
-      for (const [stat, label] of [['attack','攻击'], ['defense','防御'], ['speed','速度'],
-                                   ['attack_range','范围'], ['mana','魔法']]) {
-        choice.append(button(label, 'upgrade', {pieceId: piece.id, stat}, chess.phase === 'battle' || pieceLocked));
+      const choice = node('div', 'chess-upgrade');
+      choice.append(node('span', 'chess-upgrade__hint', `${piece.name} 强化（待选 ${piece.pending_upgrades} 次）`));
+      const picks = node('div', 'chess-upgrade__picks');
+      const lockedUpgrade = chess.phase === 'battle' || pieceLocked;
+      for (const [stat, glyph, tone, title] of [
+        ['attack', '攻', 'is-attack', '攻击 +1'],
+        ['defense', '防', 'is-defense', '防御 +1'],
+        ['speed', '速', 'is-speed', '速度 +1'],
+        ['attack_range', '范', 'is-range', '范围 +1'],
+        ['mana', '魔', 'is-mana', '魔法 +1'],
+      ]) {
+        picks.append(upgradeButton(glyph, tone, title, {pieceId: piece.id, stat}, lockedUpgrade));
       }
+      choice.append(picks);
       card.append(choice);
     }
     if (pieceView !== 'tag') {
@@ -402,7 +439,8 @@ function renderBodies(layer, bodies) {
     const ys = cells.map((cell) => cell.y);
     const minX = Math.min(...xs);
     const minY = Math.min(...ys);
-    const piece = node('div', `piece board-piece is-hero ${cells.length > 1 ? 'is-footprint' : ''} player-${body.side || 1} autochess-board-piece`);
+    const tone = Number(body.side || 1) === 1 ? 'is-friendly' : 'is-hostile';
+    const piece = node('div', `piece board-piece is-hero ${cells.length > 1 ? 'is-footprint' : ''} player-${body.side || 1} ${tone} autochess-board-piece`);
     piece.style.gridColumn = `${minX + 1} / span ${Math.max(...xs) - minX + 1}`;
     piece.style.gridRow = `${minY + 1} / span ${Math.max(...ys) - minY + 1}`;
     piece.style.setProperty('--hp-angle', `${Math.max(0, Math.min(1, body.hpRatio ?? 1)) * 360}deg`);
@@ -416,11 +454,17 @@ function renderBodies(layer, bodies) {
       shape.append(marker);
     }
     if (cells.length > 1) piece.append(shape);
-    const ring = node('div', 'piece-ring');
-    const core = node('div', 'piece-core');
-    core.append(node('div', 'piece-name', body.name));
-    ring.append(core);
-    piece.append(ring);
+    if (body.pad) piece.classList.add('is-mount-pad');
+    if (body.rider) {
+      piece.classList.add('is-rider');
+      piece.style.zIndex = '6';
+    }
+    if (!body.hideRing) {
+      const ring = node('div', 'piece-ring');
+      ring.append(node('div', 'piece-name', body.name));
+      piece.append(ring);
+    }
+    if (Number(body.star) > 0) piece.append(node('small', 'autochess-piece-star', `★${body.star}`));
     if (body.extra) piece.append(node('small', 'autochess-piece-note', body.extra));
     if (body.hero) {
       piece.classList.add('is-hoverable');
@@ -528,8 +572,9 @@ function renderDeployment(chess, me, locked) {
     }
   }
   const ownBodies = (me.fielded || []).map((piece) => ({
-    side: 1, pieceId: piece.id, name: piece.name, extra: piece.entry_companion ? `+ ${companionName(piece.entry_companion)}（坐骑）` : `★${piece.star}`,
-    hero: chess.hero_previews?.[piece.code],
+    side: 1, pieceId: piece.id, name: piece.name, star: piece.star,
+    extra: piece.entry_companion ? `+ ${companionName(piece.entry_companion)}（坐骑）` : '',
+    hero: withPieceGrowth(chess.hero_previews?.[piece.code], piece, me.synergies),
     cells: (piece.footprint || [[0, 0]]).map(([dx, dy]) => ({x: visualX(piece.x + dx), y: piece.y + dy})),
   }));
   renderBodies(pieces, ownBodies);
@@ -549,19 +594,27 @@ function renderBattleBoard(battle, previews, viewerSide = 1) {
   board.setAttribute('role', 'grid');
   board.setAttribute('aria-label', '自动战斗观战棋盘');
   const occupied = new Map();
-  const bodies = new Map();
-  for (const unit of battle.units || []) {
-    if (!unit.position || !unit.alive || unit.banished) continue;
+  const present = (battle.units || []).filter((unit) => unit.position && unit.alive && !unit.banished);
+  const riddenMounts = new Set(present.map((unit) => unit.mounted_on_unit_id).filter(Boolean));
+  const bodies = present.map((unit) => {
     for (const cell of unit.occupied_cells || []) occupied.set(`${cell.x},${cell.y}`, unit);
-    const key = `${unit.player_id}:${unit.position.x},${unit.position.y}`;
-    if (!bodies.has(key)) bodies.set(key, {side: unit.player_id, name: '', extra: '', heroCode: '', cells: new Map(), hpRatio: 1});
-    const body = bodies.get(key);
-    body.name += `${body.name ? ' + ' : ''}${unit.name}`;
-    if (unit.hero_code) body.heroCode = unit.hero_code;
-    if (unit.is_mount) body.extra = '召唤坐骑';
-    body.hpRatio = Math.min(body.hpRatio, unit.hp / Math.max(unit.max_hp, .001));
-    for (const cell of unit.occupied_cells || []) body.cells.set(`${cell.x},${cell.y}`, cell);
-  }
+    const ridden = Boolean(unit.is_mount && riddenMounts.has(unit.id));
+    return {
+      side: unit.player_id,
+      name: unit.name,
+      extra: unit.is_mount ? '召唤坐骑' : '',
+      heroCode: unit.hero_code,
+      star: Number(unit.chess_star || 0),
+      upgrades: unit.chess_upgrades || {},
+      synergyLines: unit.synergy_lines || [],
+      hideRing: ridden,
+      pad: ridden,
+      rider: Boolean(unit.mounted_on_unit_id),
+      cells: new Map((unit.occupied_cells || []).map((cell) => [`${cell.x},${cell.y}`, cell])),
+      hpRatio: unit.hp / Math.max(unit.max_hp, 0.001),
+    };
+  });
+  bodies.sort((left, right) => Number(Boolean(right.pad)) - Number(Boolean(left.pad)));
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const unit = occupied.get(`${x},${y}`);
@@ -583,10 +636,10 @@ function renderBattleBoard(battle, previews, viewerSide = 1) {
       board.append(cell);
     }
   }
-  renderBodies(pieces, [...bodies.values()].map((body) => ({
+  renderBodies(pieces, bodies.map((body) => ({
     ...body,
     side: body.side === focusSide ? 1 : 2,
-    hero: previews?.[body.heroCode],
+    hero: withPieceGrowth(previews?.[body.heroCode], {upgrades: body.upgrades, synergyLines: body.synergyLines, star: body.star}),
     cells: [...body.cells.values()].map((cell) => ({...cell, x: visualX(cell.x)})),
   })));
   return stage;
@@ -636,10 +689,63 @@ function renderMatches(chess, {includeBoard = true} = {}) {
   return section;
 }
 
+function renderChessRecord(chess, me) {
+  const wrap = node('div', 'chess-record');
+  const battles = chess.matches || [];
+  if (!battles.length) {
+    wrap.append(node('p', 'meta-note', '这一轮还没有战斗。'));
+    return wrap;
+  }
+  const keyOf = (match) => `${match.left}:${match.right}:${match.index ?? 0}`;
+  const mine = me ? battles.find((match) => match.left === me.seat_id || match.right === me.seat_id) : null;
+  const selected = battles.find((match) => keyOf(match) === logMatchKey) || mine || battles[0];
+  logMatchKey = keyOf(selected);
+  const select = document.createElement('select');
+  select.className = 'chess-log__select';
+  for (const match of battles) {
+    const option = document.createElement('option');
+    option.value = keyOf(match);
+    const left = chess.players.find((player) => player.seat_id === match.left);
+    const right = chess.players.find((player) => player.seat_id === match.right);
+    option.textContent = `${left?.name || `席位 ${match.left}`} 对 ${right?.name || `席位 ${match.right}`}${match.mirror ? ' · 镜像' : ''}`;
+    if (option.value === logMatchKey) option.selected = true;
+    select.append(option);
+  }
+  select.addEventListener('change', () => {
+    logMatchKey = select.value;
+    select.blur();
+    renderAutoChessPanel();
+  });
+  wrap.append(select);
+  const lines = node('div', 'logs');
+  const entries = [...(selected.battle?.logs || [])].reverse();
+  if (!entries.length) {
+    lines.append(node('div', 'log', chess.phase === 'battle' ? '这场战斗还没有写出记录。' : '交战开始后，这里显示这一轮的战斗记录。'));
+  } else {
+    entries.forEach((line) => lines.append(node('div', 'log', line)));
+  }
+  wrap.append(lines);
+  return wrap;
+}
+
+function renderChessMore(chess) {
+  const page = node('div', 'chess-more');
+  const host = Boolean(state.room?.viewer_is_host);
+  const fighting = chess.phase === 'battle' && (chess.matches || []).some((match) => !match.result);
+  const end = button('强行结束本轮战斗', 'force_finish_round', {}, !host || !fighting);
+  end.classList.add('chess-force-end');
+  page.append(end);
+  page.append(node('p', 'meta-note', '结束本轮还没打完的战斗。扣血按现在卡局时的算法：存活人数的差；人数相同再比血量、伤害，最后扣 1。'));
+  if (!host) page.append(node('p', 'meta-note', '只有房主可以操作。'));
+  return page;
+}
+
 export function renderAutoChessPanel() {
   const panel = $('autochess-panel');
   if (!panel) return;
   const chess = state.room?.mode === 'autochess' ? state.room.autochess : null;
+  const focused = document.activeElement;
+  if (chess && focused && panel.contains(focused) && (focused.classList.contains('chess-speed__select') || focused.classList.contains('chess-log__select'))) return;
   panel.classList.toggle('hidden', !chess);
   if (!chess) {
     hideHeroHover();
@@ -648,6 +754,12 @@ export function renderAutoChessPanel() {
   hideHeroHover();
   hideSynergyTip();
   hideActionTip();
+  const dockScroll = panel.querySelector(".chess-dock--right .chess-dock__scroll");
+  const keptScroll = dockScroll ? {
+    top: dockScroll.scrollTop,
+    height: dockScroll.scrollHeight,
+    dock: chessDock,
+  } : null;
   panel.replaceChildren();
   if (Number(chess.server_time) && Number(chess.server_time) !== lastServerTimestamp) {
     lastServerTimestamp = Number(chess.server_time);
@@ -682,11 +794,13 @@ export function renderAutoChessPanel() {
   const tabs = node('div', 'chess-side-tabs');
   const packTab = button('背包', 'dock', {tab: 'pack'});
   const foeTab = button('对手', 'dock', {tab: 'players'});
-  packTab.className = 'chess-side-tab';
-  foeTab.className = 'chess-side-tab';
-  if (rightDockOpen && chessDock !== 'players') packTab.classList.add('is-on');
-  if (rightDockOpen && chessDock === 'players') foeTab.classList.add('is-on');
-  tabs.append(packTab, foeTab);
+  const logTab = button('记录', 'dock', {tab: 'log'});
+  const moreTab = button('更多', 'dock', {tab: 'more'});
+  for (const [tab, name] of [[packTab, 'pack'], [foeTab, 'players'], [logTab, 'log'], [moreTab, 'more']]) {
+    tab.className = 'chess-side-tab';
+    if (rightDockOpen && chessDock === name) tab.classList.add('is-on');
+  }
+  tabs.append(packTab, foeTab, logTab);
   const rightBody = node('div', 'chess-dock__body chess-dock__body--split');
   const scroll = node('div', 'chess-dock__scroll');
   if (chessDock === 'players') {
@@ -711,6 +825,10 @@ export function renderAutoChessPanel() {
       page.append(item);
     });
     scroll.append(page);
+  } else if (chessDock === 'log') {
+    scroll.append(renderChessRecord(chess, me));
+  } else if (chessDock === 'more') {
+    scroll.append(renderChessMore(chess));
   } else if (me && !me.eliminated) {
     scroll.append(renderPieces(chess, me, chess.phase === 'preparation' && me.ready));
     scroll.append(renderSynergies(me));
@@ -733,6 +851,11 @@ export function renderAutoChessPanel() {
   right.append(tabs, rightBody);
   shell.append(right);
   panel.append(shell);
+  const nextScroll = panel.querySelector(".chess-dock--right .chess-dock__scroll");
+  if (keptScroll && nextScroll && keptScroll.dock === chessDock && keptScroll.top > 4) {
+    const growth = nextScroll.scrollHeight - keptScroll.height;
+    nextScroll.scrollTop = keptScroll.top + Math.max(0, growth);
+  }
   updateCountdown();
   paintChessCamera();
   const watched = (chess.matches || []).find((item) => item.left === focus?.seat_id || item.right === focus?.seat_id) || chess.matches?.[0];
@@ -746,6 +869,7 @@ export function renderAutoChessPanel() {
 }
 
 let chessDock = 'pack';
+let logMatchKey = '';
 let leftDockOpen = true;
 let rightDockOpen = true;
 let pieceView = 'card';
@@ -875,7 +999,7 @@ export function bindAutoChessEvents() {
       return;
     }
     if (action === 'dock') {
-      const tab = target.dataset.tab === 'players' ? 'players' : 'pack';
+      const tab = target.dataset.tab === 'players' || target.dataset.tab === 'log' || target.dataset.tab === 'more' ? target.dataset.tab : 'pack';
       if (rightDockOpen && chessDock === tab) rightDockOpen = false;
       else {
         chessDock = tab;
@@ -933,7 +1057,8 @@ export function bindAutoChessEvents() {
       messageRound = state.room?.autochess?.round || 0;
       actionMessage = action === 'ready' ? '备战已确认；其他玩家确认或倒计时结束后自动开战。'
         : ({buy: payload.piece_id ? '强化成功，请在武将卡片中选择一项能力 +1。' : '购买成功，已选中武将，请点击战场左侧布阵。', place: '布阵已更新。', level_up: '玩家等级已提升。',
-            reroll: '商店已刷新。', draw_equipment: '装备已抽取，请在背包中查看。'}[action] || '操作已完成。');
+            reroll: '商店已刷新。', draw_equipment: '装备已抽取，请在背包中查看。',
+            force_finish_round: '本轮还没结束的战斗已按场面差值结束。'}[action] || '操作已完成。');
       render();
     } catch (error) {
       actionError = error?.error || (error instanceof TypeError ? '网络连接失败，请检查连接后重试。' : error?.message)

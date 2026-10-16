@@ -29420,6 +29420,93 @@ class AutoChessBehaviorTests(unittest.TestCase):
         self.assertEqual(chess_timeout_result(battle)["damage"], 1)
         self.assertEqual(chess_timeout_result(battle)["criterion"], "units")
 
+    def test_finished_chain_skip_can_still_answer_damage_choice(self):
+        from wujiang.tactical.engine.core import Battle
+        battle = Battle(width=8, height=8)
+        battle.pending_damage_choice = {
+            "prompt_id": "damage-1",
+            "unit_id": "u1",
+            "kind": "stat",
+            "action_name": "测试",
+            "damage": 0,
+            "event_index": 0,
+            "stats": ["attack"],
+            "options": [],
+            "action_payload": {"type": "chain_skip"},
+            "decisions": [],
+        }
+        battle.perform_action({"type": "damage_choice", "unit_id": "u1", "stat_name": "decline"})
+        self.assertIsNone(battle.pending_damage_choice)
+
+    def test_force_finish_charges_living_count_difference(self):
+        from wujiang.tactical.engine.core import Battle, Position
+        from wujiang.tactical.heroes.registry import create_hero
+        from wujiang.tactical.rooms.autochess import AutoChessState, ChessMatch
+        from wujiang.tactical.rooms.multiplayer import GameRoom, RoomError
+        chess = AutoChessState(4, seed=3)
+        chess.start()
+        chess.phase = "battle"
+        battle = Battle(width=10, height=10)
+        battle.add_unit(create_hero("ellie", 1), Position(1, 1))
+        battle.add_unit(create_hero("ellie", 1), Position(2, 1))
+        battle.add_unit(create_hero("bard", 2), Position(8, 1))
+        battle.chess_tie_winner = 1
+        runner = GameRoom("force1", seat_count=2)
+        runner.battle = battle
+        runner.status = "battle"
+        chess.matches = [
+            ChessMatch(1, 2, runner=runner),
+            ChessMatch(3, 4, result={"winner": 1, "damage": 1, "hero_kills": 0}),
+        ]
+        before = chess.players[2].health
+        chess.force_finish_open_matches()
+        self.assertEqual(chess.players[2].health, before - 1)
+        self.assertEqual(chess.phase, "preparation")
+        with self.assertRaises(RoomError):
+            chess.force_finish_open_matches()
+
+    def test_autochess_replay_follows_the_setting(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from wujiang.platform import app_settings
+        from wujiang.tactical.rooms import replay as replay_module
+        from wujiang.tactical.rooms.autochess import AutoChessState, ChessMatch, ChessPiece
+
+        directory = tempfile.mkdtemp()
+        previous_cache = (app_settings._CACHE, app_settings._CACHE_PATH)
+        os.environ["WUJIANG_SETTINGS_PATH"] = str(Path(directory) / "settings.json")
+        app_settings._CACHE = None
+        app_settings._CACHE_PATH = ""
+        try:
+            self.assertFalse(app_settings.autochess_replay_enabled())
+            chess = AutoChessState(4, seed=8)
+            chess.start()
+            for seat_id in (1, 2):
+                chess.players[seat_id].pieces.append(ChessPiece(f"p{seat_id}", "ellie", x=0, y=1))
+            quiet = chess._create_match_battle(ChessMatch(1, 2))
+            self.assertEqual(quiet.replay_forced, "off")
+            self.assertIsNone(quiet.replay)
+
+            saved = app_settings.update_settings({"autochess_replay": True, "replay_recording": "full"})
+            self.assertTrue(saved["autochess_replay"])
+            self.assertEqual(saved["replay_recording"], "full")
+            for seat_id in (3, 4):
+                chess.players[seat_id].pieces.append(ChessPiece(f"q{seat_id}", "ellie", x=0, y=1))
+            recorded = chess._create_match_battle(ChessMatch(3, 4))
+            self.assertIsNone(getattr(recorded, "replay_forced", None))
+            self.assertEqual(recorded.replay.mode, "autochess")
+            self.assertGreaterEqual(recorded.replay.step_count, 1)
+            recorded.battle.winner = 1
+            replay_dir = Path(directory) / "replays"
+            replay_dir.mkdir()
+            with mock.patch.object(replay_module, "REPLAYS_DIR", replay_dir):
+                recorded._ensure_replay_saved()
+            self.assertEqual(len(list(replay_dir.glob("*.json"))), 1)
+        finally:
+            os.environ.pop("WUJIANG_SETTINGS_PATH", None)
+            app_settings._CACHE, app_settings._CACHE_PATH = previous_cache
+
     def test_equipment_workbook_draw_limit_cost_and_three_slots(self):
         from wujiang.tactical.rooms.autochess import AutoChessState, ChessPiece, hero_catalog
         from wujiang.tactical.rooms.equipment import load_equipment_catalog
@@ -29493,7 +29580,7 @@ class AutoChessBehaviorTests(unittest.TestCase):
 
     def test_preparation_starts_when_everyone_ready_or_deadline_passes(self):
         from types import SimpleNamespace
-        from wujiang.tactical.rooms.autochess import AutoChessState
+        from wujiang.tactical.rooms.autochess import AutoChessState, hero_catalog
 
         seats = {seat_id: SimpleNamespace(is_ai=False) for seat_id in range(1, 5)}
         chess = AutoChessState(4, seed=22)
@@ -29509,8 +29596,27 @@ class AutoChessBehaviorTests(unittest.TestCase):
         with mock.patch.object(chess, "_ai_prepare", side_effect=lambda seat_id: chess.ready(seat_id)) as prepare, \
                 mock.patch.object(chess, "_begin_battles") as begin:
             chess.tick(seats, now=chess.deadline_at + 1, prepare_budget=4)
-            self.assertEqual(prepare.call_count, 4)
+            self.assertEqual(prepare.call_count, 0)
+            self.assertTrue(all(chess.players[seat_id].ready for seat_id in range(1, 5)))
             begin.assert_called_once_with()
+
+        chess = AutoChessState(4, seed=22)
+        chess.start()
+        player = chess.players[1]
+        player.gold = 40
+        player.shop[0] = next(iter(hero_catalog()))
+        owned = len(player.pieces)
+        offline = {seat_id: SimpleNamespace(is_ai=False, ai_takeover=False, connection_status=lambda: "online")
+                   for seat_id in range(1, 5)}
+        offline[2] = SimpleNamespace(is_ai=False, ai_takeover=False, connection_status=lambda: "offline")
+        for seat_id in (3, 4):
+            chess.ready(seat_id)
+        with mock.patch.object(chess, "_ai_prepare", side_effect=lambda seat_id: chess.ready(seat_id)) as prepare, \
+                mock.patch.object(chess, "_begin_battles"):
+            chess.tick(offline, now=chess.deadline_at + 1, prepare_budget=4)
+        self.assertEqual(prepare.call_count, 1)
+        self.assertEqual(prepare.call_args.args[0], 2)
+        self.assertEqual((player.gold, len(player.pieces), player.ready), (40, owned, True))
 
     def test_auto_battle_advances_in_bounded_steps(self):
         from types import SimpleNamespace
@@ -29537,7 +29643,7 @@ class AutoChessBehaviorTests(unittest.TestCase):
         battle.logs = [str(index) for index in range(20)]
         snapshot = battle_observer_snapshot(battle)
         self.assertEqual(snapshot["board"], {"width": 10, "height": 10})
-        self.assertEqual(len(snapshot["logs"]), 12)
+        self.assertEqual(snapshot["logs"], [str(index) for index in range(20)])
         self.assertEqual(len(snapshot["units"]), 1)
         self.assertEqual(set(snapshot), {"board", "round_number", "winner", "units", "logs", "field_effects", "visual_events"})
 

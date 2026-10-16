@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>武将</title>
     <link rel="stylesheet" href="/theme.css?v=r27" />
-    <link rel="stylesheet" href="/styles.css?v=r115" />
+    <link rel="stylesheet" href="/styles.css?v=r128" />
   </head>
   <!-- 哪一屏该显示，要等 /api/auth/me 回来才知道。在那之前先什么都不显示，
        否则标记里默认可见的那一屏会先闪出来，再被换掉。 -->
@@ -88,8 +88,15 @@
               </div>
               <div class="settings-row">
                 <div class="settings-row__text">
+                  <span class="settings-row__label">自走棋录像</span>
+                  <p class="settings-row__hint">默认关闭。打开后，自走棋里的每场战斗按上面的对战记录来记，方便回看，也能当训练数据。完整回放会让战斗变慢，文件也会变大。</p>
+                </div>
+                <div id="settings-chess-replay" class="settings-seg" role="group" aria-label="自走棋录像"></div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row__text">
                   <span class="settings-row__label">AI 决策</span>
-                  <p class="settings-row__hint">简化只在武将已给出的行动里挑选。完整沿用原来的评分。</p>
+                  <p class="settings-row__hint">完整沿用原来的评分。简化按固定顺序挑一步。倾向先决定想做什么，再收成一步合法行动。</p>
                 </div>
                 <div id="settings-ai" class="settings-seg" role="group" aria-label="AI 决策"></div>
               </div>
@@ -326,7 +333,7 @@
                   <button id="board-zoom-in" type="button" class="ghost">放大</button>
                   <span id="board-zoom-value" class="zoom-value">100%</span>
                 </div>
-                <label class="replay-speed-control sim-speed-control" for="sim-speed">
+                <label class="replay-speed-control sim-speed-control">
                   <span>AI 速度</span>
                   <select id="sim-speed">
                     <option value="0.5">0.5x</option>
@@ -781,6 +788,6 @@
     <script src="/platform/home-ui.js?v=r13" defer></script>
     <script src="/tactical/replay-ui.js?v=r14" defer></script>
     <script src="/tactical/battle-feedback.js?v=r15" defer></script>
-    <script type="module" src="/app.js?v=r96"></script>
+    <script type="module" src="/app.js?v=r115"></script>
   </body>
 </html>

@@ -6612,6 +6612,19 @@ class Battle:
         self._damage_choice_event_index = 0
         try:
             self._perform_action_steps(deepcopy(payload))
+        except DamageChoiceRequired as required:
+            self.pending_damage_choice = {
+                "prompt_id": f"damage-{next(_id_counter)}",
+                "unit_id": required.unit_id,
+                "kind": required.kind,
+                "action_name": required.action_name,
+                "damage": required.damage,
+                "event_index": required.event_index,
+                "stats": required.stats,
+                "options": required.options,
+                "action_payload": deepcopy(payload),
+                "decisions": list(decisions),
+            }
         finally:
             self._damage_choice_active = False
             self._damage_choice_decisions = []
@@ -6902,7 +6915,12 @@ class Battle:
                     raise ActionError("士兵由军队指令统一行动，不能单独操控。")
             self.start_action_or_chain(payload)
             return
-        unit = self.get_unit(payload["unit_id"])
+        if action_type == "chain_skip":
+            return
+        unit_id = payload.get("unit_id")
+        if not unit_id:
+            raise ActionError("动作缺少单位。")
+        unit = self.get_unit(str(unit_id))
         if is_army_soldier(unit):
             raise ActionError("士兵由军队指令统一行动，不能单独操控。")
         if action_type == "pass_unit":
