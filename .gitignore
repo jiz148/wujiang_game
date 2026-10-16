@@ -20,6 +20,9 @@ parts/
 sdist/
 var/
 replayData/
+
+# Neural-net samples are large. The lab folder itself stays in the repo; only these dumps stay out.
+data/nn-lab/**/*.jsonl
 wheels/
 share/python-wheels/
 *.egg-info/

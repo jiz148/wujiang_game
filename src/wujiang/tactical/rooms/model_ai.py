@@ -2,7 +2,7 @@
 
 The network scores tokens such as move, attack, and skill:pierce. It does not
 invent a cell. The concrete step still comes from that one legal entry, and an
-area skill that hits nobody is refused. Weights stay under var/nn-lab. If the
+area skill that hits nobody is refused. Weights stay under data/nn-lab. If the
 ranker file is missing, the older four-way kind picker is used.
 """
 from __future__ import annotations

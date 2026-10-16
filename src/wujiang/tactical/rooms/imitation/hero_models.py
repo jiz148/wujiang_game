@@ -49,10 +49,10 @@ def shipped_hero_dir() -> Path:
 
 def hero_weight_path(identity: str) -> Path:
     name = f"{hero_file_stem(identity)}.npz"
-    local = lab_hero_dir() / name
-    if local.is_file():
-        return local
-    return shipped_hero_dir() / name
+    shipped = shipped_hero_dir() / name
+    if shipped.is_file():
+        return shipped
+    return lab_hero_dir() / name
 
 
 def split_records(source: Path, directory: Path | None = None) -> dict[str, Any]:
@@ -136,7 +136,7 @@ def main() -> None:
     import argparse
     parser = argparse.ArgumentParser(description="按武将拆开可见决策，并分别训练。")
     parser.add_argument("command", choices=("split", "train"))
-    parser.add_argument("--records", type=Path, default=Path("var/nn-lab/visible-decisions.jsonl"))
+    parser.add_argument("--records", type=Path, default=Path("data/nn-lab/visible-decisions.jsonl"))
     parser.add_argument("--min-rows", type=int, default=MIN_ROWS)
     parser.add_argument("--epochs", type=int, default=60)
     args = parser.parse_args()

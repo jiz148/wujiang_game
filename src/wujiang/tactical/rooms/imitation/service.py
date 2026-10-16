@@ -23,15 +23,15 @@ def replay_dir() -> Path:
 
 
 def lab_weights_path() -> Path:
-    return PROJECT_ROOT / "var" / "nn-lab" / "weights.npz"
+    return PROJECT_ROOT / "data" / "nn-lab" / "weights.npz"
 
 
 def lab_ranker_path() -> Path:
-    return PROJECT_ROOT / "var" / "nn-lab" / "ranker.npz"
+    return PROJECT_ROOT / "data" / "nn-lab" / "ranker.npz"
 
 
 def lab_hero_dir() -> Path:
-    return PROJECT_ROOT / "var" / "nn-lab" / "heroes"
+    return PROJECT_ROOT / "data" / "nn-lab" / "heroes"
 
 
 def weights_path() -> Path:

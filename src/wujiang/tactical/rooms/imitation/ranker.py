@@ -1,7 +1,7 @@
 """Score each already-legal action and learn which one was actually taken.
 
 The input is the situation plus one candidate, such as move or skill:pierce.
-Training uses the decision records under var/nn-lab. Weights stay there too.
+Training uses the decision records under data/nn-lab. Weights stay there too.
 The live battle still supplies the legal list; this network only ranks it.
 """
 from __future__ import annotations
@@ -198,8 +198,8 @@ def _frequency_accuracy(
 def main() -> None:
     import argparse
     parser = argparse.ArgumentParser(description="用一步一条的决策样本训练合法清单排序。")
-    parser.add_argument("--records", type=Path, default=Path("var/nn-lab/visible-decisions.jsonl"))
-    parser.add_argument("--out", type=Path, default=Path("var/nn-lab/ranker.npz"))
+    parser.add_argument("--records", type=Path, default=Path("data/nn-lab/visible-decisions.jsonl"))
+    parser.add_argument("--out", type=Path, default=Path("data/nn-lab/ranker.npz"))
     parser.add_argument("--epochs", type=int, default=80)
     args = parser.parse_args()
     print(json.dumps(train_ranker(args.records, args.out, epochs=args.epochs), ensure_ascii=False, indent=2))

@@ -431,7 +431,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="把完整录像整理成一步一个的决策样本。")
     parser.add_argument("--replays", type=Path, required=True)
     parser.add_argument("--max-bytes", type=int, default=8_000_000)
-    parser.add_argument("--out", type=Path, default=Path("var/nn-lab/decisions.jsonl"))
+    parser.add_argument("--out", type=Path, default=Path("data/nn-lab/decisions.jsonl"))
     args = parser.parse_args()
     report = write_decisions(args.replays, args.out, max_bytes=args.max_bytes)
     print(json.dumps(report, ensure_ascii=False, indent=2))
