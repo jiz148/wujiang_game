@@ -800,7 +800,7 @@ export function renderAutoChessPanel() {
     tab.className = 'chess-side-tab';
     if (rightDockOpen && chessDock === name) tab.classList.add('is-on');
   }
-  tabs.append(packTab, foeTab, logTab);
+  tabs.append(packTab, foeTab, logTab, moreTab);
   const rightBody = node('div', 'chess-dock__body chess-dock__body--split');
   const scroll = node('div', 'chess-dock__scroll');
   if (chessDock === 'players') {

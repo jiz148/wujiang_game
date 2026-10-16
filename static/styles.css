@@ -9362,10 +9362,7 @@ body.battle-mode .logs .log {
 }
 
 .autochess-board-piece .piece-ring,
-body.battle-mode .piece.is-hero .piece-ring,
-body.battle-mode .piece.is-footprint .piece-ring,
-body.battle-mode .autochess-board-piece .piece-ring,
-.board.is-large-board .piece.is-hero .piece-ring {
+body.battle-mode .autochess-board-piece .piece-ring {
   width: 46px;
   height: 46px;
   min-width: 46px;
@@ -9382,6 +9379,36 @@ body.battle-mode .autochess-board-piece .piece-ring,
   background: var(--piece-fill-1);
   box-shadow: none;
   border: 0;
+}
+
+body.battle-mode .board-piece.is-hero:not(.is-footprint):not(.is-mounted-rider):not(.autochess-board-piece) {
+  gap: 0;
+  padding: 0;
+  overflow: visible;
+}
+
+body.battle-mode .board-piece.is-hero:not(.is-footprint):not(.is-mounted-rider):not(.autochess-board-piece) .piece-ring {
+  width: 92%;
+  height: 92%;
+  min-width: 0;
+  min-height: 0;
+  max-width: none;
+  max-height: none;
+  flex: 0 0 auto;
+  container-type: size;
+}
+
+body.battle-mode .board-piece.is-hero:not(.is-footprint):not(.is-mounted-rider):not(.autochess-board-piece) .piece-name {
+  font-size: 24cqmin;
+}
+
+body.battle-mode .board-piece.is-hero:not(.is-footprint):not(.is-mounted-rider):not(.autochess-board-piece) .mana-pips {
+  position: absolute;
+  left: 50%;
+  bottom: 1px;
+  z-index: 4;
+  margin: 0;
+  transform: translateX(-50%);
 }
 
 .autochess-board-piece .piece-core {

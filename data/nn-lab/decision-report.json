@@ -1,0 +1,20 @@
+{
+  "files": 412,
+  "rows": 7445,
+  "families": {
+    "skill": 948,
+    "move": 4882,
+    "attack": 1614,
+    "end": 1
+  },
+  "label_sources": {
+    "event": 2304,
+    "board": 5140,
+    "turn": 1
+  },
+  "rows_with_legal_list": 7415,
+  "chosen_found_in_legal_list": 7414,
+  "skill_rows": 948,
+  "skill_rows_on_card": 948,
+  "out": "var\\nn-lab\\visible-decisions.jsonl"
+}

@@ -1,0 +1,489 @@
+{
+  "trained": 20,
+  "skipped": 64,
+  "min_rows": 12,
+  "heroes": [
+    {
+      "hero": "普通步兵",
+      "rows": 4210,
+      "test_accuracy": 0.944,
+      "frequency_baseline": 0.944,
+      "skill_accuracy": null,
+      "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\普通步兵.npz"
+    },
+    {
+      "hero": "弓兵",
+      "rows": 784,
+      "test_accuracy": 0.845,
+      "frequency_baseline": 0.845,
+      "skill_accuracy": null,
+      "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\弓兵.npz"
+    },
+    {
+      "hero": "守备兵",
+      "rows": 742,
+      "test_accuracy": 0.924,
+      "frequency_baseline": 0.924,
+      "skill_accuracy": null,
+      "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\守备兵.npz"
+    },
+    {
+      "hero": "E。暗人",
+      "rows": 484,
+      "test_accuracy": 0.692,
+      "frequency_baseline": 0.231,
+      "skill_accuracy": 0.75,
+      "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\E。暗人.npz"
+    },
+    {
+      "hero": "丰收之神。索拉",
+      "rows": 315,
+      "test_accuracy": 1.0,
+      "frequency_baseline": 0.5,
+      "skill_accuracy": 1.0,
+      "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\丰收之神。索拉.npz"
+    },
+    {
+      "hero": "红衣",
+      "rows": 291,
+      "test_accuracy": 0.71,
+      "frequency_baseline": 0.435,
+      "skill_accuracy": 0.556,
+      "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\红衣.npz"
+    },
+    {
+      "hero": "吟游诗人",
+      "rows": 64,
+      "test_accuracy": 0.385,
+      "frequency_baseline": 0.231,
+      "skill_accuracy": 0.625,
+      "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\吟游诗人.npz"
+    },
+    {
+      "hero": "excel_r195",
+      "rows": 33,
+      "test_accuracy": 0.25,
+      "frequency_baseline": 0.75,
+      "skill_accuracy": 0.333,
+      "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\excel_r195.npz"
+    },
+    {
+      "hero": "豹头人。飞翼",
+      "rows": 30,
+      "test_accuracy": 0.5,
+      "frequency_baseline": 0.0,
+      "skill_accuracy": 0.6,
+      "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\豹头人。飞翼.npz"
+    },
+    {
+      "hero": "excel_r379",
+      "rows": 26,
+      "test_accuracy": 0.0,
+      "frequency_baseline": 0.0,
+      "skill_accuracy": null,
+      "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\excel_r379.npz"
+    },
+    {
+      "hero": "精兵",
+      "rows": 26,
+      "test_accuracy": 0.8,
+      "frequency_baseline": 0.2,
+      "skill_accuracy": 1.0,
+      "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\精兵.npz"
+    },
+    {
+      "hero": "excel_r028",
+      "rows": 17,
+      "test_accuracy": 0.0,
+      "frequency_baseline": 0.0,
+      "skill_accuracy": 0.0,
+      "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\excel_r028.npz"
+    },
+    {
+      "hero": "excel_r139",
+      "rows": 16,
+      "test_accuracy": 1.0,
+      "frequency_baseline": 1.0,
+      "skill_accuracy": 1.0,
+      "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\excel_r139.npz"
+    },
+    {
+      "hero": "excel_r356",
+      "rows": 16,
+      "test_accuracy": 0.0,
+      "frequency_baseline": 0.333,
+      "skill_accuracy": 0.0,
+      "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\excel_r356.npz"
+    },
+    {
+      "hero": "excel_r192",
+      "rows": 15,
+      "test_accuracy": 0.667,
+      "frequency_baseline": 0.667,
+      "skill_accuracy": 1.0,
+      "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\excel_r192.npz"
+    },
+    {
+      "hero": "火葬者",
+      "rows": 15,
+      "test_accuracy": 0.667,
+      "frequency_baseline": 0.667,
+      "skill_accuracy": 1.0,
+      "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\火葬者.npz"
+    },
+    {
+      "hero": "fire_funeral",
+      "rows": 14,
+      "test_accuracy": 1.0,
+      "frequency_baseline": 0.5,
+      "skill_accuracy": 1.0,
+      "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\fire_funeral.npz"
+    },
+    {
+      "hero": "excel_r026",
+      "rows": 13,
+      "test_accuracy": 0.0,
+      "frequency_baseline": 0.0,
+      "skill_accuracy": 0.0,
+      "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\excel_r026.npz"
+    },
+    {
+      "hero": "excel_r127",
+      "rows": 13,
+      "test_accuracy": 0.0,
+      "frequency_baseline": 0.0,
+      "skill_accuracy": 0.0,
+      "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\excel_r127.npz"
+    },
+    {
+      "hero": "制裁者",
+      "rows": 12,
+      "test_accuracy": 0.0,
+      "frequency_baseline": 0.0,
+      "skill_accuracy": null,
+      "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\制裁者.npz"
+    }
+  ],
+  "skipped_heroes": [
+    {
+      "hero": "ellie",
+      "rows": 14,
+      "reason": "只有 7 条带合法清单的决策，不够训练。"
+    },
+    {
+      "hero": "excel_r093",
+      "rows": 11,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r158",
+      "rows": 10,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r198",
+      "rows": 10,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "elite_soldier",
+      "rows": 9,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r113",
+      "rows": 8,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r187",
+      "rows": 8,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r023",
+      "rows": 7,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r225",
+      "rows": 7,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r291",
+      "rows": 7,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "妖精王奥尔贝隆",
+      "rows": 7,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "幻象鸟",
+      "rows": 7,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "艾莉",
+      "rows": 7,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "蝴蝶刺客。弗伦萨",
+      "rows": 7,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r035",
+      "rows": 6,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r066",
+      "rows": 6,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r137",
+      "rows": 6,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r172",
+      "rows": 6,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r193",
+      "rows": 6,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r352",
+      "rows": 6,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "soul_wraith",
+      "rows": 6,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "天位骑士。政宗",
+      "rows": 6,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "天蟹",
+      "rows": 6,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "恶作剧的双子恶魔",
+      "rows": 6,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "昼行武者",
+      "rows": 6,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "毒蛇。巨蟒",
+      "rows": 6,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "特警。深渊零式",
+      "rows": 6,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "盲人剑士",
+      "rows": 6,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "魔神凯撒",
+      "rows": 6,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "E。电击人",
+      "rows": 5,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "dark_human",
+      "rows": 5,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r022",
+      "rows": 5,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r071",
+      "rows": 5,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "不死王利娜",
+      "rows": 5,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "哔库",
+      "rows": 5,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "无名的岩石兵",
+      "rows": 5,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r030",
+      "rows": 4,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r118",
+      "rows": 4,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r142",
+      "rows": 4,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r327",
+      "rows": 4,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "jade",
+      "rows": 4,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "古代机械炮台",
+      "rows": 4,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "D。黑豹",
+      "rows": 3,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r224",
+      "rows": 3,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "masamune",
+      "rows": 3,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "地狱的刺客。KAKI",
+      "rows": 3,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "聚变人",
+      "rows": 3,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "雪巨人",
+      "rows": 3,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "bicycle_rider",
+      "rows": 2,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r191",
+      "rows": 2,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r222",
+      "rows": 2,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "刀锋剑士",
+      "rows": 2,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "千本针",
+      "rows": 2,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "湿地之主。缇娜",
+      "rows": 2,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "诚实天使欧内斯特",
+      "rows": 2,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "N",
+      "rows": 1,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r032",
+      "rows": 1,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "excel_r136",
+      "rows": 1,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "unicycle_rider",
+      "rows": 1,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "世界之种",
+      "rows": 1,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "妖仙。菊",
+      "rows": 1,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "暴君龙",
+      "rows": 1,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "毒王",
+      "rows": 1,
+      "reason": "样本太少，先只整理不训练。"
+    },
+    {
+      "hero": "龙骑",
+      "rows": 1,
+      "reason": "样本太少，先只整理不训练。"
+    }
+  ]
+}

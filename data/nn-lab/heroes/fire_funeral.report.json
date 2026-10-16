@@ -1,0 +1,13 @@
+{
+  "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\fire_funeral.npz",
+  "train_rows": 12,
+  "test_rows": 2,
+  "test_replays": 1,
+  "test_accuracy": 1.0,
+  "frequency_baseline": 0.5,
+  "skill_accuracy": 1.0,
+  "skill_frequency_baseline": 1.0,
+  "choice_accuracy": 1.0,
+  "choice_frequency_baseline": 0.5,
+  "final_loss": 0.5444
+}

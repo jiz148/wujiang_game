@@ -1,0 +1,13 @@
+{
+  "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\E。暗人.npz",
+  "train_rows": 393,
+  "test_rows": 91,
+  "test_replays": 7,
+  "test_accuracy": 0.692,
+  "frequency_baseline": 0.231,
+  "skill_accuracy": 0.75,
+  "skill_frequency_baseline": 0.0,
+  "choice_accuracy": 0.636,
+  "choice_frequency_baseline": 0.091,
+  "final_loss": 1.0411
+}

@@ -1,0 +1,13 @@
+{
+  "weights": "var\\nn-lab\\ranker.npz",
+  "train_rows": 6116,
+  "test_rows": 1298,
+  "test_replays": 82,
+  "test_accuracy": 0.817,
+  "frequency_baseline": 0.798,
+  "skill_accuracy": 0.469,
+  "skill_frequency_baseline": 0.067,
+  "choice_accuracy": 0.778,
+  "choice_frequency_baseline": 0.755,
+  "final_loss": 0.6687
+}

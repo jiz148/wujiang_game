@@ -1,0 +1,61 @@
+{
+  "note": "这些是留出结果优于“总选该武将最常走的那条”的权重。没有对应文件的武将用完整 AI。步兵、弓兵、守备兵不使用网络。",
+  "heroes": [
+    {
+      "hero": "E。暗人",
+      "rows": 484,
+      "test_accuracy": 0.692,
+      "frequency_baseline": 0.231,
+      "skill_accuracy": 0.75,
+      "file": "E。暗人.npz"
+    },
+    {
+      "hero": "丰收之神。索拉",
+      "rows": 315,
+      "test_accuracy": 1.0,
+      "frequency_baseline": 0.5,
+      "skill_accuracy": 1.0,
+      "file": "丰收之神。索拉.npz"
+    },
+    {
+      "hero": "红衣",
+      "rows": 291,
+      "test_accuracy": 0.71,
+      "frequency_baseline": 0.435,
+      "skill_accuracy": 0.556,
+      "file": "红衣.npz"
+    },
+    {
+      "hero": "吟游诗人",
+      "rows": 64,
+      "test_accuracy": 0.385,
+      "frequency_baseline": 0.231,
+      "skill_accuracy": 0.625,
+      "file": "吟游诗人.npz"
+    },
+    {
+      "hero": "豹头人。飞翼",
+      "rows": 30,
+      "test_accuracy": 0.5,
+      "frequency_baseline": 0.0,
+      "skill_accuracy": 0.6,
+      "file": "豹头人。飞翼.npz"
+    },
+    {
+      "hero": "精兵",
+      "rows": 26,
+      "test_accuracy": 0.8,
+      "frequency_baseline": 0.2,
+      "skill_accuracy": 1.0,
+      "file": "精兵.npz"
+    },
+    {
+      "hero": "fire_funeral",
+      "rows": 14,
+      "test_accuracy": 1.0,
+      "frequency_baseline": 0.5,
+      "skill_accuracy": 1.0,
+      "file": "fire_funeral.npz"
+    }
+  ]
+}

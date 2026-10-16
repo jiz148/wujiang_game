@@ -1,0 +1,13 @@
+{
+  "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\红衣.npz",
+  "train_rows": 222,
+  "test_rows": 69,
+  "test_replays": 5,
+  "test_accuracy": 0.71,
+  "frequency_baseline": 0.435,
+  "skill_accuracy": 0.556,
+  "skill_frequency_baseline": 0.111,
+  "choice_accuracy": 0.71,
+  "choice_frequency_baseline": 0.435,
+  "final_loss": 1.7078
+}

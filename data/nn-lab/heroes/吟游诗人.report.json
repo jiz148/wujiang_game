@@ -1,0 +1,13 @@
+{
+  "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\吟游诗人.npz",
+  "train_rows": 49,
+  "test_rows": 13,
+  "test_replays": 1,
+  "test_accuracy": 0.385,
+  "frequency_baseline": 0.231,
+  "skill_accuracy": 0.625,
+  "skill_frequency_baseline": 0.375,
+  "choice_accuracy": 0.333,
+  "choice_frequency_baseline": 0.167,
+  "final_loss": 1.2566
+}

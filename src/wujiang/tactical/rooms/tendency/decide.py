@@ -133,8 +133,134 @@ def choose_chain_reaction(
     options: list[dict[str, Any]],
     difficulty: str,
 ) -> Optional[dict[str, Any]]:
-    del battle, reactor, options, difficulty
-    return {"type": "chain_skip"}
+    del difficulty
+    window = getattr(battle, "pending_chain", None)
+    queued = getattr(window, "queued_action", None) if window is not None else None
+    if queued is None or not options:
+        return {"type": "chain_skip"}
+    threatened = _incoming_hits(battle, reactor, queued)
+    ranked: list[tuple[int, dict[str, Any]]] = []
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        payload = _reaction_payload(battle, reactor, queued, option, threatened)
+        if payload is None:
+            continue
+        code = str(option.get("action_code") or "")
+        score = _reaction_score(queued, code, threatened)
+        if score <= 0 and not threatened and ("shield" in code or code in {"protection", "block"}):
+            score = 45
+        if score > 0:
+            ranked.append((score, payload))
+    if not ranked:
+        return {"type": "chain_skip"}
+    return max(ranked, key=lambda item: item[0])[1]
+
+
+def _incoming_hits(battle: Battle, reactor: Unit, queued: Any) -> bool:
+    targets = {str(unit_id) for unit_id in (getattr(queued, "target_unit_ids", None) or [])}
+    if str(getattr(reactor, "unit_id", "")) in targets:
+        return True
+    danger = set(_positions(getattr(queued, "target_cells", None)))
+    if not danger:
+        return False
+    reader = getattr(battle, "unit_cells", None)
+    cells = list(reader(reactor)) if callable(reader) else [getattr(reactor, "position", None)]
+    return any(cell in danger for cell in (_as_position(cell) for cell in cells) if cell is not None)
+
+
+def _reaction_score(queued: Any, code: str, threatened: bool) -> int:
+    if not threatened:
+        return 0
+    payload = getattr(queued, "payload", None) or {}
+    kind = str(getattr(queued, "action_type", "") or "")
+    cannot_evade = bool(payload.get("cannot_evade"))
+    ignore_shield = bool(payload.get("ignore_shield"))
+    if code in {"evasion", "ghost_step", "backstep_shot"}:
+        return 0 if cannot_evade else (90 if kind in {"attack", "skill"} else 20)
+    if code in {"protection", "block", "harden"} or "shield" in code:
+        if ignore_shield:
+            return 0
+        return 70 if kind == "attack" else (45 if kind == "skill" else 0)
+    if code in {"counter", "knockback"}:
+        return 60 if kind == "attack" else 0
+    return 30 if kind in {"attack", "skill"} else 0
+
+
+def _reaction_payload(
+    battle: Battle,
+    reactor: Unit,
+    queued: Any,
+    option: dict[str, Any],
+    threatened: bool,
+) -> Optional[dict[str, Any]]:
+    code = str(option.get("action_code") or "")
+    preview = option.get("preview") or {}
+    listed = [str(unit_id) for unit_id in (preview.get("target_unit_ids") or [])]
+    covers_ally = any(unit_id in {str(item) for item in (getattr(queued, "target_unit_ids", None) or [])} for unit_id in listed)
+    if not code or not (threatened or covers_ally):
+        return None
+    base = {"type": "chain_react", "unit_id": reactor.unit_id, "action_code": code}
+    escape = code in {"evasion", "ghost_step", "backstep_shot"}
+    if escape:
+        cell = _retreat_cell(battle, reactor, queued, _positions(preview.get("cells")))
+        if cell is None:
+            return None
+        base["x"] = cell.x
+        base["y"] = cell.y
+    elif listed:
+        own = str(getattr(reactor, "unit_id", ""))
+        base["target_unit_id"] = own if own in listed else listed[0]
+        if code in {"protection", "block"} or "shield" in code:
+            base["target_unit_ids"] = [base["target_unit_id"]]
+    if not _reaction_payload_legal(battle, reactor, queued, base):
+        return None
+    return base
+
+
+def _retreat_cell(battle: Battle, reactor: Unit, queued: Any, cells: list[Position]) -> Optional[Position]:
+    if not cells:
+        return None
+    danger = set(_positions(getattr(queued, "target_cells", None)))
+    if not danger:
+        reader = getattr(battle, "unit_cells", None)
+        own = list(reader(reactor)) if callable(reader) else [getattr(reactor, "position", None)]
+        danger = {cell for cell in (_as_position(item) for item in own) if cell is not None}
+    source = battle.units.get(str(getattr(queued, "actor_id", "") or "")) if hasattr(battle, "units") else None
+    origin = _as_position(getattr(source, "position", None)) if source is not None else None
+
+    def rank(cell: Position) -> tuple[int, int]:
+        outside = 0 if cell in danger else 1
+        away = cell.distance_to(origin) if origin is not None else 0
+        return (outside, away)
+
+    chosen = max(cells, key=rank)
+    if chosen in danger:
+        return None
+    return chosen
+
+
+def _reaction_payload_legal(battle: Battle, reactor: Unit, queued: Any, payload: dict[str, Any]) -> bool:
+    getter = getattr(reactor, "get_skill", None)
+    if not callable(getter):
+        return True
+    try:
+        skill = getter(str(payload.get("action_code") or ""))
+    except Exception:
+        return True
+    if skill is None:
+        return True
+    cost = float(getattr(skill, "mana_cost", 0.0) or 0.0)
+    if cost > float(getattr(reactor, "current_mana", cost) or 0.0):
+        return False
+    checker = getattr(skill, "can_react_with_payload", None)
+    if not callable(checker):
+        return True
+    try:
+        ok, _reason = checker(battle, reactor, queued, payload)
+    except Exception:
+        return False
+    return bool(ok)
 
 
 def choose_respawn_action(
@@ -294,18 +420,28 @@ def _skill_payload(battle: Battle, actor: Unit, action: dict[str, Any]) -> Optio
     listed = [str(item) for item in (preview.get("target_unit_ids") or [])]
     if mode in {"enemy", "unit"}:
         if code == "recover_mana":
-            return finish(_recover_mana_payload(battle, actor, code, listed))
-        target = _listed_unit(battle, actor, listed, allies=False)
-        if target is None and mode == "unit":
-            target = _listed_unit(battle, actor, listed, allies=True)
-        return finish(_at_unit(actor, code, target))
+            payload = finish(_recover_mana_payload(battle, actor, code, listed))
+            return payload if _payload_matters(battle, actor, payload) else None
+        allies_ok = mode == "unit"
+        for target in _listed_units(battle, actor, listed, allies=False) or (
+            _listed_units(battle, actor, listed, allies=True) if allies_ok else []
+        ):
+            payload = finish(_at_unit(actor, code, target))
+            if _payload_matters(battle, actor, payload):
+                return payload
+        return None
     if mode == "ally":
-        target = _listed_unit(battle, actor, listed, allies=True)
-        if target is not None and actor.unit_id in listed and _ratio(actor) <= _ratio(target):
-            target = actor if actor.position is not None else target
-        return finish(_at_unit(actor, code, target))
+        targets = _listed_units(battle, actor, listed, allies=True)
+        if actor.unit_id in listed and actor.position is not None:
+            targets = [actor, *[target for target in targets if target.unit_id != actor.unit_id]]
+        for target in targets:
+            payload = finish(_at_unit(actor, code, target))
+            if _payload_matters(battle, actor, payload):
+                return payload
+        return None
     if mode in {"none", "self"} and not preview.get("requires_target"):
-        return finish({"type": "skill", "unit_id": actor.unit_id, "skill_code": code})
+        payload = finish({"type": "skill", "unit_id": actor.unit_id, "skill_code": code})
+        return payload if _payload_matters(battle, actor, payload) else None
     if mode == "cell":
         patterns = _selection_patterns(preview)
         if patterns:
@@ -327,15 +463,65 @@ def _skill_payload(battle: Battle, actor: Unit, action: dict[str, Any]) -> Optio
         if not cells:
             return None
         enemies = _enemies(battle, actor.player_id)
-        chosen = min(
+        ordered = sorted(
             cells,
             key=lambda cell: min(
                 (cell.distance_to(enemy.position) for enemy in enemies if enemy.position is not None),
                 default=0,
             ),
         )
-        return finish({"type": "skill", "unit_id": actor.unit_id, "skill_code": code, "x": chosen.x, "y": chosen.y})
+        for chosen in ordered[:8]:
+            payload = finish({"type": "skill", "unit_id": actor.unit_id, "skill_code": code, "x": chosen.x, "y": chosen.y})
+            if _payload_matters(battle, actor, payload):
+                return payload
+        return None
     return None
+
+
+def _payload_matters(battle: Battle, actor: Unit, payload: Optional[dict[str, Any]]) -> bool:
+    """False when casting would leave the board unchanged.
+
+    A legal skill can still do nothing: the ally already has the buff, or the
+    area does not touch anyone. That cast must not be chosen again.
+    """
+    if payload is None:
+        return False
+    if payload.get("type") != "skill":
+        return True
+    code = str(payload.get("skill_code") or "")
+    skill = None
+    if hasattr(actor, "get_skill"):
+        try:
+            skill = actor.get_skill(code)
+        except Exception:
+            skill = None
+    if skill is None:
+        return True
+    before = _board_mark(battle)
+    from wujiang.tactical.rooms.ai import ai_probe_rollback
+    with ai_probe_rollback(battle):
+        try:
+            skill.execute(battle, actor, payload)
+        except Exception:
+            return False
+        return _board_mark(battle) != before
+
+
+def _board_mark(battle: Battle) -> tuple[Any, ...]:
+    units = []
+    for unit in battle.all_units():
+        position = getattr(unit, "position", None)
+        statuses = tuple(sorted(str(getattr(status, "name", "")) for status in (getattr(unit, "statuses", None) or [])))
+        units.append((
+            unit.unit_id,
+            bool(unit.alive),
+            round(float(unit.current_hp), 4),
+            round(float(unit.current_mana), 4),
+            None if position is None else (int(position.x), int(position.y)),
+            statuses,
+        ))
+    effects = tuple(sorted(str(getattr(effect, "name", type(effect).__name__)) for effect in battle.field_effects))
+    return (tuple(sorted(units)), effects)
 
 
 def _one_cell_ok(mode: str, code: str) -> bool:
@@ -418,7 +604,9 @@ def _choice_overlaps(choice: dict[str, Any], occupied: set[Position]) -> bool:
 
 def _stride_covering(items: list[Any], occupied: set[Position], overlaps: Any) -> list[Any]:
     covering = [item for item in items if overlaps(item, occupied)]
-    return _stride(covering if covering else items)
+    if not covering:
+        return []
+    return _stride(covering)
 
 
 def _pattern_payload(
@@ -430,6 +618,8 @@ def _pattern_payload(
     enemies = [enemy for enemy in _enemies(battle, actor.player_id) if enemy.position is not None]
     occupied = _enemy_occupied_cells(battle, enemies)
     sampled = _stride_covering(patterns, occupied, _pattern_overlaps)
+    if not sampled:
+        return None
 
     def rank(pattern: Any) -> tuple[int, int]:
         cells = _positions(pattern)
@@ -440,23 +630,24 @@ def _pattern_payload(
         nearest = min(min(cell.distance_to(enemy.position) for enemy in enemies) for cell in cells)
         return (0, nearest)
 
-    chosen = _positions(min(sampled, key=rank))
-    if not chosen:
-        return None
-    if enemies:
-        anchor = min(chosen, key=lambda cell: min(cell.distance_to(enemy.position) for enemy in enemies))
-    else:
-        anchor = chosen[0]
-    shaped = [{"x": cell.x, "y": cell.y} for cell in chosen]
-    return {
-        "type": "skill",
-        "unit_id": actor.unit_id,
-        "skill_code": code,
-        "cells": shaped,
-        "declared_area_cells": shaped,
-        "x": anchor.x,
-        "y": anchor.y,
-    }
+    for pattern in sorted(sampled, key=rank)[:6]:
+        chosen = _positions(pattern)
+        if not chosen:
+            continue
+        anchor = min(chosen, key=lambda cell: min(cell.distance_to(enemy.position) for enemy in enemies)) if enemies else chosen[0]
+        shaped = [{"x": cell.x, "y": cell.y} for cell in chosen]
+        payload = {
+            "type": "skill",
+            "unit_id": actor.unit_id,
+            "skill_code": code,
+            "cells": shaped,
+            "declared_area_cells": shaped,
+            "x": anchor.x,
+            "y": anchor.y,
+        }
+        if _payload_matters(battle, actor, payload):
+            return payload
+    return None
 
 
 def _choice_payload(
@@ -475,8 +666,9 @@ def _choice_payload(
         if not isinstance(patterns, list) or not patterns:
             continue
         covering = [pattern for pattern in patterns if _pattern_overlaps(pattern, occupied)]
-        # No covering shape: keep ranking the first pattern, as before the split.
-        focus = covering if covering else [patterns[0]]
+        if not covering:
+            continue
+        focus = covering
         cells = [cell for pattern in focus for cell in _positions(pattern)]
         if not cells:
             continue
@@ -640,14 +832,14 @@ def _hopeless_target(actor: Unit, target: Unit) -> bool:
     return defense_is_hopeless(float(actor.stat("attack")), float(target.stat("defense")))
 
 
-def _listed_unit(
+def _listed_units(
     battle: Battle,
     actor: Unit,
     raw_ids: list[str],
     *,
     allies: bool,
     skip_hopeless: bool = False,
-) -> Optional[Unit]:
+) -> list[Unit]:
     found: list[Unit] = []
     for raw in raw_ids:
         unit = battle.units.get(str(raw))
@@ -664,10 +856,22 @@ def _listed_unit(
         if useful:
             found = useful
         elif found:
-            return None
-    if not found or actor.position is None:
-        return None
-    return min(found, key=lambda unit: (_ratio(unit), unit.position.distance_to(actor.position)))
+            return []
+    if actor.position is None:
+        return []
+    return sorted(found, key=lambda unit: (_ratio(unit), unit.position.distance_to(actor.position)))
+
+
+def _listed_unit(
+    battle: Battle,
+    actor: Unit,
+    raw_ids: list[str],
+    *,
+    allies: bool,
+    skip_hopeless: bool = False,
+) -> Optional[Unit]:
+    found = _listed_units(battle, actor, raw_ids, allies=allies, skip_hopeless=skip_hopeless)
+    return found[0] if found else None
 
 
 def _focus_enemies(battle: Battle, actor: Unit) -> list[Unit]:

@@ -1,0 +1,18 @@
+{
+  "weights": "var\\nn-lab\\weights.npz",
+  "train_rows": 11111,
+  "test_rows": 2207,
+  "train_replays": 1292,
+  "train_accuracy": 0.518,
+  "test_accuracy": 0.543,
+  "majority_baseline": 0.515,
+  "majority_label": "end",
+  "counts": {
+    "move": 4065,
+    "attack": 1415,
+    "skill": 153,
+    "end": 5478
+  },
+  "final_loss": 1.0912,
+  "test_replays": 323
+}

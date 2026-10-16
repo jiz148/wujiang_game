@@ -1,0 +1,13 @@
+{
+  "weights": "D:\\Workspace\\AgentSpace\\wujiang\\wujiang_game\\var\\nn-lab\\heroes\\excel_r356.npz",
+  "train_rows": 13,
+  "test_rows": 3,
+  "test_replays": 1,
+  "test_accuracy": 0.0,
+  "frequency_baseline": 0.333,
+  "skill_accuracy": 0.0,
+  "skill_frequency_baseline": 0.0,
+  "choice_accuracy": 0.0,
+  "choice_frequency_baseline": 0.333,
+  "final_loss": 0.9568
+}
