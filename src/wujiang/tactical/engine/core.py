@@ -3470,9 +3470,16 @@ class Battle:
             self.pending_respawn_unit_ids.append(unit.unit_id)
             self.log(f"{unit.name} 即将重新出现，请选择其落点。")
 
+    def side_still_has_a_fighter(self, player_id: int) -> bool:
+        """A pending hell return is not a living body and cannot keep the match open."""
+        return any(
+            not bool(getattr(unit, "is_siege_structure", False))
+            for unit in self.hero_units(player_id)
+        )
+
     def schedule_hell_rebirth(self, unit: Unit) -> None:
-        """Keep a truly destroyed hero's original identity for its next enemy turn end."""
-        if unit.unit_id in self.hell_rebirth_unit_ids:
+        """Queue a return only while this side still has someone on the field."""
+        if unit.unit_id in self.hell_rebirth_unit_ids or self.winner is not None:
             return
         self.hell_rebirth_unit_ids.add(unit.unit_id)
         self.log(f"{unit.name} 将在下个敌方武将回合结束时选择回场位置。")
@@ -3484,6 +3491,8 @@ class Battle:
         return [cell for cell in origins if self.can_place_unit(unit, cell, mover=unit)]
 
     def restore_hell_dragon(self, unit: Unit, destination: Position) -> None:
+        if self.winner is not None:
+            raise ActionError("对局已结束，献祭复活不再回场。")
         if destination not in self.hell_dragon_return_options_for(unit):
             raise ActionError("古龙献祭者的原格暂不能完整容纳古龙。")
         for status in list(unit.statuses):
@@ -3525,6 +3534,8 @@ class Battle:
                       key=lambda cell: (cell.y, cell.x))
 
     def advance_hell_rebirths(self, ended_player_id: int) -> None:
+        if self.winner is not None:
+            return
         pending_bodies = {unit.unit_id: unit for unit in [*self.destroyed_units, *self.all_units()]
                           if not unit.alive}
         for unit in pending_bodies.values():
@@ -3540,6 +3551,8 @@ class Battle:
                 self._pending_turn_advance_after_hell_rebirth = True
 
     def restore_hell_rebirth(self, unit: Unit, destination: Position) -> None:
+        if self.winner is not None:
+            raise ActionError("对局已结束，地狱再临不再回场。")
         if unit.unit_id not in self.hell_rebirth_unit_ids or destination not in self.hell_rebirth_options_for(unit):
             raise ActionError("地狱再临落点已失效。")
         for status in list(unit.statuses):
@@ -5934,6 +5947,8 @@ class Battle:
             ending_player = self._pending_turn_end_after_effects_player_id
             self._pending_turn_end_after_effects_player_id = None
             self.complete_turn_end_after_effects(ending_player)
+        if self.pending_chain is None and not self.pending_followup_actions:
+            self.check_win_condition()
 
     def present_reaction_window_or_resolve(self, queued_action: QueuedAction) -> None:
         if queued_action.payload.get("refresh_cell_targets"):
@@ -6520,19 +6535,22 @@ class Battle:
         self.log(f"{unit.name} 被召唤到战场。")
 
     def check_win_condition(self) -> None:
-        if self.winner is not None:
+        if self.winner is not None or self.pending_followup_actions or self.pending_chain is not None:
             return
         alive_players = {
             player_id
             for player_id in (1, 2)
-            if (any(not bool(getattr(unit, "is_siege_structure", False)) for unit in self.hero_units(player_id))
-                or any(unit.player_id == player_id and (unit.unit_id in self.hell_rebirth_unit_ids
-                        or unit.unit_id in self.hell_dragon_return_cells)
-                       for unit in self.destroyed_units))
+            if self.side_still_has_a_fighter(player_id)
         }
         if len(alive_players) == 1 and self.units:
             self.winner = alive_players.pop()
             losing_player = 2 if self.winner == 1 else 1
+            waiting_returns = set(self.hell_rebirth_unit_ids)
+            self.pending_respawn_unit_ids = [
+                unit_id for unit_id in self.pending_respawn_unit_ids if unit_id not in waiting_returns
+            ]
+            self.hell_rebirth_unit_ids.clear()
+            self.hell_dragon_return_cells.clear()
             self.win_reason_code = "elimination"
             self.win_reason_text = f"玩家 {losing_player} 的全部武将被击破。"
             self._append_summary_event(

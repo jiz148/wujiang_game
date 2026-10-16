@@ -96,7 +96,8 @@ def simple_ai_enabled() -> bool:
 AI_FULL = "full"
 AI_SIMPLE = "simple"
 AI_TENDENCY = "tendency"
-AI_MODES = (AI_FULL, AI_SIMPLE, AI_TENDENCY)
+AI_MODEL = "model"
+AI_MODES = (AI_FULL, AI_SIMPLE, AI_TENDENCY, AI_MODEL)
 
 
 def ai_decision_mode() -> str:
@@ -162,7 +163,7 @@ def update_settings(patch: dict) -> dict:
     if "ai_mode" in patch:
         mode = str(patch.get("ai_mode") or "").strip().lower()
         if mode not in AI_MODES:
-            raise ValueError("AI 决策只能是 full、simple 或 tendency。")
+            raise ValueError("AI 决策只能是 full、simple、tendency 或 model。")
         payload["ai_mode"] = mode
         payload["simple_ai"] = mode == AI_SIMPLE
         touched = True

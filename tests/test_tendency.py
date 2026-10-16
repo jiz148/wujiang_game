@@ -129,7 +129,7 @@ class TendencyDecisionTests(unittest.TestCase):
         actor = SimpleNamespace(unit_id="hero", player_id=1)
         battle = SimpleNamespace(units={"enemy": enemy})
         east = [{"x": 5, "y": 0}]
-        north = [{"x": 0, "y": 3}]
+        north = [{"x": 0, "y": 4}]
         action = {
             "code": "deadly_bow",
             "target_mode": "cell",
@@ -149,7 +149,7 @@ class TendencyDecisionTests(unittest.TestCase):
         self.assertEqual(payload["choice_code"], "north")
         self.assertEqual(payload["cells"], north)
         self.assertEqual(payload["declared_area_cells"], north)
-        self.assertEqual((payload["x"], payload["y"]), (0, 3))
+        self.assertEqual((payload["x"], payload["y"]), (0, 4))
         self.assertEqual(payload["type"], "skill")
         self.assertEqual(payload["unit_id"], "hero")
         self.assertEqual(payload["skill_code"], "deadly_bow")
@@ -270,3 +270,97 @@ class TendencyDecisionTests(unittest.TestCase):
         )
         top = max(weights, key=lambda name: weights[name])
         self.assertEqual(top, "spacing")
+
+    def test_chain_reaction_dodges_away_from_the_hit(self) -> None:
+        from wujiang.tactical.rooms.tendency.decide import choose_chain_reaction
+
+        reactor = SimpleNamespace(unit_id="hero", player_id=1, position=SimpleNamespace(x=1, y=1), current_mana=2)
+        enemy = SimpleNamespace(unit_id="enemy", player_id=2, position=SimpleNamespace(x=0, y=1))
+        queued = SimpleNamespace(
+            action_type="skill",
+            actor_id="enemy",
+            payload={"cannot_evade": False},
+            target_unit_ids=["hero"],
+            target_cells=[SimpleNamespace(x=1, y=1)],
+            source_player_id=2,
+            hostile=True,
+        )
+        battle = SimpleNamespace(
+            units={"enemy": enemy, "hero": reactor},
+            pending_chain=SimpleNamespace(queued_action=queued),
+            unit_cells=lambda unit: [unit.position],
+        )
+        options = [{
+            "action_code": "evasion",
+            "preview": {"cells": [{"x": 1, "y": 2}, {"x": 2, "y": 1}]},
+        }, {
+            "action_code": "block",
+            "preview": {},
+        }]
+        payload = choose_chain_reaction(battle, reactor, options, "standard")
+        self.assertEqual(payload["type"], "chain_react")
+        self.assertEqual(payload["action_code"], "evasion")
+        self.assertEqual((payload["x"], payload["y"]), (2, 1))
+
+    def test_chain_reaction_skips_evasion_that_cannot_leave_the_area(self) -> None:
+        from wujiang.tactical.rooms.tendency.decide import choose_chain_reaction
+
+        reactor = SimpleNamespace(unit_id="hero", player_id=1, position=SimpleNamespace(x=1, y=1), current_mana=2)
+        queued = SimpleNamespace(
+            action_type="skill",
+            actor_id="enemy",
+            payload={},
+            target_unit_ids=["hero"],
+            target_cells=[{"x": 1, "y": 1}, {"x": 2, "y": 1}],
+            source_player_id=2,
+            hostile=True,
+        )
+        battle = SimpleNamespace(
+            units={},
+            pending_chain=SimpleNamespace(queued_action=queued),
+            unit_cells=lambda unit: [unit.position],
+        )
+        options = [{"action_code": "evasion", "preview": {"cells": [{"x": 2, "y": 1}]}}]
+        payload = choose_chain_reaction(battle, reactor, options, "standard")
+        self.assertEqual(payload["type"], "chain_skip")
+
+    def test_inspire_is_not_cast_on_an_ally_who_already_has_it(self) -> None:
+        from wujiang.tactical.engine.core import Battle, Position
+        from wujiang.tactical.heroes.excel_roster import FriedInspireStatus
+        from wujiang.tactical.heroes.registry import create_hero
+
+        battle = Battle(width=8, height=8)
+        fried = create_hero("excel_r024", 1)
+        factory = create_hero("excel_r222", 1)
+        battle.add_unit(fried, Position(1, 1))
+        battle.add_unit(factory, Position(2, 1))
+        factory.add_status(FriedInspireStatus(), source=fried)
+        action = {
+            "code": "fried_inspire",
+            "target_mode": "ally",
+            "preview": {"target_unit_ids": [factory.unit_id]},
+        }
+        self.assertIsNone(_skill_payload(battle, fried, action))
+
+    def test_area_skill_is_not_cast_when_no_pattern_touches_the_enemy(self) -> None:
+        from wujiang.tactical.engine.core import Battle, Position
+        from wujiang.tactical.heroes.registry import create_hero
+
+        battle = Battle(width=12, height=12)
+        actor = create_hero("excel_r059", 1)
+        enemy = create_hero("ellie", 2)
+        battle.add_unit(actor, Position(0, 0))
+        battle.add_unit(enemy, Position(10, 10))
+        empty = [{"x": 0, "y": 1}, {"x": 1, "y": 1}]
+        action = {
+            "code": "nian_large_dragon_breath",
+            "target_mode": "cell",
+            "preview": {"selection": {"patterns": [empty]}},
+        }
+        self.assertIsNone(_skill_payload(battle, actor, action))
+        covering = [{"x": 10, "y": 10}, {"x": 10, "y": 9}]
+        action["preview"]["selection"]["patterns"] = [empty, covering]
+        payload = _skill_payload(battle, actor, action)
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertIn({"x": 10, "y": 10}, payload["cells"])

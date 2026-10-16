@@ -29908,6 +29908,15 @@ class NewBatch238240242HellBehaviorTests(unittest.TestCase):
         self.assertIn(actor.unit_id, battle.hell_rebirth_unit_ids)
         self.assertIsNone(battle.winner)
 
+    def test_last_hell_hero_dies_and_the_match_ends(self):
+        battle, actor, _, enemy = self.fixture("excel_r238")
+        actor.current_hp = 0.25
+        battle.resolve_damage(DamageContext(source=enemy, target=actor, attack_power=10,
+                                            is_skill=True, action_name="测试法术", tags={"skill"}))
+        self.assertFalse(actor.alive)
+        self.assertNotIn(actor.unit_id, battle.hell_rebirth_unit_ids)
+        self.assertEqual(battle.winner, enemy.player_id)
+
     def enemy_end(self, battle, enemy):
         battle.turn_slot_index = battle.turn_order_unit_ids.index(enemy.unit_id)
         battle.active_turn_unit_id = enemy.unit_id
@@ -29936,7 +29945,7 @@ class NewBatch238240242HellBehaviorTests(unittest.TestCase):
     def test_skill_death_waits_for_enemy_end_and_rebirth_preserves_original_slot(self):
         for code in ("excel_r238", "excel_r240"):
             with self.subTest(code=code):
-                battle, actor, _, enemy = self.fixture(code)
+                battle, actor, _, enemy = self.fixture(code, ally_code="bard")
                 original_id, original_slot = actor.unit_id, battle.turn_order_unit_ids.index(actor.unit_id)
                 self.skill_kill(battle, actor, enemy)
                 self.assertIsNone(battle.current_respawn_prompt())
@@ -30000,7 +30009,7 @@ class NewBatch238240242HellBehaviorTests(unittest.TestCase):
         self.assertEqual(actor.attack_actions_per_turn(), 1)
 
     def test_no_landing_retries_without_cloning_dead_hero(self):
-        battle, actor, _, enemy = self.fixture("excel_r238")
+        battle, actor, _, enemy = self.fixture("excel_r238", ally_code="bard")
         self.skill_kill(battle, actor, enemy)
         battle.width, battle.height = 2, 1
         enemy.position = Position(0, 0)
@@ -30014,7 +30023,9 @@ class NewBatch238240242HellBehaviorTests(unittest.TestCase):
         self.assertEqual(battle.current_respawn_prompt().kind, "hell_rebirth")
 
     def test_sika_basic_death_can_sacrifice_named_ally_and_trigger_its_skill_rebirth(self):
+        from wujiang.tactical.heroes.registry import create_hero
         battle, actor, ally, enemy = self.fixture("excel_r242", ally_code="excel_r238")
+        battle.add_unit(create_hero("bard", 1), Position(1, 8))
         actor.current_hp = 0.25
         battle._damage_choice_active = True
         battle._damage_choice_decisions = [ally.unit_id]
@@ -30204,14 +30215,16 @@ class NewBatch245246HellBehaviorTests(unittest.TestCase):
         self.assertFalse(actor.alive)
 
     def test_brao_no_corpse_keeps_only_delayed_rebirth(self):
-        battle, actor, _, enemy = self.fixture("excel_r245")
+        battle, actor, _, enemy = self.fixture("excel_r245", ally_code="bard")
         self.skill_kill(battle, actor, enemy)
         self.assertIn(actor.unit_id, battle.hell_rebirth_unit_ids)
         self.assertFalse(battle.pending_followup_actions)
         self.assertIn("hell_rescue_decline", frontend_module("vfx.js"))
 
     def test_brao_blocked_old_cell_excludes_rescue_but_preserves_self_rebirth(self):
+        from wujiang.tactical.heroes.registry import create_hero
         battle, actor, ally, enemy = self.fixture("excel_r245", ally_code="excel_r238")
+        battle.add_unit(create_hero("bard", 1), Position(1, 8))
         self.skill_kill(battle, ally, enemy)
         battle.blocked_cells.add((actor.position.x, actor.position.y))
         self.skill_kill(battle, actor, enemy)
@@ -30237,7 +30250,9 @@ class NewBatch245246HellBehaviorTests(unittest.TestCase):
         self.assertEqual(choose_hell_rescue_action(battle, prompt, actor)["target_unit_id"], ally.unit_id)
 
     def test_galder_ultimate_counts_enemy_ends_and_preserves_usage_after_rebirth(self):
+        from wujiang.tactical.heroes.registry import create_hero
         battle, actor, _, enemy = self.fixture("excel_r246")
+        battle.add_unit(create_hero("bard", 1), Position(1, 8))
         battle.active_player = actor.player_id
         battle._exclusive_turn_unit_id = actor.unit_id
         actor.turn_ready = True
@@ -30283,7 +30298,9 @@ class NewBatch245246HellBehaviorTests(unittest.TestCase):
         self.assertLess(enemy.current_hp, 10)
 
     def test_galder_external_skill_death_preserves_ultimate_until_rebirth(self):
+        from wujiang.tactical.heroes.registry import create_hero
         battle, actor, _, enemy = self.fixture("excel_r246")
+        battle.add_unit(create_hero("bard", 1), Position(1, 8))
         actor.get_skill("hell_war_god").execute(battle, actor, {})
         actor.get_skill("hell_war_god").uses_this_battle = 1
         self.skill_kill(battle, actor, enemy)
@@ -30427,7 +30444,7 @@ class NewBatch247HellBehaviorTests(unittest.TestCase):
         self.assertLess(enemy.current_hp, 10)
 
     def test_snow_skill_death_without_dogs_rebirths_but_basic_death_does_not(self):
-        battle, snow, _, enemy = self.fixture()
+        battle, snow, _, enemy = self.fixture(ally=True)
         self.skill_kill(battle, snow, enemy)
         self.assertIn(snow.unit_id, battle.hell_rebirth_unit_ids)
         self.assertFalse(battle.pending_followup_actions)
@@ -30439,7 +30456,7 @@ class NewBatch247HellBehaviorTests(unittest.TestCase):
         self.assertFalse(battle.pending_followup_actions)
 
     def test_snow_rebirth_resets_only_ultimate_and_grants_three_owner_starts(self):
-        battle, snow, _, enemy = self.fixture()
+        battle, snow, _, enemy = self.fixture(ally=True)
         snow.get_skill("hell_teleport").uses_this_battle = 1
         snow.get_skill("hell_dog").uses_this_battle = 1
         self.skill_kill(battle, snow, enemy)
@@ -30566,6 +30583,8 @@ class NewBatch248HellDragonBehaviorTests(unittest.TestCase):
         from wujiang.tactical.rooms.multiplayer import battle_state_for_viewer
 
         battle, dragon, first, second, enemy = self.fixture()
+        from wujiang.tactical.heroes.registry import create_hero
+        battle.add_unit(create_hero("bard", 1), Position(1, 8))
         origin_first, origin_second = first.position, second.position
         dragon.get_skill("flying_dragon_orb").uses_this_battle = 1
         self.kill_with_choices(battle, dragon, first, second, enemy)
@@ -30597,6 +30616,8 @@ class NewBatch248HellDragonBehaviorTests(unittest.TestCase):
         self.assertFalse(first.alive)
         self.assertTrue(second.alive)
         battle, dragon, first, second, enemy = self.fixture()
+        from wujiang.tactical.heroes.registry import create_hero
+        battle.add_unit(create_hero("bard", 1), Position(1, 8))
         self.kill_with_choices(battle, dragon, first, second, enemy)
         from wujiang.tactical.heroes.excel_roster import HellDogSummon
         for cell in (first.last_position, second.last_position):

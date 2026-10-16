@@ -18,6 +18,7 @@ const AI_OPTIONS = [
   ["full", "完整"],
   ["simple", "简化"],
   ["tendency", "倾向"],
+  ["model", "模型"],
 ];
 
 export function renderSettings() {
@@ -95,7 +96,7 @@ function paintChessReplay() {
 
 function currentAiValue() {
   const mode = state.settings?.ai_mode;
-  if (mode === "simple" || mode === "tendency" || mode === "full") return mode;
+  if (mode === "simple" || mode === "tendency" || mode === "full" || mode === "model") return mode;
   return state.settings?.simple_ai === true ? "simple" : "full";
 }
 

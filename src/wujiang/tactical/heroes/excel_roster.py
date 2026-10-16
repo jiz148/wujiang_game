@@ -13108,11 +13108,14 @@ class HellDragonSacrificeTrait(Trait):
                 recipient._suppress_hell_forced_skill_death = True
             destroyed.append(recipient)
             battle.log_public_event(f"{owner.name} 献祭了{recipient.name}。", source=owner, target=recipient)
-        if len({unit.unit_id for unit in destroyed}) == 2:
+        if len({unit.unit_id for unit in destroyed}) == 2 and battle.side_still_has_a_fighter(owner.player_id):
             battle.hell_dragon_return_cells[owner.unit_id] = list(dict.fromkeys(origins))
             battle.log_public_event(f"{owner.name} 取得待复活权，可在两名献祭者的原格择时满状态复活。", target=owner)
+        elif len({unit.unit_id for unit in destroyed}) == 2:
+            battle.log_public_event(f"{owner.name} 这一方已经没有能继续战斗的单位，献祭复活不再生效。", target=owner)
         else:
             battle.log_public_event(f"{owner.name} 未能真正破坏两名目标，未取得复活权。", target=owner)
+        battle.check_win_condition()
 
 
 class AncientRepairBonusStatus(StatModifierStatus):
