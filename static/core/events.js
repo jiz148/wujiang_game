@@ -592,6 +592,11 @@ export function bindEvents() {
     renderHoverCard();
   });
   $("board").addEventListener("pointerleave", () => {
+    const pointer = state.hoverPointer;
+    if (pointer) {
+      const hit = document.elementFromPoint(pointer.x, pointer.y);
+      if (hit instanceof Element && hit.closest("#board, #board-world, #board-pieces")) return;
+    }
     state.hoveredUnitId = "";
     state.hoverPointer = null;
     renderHoverCard();

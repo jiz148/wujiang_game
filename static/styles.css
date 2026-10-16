@@ -9743,6 +9743,19 @@ button.chess-side-tab {
 }
 button.chess-side-tab:hover { background: rgba(255, 255, 255, 0.06); color: var(--text-1); }
 button.chess-side-tab.is-on { border-color: var(--accent, #d4a340); background: rgba(255, 255, 255, 0.06); color: var(--accent-hi, #e4c36a); }
+.chess-more { display: flex; flex-direction: column; gap: 8px; }
+button.chess-force-end {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid #8a6230;
+  border-radius: 8px;
+  background: #6a3a2a;
+  color: #ffe7c2;
+  font-size: 14px;
+  cursor: pointer;
+}
+button.chess-force-end:disabled { opacity: 0.45; cursor: default; }
 .chess-toast { position: absolute; z-index: 6; left: 50%; bottom: 16px; transform: translateX(-50%); margin: 0; padding: 6px 12px; border-radius: var(--r-2); background: rgba(16, 20, 26, 0.92); }
 .chess-toast.is-error { background: #913f37; }
 .chess-dock {
@@ -9812,6 +9825,7 @@ body.battle-mode .chess-dock--left > button[data-chess-action="toggle-dock"] {
 }
 .chess-shop-list { display: flex; flex-direction: column; gap: 10px; }
 .chess-block {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -9834,6 +9848,20 @@ body.battle-mode .chess-dock--left > button[data-chess-action="toggle-dock"] {
 .chess-block small { display: block; }
 .chess-block small { margin-top: 6px; color: var(--text-3); line-height: 1.45; }
 .chess-block.is-empty { color: var(--text-3); cursor: default; }
+.chess-upgrade-tag {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #2f8f5b;
+  color: #f3fff6;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+  line-height: 1.6;
+}
+.chess-block:has(.chess-upgrade-tag) { padding-right: 68px; }
 .chess-shop-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
 .chess-shop-split { height: 1px; margin: 12px 0; background: rgba(255, 255, 255, 0.16); }
 .chess-dock .chess-shop-btn {

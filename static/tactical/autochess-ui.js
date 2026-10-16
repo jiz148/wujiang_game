@@ -241,6 +241,7 @@ function renderShop(chess, me, locked) {
     item.className = 'chess-block';
     item.append(node('strong', '', entry.name));
     item.append(node('small', '', `${entry.level}级 · ${entry.cost}金 · ${hero?.role || '—'} / ${hero?.attribute || '—'} / ${hero?.race || '—'}`));
+    if (matching.length) item.append(node('em', 'chess-upgrade-tag', '可升级'));
     if (hero) bindHeroHover(item, withPieceGrowth(hero, target, me.synergies));
     list.append(item);
   });
@@ -727,6 +728,18 @@ function renderChessRecord(chess, me) {
   return wrap;
 }
 
+function renderChessMore(chess) {
+  const page = node('div', 'chess-more');
+  const host = Boolean(state.room?.viewer_is_host);
+  const fighting = chess.phase === 'battle' && (chess.matches || []).some((match) => !match.result);
+  const end = button('强行结束本轮战斗', 'force_finish_round', {}, !host || !fighting);
+  end.classList.add('chess-force-end');
+  page.append(end);
+  page.append(node('p', 'meta-note', '结束本轮还没打完的战斗。扣血按现在卡局时的算法：存活人数的差；人数相同再比血量、伤害，最后扣 1。'));
+  if (!host) page.append(node('p', 'meta-note', '只有房主可以操作。'));
+  return page;
+}
+
 export function renderAutoChessPanel() {
   const panel = $('autochess-panel');
   if (!panel) return;
@@ -741,6 +754,12 @@ export function renderAutoChessPanel() {
   hideHeroHover();
   hideSynergyTip();
   hideActionTip();
+  const dockScroll = panel.querySelector(".chess-dock--right .chess-dock__scroll");
+  const keptScroll = dockScroll ? {
+    top: dockScroll.scrollTop,
+    height: dockScroll.scrollHeight,
+    dock: chessDock,
+  } : null;
   panel.replaceChildren();
   if (Number(chess.server_time) && Number(chess.server_time) !== lastServerTimestamp) {
     lastServerTimestamp = Number(chess.server_time);
@@ -776,7 +795,8 @@ export function renderAutoChessPanel() {
   const packTab = button('背包', 'dock', {tab: 'pack'});
   const foeTab = button('对手', 'dock', {tab: 'players'});
   const logTab = button('记录', 'dock', {tab: 'log'});
-  for (const [tab, name] of [[packTab, 'pack'], [foeTab, 'players'], [logTab, 'log']]) {
+  const moreTab = button('更多', 'dock', {tab: 'more'});
+  for (const [tab, name] of [[packTab, 'pack'], [foeTab, 'players'], [logTab, 'log'], [moreTab, 'more']]) {
     tab.className = 'chess-side-tab';
     if (rightDockOpen && chessDock === name) tab.classList.add('is-on');
   }
@@ -807,6 +827,8 @@ export function renderAutoChessPanel() {
     scroll.append(page);
   } else if (chessDock === 'log') {
     scroll.append(renderChessRecord(chess, me));
+  } else if (chessDock === 'more') {
+    scroll.append(renderChessMore(chess));
   } else if (me && !me.eliminated) {
     scroll.append(renderPieces(chess, me, chess.phase === 'preparation' && me.ready));
     scroll.append(renderSynergies(me));
@@ -829,6 +851,11 @@ export function renderAutoChessPanel() {
   right.append(tabs, rightBody);
   shell.append(right);
   panel.append(shell);
+  const nextScroll = panel.querySelector(".chess-dock--right .chess-dock__scroll");
+  if (keptScroll && nextScroll && keptScroll.dock === chessDock && keptScroll.top > 4) {
+    const growth = nextScroll.scrollHeight - keptScroll.height;
+    nextScroll.scrollTop = keptScroll.top + Math.max(0, growth);
+  }
   updateCountdown();
   paintChessCamera();
   const watched = (chess.matches || []).find((item) => item.left === focus?.seat_id || item.right === focus?.seat_id) || chess.matches?.[0];
@@ -972,7 +999,7 @@ export function bindAutoChessEvents() {
       return;
     }
     if (action === 'dock') {
-      const tab = target.dataset.tab === 'players' || target.dataset.tab === 'log' ? target.dataset.tab : 'pack';
+      const tab = target.dataset.tab === 'players' || target.dataset.tab === 'log' || target.dataset.tab === 'more' ? target.dataset.tab : 'pack';
       if (rightDockOpen && chessDock === tab) rightDockOpen = false;
       else {
         chessDock = tab;
@@ -1030,7 +1057,8 @@ export function bindAutoChessEvents() {
       messageRound = state.room?.autochess?.round || 0;
       actionMessage = action === 'ready' ? '备战已确认；其他玩家确认或倒计时结束后自动开战。'
         : ({buy: payload.piece_id ? '强化成功，请在武将卡片中选择一项能力 +1。' : '购买成功，已选中武将，请点击战场左侧布阵。', place: '布阵已更新。', level_up: '玩家等级已提升。',
-            reroll: '商店已刷新。', draw_equipment: '装备已抽取，请在背包中查看。'}[action] || '操作已完成。');
+            reroll: '商店已刷新。', draw_equipment: '装备已抽取，请在背包中查看。',
+            force_finish_round: '本轮还没结束的战斗已按场面差值结束。'}[action] || '操作已完成。');
       render();
     } catch (error) {
       actionError = error?.error || (error instanceof TypeError ? '网络连接失败，请检查连接后重试。' : error?.message)

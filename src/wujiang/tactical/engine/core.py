@@ -6915,7 +6915,12 @@ class Battle:
                     raise ActionError("士兵由军队指令统一行动，不能单独操控。")
             self.start_action_or_chain(payload)
             return
-        unit = self.get_unit(payload["unit_id"])
+        if action_type == "chain_skip":
+            return
+        unit_id = payload.get("unit_id")
+        if not unit_id:
+            raise ActionError("动作缺少单位。")
+        unit = self.get_unit(str(unit_id))
         if is_army_soldier(unit):
             raise ActionError("士兵由军队指令统一行动，不能单独操控。")
         if action_type == "pass_unit":

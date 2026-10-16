@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>武将</title>
     <link rel="stylesheet" href="/theme.css?v=r27" />
-    <link rel="stylesheet" href="/styles.css?v=r126" />
+    <link rel="stylesheet" href="/styles.css?v=r128" />
   </head>
   <!-- 哪一屏该显示，要等 /api/auth/me 回来才知道。在那之前先什么都不显示，
        否则标记里默认可见的那一屏会先闪出来，再被换掉。 -->
@@ -85,6 +85,13 @@
               <div class="settings-row">
                 <span class="settings-row__label">对战记录</span>
                 <div id="settings-replay" class="settings-seg" role="group" aria-label="对战记录"></div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row__text">
+                  <span class="settings-row__label">自走棋录像</span>
+                  <p class="settings-row__hint">默认关闭。打开后，自走棋里的每场战斗按上面的对战记录来记，方便回看，也能当训练数据。完整回放会让战斗变慢，文件也会变大。</p>
+                </div>
+                <div id="settings-chess-replay" class="settings-seg" role="group" aria-label="自走棋录像"></div>
               </div>
               <div class="settings-row">
                 <div class="settings-row__text">
@@ -781,6 +788,6 @@
     <script src="/platform/home-ui.js?v=r13" defer></script>
     <script src="/tactical/replay-ui.js?v=r14" defer></script>
     <script src="/tactical/battle-feedback.js?v=r15" defer></script>
-    <script type="module" src="/app.js?v=r110"></script>
+    <script type="module" src="/app.js?v=r115"></script>
   </body>
 </html>

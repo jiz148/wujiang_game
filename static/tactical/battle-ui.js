@@ -1,7 +1,7 @@
 // Battle screen rendering: board, units, action panel and log.
 import { $ } from '../core/dom.js';
 import { applyBoardCamera, boardBasePixels, clampBoardZoom } from '../core/events.js';
-import { activeBundles, activeOccupantAt, allUnits, backstepFollowUpTargetIds, boardPieceZIndex, boardUnits, bundleFor, canInteract, currentRespawnPrompt, hasBattle, hasRoom, hoveredUnit, inspectBoardUnit, inspectedUnit, isAiTakeover, isChainMode, isDamageChoiceMode, isGameOver, isReplayMode, isRespawnMode, selectedUnit, stagedBackstepRetreatCell, stagedTarget, unitById, unitFootprintBounds, unitHasLargeFootprint, unitOccupiedCells, unitsAtCell, viewerPlayerId, viewerTeamId } from '../core/net.js';
+import { activeBundles, activeOccupantAt, allUnits, backstepFollowUpTargetIds, boardPieceZIndex, boardUnits, bundleFor, canInteract, currentRespawnPrompt, hasBattle, hasRoom, hoveredUnit, inspectBoardUnit, inspectedUnit, isAiTakeover, isChainMode, isDamageChoiceMode, isGameOver, isReplayMode, isRespawnMode, selectedUnit, stagedBackstepRetreatCell, stagedTarget, unitById, unitFootprintBounds, unitHasLargeFootprint, unitOccupiedCells, unitsAtCell, viewerPlayerId, viewerTeamId, visibleUnitAt } from '../core/net.js';
 import { render } from '../core/render.js';
 import { applyScreen } from '../core/router.js';
 import { state, ui } from '../core/state.js';
@@ -792,7 +792,7 @@ export function renderBoard() {
       }
     });
   applyBoardCamera();
-  playArmyMarchIfNeeded();
+  restoreHoverFromPointer();
 }
 
 export function renderActionPanel() {
@@ -1079,6 +1079,16 @@ export function chainQueuedActionPrompt(chain) {
   if (summary && summary.startsWith("\u3010")) return `${gravityResult}${summary}`;
   const actionName = chain?.queued_action?.display_name || "\u539f\u52a8\u4f5c";
   return `\u3010${actionName}\u3011：${gravityResult}${summary}`;
+}
+
+function restoreHoverFromPointer() {
+  const pointer = state.hoverPointer;
+  if (!pointer || state.screen !== "battle" || !state.battle) return;
+  const hit = document.elementFromPoint(pointer.x, pointer.y);
+  const cell = hit instanceof Element ? hit.closest(".cell") : null;
+  const board = $("board");
+  if (!cell || !board?.contains(cell)) return;
+  state.hoveredUnitId = visibleUnitAt(Number(cell.dataset.x), Number(cell.dataset.y))?.id || "";
 }
 
 export function renderHoverCard() {
@@ -1650,7 +1660,9 @@ export function renderLogs() {
   const lines = (state.battle?.logs || []).slice().reverse();
   const signature = lines.join("\n");
   if (logs.dataset.viewKey === signature) return;
-  const scroll = logs.scrollTop;
+  const top = logs.scrollTop;
+  const height = logs.scrollHeight;
+  const atTop = top <= 4;
   logs.dataset.viewKey = signature;
   logs.replaceChildren();
   lines.forEach((line) => {
@@ -1659,7 +1671,9 @@ export function renderLogs() {
     item.textContent = line;
     logs.append(item);
   });
-  logs.scrollTop = scroll;
+  if (!atTop) {
+    logs.scrollTop = top + Math.max(0, logs.scrollHeight - height);
+  }
 }
 
 function formatPostgameValue(value) {

@@ -65,6 +65,16 @@ def replay_recording() -> str:
     return value if value in REPLAY_MODES else DEFAULT_REPLAY
 
 
+def autochess_replay_enabled() -> bool:
+    """Autochess fights stay unrecorded unless this is turned on."""
+    override = os.environ.get("WUJIANG_AUTOCHESS_REPLAY", "").strip().lower()
+    if override in {"1", "true", "yes", "on"}:
+        return True
+    if override in {"0", "false", "no", "off"}:
+        return False
+    return _as_bool_or_default(_load().get("autochess_replay", False), False)
+
+
 def simple_ai_enabled() -> bool:
     """True uses the bounded picker. False uses the detailed scorer in ai.py."""
     override = os.environ.get("WUJIANG_SIMPLE_AI", "").strip().lower()
@@ -104,9 +114,21 @@ def public_settings() -> dict:
     mode = ai_decision_mode()
     return {
         "replay_recording": replay_recording(),
+        "autochess_replay": autochess_replay_enabled(),
         "simple_ai": mode == AI_SIMPLE,
         "ai_mode": mode,
     }
+
+
+def _as_bool_or_default(value, default: bool | None) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def _as_bool(value) -> bool:
@@ -130,6 +152,12 @@ def update_settings(patch: dict) -> dict:
         if value not in REPLAY_MODES:
             raise ValueError("对战记录只能是 off、actions 或 full。")
         payload["replay_recording"] = value
+        touched = True
+    if "autochess_replay" in patch:
+        enabled = _as_bool_or_default(patch.get("autochess_replay"), None)
+        if enabled is None:
+            raise ValueError("自走棋录像只能打开或关闭。")
+        payload["autochess_replay"] = enabled
         touched = True
     if "ai_mode" in patch:
         mode = str(patch.get("ai_mode") or "").strip().lower()

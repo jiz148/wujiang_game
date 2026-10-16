@@ -2207,8 +2207,7 @@ class GameRoom:
         self.battle.on_replay_checkpoint = self._record_replay_step
 
     def _replay_mode(self) -> str:
-        # 子战斗（自走棋里同时打的那几场）可以强制关掉。它们不是给人回放的，
-        # 却会在每次轮询里把整张棋盘序列化好几份。
+        # 子战斗默认不录像。打开「自走棋录像」后，才按对战记录的档位记每一步。
         forced = getattr(self, "replay_forced", None)
         if forced in {"off", "actions", "full"}:
             return str(forced)
@@ -2222,15 +2221,35 @@ class GameRoom:
         mode = self._replay_mode()
         if mode == "off":
             return
-        if bool(getattr(self, "fast_ai_simulation", False)) and reason not in {
-            "battle_start",
-            "surrender",
-            "turn_end",
-            "match_end",
-        }:
+        if (
+            bool(getattr(self, "fast_ai_simulation", False))
+            and not bool(getattr(self, "record_fast_replay_steps", False))
+            and reason not in {
+                "battle_start",
+                "surrender",
+                "turn_end",
+                "match_end",
+            }
+        ):
             return
         if self.replay is None:
-            self.replay = ReplayRecorder(self.room_id, self.mode, match_id=self.current_match_id)
+            self.replay = ReplayRecorder(
+                self.room_id,
+                str(getattr(self, "replay_mode_name", "") or self.mode),
+                match_id=self.current_match_id,
+            )
+        # 自走棋一场里单位很多。完整动作列表和多份视角会在锁里把内存和请求一起拖死。
+        # 训练用得上的是局面本身，这里每步只留一份观战快照。
+        if bool(getattr(self, "record_fast_replay_steps", False)):
+            from wujiang.tactical.rooms.autochess import battle_observer_snapshot
+            snapshot = battle_observer_snapshot(self.battle)
+            self.replay.append_step(
+                reason=reason,
+                omniscient_battle=snapshot,
+                spectator_battle=snapshot,
+                seat_views={},
+            )
+            return
         # actions 档只在开局留一份棋盘，之后每步只记「发生了什么」，不再复制
         # 全体单位。逐步回放要重演才看得懂，所以这档不对外提供播放。
         if mode == "actions" and reason != "battle_start":
@@ -3742,7 +3761,13 @@ class GameRoom:
                     seat = self._current_prompt_seat()
                     if seat is None or not seat.is_ai:
                         break
-                    self._perform_battle_action(choose_damage_choice_action(self.battle), reason="ai_damage_choice")
+                    try:
+                        self._perform_battle_action(choose_damage_choice_action(self.battle), reason="ai_damage_choice")
+                    except Exception:
+                        if self.battle is None or self.battle.pending_damage_choice is None:
+                            break
+                        self.battle.pending_damage_choice = None
+                        self.battle.log("这次伤害选择无法结算，已跳过。")
                     steps += 1
                 elif self.battle.current_respawn_prompt() is not None:
                     seat = self._current_prompt_seat()
@@ -4028,9 +4053,26 @@ class GameRoom:
 
     def serialize_state(self, viewer_token: Optional[str] = None, *, base_url: Optional[str] = None,
                         advance_chess: bool = True) -> dict[str, Any]:
+        if self.mode == "autochess" and self.autochess is not None:
+            # 战斗线程算一步时会占着锁。人多、召唤物多时这一步能拖很久，
+            # 状态请求如果一直等，浏览器就会把它们取消。等不及就交上一帧。
+            acquired = self._lock.acquire(timeout=0.25)
+            if not acquired:
+                cached = getattr(self, "_chess_state_cache", {}).get(str(viewer_token or ""))
+                if cached is not None:
+                    return cached
+                self._lock.acquire()
+            try:
+                payload = self._autochess_serialize(viewer_token, base_url=base_url, advance=advance_chess)
+                cache = getattr(self, "_chess_state_cache", None)
+                if not isinstance(cache, dict):
+                    cache = {}
+                    self._chess_state_cache = cache
+                cache[str(viewer_token or "")] = payload
+                return payload
+            finally:
+                self._lock.release()
         with self._lock:
-            if self.mode == "autochess" and self.autochess is not None:
-                return self._autochess_serialize(viewer_token, base_url=base_url, advance=advance_chess)
             viewer = self.seat_for_token(viewer_token)
             if self.battle is not None and self.battle.winner is None:
                 self._advance_simulation_due()
@@ -4176,6 +4218,13 @@ class GameRoom:
             chess = self.autochess
             if self.mode != "autochess" or chess is None:
                 raise RoomError("当前不是自走棋房间。")
+            if action == "force_finish_round":
+                if seat.player_id != self.host_player_id:
+                    raise RoomError("只有房主可以强行结束本轮战斗。")
+                chess.force_finish_open_matches()
+                self.status = chess.phase
+                self.touch()
+                return
             actions = {
                 "buy": lambda: chess.buy(seat.player_id, int(payload.get("slot", -1)),
                                           str(payload.get("piece_id") or "") or None),

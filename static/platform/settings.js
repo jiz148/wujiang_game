@@ -9,6 +9,11 @@ const REPLAY_OPTIONS = [
   ["full", "完整回放"],
 ];
 
+const CHESS_REPLAY_OPTIONS = [
+  ["off", "关闭"],
+  ["on", "打开"],
+];
+
 const AI_OPTIONS = [
   ["full", "完整"],
   ["simple", "简化"],
@@ -51,6 +56,7 @@ export function renderSettings() {
     host.append(button);
   }
   paintReplay();
+  paintChessReplay();
   paintAi();
 }
 
@@ -65,6 +71,26 @@ function paintSegment(selector, current) {
 
 function paintReplay() {
   paintSegment("#settings-replay button", state.settings?.replay_recording || "");
+}
+
+function chessReplayValue() {
+  return state.settings?.autochess_replay === true ? "on" : "off";
+}
+
+function paintChessReplay() {
+  const host = $("settings-chess-replay");
+  if (!host) return;
+  if (host.childElementCount !== CHESS_REPLAY_OPTIONS.length) host.replaceChildren();
+  if (!host.childElementCount) for (const [value, label] of CHESS_REPLAY_OPTIONS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ghost";
+    button.dataset.value = value;
+    button.textContent = label;
+    button.addEventListener("click", () => saveChessReplay(value, button));
+    host.append(button);
+  }
+  paintSegment("#settings-chess-replay button", chessReplayValue());
 }
 
 function currentAiValue() {
@@ -96,6 +122,7 @@ async function saveSetting(button, unchanged, body) {
   state.settingsBusy = true;
   button.classList.add("is-busy");
   paintReplay();
+  paintChessReplay();
   paintAi();
   try {
     state.settings = await fetchJson("/api/settings", {
@@ -109,6 +136,7 @@ async function saveSetting(button, unchanged, body) {
     state.settingsBusy = false;
     button.classList.remove("is-busy");
     paintReplay();
+    paintChessReplay();
     paintAi();
     const message = $("settings-message");
     if (message) message.textContent = state.settingsError || "";
@@ -117,6 +145,11 @@ async function saveSetting(button, unchanged, body) {
 
 async function saveReplay(value, button) {
   await saveSetting(button, state.settings?.replay_recording === value, { replay_recording: value });
+}
+
+async function saveChessReplay(value, button) {
+  const enabled = value === "on";
+  await saveSetting(button, (state.settings?.autochess_replay === true) === enabled, { autochess_replay: enabled });
 }
 
 async function saveAi(value, button) {
