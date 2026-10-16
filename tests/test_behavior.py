@@ -31540,3 +31540,1162 @@ class NewBatch254255GiantShieldBehaviorTests(unittest.TestCase):
                         "target_unit_id": bow.unit_id}
         self.assertGreater(score_skill_payload(battle, spear, wall_action, wall_payload, profile,
                                                instant_only=False), 0)
+
+
+class NewBatch256257GiantShieldBehaviorTests(unittest.TestCase):
+    """Source-locked sword and gun rules, including reactive guard and gun shape AI."""
+
+    def fixture(self):
+        battle = create_battle(["excel_r256", "excel_r257"], "bard")
+        sword = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r256")
+        gun = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r257")
+        enemy = primary_hero(battle, 2)
+        sword.position, gun.position, enemy.position = Position(3, 2), Position(4, 2), Position(6, 2)
+        for unit in (sword, gun, enemy):
+            unit.max_health = unit.current_hp = 10
+        return battle, sword, gun, enemy
+
+    def test_public_contract_and_blade_switch(self):
+        from wujiang.tactical.heroes.registry import list_heroes
+
+        battle, sword, gun, _ = self.fixture()
+        self.assertTrue({"excel_r256", "excel_r257"}.issubset({entry["code"] for entry in list_heroes()}))
+        self.assertEqual({"shield_sword_dance", "shield_wall", "shield_bash"}, set(sword.skill_map()))
+        self.assertEqual({"shield_sweep", "shield_flat_shot", "shield_volley", "shield_raise", "shield_draw_blade"},
+                         set(gun.skill_map()))
+        self.assertEqual(gun.stat("defense"), 1)
+        gun.get_skill("shield_draw_blade").execute(battle, gun, {})
+        self.assertEqual(gun.stat("defense"), 2)
+        self.assertEqual(gun.targeting_range(), 1)
+        self.assertTrue(battle.unit_can_use_block_counter(gun))
+        for code in ("shield_sweep", "shield_flat_shot", "shield_volley"):
+            self.assertFalse(gun.get_skill(code).can_use(battle, gun, {})[0])
+
+    def test_sword_counter_is_separate_from_block_and_second_hit_is_area(self):
+        battle, sword, gun, enemy = self.fixture()
+        enemy.position, gun.position = Position(4, 3), Position(2, 3)
+        enemy.base_stats.attack_range = 1
+        battle.configure_turn_order([enemy.unit_id, sword.unit_id, gun.unit_id])
+        battle.start_current_turn()
+        queued = battle.build_queued_action({"type": "attack", "unit_id": enemy.unit_id,
+                                             "target_unit_id": sword.unit_id})
+        options = {option.action_code: option for option in battle.available_reaction_options(sword, queued)}
+        self.assertIn("counter", options)
+        self.assertNotIn("block", options)
+        self.assertIn(gun.unit_id, options["counter"].preview["secondary_target_unit_ids"])
+        before_enemy, before_gun = enemy.current_hp, gun.current_hp
+        with mock.patch("wujiang.tactical.engine.core.random.random", return_value=0.99):
+            battle.resolve_reaction_action(sword, "counter", queued)
+        self.assertLess(enemy.current_hp, before_enemy)
+        self.assertLess(gun.current_hp, before_gun)
+        self.assertEqual(sword.attacks_used, 0)
+
+    def test_sword_reductions_pierce_and_wall_five(self):
+        battle, sword, gun, enemy = self.fixture()
+        enemy.position = Position(5, 2)
+        wall = sword.get_skill("shield_wall")
+        wall.execute(battle, sword, {"target_unit_id": gun.unit_id})
+        with mock.patch("wujiang.tactical.engine.core.random.random", return_value=0.99):
+            far = battle.resolve_damage(DamageContext(source=enemy, target=gun, attack_power=6,
+                                                       is_skill=False, action_name="远袭", tags={"attack"}))
+            pierced = battle.resolve_damage(DamageContext(source=enemy, target=gun, attack_power=6,
+                                                           is_skill=False, action_name="破魔", ignore_shield=True,
+                                                           tags={"attack"}))
+        self.assertEqual(far.defense_override, 5)
+        self.assertLess(far.actual_damage, pierced.actual_damage)
+        enemy.position = Position(6, 2)
+        battle.move_unit(gun, Position(5, 2), via_skill=True)
+        self.assertFalse(sword.has_status("盾墙"))
+        self.assertFalse(gun.has_status("盾墙"))
+        self.assertFalse(wall.can_use(battle, sword, {})[0])
+
+    def test_dance_guard_next_hero_turn_and_bash_consumption(self):
+        battle, sword, gun, enemy = self.fixture()
+        enemy.position = Position(4, 3)
+        battle.configure_turn_order([sword.unit_id, enemy.unit_id, gun.unit_id])
+        battle.start_current_turn()
+        sword.get_skill("shield_sword_dance").execute(battle, sword, {})
+        self.assertEqual(sword.attack_actions_per_turn(), 3)
+        self.assertFalse(sword.get_status("剑舞下回合近战免伤").active)
+        battle.resolve_turn_end()
+        self.assertTrue(sword.get_status("剑舞下回合近战免伤").active)
+        with mock.patch("wujiang.tactical.engine.core.random.random", return_value=0.99):
+            hit = battle.resolve_damage(DamageContext(source=enemy, target=sword, attack_power=7,
+                                                       is_skill=False, action_name="近战", tags={"attack"}))
+        self.assertEqual(hit.actual_damage, 0)
+        battle.resolve_turn_end()
+        self.assertFalse(sword.has_status("剑舞下回合近战免伤"))
+        self.assertEqual(sword.attack_actions_per_turn(), 3)
+        bash = sword.get_skill("shield_bash")
+        bash.react(battle, sword, {}, None)
+        sword.shields = 1
+        shielded = battle.resolve_damage(DamageContext(source=enemy, target=sword, attack_power=7,
+                                                        is_skill=False, action_name="护盾挡下", tags={"attack"}))
+        self.assertTrue(shielded.cancelled)
+        self.assertTrue(sword.has_status("盾击护身"))
+        with mock.patch("wujiang.tactical.engine.core.random.random", return_value=0.99):
+            blocked = battle.resolve_damage(DamageContext(source=enemy, target=sword, attack_power=7,
+                                                           is_skill=False, action_name="盾击挡下", tags={"attack"}))
+        self.assertEqual(blocked.actual_damage, 0)
+        self.assertFalse(sword.has_status("盾击护身"))
+
+    def test_gun_shapes_and_piercing_protection_break(self):
+        battle, sword, gun, enemy = self.fixture()
+        sword.position, enemy.position = Position(6, 3), Position(6, 2)
+        sweep = gun.get_skill("shield_sweep")
+        pattern = next(cells for cells in sweep.patterns(battle, gun)
+                       if sword.position in cells and enemy.position in cells and gun.position not in cells)
+        with mock.patch("wujiang.tactical.engine.core.random.random", return_value=0.99):
+            sweep.execute(battle, gun, {"cells": [cell.to_dict() for cell in pattern]})
+        self.assertLess(sword.current_hp, 10)
+        self.assertLess(enemy.current_hp, 10)
+        volley = gun.get_skill("shield_volley")
+        self.assertTrue(any(len({cell.y for cell in cells}) == 1 for cells in volley.patterns(battle, gun)))
+        self.assertTrue(any(len({cell.x for cell in cells}) == 1 for cells in volley.patterns(battle, gun)))
+        from wujiang.tactical.heroes.common import PassiveProtectionSkill
+        PassiveProtectionSkill().apply_shields(battle, enemy, [enemy])
+        self.assertEqual(enemy.protection_shields, 2)
+        with mock.patch("wujiang.tactical.engine.core.random.random", return_value=0.99):
+            for index in range(2):
+                ctx = battle.resolve_damage(DamageContext(source=gun, target=enemy, attack_power=3,
+                                                          is_skill=False, action_name="普攻", tags={"attack"}))
+                self.assertEqual(bool(enemy.has_status("火枪破保护降守")), index == 1)
+        self.assertTrue(ctx.protection_broken)
+        self.assertEqual(enemy.get_status("火枪破保护降守").duration, 4)
+
+    def test_ai_scores_dance_and_gun_area_without_empty_cast(self):
+        from wujiang.tactical.rooms.ai import score_skill_payload, skill_payloads_for_action
+
+        battle, sword, gun, enemy = self.fixture()
+        profile = difficulty_profile("standard")
+        dance = sword.get_skill("shield_sword_dance")
+        dance_action = {"code": dance.code, "target_mode": "self", "preview": dance.preview(battle, sword)}
+        self.assertGreater(score_skill_payload(battle, sword, dance_action,
+            {"type": "skill", "unit_id": sword.unit_id, "skill_code": dance.code}, profile,
+            instant_only=False), 0)
+        sweep = gun.get_skill("shield_sweep")
+        action = {"code": sweep.code, "target_mode": "cell", "preview": sweep.preview(battle, gun)}
+        payloads = skill_payloads_for_action(battle, gun, action)
+        self.assertTrue(payloads)
+        self.assertLessEqual(len(payloads), 24)
+        self.assertTrue(any(score_skill_payload(battle, gun, action, payload, profile, instant_only=False) > 0
+                            for payload in payloads))
+
+
+class NewBatch259260KnightKingBehaviorTests(unittest.TestCase):
+    """Focused source rules for eight-step charge and the wildman king."""
+
+    def fixture(self):
+        battle = create_battle(["excel_r259", "excel_r260"], "bard")
+        knight = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r259")
+        king = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r260")
+        enemy = primary_hero(battle, 2)
+        battle.width, battle.height = 12, 9
+        knight.position, king.position, enemy.position = Position(1, 3), Position(2, 6), Position(4, 3)
+        for unit in (knight, king, enemy):
+            unit.max_health = unit.current_hp = 10
+        return battle, knight, king, enemy
+
+    def test_public_contract_and_common_skills(self):
+        from wujiang.tactical.heroes.registry import list_heroes
+
+        battle, knight, king, _ = self.fixture()
+        self.assertTrue({"excel_r259", "excel_r260"}.issubset({item["code"] for item in list_heroes()}))
+        self.assertEqual({"shield_charge", "shield_bash"}, set(knight.skill_map()))
+        self.assertEqual({"harden", "protection", "fly_leap", "pierce", "barbarian_axe",
+                          "barbarian_harass", "barbarian_harass_free", "barbarian_gluttony"}, set(king.skill_map()))
+        self.assertEqual(king.get_skill("barbarian_axe").mana_cost_for_payload(battle, king, {"choice_code": "weak"}), 0.5)
+
+    def test_charge_exact_eight_pierces_and_hits_both_sides_once(self):
+        battle = create_battle(["excel_r259", "excel_r254"], "bard")
+        knight = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r259")
+        ally = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r254")
+        enemy = primary_hero(battle, 2)
+        battle.width, battle.height = 12, 9
+        knight.position, ally.position, enemy.position = Position(1, 3), Position(3, 3), Position(5, 3)
+        ally.base_stats.defense = enemy.base_stats.defense = 1
+        for unit in (knight, ally, enemy):
+            unit.max_health = unit.current_hp = 10
+        ally.shields = enemy.shields = 1
+        charge = knight.get_skill("shield_charge")
+        route = charge.route(battle, knight, {"x": 9, "y": 3})
+        self.assertEqual(len(route), 9)
+        self.assertEqual(route[-1], Position(9, 3))
+        self.assertNotIn(Position(8, 3), charge.routes(battle, knight))
+        with mock.patch("wujiang.tactical.engine.core.random.random", return_value=0.99):
+            charge.execute(battle, knight, {"x": 9, "y": 3})
+        self.assertEqual(knight.position, Position(9, 3))
+        self.assertLess(ally.current_hp, 10)
+        self.assertLess(enemy.current_hp, 10)
+        self.assertEqual(ally.shields, 0)
+        self.assertEqual(enemy.shields, 0)
+
+    def test_charge_requires_clear_terrain_and_legal_landing(self):
+        battle, knight, _, enemy = self.fixture()
+        enemy.position = Position(9, 3)
+        charge = knight.get_skill("shield_charge")
+        self.assertNotIn(Position(9, 3), charge.routes(battle, knight))
+        enemy.position = Position(4, 3)
+        battle.blocked_cells.add((6, 3))
+        self.assertNotIn(Position(9, 3), charge.routes(battle, knight))
+        with self.assertRaises(ActionError):
+            charge.execute(battle, knight, {"x": 9, "y": 3})
+
+    def test_passing_giant_shield_grants_resources_and_next_turn_speed(self):
+        battle = create_battle(["excel_r259", "excel_r254"], "bard")
+        knight = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r259")
+        shield = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r254")
+        enemy = primary_hero(battle, 2)
+        battle.width, battle.height = 12, 9
+        knight.position, shield.position, enemy.position = Position(1, 3), Position(3, 3), Position(10, 7)
+        shield.current_hp, shield.current_mana = 0.5, 0
+        before_speed = shield.stat("speed")
+        battle.move_unit(knight, Position(4, 3), via_skill=True, ignore_units=True,
+                         straight_only=True, max_distance=3)
+        self.assertEqual(shield.current_hp, 0.75)
+        self.assertEqual(shield.current_mana, 1)
+        self.assertEqual(shield.stat("speed"), before_speed + 1)
+        speed_status = shield.get_status("巨盾冲锋提速")
+        self.assertIsNotNone(speed_status)
+        speed_status.on_owner_turn_end(battle)
+        self.assertTrue(shield.has_status("巨盾冲锋提速"))
+        battle.turn_number += 1
+        speed_status.on_owner_turn_end(battle)
+        self.assertFalse(shield.has_status("巨盾冲锋提速"))
+
+    def test_passing_enemy_named_giant_shield_is_not_silently_excluded(self):
+        battle = create_battle("excel_r259", ["excel_r254", "bard"])
+        knight = primary_hero(battle, 1)
+        shield = next(unit for unit in battle.hero_units(2) if unit.hero_code == "excel_r254")
+        bard = next(unit for unit in battle.hero_units(2) if unit.hero_code == "bard")
+        battle.width, battle.height = 12, 9
+        knight.position, shield.position, bard.position = Position(1, 3), Position(3, 3), Position(10, 7)
+        shield.current_hp, shield.current_mana = 0.5, 0
+        battle.move_unit(knight, Position(4, 3), via_skill=True, ignore_units=True,
+                         straight_only=True, max_distance=3)
+        self.assertEqual(shield.current_hp, 0.75)
+        self.assertEqual(shield.current_mana, 1)
+        self.assertTrue(shield.has_status("巨盾冲锋提速"))
+
+    def test_axe_choices_shape_and_bypass_only_free_reactions(self):
+        battle, knight, king, enemy = self.fixture()
+        knight.position, king.position, enemy.position = Position(1, 1), Position(4, 3), Position(5, 3)
+        battle.configure_turn_order([king.unit_id, enemy.unit_id, knight.unit_id])
+        battle.start_current_turn()
+        axe = king.get_skill("barbarian_axe")
+        pattern = next(cells for cells in axe.patterns(battle, king) if cells[0] == enemy.position)
+        self.assertLessEqual(len(pattern), 4)
+        preview = axe.preview(battle, king)
+        self.assertEqual({choice["code"] for choice in preview["selection"]["choices"]}, {"full", "weak"})
+        enemy.has_block_counter = True
+        attack = battle.build_queued_action({"type": "attack", "unit_id": king.unit_id,
+                                             "target_unit_id": enemy.unit_id})
+        self.assertTrue({"block", "counter"} & {item.action_code for item in battle.available_reaction_options(enemy, attack)})
+        queued = battle.build_queued_action({"type": "skill", "unit_id": king.unit_id,
+                                             "skill_code": axe.code, "choice_code": "weak",
+                                             "cells": [cell.to_dict() for cell in pattern]})
+        blocked = {item.action_code for item in battle.available_reaction_options(enemy, queued)}
+        self.assertNotIn("block", blocked)
+        self.assertNotIn("counter", blocked)
+        self.assertEqual(axe.mana_cost_for_payload(battle, king, {"choice_code": "full"}), 1.5)
+        self.assertEqual(axe.mana_cost_for_payload(battle, king, {"choice_code": "weak"}), 0.5)
+
+    def test_harassment_free_quota_rename_and_wildman_limit(self):
+        battle, knight, king, enemy = self.fixture()
+        knight.position, king.position, enemy.position = Position(1, 1), Position(4, 3), Position(5, 3)
+        enemy.base_stats.defense = 1
+        free = king.get_skill("barbarian_harass_free")
+        paid = king.get_skill("barbarian_harass")
+        with mock.patch("wujiang.tactical.engine.core.random.random", return_value=0.99):
+            free.execute(battle, king, {"target_unit_id": enemy.unit_id})
+        self.assertEqual(enemy.name, "野人")
+        self.assertEqual(enemy.hero_code, "bard")
+        self.assertEqual(free.mana_cost, 0)
+        self.assertEqual(paid.mana_cost, 0.5)
+        king.base_stats.defense = 1
+        hit = battle.resolve_damage(DamageContext(source=enemy, target=king, attack_power=5,
+                                                   is_skill=False, action_name="野人普攻", tags={"attack"}))
+        self.assertEqual(hit.attack_power, 3)
+        battle.configure_turn_order([king.unit_id, enemy.unit_id, knight.unit_id])
+        battle.start_current_turn()
+        enemy.has_block_counter = True
+        queued = battle.build_queued_action({"type": "attack", "unit_id": king.unit_id,
+                                             "target_unit_id": enemy.unit_id})
+        self.assertEqual(battle.available_reaction_options(enemy, queued), [])
+
+    def test_free_harassment_does_not_consume_paid_use(self):
+        battle, knight, king, enemy = self.fixture()
+        knight.position, king.position, enemy.position = Position(1, 1), Position(4, 3), Position(5, 3)
+        battle.configure_turn_order([king.unit_id, enemy.unit_id, knight.unit_id])
+        battle.start_current_turn()
+        free = king.get_skill("barbarian_harass_free")
+        paid = king.get_skill("barbarian_harass")
+        payload = {"target_unit_id": enemy.unit_id}
+        self.assertTrue(free.can_use(battle, king, payload)[0])
+        free.prepay_resources(battle, king, payload)
+        self.assertFalse(free.can_use(battle, king, payload)[0])
+        self.assertTrue(paid.can_use(battle, king, payload)[0])
+        self.assertEqual(paid.uses_this_turn, 0)
+
+    def test_gluttony_heals_and_blocks_leap_until_next_own_turn_end(self):
+        battle, _, king, enemy = self.fixture()
+        king.position, enemy.position = Position(4, 3), Position(10, 7)
+        king.current_hp = 0.25
+        before_defense = king.stat("defense")
+        king.get_skill("barbarian_gluttony").execute(battle, king, {})
+        self.assertEqual(king.current_hp, king.max_health)
+        self.assertEqual(king.stat("defense"), before_defense + 3)
+        self.assertEqual(king.stat("speed"), 1)
+        status = king.get_status("暴食")
+        self.assertTrue(status.blocks_skill_use(battle, king, king.get_skill("fly_leap"))[0])
+        self.assertFalse(status.blocks_skill_use(battle, king, king.get_skill("pierce"))[0])
+        status.on_owner_turn_end(battle)
+        self.assertTrue(king.has_status("暴食"))
+        battle.turn_number += 1
+        status.on_owner_turn_end(battle)
+        self.assertFalse(king.has_status("暴食"))
+
+    def test_ai_generates_and_values_new_skill_choices(self):
+        from wujiang.tactical.rooms.ai import score_skill_payload, skill_payloads_for_action
+
+        battle, knight, king, enemy = self.fixture()
+        profile = difficulty_profile("standard")
+        charge = knight.get_skill("shield_charge")
+        action = {"code": charge.code, "target_mode": "cell", "preview": charge.preview(battle, knight)}
+        payloads = skill_payloads_for_action(battle, knight, action)
+        self.assertTrue(any(payload.get("cells") == [{"x": 9, "y": 3}] for payload in payloads))
+        self.assertTrue(any(score_skill_payload(battle, knight, action, payload, profile,
+                                                instant_only=False) > 0 for payload in payloads))
+        king.position, enemy.position = Position(4, 3), Position(5, 3)
+        axe = king.get_skill("barbarian_axe")
+        axe_action = {"code": axe.code, "target_mode": "cell", "preview": axe.preview(battle, king)}
+        axe_payloads = skill_payloads_for_action(battle, king, axe_action)
+        self.assertEqual({payload["choice_code"] for payload in axe_payloads}, {"full", "weak"})
+        self.assertTrue(any(score_skill_payload(battle, king, axe_action, payload, profile,
+                                                instant_only=False) > 0 for payload in axe_payloads))
+
+
+class NewBatch262263BirdIceBehaviorTests(unittest.TestCase):
+    """Source-first behavior scenarios for the bird king and ice emperor."""
+
+    def fixture(self):
+        battle = create_battle(["excel_r262", "excel_r263"], "bard")
+        bird = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r262")
+        ice = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r263")
+        enemy = primary_hero(battle, 2)
+        battle.width = battle.height = 10
+        bird.position, ice.position, enemy.position = Position(2, 3), Position(3, 3), Position(5, 4)
+        for unit in (bird, ice, enemy):
+            unit.current_hp = unit.max_health = 10
+        return battle, bird, ice, enemy
+
+    def test_public_contract_and_backend_area_preview(self):
+        from wujiang.tactical.heroes.registry import list_heroes
+        from wujiang.tactical.heroes.weather_descriptions import hero_weather_effect_text
+
+        battle, bird, ice, _ = self.fixture()
+        self.assertTrue({"excel_r262", "excel_r263"}.issubset({entry["code"] for entry in list_heroes()}))
+        self.assertTrue({"great_feather_fan", "poison_feather", "pierce", "shensu", "evasion"}.issubset(bird.skill_map()))
+        self.assertTrue({"absolute_zero", "floating_crane_city", "fly_leap", "remote_pierce",
+                         "protection", "drain_mana", "remote_dragon_breath"}.issubset(ice.skill_map()))
+        self.assertIn("1/2概率失败", hero_weather_effect_text(ice))
+        for actor, code, size in ((bird, "great_feather_fan", 4), (ice, "absolute_zero", 2)):
+            skill = actor.get_skill(code)
+            patterns = skill.patterns(battle, actor)
+            self.assertTrue(patterns)
+            self.assertTrue(any(len(pattern) == size * size for pattern in patterns))
+            self.assertEqual(skill.preview(battle, actor)["selection"]["mode"], "pattern_cells")
+
+    def test_feather_fan_clears_both_sides_and_seals_only_active_skills(self):
+        from wujiang.tactical.engine.core import StatusEffect
+
+        battle, bird, ice, enemy = self.fixture()
+        ice.add_status(StatusEffect("友方增益", duration=2), source=ice)
+        enemy.add_status(StatusEffect("敌方减益", duration=3), source=bird)
+        enemy.add_status(StatusEffect("长期持续状态"), source=enemy)
+        fan = bird.get_skill("great_feather_fan")
+        pattern = next(cells for cells in fan.patterns(battle, bird)
+                       if ice.position in cells and enemy.position in cells)
+        fan.execute(battle, bird, {"cells": [cell.to_dict() for cell in pattern]})
+        self.assertFalse(ice.has_status("友方增益"))
+        self.assertFalse(enemy.has_status("敌方减益"))
+        self.assertFalse(enemy.has_status("长期持续状态"))
+        for unit in (ice, enemy):
+            status = unit.get_status("大羽毛扇封技")
+            self.assertIsNotNone(status)
+            self.assertEqual(status.duration, 2)
+            self.assertTrue(status.blocks_skill_use(battle, unit, unit.get_skill("protection"))[0] is False)
+        self.assertTrue(ice.get_status("大羽毛扇封技").blocks_skill_use(
+            battle, ice, ice.get_skill("fly_leap"))[0])
+
+    def test_poison_feather_pierces_shield_and_can_cast_at_defense_one(self):
+        battle, bird, _, enemy = self.fixture()
+        enemy.position = Position(4, 3)
+        enemy.shields, enemy.current_mana, bird.current_mana = 1, 3, 0
+        feather = bird.get_skill("poison_feather")
+        self.assertEqual(feather.direct_unit_target_range(battle, bird), bird.targeting_range() + 1)
+        self.assertTrue(feather.ignores_shield_for_payload(battle, bird, {}))
+        bird.base_stats.defense = 1
+        feather.execute(battle, bird, {"target_unit_id": enemy.unit_id})
+        self.assertEqual(bird.stat("defense"), 1)
+        self.assertEqual(enemy.current_mana, 2)
+        self.assertEqual(bird.current_mana, 1)
+        self.assertEqual(enemy.shields, 0)
+
+    def test_bird_formation_grows_defense_only_with_adjacent_allied_birds(self):
+        battle, bird, ice, enemy = self.fixture()
+        bird.base_stats.defense = 5
+        ice.name = "鸟人卫士"
+        next(trait for trait in bird.traits if trait.name == "鸟人王结阵").on_owner_turn_end(battle)
+        self.assertEqual(bird.stat("defense"), 6)
+        ice.position = Position(7, 7)
+        enemy.name = "敌方鸟人"
+        next(trait for trait in bird.traits if trait.name == "鸟人王结阵").on_owner_turn_end(battle)
+        self.assertEqual(bird.stat("defense"), 6)
+
+    def test_absolute_zero_freezes_both_sides_and_suspends_innate_traits(self):
+        battle, bird, ice, enemy = self.fixture()
+        bird.position, enemy.position = Position(4, 3), Position(5, 4)
+        zero = ice.get_skill("absolute_zero")
+        pattern = next(cells for cells in zero.patterns(battle, ice)
+                       if bird.position in cells and enemy.position in cells)
+        zero.execute(battle, ice, {"cells": [cell.to_dict() for cell in pattern]})
+        self.assertTrue(bird.cannot_move)
+        self.assertTrue(enemy.cannot_move)
+        with self.assertRaises(ActionError):
+            battle.move_unit(bird, Position(4, 2), forced=True)
+        self.assertTrue(bird.innate_traits_suppressed())
+        self.assertFalse(any(component in bird.traits for component in bird.iter_components()))
+        status = bird.get_status("绝对零度")
+        self.assertEqual(status.duration, 5)
+        ice.add_status(type(status)(), source=enemy)
+        self.assertTrue(ice.get_status("绝对零度").blocks_skill_use(battle, ice, ice.get_skill("fly_leap"))[0])
+        self.assertFalse(ice.get_status("绝对零度").blocks_skill_use(battle, ice, ice.get_skill("remote_pierce"))[0])
+        bird.remove_status(status, battle)
+        self.assertFalse(bird.cannot_move)
+        self.assertFalse(bird.innate_traits_suppressed())
+
+    def test_floating_crane_weather_range_and_paid_skill_failure(self):
+        from wujiang.tactical.heroes.excel_roster import FloatingCraneCityField
+
+        battle, bird, ice, enemy = self.fixture()
+        bird.position, ice.position, enemy.position = Position(3, 3), Position(1, 1), Position(7, 7)
+        field = FloatingCraneCityField()
+        battle.add_field_effect(field, source=ice)
+        self.assertEqual(ice.targeting_range(), 4)
+        self.assertEqual(bird.targeting_range(), 1)
+        self.assertEqual(enemy.targeting_range(), max(1, enemy.base_stats.attack_range - 3))
+        battle.configure_turn_order([bird.unit_id, enemy.unit_id, ice.unit_id])
+        battle.start_current_turn()
+        skill = bird.get_skill("shensu")
+        mana = bird.current_mana
+        with mock.patch("wujiang.tactical.heroes.excel_roster.random.random", return_value=0.0):
+            battle.start_action_or_chain({"type": "skill", "unit_id": bird.unit_id, "skill_code": skill.code})
+        self.assertEqual(bird.current_mana, mana - 1)
+        self.assertEqual(skill.uses_this_turn, 1)
+        self.assertFalse(bird.has_status("神速"))
+        declared = {"unit_id": bird.unit_id, "skill_code": "pierce"}
+        with mock.patch("wujiang.tactical.heroes.excel_roster.random.random", return_value=0.99) as roll:
+            field.on_owner_action_declared(battle, "skill", declared)
+            field.on_owner_action_declared(battle, "skill", declared)
+        self.assertFalse(declared["action_failed_by_floating_crane"])
+        self.assertEqual(roll.call_count, 1)
+
+    def test_ice_piercing_guard_reduces_damage_power_and_ai_values_control(self):
+        from wujiang.tactical.rooms.ai import score_skill_payload, skill_payloads_for_action
+
+        battle, bird, ice, enemy = self.fixture()
+        battle.configure_turn_order([ice.unit_id, enemy.unit_id, bird.unit_id])
+        battle.start_current_turn()
+        ice.base_stats.defense = 1
+        ctx = battle.resolve_damage(DamageContext(source=enemy, target=ice, attack_power=6,
+                                                   is_skill=True, ignore_shield=True, action_name="破魔"))
+        self.assertEqual(ctx.attack_power, 3)
+        profile = difficulty_profile("standard")
+        zero = ice.get_skill("absolute_zero")
+        action = {"code": zero.code, "target_mode": "cell", "preview": zero.preview(battle, ice)}
+        payloads = skill_payloads_for_action(battle, ice, action)
+        self.assertTrue(payloads)
+        self.assertTrue(any(score_skill_payload(battle, ice, action, payload, profile,
+                                                instant_only=False) > 0 for payload in payloads))
+
+
+class NewBatch277290TianyuanCrowBehaviorTests(unittest.TestCase):
+    """Directed source-first checks for the Tianyuan walker and crow emperor."""
+
+    def fixture(self):
+        battle = create_battle(["excel_r277", "excel_r290"], "bard")
+        walker = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r277")
+        emperor = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r290")
+        enemy = primary_hero(battle, 2)
+        battle.width = battle.height = 12
+        walker.position, emperor.position, enemy.position = Position(2, 3), Position(4, 5), Position(7, 5)
+        for unit in (walker, emperor, enemy):
+            unit.current_hp = unit.max_health = 10
+        return battle, walker, emperor, enemy
+
+    def test_pandemonium_ai_scores_mounted_dragon_area_attack_without_missing_cells(self):
+        from wujiang.tactical.rooms.ai import r20_weather_cast_score
+
+        battle = create_battle(["excel_r290", "dragon_rider"], ["dark_human", "excel_r187"])
+        emperor = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r290")
+        rider = next(unit for unit in battle.hero_units(1) if unit.hero_code == "dragon_rider")
+        dragon = summon_by_code(battle, 1, "dragon_mount")
+        dark = next(unit for unit in battle.hero_units(2) if unit.hero_code == "dark_human")
+        leader = next(unit for unit in battle.hero_units(2) if unit.hero_code == "excel_r187")
+        battle.width = battle.height = 9
+        emperor.position, rider.position, dragon.position = Position(1, 6), Position(2, 2), Position(2, 2)
+        dark.position, leader.position = Position(5, 6), Position(5, 2)
+        self.assertTrue(any(trait.name == "龙爪" for trait in dragon.traits))
+        score = r20_weather_cast_score(battle, leader, "pandemonium", difficulty_profile("standard"))
+        self.assertIsInstance(score, float)
+        self.assertFalse(battle.has_weather("万魔殿"))
+
+    def test_registry_skills_and_target_previews(self):
+        from wujiang.tactical.heroes.registry import list_heroes
+
+        battle, walker, emperor, _ = self.fixture()
+        self.assertTrue({"excel_r277", "excel_r290"}.issubset({entry["code"] for entry in list_heroes()}))
+        self.assertTrue({"tianyuan", "tianyuan_breakthrough", "fly_leap", "protection", "missile"}.issubset(walker.skill_map()))
+        self.assertTrue({"messenger_crow", "crow_swap", "great_crow_flock"}.issubset(emperor.skill_map()))
+        self.assertFalse(walker.get_skill("tianyuan_breakthrough").can_use(battle, walker, {})[0])
+        crow_cells = emperor.get_skill("messenger_crow").preview(battle, emperor)["cells"]
+        self.assertIn({"x": 5, "y": 5}, crow_cells)
+        empty_preview = battle.basic_attack_preview_for_payload(emperor, {"attack_variant": "crow_spawn"})
+        self.assertTrue(empty_preview["cell_targeted_attack"])
+        self.assertIn({"x": 5, "y": 5}, empty_preview["cells"])
+        self.assertEqual(emperor.get_skill("great_crow_flock").preview(battle, emperor)["selection"]["mode"], "pattern_cells")
+
+    def test_tianyuan_roll_is_public_cumulative_and_probe_does_not_roll(self):
+        battle, walker, _, _ = self.fixture()
+        skill = walker.get_skill("tianyuan")
+        with mock.patch("wujiang.tactical.heroes.excel_roster.random.randint", side_effect=[2, 5]) as roll:
+            skill.execute(battle, walker, {})
+            skill.execute(battle, walker, {})
+            battle._ai_probe_active = True
+            try:
+                skill.execute(battle, walker, {})
+            finally:
+                battle._ai_probe_active = False
+        self.assertEqual(roll.call_count, 2)
+        self.assertEqual(walker.get_status("叹号计数点").points, 10)
+        self.assertEqual(walker.get_status("叹号计数点").to_public_dict(battle)["points"], 10)
+
+    def test_breakthrough_destroys_wall_hits_then_stops_and_spends_points(self):
+        from wujiang.tactical.heroes.excel_roster import TianyuanCounterStatus
+
+        battle, walker, _, enemy = self.fixture()
+        walker.position, enemy.position = Position(2, 3), Position(4, 3)
+        battle.blocked_cells.add((3, 3))
+        walker.add_status(TianyuanCounterStatus(3), source=walker)
+        skill = walker.get_skill("tianyuan_breakthrough")
+        self.assertIn({"x": 5, "y": 3}, skill.preview(battle, walker)["cells"])
+        self.assertNotIn({"x": 3, "y": 3}, skill.preview(battle, walker)["cells"])
+        before = enemy.current_hp
+        with mock.patch.object(battle, "resolve_damage", wraps=battle.resolve_damage) as hits:
+            skill.execute(battle, walker, {"x": 5, "y": 3})
+        self.assertEqual(sum(call.args[0].target is enemy for call in hits.call_args_list), 3)
+        self.assertNotIn((3, 3), battle.blocked_cells)
+        self.assertLess(enemy.current_hp, before)
+        self.assertEqual(walker.position, Position(3, 3))
+        self.assertIsNone(walker.get_status("叹号计数点"))
+
+    def test_breakthrough_friendly_unit_takes_repeated_hits_and_blocks(self):
+        from wujiang.tactical.heroes.excel_roster import TianyuanCounterStatus
+
+        battle, walker, emperor, enemy = self.fixture()
+        walker.position, emperor.position, enemy.position = Position(2, 3), Position(3, 3), Position(5, 3)
+        walker.add_status(TianyuanCounterStatus(4), source=walker)
+        ally_before, enemy_before = emperor.current_hp, enemy.current_hp
+        with mock.patch.object(battle, "resolve_damage", wraps=battle.resolve_damage) as hits:
+            walker.get_skill("tianyuan_breakthrough").execute(battle, walker, {"x": 6, "y": 3})
+        self.assertEqual(sum(call.args[0].target is emperor for call in hits.call_args_list), 4)
+        self.assertLess(emperor.current_hp, ally_before)
+        self.assertEqual(enemy.current_hp, enemy_before)
+        self.assertEqual(walker.position, Position(2, 3))
+
+    def test_breakthrough_destroys_terrain_unit_before_later_collision(self):
+        from wujiang.tactical.heroes.excel_roster import MessengerCrowSummon, TianyuanCounterStatus
+
+        battle, walker, emperor, enemy = self.fixture()
+        walker.position, enemy.position = Position(2, 3), Position(5, 3)
+        battle.blocked_cells.add((3, 3))
+        terrain = MessengerCrowSummon(1)
+        terrain.is_terrain = True
+        battle.summon_unit(terrain, Position(4, 3), summoner=emperor)
+        walker.add_status(TianyuanCounterStatus(4), source=walker)
+        before = enemy.current_hp
+        walker.get_skill("tianyuan_breakthrough").execute(battle, walker, {"x": 6, "y": 3})
+        self.assertNotIn((3, 3), battle.blocked_cells)
+        self.assertFalse(terrain.alive)
+        self.assertLess(enemy.current_hp, before)
+        self.assertEqual(walker.position, Position(4, 3))
+
+    def test_crow_aura_reduces_enemy_speed_once_and_blocks_actual_free_skills(self):
+        from wujiang.tactical.heroes.excel_roster import MessengerCrowSummon
+
+        battle = create_battle(["excel_r290"], "excel_r277")
+        emperor, enemy = primary_hero(battle, 1), primary_hero(battle, 2)
+        battle.width = battle.height = 12
+        emperor.position, enemy.position = Position(4, 5), Position(6, 5)
+        base_speed = enemy.stat("speed")
+        emperor.get_skill("messenger_crow").execute(battle, emperor, {"x": 5, "y": 5})
+        first = summon_by_code(battle, 1, "messenger_crow")
+        self.assertEqual(enemy.stat("speed"), max(1, base_speed - 1))
+        aura = next(effect for effect in battle.field_effects if getattr(effect, "crow_id", None) == first.unit_id)
+        self.assertTrue(aura.blocks_skill_payload(battle, enemy, enemy.get_skill("tianyuan"), {})[0])
+        missile, leap = enemy.get_skill("missile"), enemy.get_skill("fly_leap")
+        self.assertEqual(missile.mana_cost_for_payload(battle, enemy, {}), 0)
+        self.assertEqual(leap.mana_cost_for_payload(battle, enemy, {}), 1)
+        self.assertTrue(aura.blocks_skill_payload(battle, enemy, missile, {})[0])
+        self.assertFalse(aura.blocks_skill_payload(battle, enemy, leap, {})[0])
+        battle.summon_unit(MessengerCrowSummon(1), Position(5, 6), summoner=emperor)
+        self.assertEqual(enemy.stat("speed"), max(1, base_speed - 1))
+        first.alive = False
+        battle.cleanup_dead_units()
+        self.assertEqual(enemy.stat("speed"), max(1, base_speed - 1))
+
+    def test_crow_swap_exchanges_exact_positions(self):
+        battle, _, emperor, enemy = self.fixture()
+        enemy.position = Position(8, 5)
+        emperor.get_skill("messenger_crow").execute(battle, emperor, {"x": 5, "y": 5})
+        crow = summon_by_code(battle, 1, "messenger_crow")
+        start_emperor, start_crow = emperor.position, crow.position
+        swap = emperor.get_skill("crow_swap")
+        self.assertIn(crow.unit_id, swap.preview(battle, emperor)["target_unit_ids"])
+        swap.execute(battle, emperor, {"target_unit_id": crow.unit_id})
+        self.assertEqual((emperor.position, crow.position), (start_crow, start_emperor))
+
+    def test_great_flock_hits_enemy_hero_then_summons_without_friendly_fire(self):
+        battle, walker, emperor, enemy = self.fixture()
+        walker.position, enemy.position = Position(2, 2), Position(6, 5)
+        skill = emperor.get_skill("great_crow_flock")
+        pattern = next(cells for cells in skill.patterns(battle, emperor) if enemy.position in cells)
+        enemy_before, ally_before = enemy.current_hp, walker.current_hp
+        skill.execute(battle, emperor, {"cells": [cell.to_dict() for cell in pattern]})
+        self.assertLess(enemy.current_hp, enemy_before)
+        self.assertEqual(walker.current_hp, ally_before)
+        self.assertTrue(any(unit.hero_code == "messenger_crow" for unit in battle.player_units(1)))
+
+    def test_empty_cell_attack_spends_attack_and_summons_without_damage(self):
+        battle, walker, emperor, enemy = self.fixture()
+        walker.position, enemy.position = Position(2, 2), Position(8, 5)
+        battle.configure_turn_order([emperor.unit_id, enemy.unit_id, walker.unit_id])
+        battle.start_current_turn()
+        before = enemy.current_hp
+        battle.basic_area_attack_with_payload(emperor, {"attack_variant": "crow_spawn", "x": 5, "y": 5})
+        self.assertEqual(emperor.attacks_used, 1)
+        self.assertEqual(enemy.current_hp, before)
+        self.assertEqual(summon_by_code(battle, 1, "messenger_crow").position, Position(5, 5))
+
+    def test_ai_has_positive_crow_and_breakthrough_opportunities(self):
+        from wujiang.tactical.heroes.excel_roster import TianyuanCounterStatus
+        from wujiang.tactical.rooms.ai import score_skill_payload, skill_payloads_for_action
+
+        battle, walker, emperor, enemy = self.fixture()
+        profile = difficulty_profile("standard")
+        enemy.position = Position(6, 5)
+        crow = emperor.get_skill("messenger_crow")
+        crow_action = {"code": crow.code, "target_mode": "cell", "preview": crow.preview(battle, emperor)}
+        crow_payloads = skill_payloads_for_action(battle, emperor, crow_action)
+        self.assertTrue(any(score_skill_payload(battle, emperor, crow_action, payload, profile,
+                                                instant_only=False) > 0 for payload in crow_payloads))
+        walker.position, enemy.position = Position(2, 3), Position(4, 3)
+        walker.add_status(TianyuanCounterStatus(3), source=walker)
+        breakthrough = walker.get_skill("tianyuan_breakthrough")
+        action = {"code": breakthrough.code, "target_mode": "cell", "preview": breakthrough.preview(battle, walker)}
+        payloads = skill_payloads_for_action(battle, walker, action)
+        self.assertTrue(any(score_skill_payload(battle, walker, action, payload, profile,
+                                                instant_only=False) > 0 for payload in payloads))
+
+
+class NewBatch302308TrueRedDemonBehaviorTests(unittest.TestCase):
+    """Source-locked movement blast, paired link, death credit and AI choices."""
+
+    def test_fusion_death_explosion_does_not_reenter_removal_forever(self):
+        battle = create_battle(["excel_r308", "excel_r030"], ["excel_r035", "excel_r193"])
+        fusion = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r030")
+        ogre = next(unit for unit in battle.hero_units(2) if unit.hero_code == "excel_r035")
+        fusion.position, ogre.position = Position(4, 4), Position(5, 4)
+        fusion.current_hp = 0.25
+        battle.resolve_damage(DamageContext(
+            source=ogre, target=fusion, attack_power=ogre.stat("attack"),
+            is_skill=True, action_name="龙息",
+        ))
+        self.assertFalse(fusion.alive)
+        self.assertNotIn(fusion.unit_id, battle.units)
+        self.assertEqual(sum("引发聚变爆炸" in line for line in battle.logs), 1)
+
+    def fixture(self):
+        battle = create_battle(["excel_r302", "excel_r308"], ["bard", "dark_human"])
+        red = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r302")
+        demon = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r308")
+        bard = next(unit for unit in battle.hero_units(2) if unit.hero_code == "bard")
+        dark = next(unit for unit in battle.hero_units(2) if unit.hero_code == "dark_human")
+        battle.width = battle.height = 12
+        red.position, demon.position = Position(2, 2), Position(2, 6)
+        bard.position, dark.position = Position(7, 2), Position(5, 6)
+        for unit in (red, demon, bard, dark):
+            unit.current_hp = unit.max_health = 10
+        return battle, red, demon, bard, dark
+
+    def test_roster_skills_traits_and_frontend_targets(self):
+        from wujiang.tactical.heroes.registry import list_heroes
+
+        battle, red, demon, _, dark = self.fixture()
+        self.assertTrue({"excel_r302", "excel_r308"}.issubset({entry["code"] for entry in list_heroes()}))
+        self.assertEqual(red.stat("attack"), 0)
+        self.assertTrue({"fly_leap", "zero_dash", "true_red_free_leap", "true_red_free_dash",
+                         "shensu", "protection"}.issubset(red.skill_map()))
+        self.assertTrue({"remote_dragon_breath", "demon_link", "drain_mana",
+                         "shensu", "protection"}.issubset(demon.skill_map()))
+        self.assertIn(dark.unit_id, demon.get_skill("demon_link").preview(battle, demon)["target_unit_ids"])
+        self.assertIn(red.unit_id, demon.get_skill("demon_link").preview(battle, demon)["target_unit_ids"])
+        self.assertNotIn(demon.unit_id, demon.get_skill("demon_link").preview(battle, demon)["target_unit_ids"])
+        self.assertIn({"x": 5, "y": 2}, red.get_skill("true_red_free_leap").preview(battle, red)["cells"])
+
+    def test_true_red_free_displacement_is_extra_and_shares_one_quota(self):
+        battle, red, demon, bard, dark = self.fixture()
+        battle.configure_turn_order([red.unit_id, bard.unit_id, demon.unit_id, dark.unit_id])
+        battle.start_current_turn()
+        free = red.get_skill("true_red_free_leap")
+        free.prepay_resources(battle, red, {"x": 5, "y": 2})
+        self.assertFalse(red.get_skill("true_red_free_dash").can_use(battle, red, {})[0])
+        self.assertTrue(red.get_skill("fly_leap").can_use(battle, red, {})[0])
+        self.assertTrue(red.get_skill("zero_dash").can_use(battle, red, {})[0])
+        battle.turn_number += 1
+        red.refresh_for_turn(battle)
+        self.assertTrue(free.can_use(battle, red, {})[0])
+
+    def test_true_red_landing_blast_hits_both_sides_and_standing_refunds_mana(self):
+        battle, red, demon, bard, _ = self.fixture()
+        red.position, demon.position, bard.position = Position(2, 2), Position(4, 3), Position(5, 2)
+        battle.resolving_action = mock.Mock(action_type="move", actor_id=red.unit_id, payload={})
+        try:
+            battle.move_unit(red, Position(4, 2), via_skill=True, max_distance=3, ignore_units=True)
+        finally:
+            battle.resolving_action = None
+        self.assertEqual(len(battle.pending_followup_actions), 1)
+        self.assertTrue(red.moved_this_turn)
+        queued = battle.pending_followup_actions.pop()
+        queued.effect_resolver(battle, red, queued)
+        self.assertLess(demon.current_hp, 10)
+        self.assertLess(bard.current_hp, 10)
+        red.current_mana = red.max_mana() - 1
+        trait = next(item for item in red.traits if item.name == "真红位移")
+        trait.on_owner_turn_end(battle)
+        self.assertEqual(red.current_mana, red.max_mana() - 1)
+        red.moved_this_turn = False
+        trait.on_owner_turn_end(battle)
+        self.assertEqual(red.current_mana, red.max_mana())
+
+    def test_demon_link_stacks_symmetrically_to_zero_then_cleans_after_round(self):
+        battle, _, demon, bard, _ = self.fixture()
+        bard.position = Position(5, 6)
+        dark = bard
+        skill = demon.get_skill("demon_link")
+        before = (demon.stat("attack"), demon.stat("speed"), dark.stat("attack"), dark.stat("speed"))
+        original_minimums = dict(dark.stat_minimums)
+        skill.execute(battle, demon, {"target_unit_id": dark.unit_id})
+        source = demon.get_status("恶魔链接·来源")
+        target = dark.get_status("恶魔链接·受体")
+        self.assertIsNotNone(source)
+        self.assertIsNotNone(target)
+        self.assertEqual((demon.stat("attack"), demon.stat("speed")), (before[0] + 1, before[1] + 1))
+        self.assertEqual((dark.stat("attack"), dark.stat("speed")), (before[2] - 1, before[3] - 1))
+        for _ in range(8):
+            if source.ending_turn_number is not None:
+                break
+            source.on_owner_turn_start(battle)
+        self.assertIsNotNone(source.ending_turn_number)
+        self.assertTrue(dark.stat("attack") == 0 or dark.stat("speed") == 0)
+        self.assertEqual(source.stacks, target.stacks)
+        battle.turn_number = source.ending_turn_number
+        source.on_any_turn_end(battle, demon.player_id)
+        self.assertIsNone(demon.get_status("恶魔链接·来源"))
+        self.assertIsNone(dark.get_status("恶魔链接·受体"))
+        self.assertEqual(dark.stat_minimums, original_minimums)
+        self.assertEqual((demon.stat("attack"), demon.stat("speed")), before[:2])
+
+    def test_demon_link_escaped_target_stops_stacking_and_magic_immunity_blocks(self):
+        battle, _, demon, bard, _ = self.fixture()
+        bard.position = Position(5, 6)
+        dark = bard
+        skill = demon.get_skill("demon_link")
+        dark.magic_immunity = True
+        skill.execute(battle, demon, {"target_unit_id": dark.unit_id})
+        self.assertIsNone(demon.get_status("恶魔链接·来源"))
+        dark.magic_immunity = False
+        skill.execute(battle, demon, {"target_unit_id": dark.unit_id})
+        source = demon.get_status("恶魔链接·来源")
+        self.assertIsNotNone(source)
+        old_stacks = source.stacks
+        dark.position = Position(11, 11)
+        source.on_any_turn_end(battle, bard.player_id)
+        self.assertIsNotNone(source.ending_turn_number)
+        source.on_owner_turn_start(battle)
+        self.assertEqual(source.stacks, old_stacks)
+
+    def test_demon_link_pierces_one_shield_but_dodge_still_cancels(self):
+        battle, _, demon, bard, _ = self.fixture()
+        bard.position = Position(5, 6)
+        bard.temporary_shields = 1
+        bard.dodge_charges = 1
+        skill = demon.get_skill("demon_link")
+        skill.execute(battle, demon, {"target_unit_id": bard.unit_id})
+        self.assertEqual(bard.total_shields(), 0)
+        self.assertEqual(bard.dodge_charges, 0)
+        self.assertIsNone(demon.get_status("恶魔链接·来源"))
+        skill.execute(battle, demon, {"target_unit_id": bard.unit_id})
+        self.assertIsNotNone(demon.get_status("恶魔链接·来源"))
+
+    def test_demon_link_pair_cleans_when_source_destroyed(self):
+        battle, _, demon, bard, _ = self.fixture()
+        bard.position = Position(5, 6)
+        old_minimums = dict(bard.stat_minimums)
+        demon.get_skill("demon_link").execute(battle, demon, {"target_unit_id": bard.unit_id})
+        self.assertIsNotNone(bard.get_status("恶魔链接·受体"))
+        demon.alive = False
+        battle.cleanup_dead_units()
+        self.assertIsNone(bard.get_status("恶魔链接·受体"))
+        self.assertEqual(bard.stat_minimums, old_minimums)
+
+    def test_demon_true_death_backlash_credits_actual_attacker_once(self):
+        from wujiang.tactical.engine.core import DamageContext
+
+        battle, _, demon, bard, _ = self.fixture()
+        demon.current_hp = 0.25
+        before = bard.stat("attack")
+        battle.resolve_damage(DamageContext(source=bard, target=demon, attack_power=5,
+                                            raw_damage=1, is_skill=False, tags={"attack"},
+                                            action_name="定向击杀"))
+        self.assertFalse(demon.alive)
+        battle.advance_followup_actions()
+        self.assertEqual(bard.stat("attack"), max(1, before - 1))
+        self.assertEqual(sum(status.name == "希尔法死亡反噬" for status in bard.statuses), 1)
+
+    def test_demon_death_backlash_is_cancelled_if_demon_returns_before_resolution(self):
+        from wujiang.tactical.engine.core import DamageContext
+
+        battle, _, demon, bard, _ = self.fixture()
+        demon.current_hp = 0.25
+        before = bard.stat("attack")
+        battle.resolve_damage(DamageContext(source=bard, target=demon, attack_power=5,
+                                            raw_damage=1, is_skill=True, action_name="定向技能击杀"))
+        self.assertTrue(battle.pending_followup_actions)
+        queued = battle.pending_followup_actions.pop()
+        demon.alive = True
+        queued.effect_resolver(battle, demon, queued)
+        self.assertEqual(bard.stat("attack"), before)
+
+    def test_ai_values_enemy_blast_avoids_ally_and_links_effective_target(self):
+        from wujiang.tactical.rooms.ai import score_skill_payload, true_red_blast_score
+
+        battle, red, demon, bard, dark = self.fixture()
+        red.position, bard.position, dark.position = Position(2, 2), Position(5, 2), Position(8, 6)
+        demon.position = Position(2, 6)
+        self.assertGreater(true_red_blast_score(battle, red, Position(4, 2)), 0)
+        bard.position, demon.position = Position(8, 2), Position(4, 3)
+        self.assertLess(true_red_blast_score(battle, red, Position(4, 2)), 0)
+        demon.position, bard.position = Position(2, 6), Position(5, 6)
+        action = {"code": "demon_link", "target_mode": "unit",
+                  "preview": demon.get_skill("demon_link").preview(battle, demon)}
+        payload = {"type": "skill", "unit_id": demon.unit_id, "skill_code": "demon_link",
+                   "target_unit_id": bard.unit_id}
+        self.assertGreater(score_skill_payload(battle, demon, action, payload,
+                                               difficulty_profile("standard"), instant_only=False), 0)
+
+    def test_weather_ai_cross_hero_pattern_attack_regression(self):
+        from wujiang.tactical.rooms.ai import r20_weather_cast_score
+
+        battle = create_battle(["excel_r290", "dragon_rider"], ["dark_human", "excel_r187"])
+        leader = next(unit for unit in battle.hero_units(2) if unit.hero_code == "excel_r187")
+        score = r20_weather_cast_score(battle, leader, "pandemonium", difficulty_profile("standard"))
+        self.assertIsInstance(score, float)
+
+
+class NewBatch303DaylightHunterBehaviorTests(unittest.TestCase):
+    """Cross-turn quarry growth, strict half-health defense, piercing seal, and AI intent."""
+
+    def fixture(self):
+        battle = create_battle(["excel_r303", "elite_soldier"], ["bard", "dark_human"])
+        hunter = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r303")
+        first = next(unit for unit in battle.hero_units(2) if unit.hero_code == "bard")
+        second = next(unit for unit in battle.hero_units(2) if unit.hero_code == "dark_human")
+        ally = next(unit for unit in battle.hero_units(1) if unit.unit_id != hunter.unit_id)
+        hunter.position, ally.position = Position(2, 2), Position(0, 0)
+        first.position, second.position = Position(4, 2), Position(2, 4)
+        for unit in (hunter, first, second):
+            unit.max_health = unit.current_hp = 30
+        battle.configure_turn_order([hunter.unit_id, first.unit_id, ally.unit_id, second.unit_id])
+        battle.start_current_turn()
+        return battle, hunter, first, second
+
+    def next_hunter_turn(self, battle, hunter):
+        hunter.finish_turn(battle)
+        hunter.refresh_for_turn(battle)
+
+    def test_public_roster_common_kit_and_target_preview(self):
+        from wujiang.tactical.heroes.registry import list_heroes
+
+        battle, hunter, first, second = self.fixture()
+        self.assertIn("excel_r303", {item["code"] for item in list_heroes()})
+        self.assertTrue({"protection", "harden", "fly_leap", "shensu"}.issubset(hunter.skill_map()))
+        self.assertTrue({"昼行追猎", "攻击吸血"}.issubset({trait.name for trait in hunter.traits}))
+        hunter.current_hp = 29
+        battle.basic_attack(hunter, first)
+        self.next_hunter_turn(battle, hunter)
+        battle.basic_attack(hunter, first)
+        preview = battle.basic_attack_preview_for_payload(hunter, {"attack_variant": "default"})
+        self.assertIn(first.unit_id, preview["target_unit_ids"])
+        self.assertNotIn(second.unit_id, preview["target_unit_ids"])
+
+    def test_same_quarry_immediately_grows_then_switch_and_empty_turn_reset(self):
+        battle, hunter, first, second = self.fixture()
+        trait = next(trait for trait in hunter.traits if trait.name == "昼行追猎")
+        self.assertEqual(hunter.attack_actions_per_turn(), 1)
+        battle.basic_attack(hunter, first)
+        self.next_hunter_turn(battle, hunter)
+        battle.basic_attack(hunter, first)
+        self.assertEqual(hunter.attack_actions_per_turn(), 2)
+        battle.basic_attack(hunter, first)
+        self.assertEqual(hunter.attacks_used, 2)
+        self.next_hunter_turn(battle, hunter)
+        battle.basic_attack(hunter, second)
+        self.assertEqual(hunter.attack_actions_per_turn(), 1)
+        self.assertEqual(trait.current_target_id, second.unit_id)
+        with self.assertRaises(ActionError):
+            battle.basic_attack(hunter, first)
+        self.next_hunter_turn(battle, hunter)
+        self.next_hunter_turn(battle, hunter)
+        self.assertEqual(hunter.attack_actions_per_turn(), 1)
+
+    def test_quarry_destruction_does_not_release_this_turn_lock(self):
+        battle, hunter, first, second = self.fixture()
+        battle.basic_attack(hunter, first)
+        self.next_hunter_turn(battle, hunter)
+        battle.basic_attack(hunter, first)
+        self.next_hunter_turn(battle, hunter)
+        first.current_hp = 0.25
+        battle.basic_attack(hunter, first)
+        self.assertFalse(first.alive)
+        self.assertEqual(hunter.attack_actions_per_turn(), 3)
+        with self.assertRaises(ActionError):
+            battle.basic_attack(hunter, second)
+
+    def test_strict_half_health_only_blocks_skill_damage(self):
+        battle, hunter, first, _ = self.fixture()
+        hunter.current_hp = hunter.max_health / 2
+        equal = battle.resolve_damage(DamageContext(source=first, target=hunter, raw_damage=0.1,
+                                                    attack_power=1, is_skill=True, action_name="半血技能"))
+        self.assertGreater(equal.actual_damage, 0)
+        below = battle.resolve_damage(DamageContext(source=first, target=hunter, raw_damage=0.1,
+                                                    attack_power=1, is_skill=True, action_name="低血技能"))
+        self.assertTrue(below.cancelled)
+        self.assertTrue(below.preserve_followup_effects)
+        hp = hunter.current_hp
+        battle.resolve_damage(DamageContext(source=first, target=hunter, raw_damage=0.1,
+                                            attack_power=1, is_skill=False, tags={"attack"},
+                                            action_name="低血普攻"))
+        self.assertLess(hunter.current_hp, hp)
+
+    def test_piercing_seal_on_shield_refreshes_and_expires_after_victim_turn(self):
+        battle, hunter, first, _ = self.fixture()
+        first.temporary_shields = 1
+        hp = first.current_hp
+        battle.basic_attack(hunter, first)
+        self.assertEqual(first.current_hp, hp)
+        self.assertEqual(first.total_shields(), 0)
+        status = first.get_status("昼行破魔封技")
+        self.assertIsNotNone(status)
+        active = next(skill for skill in first.skills if skill.timing == "active")
+        self.assertTrue(status.blocks_skill_use(battle, first, active)[0])
+        status.on_owner_turn_end(battle)
+        self.assertIsNone(first.get_status("昼行破魔封技"))
+        self.next_hunter_turn(battle, hunter)
+        first.temporary_shields = 1
+        first.dodge_charges = 1
+        battle.basic_attack(hunter, first)
+        self.assertEqual(first.total_shields(), 0)
+        self.assertEqual(first.dodge_charges, 0)
+        self.assertIsNone(first.get_status("昼行破魔封技"))
+
+    def test_lifesteal_needs_real_hp_loss_and_ai_values_quarry(self):
+        from wujiang.tactical.rooms.ai import (reviewed_attack_synergy, score_move_destination,
+                                               fast_move_shortlist, difficulty_profile)
+
+        battle, hunter, first, second = self.fixture()
+        hunter.current_hp = 0.5
+        first.temporary_shields = 1
+        battle.basic_attack(hunter, first)
+        self.assertEqual(hunter.current_hp, 0.5)
+        self.next_hunter_turn(battle, hunter)
+        battle.basic_attack(hunter, first)
+        self.assertGreater(hunter.current_hp, 0.5)
+        self.next_hunter_turn(battle, hunter)
+        profile = difficulty_profile("standard")
+        same = reviewed_attack_synergy(battle, hunter, first, 0.1)
+        switched = reviewed_attack_synergy(battle, hunter, second, 0.1)
+        self.assertGreater(same, switched)
+        near = score_move_destination(battle, hunter, Position(3, 2), "fighter", profile)
+        far = score_move_destination(battle, hunter, Position(1, 4), "fighter", profile)
+        self.assertGreater(near, far)
+        first.position = Position(7, 2)
+        cells = [Position(x, y) for x in range(8) for y in range(8)]
+        self.assertIn(Position(6, 2), fast_move_shortlist(battle, hunter, cells, "fighter"))
+
+
+class NewBatch304WillowBehaviorTests(unittest.TestCase):
+    """Exchange geometry and the bounded, payable after-destruction wall."""
+
+    def fixture(self):
+        battle = create_battle(["excel_r304", "elite_soldier"], ["bard", "dark_human"])
+        willow = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r304")
+        ally = next(unit for unit in battle.hero_units(1) if unit is not willow)
+        enemy = next(unit for unit in battle.hero_units(2) if unit.hero_code == "bard")
+        other = next(unit for unit in battle.hero_units(2) if unit is not enemy)
+        willow.position, ally.position = Position(2, 2), Position(4, 2)
+        enemy.position, other.position = Position(5, 2), Position(7, 7)
+        battle.configure_turn_order([enemy.unit_id, willow.unit_id, ally.unit_id, other.unit_id])
+        battle.start_current_turn()
+        return battle, willow, ally, enemy
+
+    def threat(self, enemy, ally):
+        return QueuedAction(action_type="attack", actor_id=enemy.unit_id, display_name="普攻",
+                            speed=1, payload={"target_unit_id": ally.unit_id},
+                            target_unit_ids=[ally.unit_id], target_cells=[ally.position],
+                            source_player_id=enemy.player_id, hostile=True)
+
+    def test_public_kit_and_exchange_preview_shows_both_landings(self):
+        from wujiang.tactical.heroes.registry import list_heroes
+        battle, willow, ally, enemy = self.fixture()
+        self.assertIn("excel_r304", {entry["code"] for entry in list_heroes()})
+        self.assertEqual({"light_wall", "exchange"}, set(willow.skill_map()))
+        self.assertIn("柳影光墙", {trait.name for trait in willow.traits})
+        preview = willow.get_skill("exchange").preview(battle, willow)
+        self.assertIn(enemy.unit_id, preview["target_unit_ids"])
+        self.assertEqual(preview["landing_by_target"][enemy.unit_id]["self"], enemy.position.to_dict())
+        self.assertEqual(preview["landing_by_target"][enemy.unit_id]["target"], willow.position.to_dict())
+
+    def test_exchange_moves_both_and_pierces_only_one_shield(self):
+        battle, willow, ally, enemy = self.fixture()
+        skill = willow.get_skill("exchange")
+        enemy.temporary_shields = 2
+        before = (willow.position, enemy.position)
+        payload = {"target_unit_id": enemy.unit_id}
+        battle.prepay_skill_resources(skill, willow, payload)
+        skill.execute(battle, willow, payload)
+        self.assertEqual((willow.position, enemy.position), (before[1], before[0]))
+        self.assertEqual(enemy.total_shields(), 1)
+        self.assertEqual(enemy.current_hp, enemy.max_health)
+        self.assertEqual(skill.uses_this_battle, 1)
+        self.assertFalse(skill.can_use(battle, willow, {"target_unit_id": ally.unit_id})[0])
+
+    def test_exchange_magic_immunity_and_dodge_block_movement(self):
+        for defense in ("magic_immunity", "dodge"):
+            battle, willow, _, enemy = self.fixture()
+            skill = willow.get_skill("exchange")
+            before = (willow.position, enemy.position)
+            if defense == "magic_immunity":
+                enemy._base_magic_immunity = True
+            else:
+                enemy.dodge_charges = 1
+            skill.execute(battle, willow, {"target_unit_id": enemy.unit_id})
+            self.assertEqual((willow.position, enemy.position), before)
+            if defense == "dodge":
+                self.assertEqual(enemy.dodge_charges, 0)
+
+    def test_multicell_exchange_uses_legal_pair(self):
+        from wujiang.tactical.heroes.excel_roster import gladiator_swap_destinations
+        battle = create_battle(["excel_r304", "elite_soldier"], ["excel_r252", "bard"])
+        willow = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r304")
+        giant = next(unit for unit in battle.hero_units(2) if unit.hero_code == "excel_r252")
+        willow.position, giant.position = Position(2, 2), Position(5, 2)
+        for unit in battle.all_units():
+            if unit not in (willow, giant):
+                unit.position = Position(8, 8) if unit.player_id == 1 else Position(9, 9)
+        pair = gladiator_swap_destinations(battle, willow, giant)
+        self.assertIsNotNone(pair)
+        willow.get_skill("exchange").execute(battle, willow, {"target_unit_id": giant.unit_id})
+        self.assertEqual((willow.position, giant.position), pair)
+        self.assertFalse(set(battle.unit_cells(willow)) & set(battle.unit_cells(giant)))
+
+    def test_destroyed_reactor_keeps_last_anchor_mana_and_two_uses(self):
+        battle, willow, ally, enemy = self.fixture()
+        willow.current_mana = 2
+        willow.current_hp = 0
+        willow.alive = False
+        battle.cleanup_dead_units()
+        self.assertNotIn(willow.unit_id, battle.units)
+        self.assertEqual(willow.last_position, Position(2, 2))
+        skill = willow.get_skill("light_wall")
+        queued = self.threat(enemy, ally)
+        first = battle.create_reaction_window(queued)
+        self.assertIsNotNone(first)
+        self.assertIn(willow.unit_id, first.options_by_unit)
+        payload = {"target_unit_ids": [ally.unit_id]}
+        for used in range(2):
+            self.assertTrue(skill.can_react_with_payload(battle, willow, queued, payload)[0])
+            skill.prepay_resources(battle, willow, payload)
+            skill.react(battle, willow, payload, queued)
+            self.assertEqual(skill.uses_this_turn, used + 1)
+            ally.temporary_shields = 0  # A separate attack window in the same enemy turn.
+        self.assertEqual(willow.current_mana, 0)
+        self.assertFalse(skill.can_react_to(battle, willow, queued)[0])
+        public = next(unit for unit in battle.to_public_dict()["destroyed_units"] if unit["id"] == willow.unit_id)
+        trait = next(item for item in public["traits"] if item["name"] == "柳影光墙")
+        self.assertEqual(trait["ghost_wall_remaining_this_enemy_turn"], 0)
+        self.assertEqual(trait["ghost_casting_anchor"], Position(2, 2).to_dict())
+        self.assertEqual(public["mana"], 0)
+        battle.turn_number += 1
+        willow.current_mana = 1
+        self.assertTrue(skill.can_react_to(battle, willow, queued)[0])
+        self.assertEqual(skill.uses_this_turn, 0)
+
+    def test_destroyed_wall_full_chain_and_range_limit(self):
+        battle, willow, ally, enemy = self.fixture()
+        willow.current_hp = 0
+        willow.alive = False
+        battle.cleanup_dead_units()
+        queued = self.threat(enemy, ally)
+        window = battle.create_reaction_window(queued)
+        self.assertIsNotNone(window)
+        battle.pending_chain = window
+        while battle.pending_chain and battle.pending_chain.current_unit_id() != willow.unit_id:
+            battle.perform_action({"type": "chain_skip"})
+        self.assertIsNotNone(battle.pending_chain)
+        before_mana = willow.current_mana
+        battle.perform_action({"type": "chain_react", "unit_id": willow.unit_id,
+                               "action_code": "light_wall", "target_unit_ids": [ally.unit_id]})
+        self.assertEqual(willow.current_mana, before_mana - 1)
+        if battle.pending_chain is not None:
+            battle.finalize_reaction_window()
+        self.assertTrue(any("连锁使用【光墙】" in line for line in battle.logs))
+        self.assertFalse(willow.alive)
+        self.assertIsNone(willow.position)
+        battle, willow, ally, enemy = self.fixture()
+        willow.current_hp = 0
+        willow.alive = False
+        battle.cleanup_dead_units()
+        ally.position = Position(8, 8)
+        self.assertFalse(willow.get_skill("light_wall").can_react_to(battle, willow, self.threat(enemy, ally))[0])
+
+    def test_ai_uses_only_effective_wall_and_rejects_wasteful_exchange(self):
+        from wujiang.tactical.rooms.ai import difficulty_profile, score_reaction_payload, score_skill_payload
+        battle, willow, ally, enemy = self.fixture()
+        enemy.base_stats.attack = 5
+        ally.current_hp = min(ally.current_hp, 1)
+        profile = difficulty_profile("standard")
+        queued = self.threat(enemy, ally)
+        option = {"action_code": "light_wall"}
+        score = score_reaction_payload(battle, willow, queued, option,
+                                       {"target_unit_ids": [ally.unit_id]}, profile)
+        self.assertGreater(score, -1000)
+        battle.end_turn()
+        enemy._base_magic_immunity = True
+        action = {"code": "exchange", "target_mode": "unit"}
+        waste = score_skill_payload(battle, willow, action,
+                                    {"type": "skill", "unit_id": willow.unit_id,
+                                     "skill_code": "exchange", "target_unit_id": enemy.unit_id},
+                                    profile, instant_only=False)
+        self.assertLess(waste, profile.action_threshold)

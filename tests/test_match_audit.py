@@ -28,6 +28,8 @@ from wujiang.tools.batch_match_audit import build_match_plan, run_batch_audit  #
 from wujiang.tools.per_hero_ai_debug import (  # noqa: E402
     build_per_hero_match_plan,
     completed_audit_manifest,
+    read_match_progress,
+    run_match_audit_guarded,
     run_per_hero_ai_debug,
 )
 from wujiang.tools.all_hero_deep_audit import (  # noqa: E402
@@ -64,6 +66,42 @@ def normalize_unit_ids(value):
 
 
 class MatchAuditToolTests(unittest.TestCase):
+    def test_turn_audit_progress_identifies_actor_and_action(self) -> None:
+        battle = create_battle("bard", "n")
+        actor = battle.current_turn_unit()
+        self.assertIsNotNone(actor)
+        observed = []
+
+        def visible_diagnostic(_, unit, action, profile, *, instant_only):
+            return {"kind": action["kind"], "code": action["code"], "_candidates": []}
+
+        with mock.patch("wujiang.tools.match_audit.action_diagnostic", side_effect=visible_diagnostic):
+            build_turn_decision(
+                battle, actor, "standard", FindingRecorder(), step=0,
+                progress_callback=lambda stage, unit, action: observed.append(
+                    (stage, unit.unit_id, action.get("code") if action else None)
+                ),
+            )
+
+        self.assertEqual(observed[0], ("turn_snapshot", actor.unit_id, None))
+        self.assertTrue(any(stage == "turn_action_diagnostic" for stage, _, _ in observed))
+
+    def test_stalled_match_is_terminated_with_progress_left_for_diagnosis(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            match_dir = Path(temp_dir)
+            worker = mock.Mock()
+            worker.poll.return_value = None
+            worker.wait.return_value = 0
+            with mock.patch("wujiang.tools.per_hero_ai_debug.subprocess.Popen", return_value=worker), \
+                    mock.patch("wujiang.tools.per_hero_ai_debug.MATCH_PROGRESS_STALL_SECONDS", 0):
+                with self.assertRaisesRegex(TimeoutError, "stage=None"):
+                    run_match_audit_guarded(
+                        match_dir, team1=["bard", "ellie"], team2=["n", "li"],
+                        seed=1, difficulty="standard", max_steps=10,
+                    )
+            worker.terminate.assert_called_once()
+            self.assertEqual(read_match_progress(match_dir), {})
+
     def test_turn_audit_uses_player_visible_clone_identity_and_restores_true_unit(self) -> None:
         from wujiang.tactical.engine.core import Position
         from wujiang.tactical.heroes.next_five import StandardCloneSummon

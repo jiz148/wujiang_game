@@ -1356,6 +1356,7 @@ class BattleSmokeTests(unittest.TestCase):
 
         self.assertEqual(bard.shields, 0)
         self.assertIsNotNone(bard.get_status("技能封印：回血"))
+        self.assertIsNone(bard.get_status("技能封印：守*2"))
         battle.perform_action({"type": "end_turn"})
         with self.assertRaisesRegex(ActionError, "封印"):
             battle.perform_action({"type": "skill", "unit_id": bard.unit_id, "skill_code": "heal", "target_unit_id": bard.unit_id})

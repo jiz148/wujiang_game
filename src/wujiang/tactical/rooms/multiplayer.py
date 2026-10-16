@@ -685,7 +685,7 @@ def battle_state_for_viewer(
             {
                 "unit_id": unit.unit_id,
                 "name": unit.name,
-                "actions": battle.action_snapshot_for(unit),
+                "actions": battle.action_snapshot_for(unit) if unit.alive else {"actions": []},
                 "reactions": battle.reaction_snapshot_for(unit),
             }
             for unit in _active_units_for_viewer(battle)

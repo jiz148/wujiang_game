@@ -222,6 +222,9 @@ class BattleComponent(ABC):
     def grants_block_counter(self, battle: "Battle", unit: "Unit") -> bool:
         return False
 
+    def grants_counter(self, battle: "Battle", unit: "Unit") -> bool:
+        return False
+
     def allied_basic_heal_amount(self, battle: "Battle", actor: "Unit", target: "Unit") -> float:
         return 0.0
 
@@ -333,6 +336,10 @@ class BattleComponent(ABC):
         """React after ordinary defenses, immediately before HP loss."""
         return None
 
+    def on_before_hp_loss(self, battle: "Battle", ctx: "DamageContext") -> None:
+        """Adjust a positive HP-loss opportunity after shields, immunity and evasion."""
+        return None
+
     def on_after_damage(self, battle: "Battle", ctx: "DamageContext") -> None:
         return None
 
@@ -441,6 +448,10 @@ class BattleComponent(ABC):
 
     def before_basic_attack_resolution(self, battle: "Battle", actor: "Unit", payload: dict[str, Any]) -> bool:
         return True
+
+    def resolve_empty_basic_attack(self, battle: "Battle", actor: "Unit", payload: dict[str, Any]) -> bool:
+        """Replace an explicitly empty-cell attack with a component's non-damage effect."""
+        return False
 
     def forced_normal_move_paths(self, battle: "Battle", actor: "Unit") -> Optional[list[list["Position"]]]:
         return None
@@ -805,7 +816,7 @@ class Skill(BattleComponent, ABC):
         self.sync_turn_scope(battle)
         if not self.is_reaction:
             return False, "不是连锁技能。"
-        if actor.banished or not actor.alive:
+        if actor.banished or (not actor.alive and not self.can_react_after_destroyed(battle, actor, queued_action)):
             return False, "单位不在战场上。"
         if actor.cannot_use_skills:
             return False, "这个单位当前不能使用技能。"
@@ -833,6 +844,11 @@ class Skill(BattleComponent, ABC):
         if block_reason:
             return False, block_reason
         return True, ""
+
+    def can_react_after_destroyed(
+        self, battle: "Battle", actor: "Unit", queued_action: "QueuedAction",
+    ) -> bool:
+        return False
 
     def can_react_with_payload(
         self,
@@ -1050,6 +1066,7 @@ class DamageContext:
     area_cell_hits: int = 1
     raw_damage: Optional[float] = None
     shield_consumed: bool = False
+    protection_broken: bool = False
     cancelled: bool = False
     preserve_followup_effects: bool = False
     reason: str = ""
@@ -1333,6 +1350,7 @@ class Unit(ABC):
         self.allow_enemy_destination_overlap = False
         self.has_flying = False
         self.has_block_counter = False
+        self.protection_shields = 0
         self.is_summon = is_summon
         self.is_clone = is_clone
         self.summoner_id: Optional[str] = None
@@ -1374,7 +1392,7 @@ class Unit(ABC):
         for source in battle.all_units():
             if not source.alive or source.banished or source.position is None:
                 continue
-            for trait in source.traits:
+            for trait in (() if source.innate_traits_suppressed() else source.traits):
                 projected = trait.projected_trait_for(battle, self)
                 if projected is not None and projected.name not in seen:
                     seen.add(projected.name)
@@ -1387,7 +1405,8 @@ class Unit(ABC):
             return
         active_skills_only = battle is not None and "real_men" in getattr(battle, "special_mode_codes", ())
         yield from (skill for skill in self.skills if not active_skills_only or skill.timing == "active")
-        yield from self.traits
+        if not self.innate_traits_suppressed():
+            yield from self.traits
         seen_skills = {id(skill) for skill in self.skills}
         for status in self.statuses:
             yield status
@@ -1403,6 +1422,9 @@ class Unit(ABC):
             if id(skill) not in seen_skills and (not active_skills_only or skill.timing == "active"):
                 yield skill
         yield from self.projected_traits()
+
+    def innate_traits_suppressed(self) -> bool:
+        return any(getattr(status, "suppresses_innate_traits", False) for status in getattr(self, "statuses", ()))
 
     def action_skills(self) -> list[Skill]:
         skills = list(self.skills)
@@ -1608,12 +1630,15 @@ class Unit(ABC):
             return True
         if self.shields > 0:
             self.shields -= 1
+            if self.protection_shields > 0:
+                self.protection_shields -= 1
             return True
         return False
 
     def clear_end_of_turn_shields(self) -> None:
         self.shields = 0
         self.temporary_shields = 0
+        self.protection_shields = 0
 
     def max_mana(self) -> float:
         value = max(float(self.stat("mana")), 0.0)
@@ -1705,6 +1730,8 @@ class Unit(ABC):
     def cannot_move(self) -> bool:
         if getattr(self, "_cannot_move", False):
             return True
+        if any(getattr(status, "prevents_movement", False) for status in self.statuses):
+            return True
         battle_ref = getattr(self, "_battle_ref", None)
         battle = battle_ref() if battle_ref is not None else None
         return bool(battle is not None and any(
@@ -1721,7 +1748,7 @@ class Unit(ABC):
         for component in self.iter_components():
             before = value
             value = component.modify_stat(stat_name, value)
-            for trait in self.traits:
+            for trait in (() if self.innate_traits_suppressed() else self.traits):
                 value = trait.modify_received_stat_change(component, stat_name, before, value)
         battle_ref = getattr(self, "_battle_ref", None)
         battle = battle_ref() if battle_ref is not None else None
@@ -1870,6 +1897,7 @@ class Unit(ABC):
             "performed_active_skill": self.performed_active_skill,
             "moved_this_turn": self.moved_this_turn,
             "shields": self.shields,
+            "protection_shields": self.protection_shields,
             "temporary_shields": self.temporary_shields,
             "total_shields": self.total_shields(),
             "dodge_charges": self.dodge_charges,
@@ -3114,6 +3142,12 @@ class Battle:
             return False
         return all(component.allows_block_counter(self, unit) for component in components)
 
+    def unit_can_use_counter(self, unit: Unit) -> bool:
+        components = list(unit.iter_components())
+        return (self.unit_can_use_block_counter(unit)
+                or (any(component.grants_counter(self, unit) for component in components)
+                    and all(component.allows_block_counter(self, unit) for component in components)))
+
     def player_units(self, player_id: int) -> list[Unit]:
         return [
             unit
@@ -3652,6 +3686,17 @@ class Battle:
 
     def get_unit(self, unit_id: str) -> Unit:
         if unit_id not in self.units:
+            ghost_reaction = (
+                (self.pending_chain is not None and unit_id in self.pending_chain.options_by_unit)
+                or (self.resolving_action is not None
+                    and self.resolving_action.actor_id == unit_id
+                    and self.resolving_action.action_type == "reaction_skill"
+                    and self.resolving_action.payload.get("after_death_effect"))
+            )
+            if ghost_reaction:
+                pending = next((unit for unit in self.destroyed_units if unit.unit_id == unit_id), None)
+                if pending is not None:
+                    return pending
             if unit_id in self.hell_rebirth_unit_ids or unit_id in self.hell_dragon_return_cells:
                 pending = next((unit for unit in self.destroyed_units if unit.unit_id == unit_id), None)
                 if pending is not None:
@@ -4006,7 +4051,8 @@ class Battle:
             raise ActionError("目标位置超出战场边界。")
         if not self.can_place_unit(unit, destination, ignore=unit, mover=unit, ignore_units=False):
             raise ActionError("目标位置已被占用。")
-        if unit.cannot_move and not forced:
+        if unit.cannot_move and (not forced or any(
+                getattr(status, "prevents_forced_movement", False) for status in unit.statuses)):
             raise ActionError(f"{unit.name} 当前无法移动。")
         if unit.cannot_normal_move and not via_skill and not forced:
             raise ActionError(f"{unit.name} 当前不能进行常规移动。")
@@ -4306,8 +4352,10 @@ class Battle:
                 return ctx
             if ctx.target.total_shields() > 0:
                 if ctx.ignore_shield:
+                    protection_before = ctx.target.protection_shields
                     ctx.target.consume_one_shield()
                     ctx.shield_consumed = True
+                    ctx.protection_broken = protection_before > 0 and ctx.target.protection_shields == 0
                     self.record_shield_break_summary(ctx.source, ctx.target, ctx.action_name)
                     self.emit_defense_visual_event(
                         source=ctx.source,
@@ -4321,8 +4369,10 @@ class Battle:
                         target=ctx.target,
                     )
                 elif ctx.half_ignore_shield:
+                    protection_before = ctx.target.protection_shields
                     ctx.target.consume_one_shield()
                     ctx.shield_consumed = True
+                    ctx.protection_broken = protection_before > 0 and ctx.target.protection_shields == 0
                     self.record_shield_break_summary(ctx.source, ctx.target, ctx.action_name)
                     if ctx.raw_damage is None:
                         ctx.attack_power = max(0.0, ctx.attack_power - 1)
@@ -4403,6 +4453,9 @@ class Battle:
             if ctx.raw_damage is not None:
                 damage_amount = ctx.raw_damage
             ctx.raw_damage = ctx.target.damage_fraction_after_limits(damage_amount)
+            if ctx.raw_damage > 0:
+                for component in list(ctx.target.iter_components()):
+                    component.on_before_hp_loss(self, ctx)
             if ctx.raw_damage > 0 and ctx.complete_block_chance > 0:
                 if getattr(self, "_ai_probe_active", False):
                     # Forecast an independent random guard by expectation; do not
@@ -4537,6 +4590,7 @@ class Battle:
         ok, reason = self.attack_target_allowed(actor, target, ignore_stealth=ignore_stealth, payload=resolved_payload)
         if not ok:
             raise ActionError(reason)
+        resolved_payload.setdefault("target_unit_id", target.unit_id)
         actor.attacks_used += attack_cost
         actor.actions_taken_this_turn.append("attack")
         if not resolved_payload.get("queued_resolution"):
@@ -4610,6 +4664,12 @@ class Battle:
         attack_payload["attack_cells"] = [cell.to_dict() for cell in area_cells]
         actor.attacks_used += attack_cost
         actor.actions_taken_this_turn.append("attack")
+        for component in list(actor.iter_components()):
+            if component.resolve_empty_basic_attack(self, actor, attack_payload):
+                actor.consume_attack_attempt_buffs(self)
+                actor.notify_basic_attack_finished(self, attack_payload, [], missed=True)
+                self.check_win_condition()
+                return
         affects_allies = all(
             component.basic_attack_area_affects_allies(self, actor, attack_payload)
             for component in actor.iter_components()
@@ -5240,6 +5300,8 @@ class Battle:
         queued_payload.pop("allied_heal_attack", None)
         queued_payload.pop("wuchang_mist_checked", None)
         queued_payload.pop("action_failed_by_wuchang_mist", None)
+        queued_payload.pop("floating_crane_checked", None)
+        queued_payload.pop("action_failed_by_floating_crane", None)
         queued_payload.pop("separate_attack_segments", None)
         queued_payload.pop("separate_attack_index", None)
         queued_payload.pop("kings_insight_checked", None)
@@ -5677,6 +5739,14 @@ class Battle:
         if self.shield_auto_blocks_chain(unit, queued_action):
             return []
         source = self.units.get(queued_action.actor_id)
+        if (unit.name == "野人" and source is not None and source.hero_code == "excel_r260"
+                and queued_action.action_type in {"attack", "skill", "skill_effect"}):
+            return []
+        bypass_free_block_counter = bool(
+            queued_action.action_type == "skill" and source is not None
+            and (skill := source.skill_map().get(str(queued_action.payload.get("skill_code") or ""))) is not None
+            and getattr(skill, "bypasses_block_counter", False)
+        )
         affected_by_source = set(queued_action.target_unit_ids)
         affected_by_source.update(target.unit_id for target in self.effect_units_at_cells(queued_action.target_cells))
         bystander_skill_locked = bool(
@@ -5704,24 +5774,32 @@ class Battle:
                 )
             )
         reaction_target = self.reaction_proxy_target(unit, queued_action)
-        if self.unit_can_use_block_counter(unit) and queued_action.speed < 2 and reaction_target is not None:
-            options.append(
-                ReactionOption(
-                    unit_id=unit.unit_id,
-                    action_code="block",
-                    action_name="格挡",
-                    action_type="reaction_action",
-                    timing="reaction",
-                    chain_speed=2,
-                    description="下一次伤害结算时守 +1，只持续到这次连锁结算结束。",
-                    preview={"cells": [cell.to_dict() for cell in self.unit_cells(reaction_target)], "target_unit_ids": [], "requires_target": False},
+        if (not bypass_free_block_counter and self.unit_can_use_counter(unit)
+                and queued_action.speed < 2 and reaction_target is not None):
+            if self.unit_can_use_block_counter(unit):
+                options.append(
+                    ReactionOption(
+                        unit_id=unit.unit_id,
+                        action_code="block",
+                        action_name="格挡",
+                        action_type="reaction_action",
+                        timing="reaction",
+                        chain_speed=2,
+                        description="下一次伤害结算时守 +1，只持续到这次连锁结算结束。",
+                        preview={"cells": [cell.to_dict() for cell in self.unit_cells(reaction_target)], "target_unit_ids": [], "requires_target": False},
+                    )
                 )
-            )
             attacker = self.units.get(queued_action.actor_id)
             if (
                 attacker is not None
                 and self.attack_target_allowed(unit, attacker)[0]
             ):
+                counter_preview = {"cells": [cell.to_dict() for cell in self.unit_cells(attacker)],
+                                   "target_unit_ids": [attacker.unit_id], "requires_target": False}
+                if getattr(unit, "hero_code", "") == "excel_r256" and unit.position is not None:
+                    counter_preview["secondary_cells"] = [cell.to_dict() for cell in self.neighbors(unit.position)]
+                    counter_preview["secondary_target_unit_ids"] = [target.unit_id for target in
+                        self.effect_units_at_cells(self.neighbors(unit.position), ignore=unit)]
                 options.append(
                     ReactionOption(
                         unit_id=unit.unit_id,
@@ -5730,8 +5808,9 @@ class Battle:
                         action_type="reaction_action",
                         timing="reaction",
                         chain_speed=2,
-                        description="对你所连锁的攻击或技能使用者进行一次普攻式反击，需在自身攻击范围内。",
-                        preview={"cells": [cell.to_dict() for cell in self.unit_cells(attacker)], "target_unit_ids": [attacker.unit_id], "requires_target": False},
+                        description="先反击来源，再攻击周围八格双方单位。" if getattr(unit, "hero_code", "") == "excel_r256"
+                                    else "对你所连锁的攻击或技能使用者进行一次普攻式反击，需在自身攻击范围内。",
+                        preview=counter_preview,
                     )
                 )
         return options
@@ -5802,21 +5881,30 @@ class Battle:
         reactive_player_id = affected_units[0].player_id
         candidate_ids: list[str] = []
         options_by_unit: dict[str, list[ReactionOption]] = {}
-        for unit in [*affected_units, *self.player_units(reactive_player_id)]:
+        candidates_by_id: dict[str, Unit] = {}
+        dead_reactors = [
+            unit for unit in self.destroyed_units
+            if unit.player_id == reactive_player_id and unit.last_position is not None
+            and not unit.alive and not unit.banished
+            and any(skill.can_react_after_destroyed(self, unit, queued_action) for skill in unit.skills)
+        ]
+        for unit in [*affected_units, *self.player_units(reactive_player_id), *dead_reactors]:
             if unit.unit_id in candidate_ids:
                 continue
-            if not unit.alive or unit.position is None or unit.banished:
+            if (((not unit.alive or unit.position is None) and unit not in dead_reactors)
+                    or unit.banished):
                 continue
             options = self.available_reaction_options(unit, queued_action)
             if options:
                 candidate_ids.append(unit.unit_id)
+                candidates_by_id[unit.unit_id] = unit
                 options_by_unit[unit.unit_id] = options
         if not candidate_ids:
             return None
         candidate_ids.sort(
             key=lambda unit_id: (
-                -float(self.get_unit(unit_id).stat("speed")),
-                -int(self.get_unit(unit_id).level),
+                -float(candidates_by_id[unit_id].stat("speed")),
+                -int(candidates_by_id[unit_id].level),
                 random.random(),
             )
         )
@@ -6293,12 +6381,13 @@ class Battle:
                 self.resolve_from_declared_origin(actor, payload, lambda: self.basic_attack_with_payload(actor, target, payload))
                 return
             if queued_action.action_type == "skill":
-                if payload.get("action_failed_by_wuchang_mist"):
+                if payload.get("action_failed_by_wuchang_mist") or payload.get("action_failed_by_floating_crane"):
                     skill = actor.get_skill(payload["skill_code"])
                     skill.on_target_missed(self, actor, payload)
                     skill.finalize_use(self, actor)
                     actor.actions_taken_this_turn.append(f"skill:{skill.code}")
-                    self.log(f"{actor.name} 的【{skill.name}】因【无常之雾】失败。")
+                    weather_name = "无常之雾" if payload.get("action_failed_by_wuchang_mist") else "浮鹤城"
+                    self.log(f"{actor.name} 的【{skill.name}】因【{weather_name}】失败。")
                     return
                 resolved_payload = dict(payload)
                 resolved_target = self.resolve_declared_target_unit(
@@ -6431,7 +6520,8 @@ class Battle:
                     if target is not None:
                         for component in list(target.iter_components()):
                             component.on_target_action_declared(self, actor, queued_action.action_type, queued_action.payload)
-            if queued_action.payload.get("action_failed_by_wuchang_mist") or (queued_action.action_type == "skill" and reaction_window_timing == "after"):
+            if (queued_action.payload.get("action_failed_by_wuchang_mist") or queued_action.payload.get("action_failed_by_floating_crane")
+                    or (queued_action.action_type == "skill" and reaction_window_timing == "after")):
                 self.resolve_queued_action(queued_action)
                 self.advance_followup_actions()
                 return
@@ -6459,7 +6549,11 @@ class Battle:
                 summon.alive = False
                 self.log(f"{summon.name} \u7684\u53ec\u5524\u8005\u5df2\u88ab\u51fb\u7834\uff0c\u56e0\u6b64\u4e00\u5e76\u6d88\u6563\u3002")
         while True:
-            dead_units = [unit for unit in self.all_units() if not unit.alive]
+            # A death callback may deal damage and enter cleanup again. Its
+            # owner is still registered until remove_unit returns; the nested
+            # pass must leave that corpse to the outer pass.
+            dead_units = [unit for unit in self.all_units()
+                          if not unit.alive and not getattr(unit, "_removal_in_progress", False)]
             if not dead_units:
                 break
             for unit in dead_units:
@@ -6849,7 +6943,8 @@ class Battle:
                     )
                     if not ok:
                         raise ActionError(reason)
-                    for field in ("kings_insight_checked", "wuchang_mist_checked", "action_failed_by_wuchang_mist"):
+                    for field in ("kings_insight_checked", "wuchang_mist_checked", "action_failed_by_wuchang_mist",
+                                  "floating_crane_checked", "action_failed_by_floating_crane"):
                         reaction_payload.pop(field, None)
                     reaction_payload.update(skill.queued_reaction_payload_metadata(self, reactor, reaction_payload))
                     self.prepay_skill_resources(skill, reactor, reaction_payload)
@@ -6872,7 +6967,12 @@ class Battle:
                         },
                     )
                     reaction_payload["declared_source_attack"] = reactor.stat("attack")
-                    if reactor.unit_id not in self.units or not reactor.alive or reactor.banished:
+                    after_death_reaction = (
+                        reactor in self.destroyed_units and not reactor.alive
+                        and skill.can_react_after_destroyed(self, reactor, self.pending_chain.queued_action)
+                    )
+                    if (((reactor.unit_id not in self.units or not reactor.alive) and not after_death_reaction)
+                            or reactor.banished):
                         skill.finalize_use(self, reactor)
                         self.pending_chain.decision_log.append(f"{reactor.name} 的连锁因自身离场而失效。")
                         self.log(f"{reactor.name} 的【{chosen.action_name}】未能结算，因为使用者已不在战场。")
@@ -6893,6 +6993,7 @@ class Battle:
                         "action_name": chosen.action_name,
                         "description": chosen.description,
                         **reaction_payload,
+                        **({"after_death_effect": True} if chosen.action_type == "skill" and after_death_reaction else {}),
                         "source_action_type": self.pending_chain.queued_action.action_type,
                         "source_actor_id": self.pending_chain.queued_action.actor_id,
                         "source_display_name": self.pending_chain.queued_action.display_name,

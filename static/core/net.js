@@ -155,7 +155,8 @@ export function boardUnits() {
 export function unitById(unitId) {
   return allUnits().find((unit) => unit.id === unitId)
     || ((currentRespawnPrompt()?.unit_id === unitId
-        || (state.battle?.hell_dragon_returns || []).some((entry) => entry.unit_id === unitId))
+        || (state.battle?.hell_dragon_returns || []).some((entry) => entry.unit_id === unitId)
+        || state.battle?.pending_chain?.current_unit_id === unitId)
       ? (state.battle?.destroyed_units || []).find((unit) => unit.id === unitId)
       : null)
     || null;

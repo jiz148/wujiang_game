@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
+import subprocess
+import sys
 import time
 import traceback
 from collections import Counter
@@ -12,12 +15,13 @@ from typing import Any, Iterable, Optional
 
 from wujiang.tactical.heroes.registry import list_heroes
 from wujiang.tools.batch_match_audit import HIGH_SIGNAL_CATEGORIES, read_jsonl
-from wujiang.tools.match_audit import DEFAULT_MAX_STEPS, parse_roster, run_match_audit, sanitize_label, write_json, write_jsonl
+from wujiang.tools.match_audit import DEFAULT_MAX_STEPS, parse_roster, sanitize_label, write_json, write_jsonl
 from wujiang.tactical.rooms import ai as ai_policy
 
 
 DEFAULT_PER_HERO_DIR = Path("reports") / "per-hero-ai-debug"
 DEFAULT_MATCHES_PER_HERO = 10
+MATCH_PROGRESS_STALL_SECONDS = 60
 
 
 @dataclass(slots=True)
@@ -165,21 +169,16 @@ def run_per_hero_ai_debug(
                 report_file = match_dir / "battle_report.md"
                 findings_markdown_file = match_dir / "findings.md"
             else:
-                result = run_match_audit(
-                    match["team1"],
-                    match["team2"],
-                    seed=int(match["seed"]),
-                    difficulty=difficulty,
-                    max_steps=max_steps,
-                    output_dir=match_dir,
-                    label=match_label,
+                manifest = run_match_audit_guarded(
+                    match_dir, team1=match["team1"], team2=match["team2"],
+                    seed=int(match["seed"]), difficulty=difficulty, max_steps=max_steps,
                 )
-                findings = read_jsonl(result.findings_jsonl_path)
-                winner = result.winner
-                steps = result.step_count
-                finding_count = result.finding_count
-                report_file = result.report_path
-                findings_markdown_file = result.findings_markdown_path
+                findings = read_jsonl(findings_file)
+                winner = manifest.get("winner")
+                steps = int(manifest.get("steps_executed") or 0)
+                finding_count = len(findings)
+                report_file = match_dir / "battle_report.md"
+                findings_markdown_file = match_dir / "findings.md"
             match_summary = {
                 **match,
                 "output_dir": str(match_dir),
@@ -193,6 +192,8 @@ def run_per_hero_ai_debug(
             }
         except Exception as exc:
             failure_traceback = traceback.format_exc()
+            live_progress = read_match_progress(match_dir)
+            progress_actor = live_progress.get("actor") if isinstance(live_progress.get("actor"), dict) else None
             findings = [
                 {
                     "id": "PER-HERO",
@@ -200,10 +201,16 @@ def run_per_hero_ai_debug(
                     "category": "match_error",
                     "source": "per_hero_ai_debug",
                     "message": f"Match failed before writing a complete audit: {type(exc).__name__}: {exc}",
-                    "step": None,
-                    "actor": None,
+                    "step": int(live_progress.get("step") or 0),
+                    "actor": progress_actor,
                     "payload": None,
-                    "evidence": {"match": match, "traceback": failure_traceback},
+                    "evidence": {
+                        "match": match, "traceback": failure_traceback,
+                        "live_progress": live_progress,
+                        "partial_trace": str(match_dir / "trace.jsonl"),
+                        "slow_step_stack": str(match_dir / "slow_step_stack.log"),
+                        "worker_stderr": str(match_dir / "worker_stderr.log"),
+                    },
                 }
             ]
             match_summary = {
@@ -212,7 +219,7 @@ def run_per_hero_ai_debug(
                 "battle_report": None,
                 "findings_markdown": None,
                 "winner": None,
-                "steps": 0,
+                "steps": int(live_progress.get("step") or 0),
                 "finding_count": len(findings),
                 "high_signal_count": count_high_signal(findings),
                 "error": f"{type(exc).__name__}: {exc}",
@@ -229,6 +236,12 @@ def run_per_hero_ai_debug(
                 f"findings={match_summary.get('finding_count')}; high-signal={match_summary.get('high_signal_count')}",
                 flush=True,
             )
+            if match_summary.get("error"):
+                print(
+                    f"    {match_summary['error']}; progress={match_dir / 'match_progress.json'}; "
+                    f"stack={match_dir / 'slow_step_stack.log'}; partial-trace={match_dir / 'trace.jsonl'}",
+                    flush=True,
+                )
 
         for finding in findings:
             actor = finding.get("actor") if isinstance(finding.get("actor"), dict) else {}
@@ -293,6 +306,87 @@ def run_per_hero_ai_debug(
         finding_count=len(all_findings),
         high_signal_count=count_high_signal(all_findings),
     )
+
+
+def read_match_progress(match_dir: Path) -> dict[str, Any]:
+    try:
+        value = json.loads((match_dir / "match_progress.json").read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def run_match_audit_guarded(
+    match_dir: Path,
+    *,
+    team1: Iterable[str],
+    team2: Iterable[str],
+    seed: int,
+    difficulty: str,
+    max_steps: int,
+) -> dict[str, Any]:
+    """Keep one slow AI decision from blocking all remaining match reports."""
+    team1 = list(team1)
+    team2 = list(team2)
+    match_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("manifest.json", "match_progress.json", "slow_step_stack.log"):
+        (match_dir / name).unlink(missing_ok=True)
+    project_root = Path(__file__).resolve().parents[3]
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(project_root / "src"), environment.get("PYTHONPATH", "")) if part
+    )
+    command = [
+        sys.executable, "-u", "-m", "wujiang.tools.match_audit",
+        "--team1", ",".join(team1), "--team2", ",".join(team2),
+        "--seed", str(seed), "--difficulty", difficulty,
+        "--max-steps", str(max_steps), "--out", str(match_dir.resolve()),
+    ]
+    progress_path = match_dir / "match_progress.json"
+    with (match_dir / "worker_stdout.log").open("w", encoding="utf-8") as stdout, \
+            (match_dir / "worker_stderr.log").open("w", encoding="utf-8") as stderr:
+        process = subprocess.Popen(command, cwd=project_root, env=environment, stdout=stdout, stderr=stderr)
+        last_progress_stamp: int | None = None
+        last_progress_at = time.monotonic()
+        try:
+            while process.poll() is None:
+                try:
+                    stamp = progress_path.stat().st_mtime_ns
+                except OSError:
+                    stamp = None
+                if stamp is not None and stamp != last_progress_stamp:
+                    last_progress_stamp = stamp
+                    last_progress_at = time.monotonic()
+                if time.monotonic() - last_progress_at >= MATCH_PROGRESS_STALL_SECONDS:
+                    live = read_match_progress(match_dir)
+                    raise TimeoutError(
+                        f"No match progress for {MATCH_PROGRESS_STALL_SECONDS}s; "
+                        f"step={live.get('step')}, stage={live.get('stage')}, "
+                        f"actor={live.get('actor')}, action={live.get('skill_code') or live.get('action_type')}; "
+                        f"stack={match_dir / 'slow_step_stack.log'}"
+                    )
+                time.sleep(0.5)
+            if process.returncode != 0:
+                raise RuntimeError(
+                    f"Match worker exited with code {process.returncode}; "
+                    f"details={match_dir / 'worker_stderr.log'}"
+                )
+        except BaseException:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            raise
+    manifest = completed_audit_manifest(
+        match_dir, team1=team1, team2=team2, seed=seed,
+        difficulty=difficulty, max_steps=max_steps,
+    )
+    if manifest is None:
+        raise RuntimeError(f"Match worker did not write a complete audit; details={match_dir}")
+    return manifest
 
 
 def completed_audit_manifest(
