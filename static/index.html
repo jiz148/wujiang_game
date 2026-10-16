@@ -96,7 +96,7 @@
               <div class="settings-row">
                 <div class="settings-row__text">
                   <span class="settings-row__label">AI 决策</span>
-                  <p class="settings-row__hint">完整沿用原来的评分。简化按固定顺序挑一步。倾向先决定想做什么，再收成一步合法行动。模型按当前这个武将，读取仓库外单独训练的网络，在已经合法的行动里排序。步兵、弓兵、守备兵不走网络，仍用原来的军队算法。这个武将还没有自己的权重时，用共用的那一份。</p>
+                  <p class="settings-row__hint">完整沿用原来的评分。简化按固定顺序挑一步。倾向先决定想做什么，再收成一步合法行动。模型按当前这个武将读取已经训好的网络，在合法行动里排序。没有这个武将的网络时，用回完整 AI。步兵、弓兵、守备兵仍走原来的军队算法。</p>
                 </div>
                 <div id="settings-ai" class="settings-seg" role="group" aria-label="AI 决策"></div>
               </div>

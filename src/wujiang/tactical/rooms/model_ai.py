@@ -14,16 +14,13 @@ from wujiang.tactical.rooms.imitation.dataset import LABELS, situation_vector
 from wujiang.tactical.rooms.imitation.decisions import action_verb
 from wujiang.tactical.rooms.imitation.ranker import LegalRanker
 from wujiang.tactical.rooms.imitation.hero_models import hero_weight_path, uses_soldier_logic
-from wujiang.tactical.rooms.imitation.service import lab_ranker_path, lab_weights_path, load_picker
+from wujiang.tactical.rooms.imitation.service import lab_weights_path, load_picker
 from wujiang.tactical.rooms.imitation.visible import merge_candidates, visible_situation
 from wujiang.tactical.rooms.tendency.decide import (
     _attack,
     _first_skill,
     _move,
     _skill_payload,
-    choose_chain_reaction,
-    choose_instant_action,
-    choose_respawn_action,
 )
 
 _RANKER: tuple[str, float, LegalRanker] | None = None
@@ -31,11 +28,18 @@ _RANKER: tuple[str, float, LegalRanker] | None = None
 
 def _load_ranker(actor: Unit) -> Optional[LegalRanker]:
     global _RANKER
-    identity = str(getattr(actor, "hero_code", "") or "") or str(getattr(actor, "name", "") or "")
-    path = hero_weight_path(identity)
-    if not path.is_file():
-        path = lab_ranker_path()
-    if not path.is_file():
+    path = None
+    seen: set[str] = set()
+    for raw in (getattr(actor, "hero_code", ""), getattr(actor, "name", "")):
+        identity = str(raw or "").strip()
+        if not identity or identity in seen or uses_soldier_logic(identity):
+            continue
+        seen.add(identity)
+        candidate = hero_weight_path(identity)
+        if candidate.is_file():
+            path = candidate
+            break
+    if path is None:
         return None
     try:
         modified = path.stat().st_mtime
@@ -80,17 +84,30 @@ def choose_turn_bundle_action(
     if _is_plain_soldier(actor):
         from wujiang.tactical.rooms import ai as detailed
         return detailed.choose_turn_bundle_action(battle, units, difficulty)
-    del difficulty
     snapshot = battle.action_snapshot_for(actor)
     payload = _payload_from_ranker(battle, actor, snapshot)
     if payload is None:
-        kind = _predicted_kind(battle, actor)
-        payload = _payload_for_kind(battle, actor, snapshot, kind)
-    if payload is None:
-        payload = {"type": "end_turn", "unit_id": actor.unit_id}
+        from wujiang.tactical.rooms import ai as detailed
+        return detailed.choose_turn_bundle_action(battle, units, difficulty)
     if payload.get("type") == "end_turn" and any(unit.unit_id != actor.unit_id for unit in ready):
         payload = {"type": "pass_unit", "unit_id": actor.unit_id}
     return payload, actor
+
+
+
+def choose_instant_action(battle: Battle, units: Iterable[Unit], difficulty: str) -> Optional[dict[str, Any]]:
+    from wujiang.tactical.rooms import ai as detailed
+    return detailed.choose_instant_action(battle, units, difficulty)
+
+
+def choose_chain_reaction(battle: Battle, reactor: Unit, options: list[dict[str, Any]], difficulty: str):
+    from wujiang.tactical.rooms import ai as detailed
+    return detailed.choose_chain_reaction(battle, reactor, options, difficulty)
+
+
+def choose_respawn_action(battle: Battle, unit: Unit, options: list, difficulty: str):
+    from wujiang.tactical.rooms import ai as detailed
+    return detailed.choose_respawn_action(battle, unit, options, difficulty)
 
 
 def choose_damage_choice_action(battle: Battle) -> dict[str, Any]:

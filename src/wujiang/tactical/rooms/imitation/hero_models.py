@@ -42,8 +42,17 @@ def hero_file_stem(identity: str) -> str:
     return cleaned or "unknown"
 
 
+def shipped_hero_dir() -> Path:
+    from wujiang.platform.http.runtime import PROJECT_ROOT
+    return PROJECT_ROOT / "data" / "hero-models"
+
+
 def hero_weight_path(identity: str) -> Path:
-    return lab_hero_dir() / f"{hero_file_stem(identity)}.npz"
+    name = f"{hero_file_stem(identity)}.npz"
+    local = lab_hero_dir() / name
+    if local.is_file():
+        return local
+    return shipped_hero_dir() / name
 
 
 def split_records(source: Path, directory: Path | None = None) -> dict[str, Any]:

@@ -42,7 +42,7 @@ python -m wujiang.tactical.rooms.imitation.decisions --replays replayData/replay
 python -m wujiang.tactical.rooms.imitation.ranker --records var/nn-lab/visible-decisions.jsonl --out var/nn-lab/ranker.npz
 ```
 
-排序网络按武将分开。`var/nn-lab/heroes/` 里每个还活着、并且是自己在行动的武将一份样本和一份权重。样本少于 12 条的只整理，不训练；对局里没有这份权重时，仍用共用的 `var/nn-lab/ranker.npz`。
+排序网络按武将分开。大块样本仍在 `var/nn-lab/heroes/`，不进仓库。留出结果更好、可以上场的权重在 `data/hero-models/`。没有这份权重的武将用完整 AI。步兵、弓兵、守备兵不使用网络。
 
 ```bash
 python -m wujiang.tactical.rooms.imitation.hero_models split --records var/nn-lab/visible-decisions.jsonl
