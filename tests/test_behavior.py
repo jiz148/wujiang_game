@@ -7789,12 +7789,13 @@ class RoomBehaviorTests(unittest.TestCase):
             {"room_id": room_id, "player_token": guest_token, "session_token": bob["session_token"]},
         )
 
-        # Then each participant gets one private result and a persisted replay
+        # Then each participant gets a private result without a stored replay.
         alice_history = self.api_get("/api/matches/recent", params={"session_token": alice_token})["matches"]
         bob_history = self.api_get("/api/matches/recent", params={"session_token": bob["session_token"]})["matches"]
         self.assertEqual([item["match_id"] for item in alice_history], [first_match_id])
         self.assertEqual(alice_history[0]["result"], "win")
         self.assertEqual(bob_history[0]["result"], "loss")
+        self.assertFalse(alice_history[0]["replay_available"])
         serialized_history = json.dumps(alice_history, ensure_ascii=False)
         self.assertNotIn("session_token", serialized_history)
         self.assertNotIn("player_token", serialized_history)
@@ -7819,12 +7820,11 @@ class RoomBehaviorTests(unittest.TestCase):
         self.assertNotEqual(alice_progression, bob_progression)
         anonymous_status, _ = self.api_get_error("/api/progression/overview")
         self.assertEqual(anonymous_status, 401)
-        replay = self.api_get(
+        gone_status, _ = self.api_get_error(
             "/api/matches/replay",
             params={"session_token": alice_token, "match_id": first_match_id, "step_index": "-1"},
         )
-        self.assertTrue(replay["room"]["historical"])
-        self.assertEqual(replay["replay"]["step_index"], replay["replay"]["last_step_index"])
+        self.assertEqual(gone_status, 410)
         forbidden_status, _ = self.api_get_error(
             "/api/matches/replay",
             params={"session_token": charlie["session_token"], "match_id": first_match_id},
@@ -17365,13 +17365,17 @@ class DevelopedHeroReviewR08FriedBehaviorTests(unittest.TestCase):
         actor.current_mana = 0
         skill = actor.get_skill("fried_inspire")
         payload = {"type": "skill", "unit_id": actor.unit_id, "skill_code": skill.code, "target_unit_id": actor.unit_id}
+        ally_a = self.ally(battle, actor, Position(5, 4), hero=True)
+        ally_b = self.ally(battle, actor, Position(4, 5), hero=True)
         battle.perform_action(payload)
         self.assertEqual((actor.current_mana, skill.uses_this_turn), (0, 0))
+        ally_a_payload = {**payload, "target_unit_id": ally_a.unit_id}
+        ally_b_payload = {**payload, "target_unit_id": ally_b.unit_id}
         with self.assertRaises(ActionError):
-            battle.perform_action(payload)
+            battle.perform_action(ally_a_payload)
         actor.current_mana = 4
-        battle.perform_action(payload)
-        battle.perform_action(payload)
+        battle.perform_action(ally_a_payload)
+        battle.perform_action(ally_b_payload)
         self.assertEqual((actor.current_mana, skill.uses_this_turn, skill.uses_this_battle), (0, 2, 3))
 
     def test_inspire_never_stacks_and_expires_at_current_global_end(self):
@@ -17379,14 +17383,38 @@ class DevelopedHeroReviewR08FriedBehaviorTests(unittest.TestCase):
         ally = self.ally(battle, actor, Position(5, 4), hero=True)
         speed = ally.stat("speed")
         payload = {"type": "skill", "unit_id": actor.unit_id, "skill_code": "fried_inspire", "target_unit_id": ally.unit_id}
-        for _ in range(4):
-            battle.perform_action(payload)
+        battle.perform_action(payload)
+        spent = actor.get_skill("fried_inspire").uses_this_battle
+        for _ in range(3):
+            with self.assertRaisesRegex(ActionError, "已受鼓舞"):
+                battle.perform_action(payload)
         self.assertEqual(ally.stat("speed"), speed * 2)
         self.assertEqual(ally.normal_move_actions_per_turn(), 2)
         self.assertEqual(sum(status.name == "鼓舞" for status in ally.statuses), 1)
+        self.assertEqual(actor.get_skill("fried_inspire").uses_this_battle, spent)
         battle.perform_action({"type": "end_turn"})
         self.assertEqual(ally.stat("speed"), speed)
         self.assertFalse(ally.has_status("鼓舞"))
+
+    def test_inspire_omits_already_buffed_factory_from_player_and_ai_targets(self):
+        from wujiang.tactical.rooms import ai
+
+        battle, actor, _ = self.fixture()
+        factory = create_hero("excel_r222", actor.player_id)
+        battle.add_unit(factory, Position(5, 4))
+        skill = actor.get_skill("fried_inspire")
+        payload = {"type": "skill", "unit_id": actor.unit_id, "skill_code": skill.code,
+                   "target_unit_id": factory.unit_id}
+        self.assertIn(factory.unit_id, skill.preview(battle, actor)["target_unit_ids"])
+        battle.perform_action(payload)
+        self.assertTrue(factory.has_status("鼓舞"))
+        self.assertNotIn(factory.unit_id, skill.preview(battle, actor)["target_unit_ids"])
+        self.assertIn(actor.unit_id, skill.preview(battle, actor)["target_unit_ids"])
+        self.assertFalse(ai.payload_is_legal(battle, payload))
+        action = next(item for item in battle.action_snapshot_for(actor)["actions"] if item["code"] == skill.code)
+        candidates = ai.build_skill_candidates(battle, actor, action, difficulty_profile("standard"), instant_only=False)
+        self.assertFalse(any(candidate.payload.get("target_unit_id") == factory.unit_id for candidate in candidates))
+        self.assertFalse(any("已受鼓舞，同名效果不叠加" in line for line in battle.logs))
 
     def test_inspire_invalid_target_does_not_spend_free_use(self):
         battle, actor, enemy = self.fixture()
@@ -27712,13 +27740,13 @@ class BPRoomBehaviorTests(unittest.TestCase):
                 self.assertEqual(room.status, "battle")
                 self.assertEqual(sum(room._seat_for_actor(unit).is_ai for unit in room.battle.hero_units(1)), team_size)
                 self.assertEqual(sum(room._seat_for_actor(unit).is_ai for unit in room.battle.hero_units(2)), 0)
-                with mock.patch.object(room, "_ensure_replay_saved"):
+                with mock.patch.object(room, "_finish_replay"):
                     room.surrender(blue_token)
                 room.touch()
                 self.assertEqual(room.bp_wins, {1: 1, 2: 0})
                 with self.assertRaises(RoomError):
                     room.restart_lobby(blue_token)
-                with mock.patch.object(room, "_ensure_replay_saved"), \
+                with mock.patch.object(room, "_finish_replay"), \
                         mock.patch.object(room, "_bp_feasible_level_pairs", return_value=[(8, 9)]), \
                         mock.patch("wujiang.tactical.rooms.multiplayer.choose_bp_special_modes", return_value=("none",)):
                     room.restart_lobby(red_token)
@@ -27746,7 +27774,7 @@ class BPRoomBehaviorTests(unittest.TestCase):
                 room.open_bp_assign(red_token)
                 with mock.patch.object(room, "_advance_simulation_due", return_value=0):
                     room.start_battle(red_token, require_confirmation=True)
-                with mock.patch.object(room, "_ensure_replay_saved"):
+                with mock.patch.object(room, "_finish_replay"):
                     room.surrender(blue_token)
                 self.assertEqual(room.bp_wins, {1: 2, 2: 0})
 
@@ -29318,6 +29346,27 @@ class NewBatch221222RepairFactoryBehaviorTests(unittest.TestCase):
 class AutoChessBehaviorTests(unittest.TestCase):
     """Rules-level scenarios; dynamic execution remains with the user."""
 
+    def test_convex_native_prices_owned_draw_chance_and_ten_gold_equipment(self):
+        from wujiang.tactical.rooms.autochess import AutoChessState, ChessPiece, hero_catalog, hero_cost, owned_shop_chance
+        self.assertEqual([hero_cost(level) for level in range(1, 11)],
+                         [1, 2, 3, 5, 7, 10, 14, 19, 24, 30])
+        chess = AutoChessState(4, seed=13)
+        chess.start()
+        player = chess.players[1]
+        self.assertEqual(chess.config.equipment_draw_cost, 10)
+        low_code = next(code for code, hero in hero_catalog().items() if hero["level"] == 1)
+        player.pieces.append(ChessPiece("owned", low_code))
+        player.level = 8
+        self.assertEqual((owned_shop_chance(1), owned_shop_chance(8)), (0.0, 0.35))
+        with mock.patch.object(chess.rng, "random", return_value=0):
+            self.assertEqual(chess._draw_shop(player), [low_code] * chess.config.shop_slots)
+        high_code = next(code for code, hero in hero_catalog().items() if hero["level"] == 6)
+        player.shop[0] = high_code
+        player.gold = 100
+        chess.buy(1, 0)
+        self.assertEqual(player.gold, 90)
+        self.assertEqual(player.pieces[-1].code, high_code)
+
     def test_four_player_lobby_ai_fill_and_account_reconnect(self):
         from wujiang.tactical.rooms.multiplayer import GameRoom
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict("os.environ", {"WUJIANG_AUTOCHESS_DIR": directory}):
@@ -29465,12 +29514,11 @@ class AutoChessBehaviorTests(unittest.TestCase):
         with self.assertRaises(RoomError):
             chess.force_finish_open_matches()
 
-    def test_autochess_replay_follows_the_setting(self):
+    def test_autochess_replay_is_memory_only_when_enabled(self):
         import os
         import tempfile
         from pathlib import Path
         from wujiang.platform import app_settings
-        from wujiang.tactical.rooms import replay as replay_module
         from wujiang.tactical.rooms.autochess import AutoChessState, ChessMatch, ChessPiece
 
         directory = tempfile.mkdtemp()
@@ -29487,6 +29535,8 @@ class AutoChessBehaviorTests(unittest.TestCase):
             quiet = chess._create_match_battle(ChessMatch(1, 2))
             self.assertEqual(quiet.replay_forced, "off")
             self.assertIsNone(quiet.replay)
+            self.assertTrue(quiet.battle.fast_ai_simulation)
+            self.assertTrue(quiet.battle.record_live_visual_events)
 
             saved = app_settings.update_settings({"autochess_replay": True, "replay_recording": "full"})
             self.assertTrue(saved["autochess_replay"])
@@ -29500,9 +29550,12 @@ class AutoChessBehaviorTests(unittest.TestCase):
             recorded.battle.winner = 1
             replay_dir = Path(directory) / "replays"
             replay_dir.mkdir()
-            with mock.patch.object(replay_module, "REPLAYS_DIR", replay_dir):
-                recorded._ensure_replay_saved()
-            self.assertEqual(len(list(replay_dir.glob("*.json"))), 1)
+            recorded._finish_replay()
+            self.assertIsNotNone(recorded.replay.finished_at)
+            self.assertEqual(list(replay_dir.glob("*.json")), [])
+            chess.matches[0].runner = recorded
+            self.assertIsNone(chess.__getstate__()["matches"][0].runner)
+            self.assertIsNone(recorded.__getstate__()["replay"])
         finally:
             os.environ.pop("WUJIANG_SETTINGS_PATH", None)
             app_settings._CACHE, app_settings._CACHE_PATH = previous_cache
@@ -29519,11 +29572,11 @@ class AutoChessBehaviorTests(unittest.TestCase):
         player = chess.players[1]
         gold = player.gold
         chess.draw_equipment(1)
-        self.assertEqual(player.gold, gold - 5)
+        self.assertEqual(player.gold, gold - 10)
         self.assertEqual(len(player.equipment_inventory), 1)
         with self.assertRaisesRegex(RoomError, "每轮只能"):
             chess.draw_equipment(1)
-        self.assertEqual(player.gold, gold - 5)
+        self.assertEqual(player.gold, gold - 10)
         piece = ChessPiece("gear", next(iter(hero_catalog())))
         player.pieces.append(piece)
         player.equipment_inventory.extend(["锈剑"] * 4)
@@ -29633,19 +29686,69 @@ class AutoChessBehaviorTests(unittest.TestCase):
         first.resolve_ai_until_human_input.assert_called_once_with(max_steps=1)
         second.resolve_ai_until_human_input.assert_called_once_with(max_steps=1)
 
+    def test_finished_autochess_board_stays_visible_for_a_room_poll(self):
+        from types import SimpleNamespace
+        from wujiang.tactical.rooms.multiplayer import _autochess_final_frame_elapsed
+
+        room = SimpleNamespace()
+        chess = SimpleNamespace(round_number=1)
+        self.assertFalse(_autochess_final_frame_elapsed(room, chess, now=10.0))
+        self.assertFalse(_autochess_final_frame_elapsed(room, chess, now=11.5))
+        self.assertTrue(_autochess_final_frame_elapsed(room, chess, now=11.61))
+        chess.round_number = 2
+        self.assertFalse(_autochess_final_frame_elapsed(room, chess, now=11.7))
+
     def test_observer_snapshot_only_sends_board_bodies_and_recent_logs(self):
         from wujiang.tactical.engine.core import Battle, Position
         from wujiang.tactical.heroes.registry import create_hero
         from wujiang.tactical.rooms.autochess import battle_observer_snapshot
 
         battle = Battle(width=10, height=10)
-        battle.add_unit(create_hero("ellie", 1), Position(0, 0))
-        battle.logs = [str(index) for index in range(20)]
+        actor = create_hero("ellie", 1)
+        battle.add_unit(actor, Position(0, 0))
+        battle.logs = [str(index) for index in range(100)]
+        battle.record_visual_event(kind="skill", display_name="测试技能", actor=actor,
+                                   target_unit_ids=[actor.unit_id], target_cells=[Position(1, 2)],
+                                   source_cell=Position(0, 0))
         snapshot = battle_observer_snapshot(battle)
         self.assertEqual(snapshot["board"], {"width": 10, "height": 10})
-        self.assertEqual(snapshot["logs"], [str(index) for index in range(20)])
+        self.assertEqual(snapshot["logs"], [str(index) for index in range(20, 100)])
         self.assertEqual(len(snapshot["units"]), 1)
-        self.assertEqual(set(snapshot), {"board", "round_number", "winner", "units", "logs", "field_effects", "visual_events"})
+        self.assertEqual(snapshot["units"][0]["mana"], actor.current_mana)
+        self.assertEqual(snapshot["actions"][0]["actor_name"], actor.name)
+        self.assertEqual(snapshot["actions"][0]["target_names"], [actor.name])
+        self.assertEqual(snapshot["actions"][0]["target_cells"], [{"x": 1, "y": 2}])
+        self.assertEqual(set(snapshot), {"board", "round_number", "winner", "units", "logs", "actions", "field_effects", "visual_events"})
+
+    def test_fast_autochess_emits_real_attack_and_skill_cues_without_probe_noise(self):
+        from wujiang.tactical.engine.core import Battle, Position, QueuedAction
+        from wujiang.tactical.heroes.registry import create_hero
+        from wujiang.tactical.rooms.autochess import battle_observer_snapshot
+
+        battle = Battle(width=10, height=10)
+        actor = create_hero("ellie", 1)
+        battle.add_unit(actor, Position(1, 2))
+        battle.fast_ai_simulation = True
+        attack = QueuedAction("attack", actor.unit_id, "普通攻击", 1, {"type": "attack"},
+                              target_cells=[Position(7, 2)])
+        battle.emit_visual_event_for_queued_action(actor, attack)
+        self.assertEqual(battle.visual_events, [])
+
+        battle.record_live_visual_events = True
+        battle._forecasting_action = True
+        battle.emit_visual_event_for_queued_action(actor, attack)
+        self.assertEqual(battle.visual_events, [])
+        battle._forecasting_action = False
+        battle.emit_visual_event_for_queued_action(actor, attack)
+        skill = QueuedAction("skill", actor.unit_id, "测试技能", 1,
+                             {"type": "skill", "skill_code": "test"},
+                             target_cells=[Position(6, 3)])
+        battle.emit_visual_event_for_queued_action(actor, skill)
+        events = battle_observer_snapshot(battle)["visual_events"]
+        self.assertEqual([event["kind"] for event in events], ["attack", "skill"])
+        self.assertEqual([event["id"] for event in events], [1, 2])
+        self.assertEqual(events[0]["source_cell"], {"x": 1, "y": 2})
+        self.assertEqual(events[1]["target_cells"], [{"x": 6, "y": 3}])
 
     def test_battle_buy_merges_and_upgrade_waits_until_preparation(self):
         from wujiang.tactical.rooms.autochess import AutoChessState, ChessPiece
@@ -29688,6 +29791,7 @@ class AutoChessBehaviorTests(unittest.TestCase):
         view = chess.public(1, seats)
         own = view["players"][0]
         self.assertEqual((own["budget"], own["roster_capacity"], own["next_roster_capacity"]), (6, 2, 3))
+        self.assertIn("next_roster_capacity", frontend_module("autochess-ui.js"))
         dragon = view["hero_previews"]["dragon_rider"]
         self.assertIn("龙", dragon["entry_companion"])
         self.assertEqual({(dx, dy) for dx, dy in _footprint("dragon_rider")},
@@ -29974,6 +30078,48 @@ class NewBatch238240242HellBehaviorTests(unittest.TestCase):
                 self.assertNotIn(actor.unit_id, battle.hell_rebirth_unit_ids)
                 self.assertEqual(battle.winner, 2)
 
+    def test_last_hell_hero_skill_death_loses_despite_delayed_rebirth(self):
+        for code in ("excel_r238", "excel_r239", "excel_r240", "excel_r242",
+                     "excel_r243", "excel_r244", "excel_r245", "excel_r246", "excel_r247"):
+            with self.subTest(code=code):
+                battle, actor, _, enemy = self.fixture(code)
+                actor.current_hp = 0.25
+                battle.resolve_damage(DamageContext(
+                    source=enemy, target=actor, attack_power=10, is_skill=True,
+                    action_name="测试技能", tags={"skill"}))
+                self.assertIn(actor.unit_id, battle.hell_rebirth_unit_ids)
+                self.assertEqual(battle.winner, 2)
+                self.assertIsNone(battle.current_respawn_prompt())
+                with self.assertRaises(ActionError):
+                    battle.perform_action({"type": "end_turn"})
+
+    def test_delayed_rebirth_remains_available_with_living_hero_ally(self):
+        for code in ("excel_r238", "excel_r239", "excel_r240", "excel_r242",
+                     "excel_r243", "excel_r244", "excel_r245", "excel_r246", "excel_r247"):
+            with self.subTest(code=code):
+                battle, actor, _, enemy = self.fixture(code, ally_code="bard")
+                self.skill_kill(battle, actor, enemy)
+                self.assertIsNone(battle.winner)
+                self.assertTrue(battle.hell_rebirth_options_for(actor))
+
+    def test_skill_death_during_enemy_turn_end_waits_for_next_enemy_end(self):
+        battle, actor, _, enemy = self.fixture("excel_r238", ally_code="bard")
+        battle.turn_slot_index = battle.turn_order_unit_ids.index(enemy.unit_id)
+        battle.active_turn_unit_id = enemy.unit_id
+        battle.active_player = enemy.player_id
+        original_turn = battle.turn_number
+        with mock.patch.object(enemy, "finish_turn", side_effect=lambda _battle: self.skill_kill(
+                battle, actor, enemy)):
+            battle.resolve_turn_end()
+        self.assertEqual(actor._hell_rebirth_skip_turn_number, original_turn)
+        self.assertNotIn(actor.unit_id, battle.pending_respawn_unit_ids)
+        self.assertIsNone(battle.current_respawn_prompt())
+        battle.turn_slot_index = battle.turn_order_unit_ids.index(enemy.unit_id)
+        battle.active_turn_unit_id = enemy.unit_id
+        battle.active_player = enemy.player_id
+        battle.resolve_turn_end()
+        self.assertEqual(battle.current_respawn_prompt().unit_id, actor.unit_id)
+
     def test_baki_three_owner_turns_pierce_basic_but_not_spear(self):
         battle, actor, _, enemy = self.fixture("excel_r238")
         actor.current_mana = 0
@@ -30009,11 +30155,12 @@ class NewBatch238240242HellBehaviorTests(unittest.TestCase):
         self.assertEqual(actor.attack_actions_per_turn(), 1)
 
     def test_no_landing_retries_without_cloning_dead_hero(self):
-        battle, actor, _, enemy = self.fixture("excel_r238", ally_code="bard")
+        battle, actor, ally, enemy = self.fixture("excel_r238", ally_code="bard")
         self.skill_kill(battle, actor, enemy)
-        battle.width, battle.height = 2, 1
+        battle.width, battle.height = 2, 2
         enemy.position = Position(0, 0)
-        battle.blocked_cells = {(1, 0)}
+        ally.position = Position(1, 1)
+        battle.blocked_cells = {(1, 0), (0, 1)}
         battle.advance_hell_rebirths(enemy.player_id)
         self.assertIsNone(battle.current_respawn_prompt())
         self.assertIn(actor.unit_id, battle.hell_rebirth_unit_ids)
@@ -30036,7 +30183,7 @@ class NewBatch238240242HellBehaviorTests(unittest.TestCase):
         self.assertFalse(ally.alive)
         self.assertNotIn(actor.unit_id, battle.hell_rebirth_unit_ids)
         self.assertIn(ally.unit_id, battle.hell_rebirth_unit_ids)
-        self.assertIsNone(battle.winner)
+        self.assertEqual(battle.winner, 2)
 
     def test_sika_skill_death_rebirth_offers_optional_sacrifice(self):
         battle, actor, ally, enemy = self.fixture("excel_r242", ally_code="excel_r240")
@@ -30205,9 +30352,11 @@ class NewBatch245246HellBehaviorTests(unittest.TestCase):
         battle._damage_choice_decisions = [ally.unit_id]
         battle._damage_choice_event_index = 0
         self.skill_kill(battle, actor, enemy)
+        self.assertIsNone(battle.winner)
         self.assertEqual(len(battle.pending_followup_actions), 1)
         battle.advance_followup_actions()
         self.assertTrue(ally.alive)
+        self.assertIsNone(battle.winner)
         self.assertIs(battle.units[ally.unit_id], ally)
         self.assertEqual((ally.position, ally.current_mana, ally.turn_ready), (Position(3, 3), 0, False))
         self.assertNotIn(ally.unit_id, battle.hell_rebirth_unit_ids)
@@ -30219,6 +30368,7 @@ class NewBatch245246HellBehaviorTests(unittest.TestCase):
         self.skill_kill(battle, actor, enemy)
         self.assertIn(actor.unit_id, battle.hell_rebirth_unit_ids)
         self.assertFalse(battle.pending_followup_actions)
+        self.assertEqual(battle.winner, 2)
         self.assertIn("hell_rescue_decline", frontend_module("vfx.js"))
 
     def test_brao_blocked_old_cell_excludes_rescue_but_preserves_self_rebirth(self):
@@ -30231,6 +30381,20 @@ class NewBatch245246HellBehaviorTests(unittest.TestCase):
         self.assertFalse(battle.pending_followup_actions)
         self.assertFalse(ally.alive)
         self.assertIn(actor.unit_id, battle.hell_rebirth_unit_ids)
+        self.assertEqual(battle.winner, 2)
+
+    def test_brao_failed_immediate_rescue_then_loses(self):
+        battle, actor, ally, enemy = self.fixture("excel_r245", ally_code="excel_r238")
+        self.skill_kill(battle, ally, enemy)
+        battle._damage_choice_active = True
+        battle._damage_choice_decisions = [ally.unit_id]
+        battle._damage_choice_event_index = 0
+        self.skill_kill(battle, actor, enemy)
+        self.assertIsNone(battle.winner)
+        battle.blocked_cells.add((actor.last_position.x, actor.last_position.y))
+        battle.advance_followup_actions()
+        self.assertFalse(ally.alive)
+        self.assertEqual(battle.winner, 2)
 
     def test_brao_basic_death_does_not_rescue_or_rebirth(self):
         battle, actor, _, enemy = self.fixture("excel_r245")
@@ -30242,17 +30406,23 @@ class NewBatch245246HellBehaviorTests(unittest.TestCase):
 
     def test_brao_ai_selects_legal_old_ally_and_declines_empty_choice(self):
         from wujiang.tactical.rooms.ai import choose_hell_rescue_action
+        from wujiang.tactical.heroes.excel_roster import HellDogSummon
         battle, actor, ally, enemy = self.fixture("excel_r245", ally_code="excel_r238")
         prompt = {"unit_id": actor.unit_id, "kind": "hell_rescue", "options": []}
         self.assertEqual(choose_hell_rescue_action(battle, prompt, actor)["target_unit_id"], "decline")
         self.skill_kill(battle, ally, enemy)
         prompt["options"] = [ally.unit_id]
         self.assertEqual(choose_hell_rescue_action(battle, prompt, actor)["target_unit_id"], ally.unit_id)
+        dog = HellDogSummon(1)
+        dog.alive = False
+        dog.base_stats.attack = 50
+        battle.destroyed_units.append(dog)
+        actor.alive = False
+        prompt["options"] = [dog.unit_id, ally.unit_id]
+        self.assertEqual(choose_hell_rescue_action(battle, prompt, actor)["target_unit_id"], ally.unit_id)
 
     def test_galder_ultimate_counts_enemy_ends_and_preserves_usage_after_rebirth(self):
-        from wujiang.tactical.heroes.registry import create_hero
-        battle, actor, _, enemy = self.fixture("excel_r246")
-        battle.add_unit(create_hero("bard", 1), Position(1, 8))
+        battle, actor, _, enemy = self.fixture("excel_r246", ally_code="bard")
         battle.active_player = actor.player_id
         battle._exclusive_turn_unit_id = actor.unit_id
         actor.turn_ready = True
@@ -30298,9 +30468,7 @@ class NewBatch245246HellBehaviorTests(unittest.TestCase):
         self.assertLess(enemy.current_hp, 10)
 
     def test_galder_external_skill_death_preserves_ultimate_until_rebirth(self):
-        from wujiang.tactical.heroes.registry import create_hero
-        battle, actor, _, enemy = self.fixture("excel_r246")
-        battle.add_unit(create_hero("bard", 1), Position(1, 8))
+        battle, actor, _, enemy = self.fixture("excel_r246", ally_code="bard")
         actor.get_skill("hell_war_god").execute(battle, actor, {})
         actor.get_skill("hell_war_god").uses_this_battle = 1
         self.skill_kill(battle, actor, enemy)
@@ -30448,6 +30616,7 @@ class NewBatch247HellBehaviorTests(unittest.TestCase):
         self.skill_kill(battle, snow, enemy)
         self.assertIn(snow.unit_id, battle.hell_rebirth_unit_ids)
         self.assertFalse(battle.pending_followup_actions)
+        self.assertEqual(battle.winner, 2)
         battle, snow, _, enemy = self.fixture()
         snow.current_hp = 0.25
         battle.resolve_damage(DamageContext(source=enemy, target=snow, attack_power=10,
@@ -30583,8 +30752,8 @@ class NewBatch248HellDragonBehaviorTests(unittest.TestCase):
         from wujiang.tactical.rooms.multiplayer import battle_state_for_viewer
 
         battle, dragon, first, second, enemy = self.fixture()
-        from wujiang.tactical.heroes.registry import create_hero
-        battle.add_unit(create_hero("bard", 1), Position(1, 8))
+        survivor = create_hero("bard", 1)
+        battle.add_unit(survivor, Position(1, 7))
         origin_first, origin_second = first.position, second.position
         dragon.get_skill("flying_dragon_orb").uses_this_battle = 1
         self.kill_with_choices(battle, dragon, first, second, enemy)
@@ -30608,6 +30777,41 @@ class NewBatch248HellDragonBehaviorTests(unittest.TestCase):
         self.assertEqual(dragon.get_skill("flying_dragon_orb").uses_this_battle, 1)
         self.assertNotIn(dragon.unit_id, battle.hell_dragon_return_cells)
 
+    def test_dragon_return_right_does_not_prevent_elimination(self):
+        from wujiang.tactical.rooms.ai import choose_hell_dragon_return_action
+        from wujiang.tactical.rooms.multiplayer import battle_state_for_viewer
+
+        battle, dragon, first, second, enemy = self.fixture()
+        self.kill_with_choices(battle, dragon, first, second, enemy)
+        self.assertIn(dragon.unit_id, battle.hell_dragon_return_cells)
+        self.assertEqual(battle.winner, 2)
+        self.assertIsNone(choose_hell_dragon_return_action(battle, dragon))
+        self.assertFalse(battle_state_for_viewer(battle, 1)["hell_dragon_returns"][0]["can_control"])
+        with self.assertRaises(ActionError):
+            battle.perform_action({"type": "hell_dragon_return", "unit_id": dragon.unit_id,
+                                   "x": first.last_position.x, "y": first.last_position.y})
+
+    def test_dragon_ai_declines_last_two_hero_sacrifice(self):
+        from wujiang.tactical.rooms.ai import choose_hell_dragon_sacrifice_action
+
+        battle, dragon, first, second, _ = self.fixture()
+        dragon.alive = False
+        first.current_hp = second.current_hp = 0.25
+        prompt = {"kind": "hell_dragon_first", "options": [first.unit_id, second.unit_id]}
+        self.assertEqual(choose_hell_dragon_sacrifice_action(
+            battle, prompt, dragon)["target_unit_id"], "decline")
+        battle.add_unit(create_hero("bard", 1), Position(1, 7))
+        self.assertNotEqual(choose_hell_dragon_sacrifice_action(
+            battle, prompt, dragon)["target_unit_id"], "decline")
+        battle, dragon, first, second, _ = self.fixture()
+        dragon.alive = False
+        summon = create_hero("bard", 1)
+        summon.name, summon.is_summon = "地狱见习", True
+        battle.summon_unit(summon, Position(6, 5), summoner=second)
+        prompt = {"kind": "hell_dragon_second", "options": [second.unit_id, summon.unit_id]}
+        self.assertEqual(choose_hell_dragon_sacrifice_action(
+            battle, prompt, dragon)["target_unit_id"], summon.unit_id)
+
     def test_shielded_sacrifice_fails_and_blocked_old_cells_wait(self):
         battle, dragon, first, second, enemy = self.fixture()
         second.shields = 1
@@ -30616,8 +30820,7 @@ class NewBatch248HellDragonBehaviorTests(unittest.TestCase):
         self.assertFalse(first.alive)
         self.assertTrue(second.alive)
         battle, dragon, first, second, enemy = self.fixture()
-        from wujiang.tactical.heroes.registry import create_hero
-        battle.add_unit(create_hero("bard", 1), Position(1, 8))
+        battle.add_unit(create_hero("bard", 1), Position(1, 7))
         self.kill_with_choices(battle, dragon, first, second, enemy)
         from wujiang.tactical.heroes.excel_roster import HellDogSummon
         for cell in (first.last_position, second.last_position):
@@ -31203,6 +31406,7 @@ class NewBatch239243244HellBehaviorTests(NewBatch239243244HellBehaviorBase, unit
 
     def test_buron_shuffle_ignores_only_magic_immunity_and_rebirth_resets_ultimate(self):
         battle, actor, ally, enemy = self.fixture("excel_r239", ally_code="excel_r238")
+        battle.add_unit(create_hero("bard", 1), Position(1, 7))
         shuffle = actor.get_skill("hell_shuffle")
         payload = {"target_unit_id": ally.unit_id}
         ally.magic_immunity = True
@@ -31231,7 +31435,7 @@ class NewBatch239243244HellBehaviorTests(NewBatch239243244HellBehaviorBase, unit
         self.assertGreater(hell_shuffle_score(battle, actor, payload), 0)
 
     def test_zur_begins_without_horse_and_rebirth_needs_full_mount_footprint(self):
-        battle, actor, _, enemy = self.fixture("excel_r243")
+        battle, actor, _, enemy = self.fixture("excel_r243", ally_code="bard")
         self.assertFalse(any(unit.hero_code == "hell_horse" for unit in battle.all_units()))
         self.assertTrue({"hell_spear", "hell_spear_free", "hell_pressure",
                          "hell_pressure_free"}.issubset(actor.skill_map()))
@@ -31249,10 +31453,11 @@ class NewBatch239243244HellBehaviorTests(NewBatch239243244HellBehaviorBase, unit
         self.assertEqual(actor.current_mana, 0)
 
     def test_zur_waits_when_only_one_row_can_fit(self):
-        battle, actor, _, enemy = self.fixture("excel_r243")
+        battle, actor, ally, enemy = self.fixture("excel_r243", ally_code="bard")
         self.kill_with_skill(battle, actor, enemy)
         battle.width, battle.height = 3, 1
         enemy.position = Position(1, 0)
+        ally.position = Position(0, 0)
         self.assertEqual(battle.hell_rebirth_options_for(actor), [])
         battle.advance_hell_rebirths(enemy.player_id)
         self.assertIn(actor.unit_id, battle.hell_rebirth_unit_ids)
@@ -31290,7 +31495,7 @@ class NewBatch239243244HellBehaviorTests(NewBatch239243244HellBehaviorBase, unit
         self.assertFalse(battle.pending_followup_actions)
 
     def test_kaki_rebirth_gives_free_stealth_and_shuffle_death_strikes_once(self):
-        battle, actor, _, enemy = self.fixture("excel_r244")
+        battle, actor, _, enemy = self.fixture("excel_r244", ally_code="bard")
         self.kill_with_skill(battle, actor, enemy)
         cell = battle.hell_rebirth_options_for(actor)[0]
         battle.restore_hell_rebirth(actor, cell)
@@ -32699,3 +32904,132 @@ class NewBatch304WillowBehaviorTests(unittest.TestCase):
                                      "skill_code": "exchange", "target_unit_id": enemy.unit_id},
                                     profile, instant_only=False)
         self.assertLess(waste, profile.action_threshold)
+
+
+class NewBatch305NovaBehaviorTests(unittest.TestCase):
+    """The short lived guard and actual mana payment rules from R305."""
+
+    def fixture(self):
+        battle = create_battle(["excel_r305", "excel_r302"], ["excel_r303", "dark_human"])
+        nova = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r305")
+        ally = next(unit for unit in battle.hero_units(1) if unit is not nova)
+        enemy = next(unit for unit in battle.hero_units(2) if unit.hero_code == "excel_r303")
+        other = next(unit for unit in battle.hero_units(2) if unit is not enemy)
+        nova.position, ally.position = Position(2, 2), Position(7, 7)
+        enemy.position, other.position = Position(5, 2), Position(7, 0)
+        battle.configure_turn_order([nova.unit_id, enemy.unit_id, ally.unit_id, other.unit_id])
+        battle.start_current_turn()
+        return battle, nova, ally, enemy
+
+    def test_public_kit_guard_preview_and_immediate_owner_actions(self):
+        from wujiang.tactical.heroes.registry import list_heroes
+
+        battle, nova, _, _ = self.fixture()
+        self.assertIn("excel_r305", {entry["code"] for entry in list_heroes()})
+        self.assertEqual({"machine_gun", "ion_shield", "quantum_separation", "electromagnetic_field"},
+                         set(nova.skill_map()))
+        skill = nova.get_skill("quantum_separation")
+        self.assertIn(Position(4, 3).to_dict(), skill.preview(battle, nova)["cells"])
+        self.assertNotIn(nova.position.to_dict(), skill.preview(battle, nova)["cells"])
+        skill.execute(battle, nova, {"x": 4, "y": 3})
+        guard = next(unit for unit in battle.all_units() if unit.hero_code == "electronic_guard_dragon")
+        self.assertEqual((guard.stat("attack"), guard.stat("defense"), guard.stat("speed"),
+                          guard.targeting_range(), guard.current_mana), (3, 4, 3, 3, 0))
+        self.assertEqual((guard.level, guard.attribute, guard.race, guard.max_health), (1, "雷", "机甲", 1))
+        self.assertEqual(set(guard.skill_map()), {"machine_gun", "missile"})
+        self.assertTrue(guard.can_take_turn_actions(battle))
+        self.assertEqual(guard.summoner_id, nova.unit_id)
+        public = next(item for item in battle.to_public_dict()["units"] if item["id"] == guard.unit_id)
+        self.assertTrue(public["turn_ready"])
+        self.assertIn("回合结束时破坏", public["traits"][0]["description"])
+        self.assertTrue(public["traits"][0]["expires_on_owner_turn_end"])
+        self.assertEqual(public["traits"][0]["summoned_turn_number"], battle.turn_number)
+
+    def test_guard_lives_through_owner_actions_then_breaks_at_same_turn_end(self):
+        battle, nova, _, _ = self.fixture()
+        skill = nova.get_skill("quantum_separation")
+        battle.prepay_skill_resources(skill, nova, {"x": 4, "y": 3})
+        skill.execute(battle, nova, {"x": 4, "y": 3})
+        guard = next(unit for unit in battle.all_units() if unit.hero_code == "electronic_guard_dragon")
+        self.assertTrue(guard.alive)
+        self.assertTrue(guard.get_skill("machine_gun").can_use(battle, guard, {})[0])
+        self.assertFalse(skill.can_use(battle, nova, {})[0])
+        battle.end_turn()
+        self.assertNotIn(guard.unit_id, battle.units)
+        self.assertIn(guard.unit_id, {unit.unit_id for unit in battle.destroyed_units})
+        self.assertTrue(nova.alive)
+
+    def test_guard_disappears_with_summoner_before_expiry(self):
+        battle, nova, _, _ = self.fixture()
+        nova.get_skill("quantum_separation").execute(battle, nova, {"x": 4, "y": 3})
+        guard = next(unit for unit in battle.all_units() if unit.hero_code == "electronic_guard_dragon")
+        nova.alive = False
+        nova.current_hp = 0
+        battle.cleanup_dead_units()
+        self.assertNotIn(guard.unit_id, battle.units)
+
+    def test_weather_hits_both_paid_casters_once_but_not_zero_cost_or_drain(self):
+        battle, nova, ally, enemy = self.fixture()
+        nova.get_skill("electromagnetic_field").execute(battle, nova, {})
+        self.assertTrue(battle.has_weather("电磁场"))
+        battle.prepay_skill_resources(enemy.get_skill("harden"), enemy, {})
+        self.assertAlmostEqual(enemy.current_hp, enemy.max_health * 0.875)
+        self.assertEqual((nova.stat("attack"), nova.stat("defense")), (4, 5))
+        battle.prepay_skill_resources(ally.get_skill("fly_leap"), ally, {})
+        self.assertAlmostEqual(ally.current_hp, ally.max_health * 0.875)
+        before = (nova.current_hp, enemy.current_hp, nova.stat("attack"))
+        battle.prepay_skill_resources(nova.get_skill("machine_gun"), nova, {})
+        enemy.spend_mana(0.5)
+        self.assertEqual((nova.current_hp, enemy.current_hp, nova.stat("attack")), before)
+
+    def test_weather_same_name_deduplicates_and_enemy_payment_stacks_until_next_owner_end(self):
+        from wujiang.tactical.heroes.excel_roster import ElectromagneticFieldEffect, NovaChargeStatus
+
+        battle, nova, _, enemy = self.fixture()
+        battle.add_field_effect(ElectromagneticFieldEffect(), source=nova)
+        battle.add_field_effect(ElectromagneticFieldEffect(), source=enemy)
+        self.assertEqual(sum(effect.weather_name == "电磁场" for effect in battle.field_effects), 1)
+        battle.prepay_skill_resources(enemy.get_skill("harden"), enemy, {})
+        battle.prepay_skill_resources(enemy.get_skill("fly_leap"), enemy, {})
+        self.assertAlmostEqual(enemy.current_hp, enemy.max_health * 0.75)
+        self.assertEqual(sum(isinstance(status, NovaChargeStatus) for status in nova.statuses), 2)
+        enemy.position = Position(7, 6)
+        battle.prepay_skill_resources(enemy.get_skill("harden"), enemy, {})
+        self.assertEqual(sum(isinstance(status, NovaChargeStatus) for status in nova.statuses), 2)
+        self.assertEqual((nova.stat("attack"), nova.stat("defense")), (5, 6))
+        battle.turn_number += 1
+        nova.finish_turn(battle)
+        self.assertEqual((nova.stat("attack"), nova.stat("defense")), (3, 4))
+
+    def test_mana_payment_lethal_weather_cancels_the_declared_skill(self):
+        battle, nova, _, enemy = self.fixture()
+        nova.get_skill("electromagnetic_field").execute(battle, nova, {})
+        enemy.current_hp = 0.1
+        battle.configure_turn_order([enemy.unit_id, nova.unit_id])
+        battle.start_current_turn()
+        battle.start_action_or_chain({"type": "skill", "unit_id": enemy.unit_id, "skill_code": "harden"})
+        self.assertNotIn(enemy.unit_id, battle.units)
+        self.assertIsNone(battle.pending_chain)
+        self.assertEqual(enemy.get_skill("harden").uses_this_turn, 1)
+
+    def test_ai_values_immediate_guard_attack_and_team_net_weather_pressure(self):
+        from wujiang.tactical.heroes.excel_roster import ElectromagneticFieldEffect
+        from wujiang.tactical.rooms.ai import (difficulty_profile, nova_electromagnetic_weather_score,
+                                               nova_paid_action_adjustment, nova_quantum_separation_score)
+
+        battle, nova, ally, enemy = self.fixture()
+        profile = difficulty_profile("aggressive")
+        self.assertGreater(nova_quantum_separation_score(battle, nova, Position(4, 3), profile),
+                           nova_quantum_separation_score(battle, nova, Position(1, 5), profile))
+        ally.current_mana = 0
+        enemy.current_mana = 4
+        favorable = nova_electromagnetic_weather_score(battle, nova, profile)
+        ally.current_mana = 4
+        enemy.current_mana = 0
+        unfavorable = nova_electromagnetic_weather_score(battle, nova, profile)
+        self.assertGreater(favorable, unfavorable)
+        self.assertLess(unfavorable, profile.action_threshold)
+        battle.add_field_effect(ElectromagneticFieldEffect(), source=nova)
+        enemy.current_hp = 0.1
+        enemy.current_mana = 4
+        self.assertEqual(nova_paid_action_adjustment(battle, enemy, "harden", {}), -1000.0)

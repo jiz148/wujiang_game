@@ -1,5 +1,10 @@
 ﻿# wujiang_game Project Map
 
+- 2026-10-16 R304复跑七项六过：剩余死态光墙未进入结算源于`engine/core.py`连锁预付费后无条件活体检查；现付款前锁定已授权死态反应，活体付费致死仍取消。R305用户七项全过、三场AI已结束且零高信号，`tools/all_hero_deep_audit.py`读取带UTF-8 BOM设计档案时汇总崩溃，现用`utf-8-sig`并补审计工具场景。两项仅静态修复，R305原目录可`--resume`复用三场；公开池115/388、余273，未新增武将。
+
+- 2026-10-16 Phase H R305：设计档与问卷先锁源设计；heroes/excel_roster.py接当轮行动/本轮末破坏守卫龙、全场电磁场及逐次近域攻守层；engine/core.py::prepay_skill_resources统一分发实际正数付魔事件并在付费致死时停止技能；rooms/ai.py评估守卫龙本轮火力、天气双方损血和已在场天气下的付魔代价。后端召唤合法格预览供前端，NewBatch305NovaBehaviorTests七项静态写入；天气说明同步。R304用户七项五过，两项死态候选排序错误已静态修复；两批动态待用户验证。公开池115/388，剩余273；助手未运行动态测试。
+
+- 2026-10-16 已开发地狱系列R238/R239/R240/R242–R248：`engine/core.py`胜负判定不再把死后预约再临、古龙待复活权计为存活；仅猎人死亡当次已排队的即时救援可在终局判定前完成。敌方武将末才发生的技能死亡跳过同次末尾，等下一次敌方末再临。`rooms/ai.py`古龙献祭避开己方全灭组合，终局不再下复活指令；`rooms/multiplayer.py`终局不再把古龙复活权展示为可操作。`tests/test_behavior.py`补单将团灭、队友支撑、末尾死亡、猎人救援成功/失败及古龙权利与AI边界。源表R241尚未公开；规则见《通用规则》《武将说明》，仅静态检查，动态待用户验证。
 - 2026-10-15 Phase H R304妖仙。柳：源304、保存R304-Q001=b、通用光墙及破魔/死亡规则先锁设计。excel_roster.py接一场一次双人多格合法交换、破盾/魔免/回避与死态光墙；engine/core.py仅向经技能显式授权的死亡反应者开放连锁、仍不算在场单位；rooms/multiplayer.py与static/core/net.js把死态当前响应者交给玩家，rooms/ai.py按真实挡伤与换位净值决策，NewBatch304WillowBehaviorTests七项静态写入待用户运行。R303用户报告六项回归、三场AI均完成且零高信号；公开池114/388、未实现274。助手未运行动态测试。
 - 2026-10-15 Phase H R303昼行武者：源303与通用规则先锁JSON/XLSX四项歧义自裁，`excel_roster.py`实现跨本人轮同真实目标普攻额度、同轮目标锁、严格低半血技能免伤、有效普攻破魔封主动及通用实伤吸血；`engine/core.py`保留直调普攻的目标ID供锁定；`rooms/ai.py`评追猎、转火与实际回血，预览沿后端普攻候选；`NewBatch303DaylightHunterBehaviorTests`六项及三场AI已由用户跑通且零高信号。当批公开池113/388；R304已转独立批次实施。
 
@@ -24,6 +29,14 @@
 - 2026-10-12 `dev-jinchi` 与 `master` BP 冲突合并：全体选择沿用 66 人池、系统禁级和等级预算，随机等级沿用逐轮抽级与可选同名规则；两种流程均抽特殊模式并在战斗界面展示。`multiplayer.py` 的同名可选完成性、合法等级缓存纳入本局池；`bp-ui.js` 的等级矩阵仅列本局池，补可展开池/禁级资料。`tests/test_behavior.py` 前端断言对齐矩阵界面；相关规则见 `docs/武将游戏规则.md` 和 `docs/BP特殊模式规则.md`。动态验证按现阶段约定待用户统一运行。
 
 Update this file after every new gameplay requirement or code change in `wujiang_game`. Keep entries concise and durable; do not paste full docs.
+
+- 2026-10-16 自走棋战斗动画：快速 AI 模拟原在 `Battle.record_visual_event` 屏蔽全部事件，观战前端无可播放数据。`rooms/autochess.py`仅对真实自走棋战斗开启有限视觉事件，AI 试算仍过滤；`autochess-ui.js`对攻击/技能从来源格到目标格播放轨迹及命中效果，首进观战补播最近事件，保持最近 24 事件快照。`rooms/multiplayer.py`所有配对结束后留约 1.6 秒最终战场，防高倍速跨过浏览器轮询。`AutoChessBehaviorTests`新增快模事件、试算隔离、最终画面时间场景；仅静态检查，待用户新局验证。
+
+- 2026-10-16 录像生命周期：所有房间的录像步骤只在内存中供本场回看；`replay.py` 不写文件，`GameRoom.__getstate__` 与 `AutoChessState.__getstate__` 从持久检查点排除录像/战斗 runner，自走棋交战中不存检查点，下一轮/删除房间释放。战绩仅留结果；历史回放 API 对有权限战绩返回 410。设置界面明确本场回看；对战运行时内存开销仍取决于回看档位，动态验证由用户执行。
+
+- 2026-10-16 自走棋经济与观战：`rooms/autochess.py::hero_cost` 按原生等级用二次加速价格 `1+ceil(29(n-1)^2/81)`，1～10 级为 1/2/3/5/7/10/14/19/24/30 金（替代原始斐波那契售价）；`_draw_shop` 的五个概率档仍按原生等级划分，另按玩家等级给已拥有武将 0～35% 独立回抽机会；装备每抽 10 金。观战快照公开当前生命/魔法/状态与最近 24 动作、80 行战报，`autochess-ui.js` 和 `hero-hover.js` 展示攻击者、目标、技能区域及武将当前状态。规则与场景见《自走棋模式规则》和 `AutoChessBehaviorTests`；动态验证由用户执行。
+
+- 2026-10-15 R024鼓舞重复目标：用户AI对局连续记录电子修理工厂“已受鼓舞，同名效果不叠加”。已锁R024设计要求同名不叠、AI只选新增有效目标；`FriedInspireSkill.can_use`现对已有鼓舞目标在付款前拒绝，`preview`同步剔除，通用AI `payload_is_legal`自动过滤重复候选。可继续对其他友军施放。R08行为场景补2×2工厂、玩家预览与AI过滤；静态检查，动态待用户运行。今后可重复支援技能应把当前无效目标排除在声明合法性与预览之外，不能仅在结算时记一次无效日志。
 
 - 2026-10-13 R253首份用户报告：`reports/new-batch-253-20261013/regression_tests.log`七项六过，一项AI评分场景漏导入`score_skill_payload`已补；非战斗/AI缺陷。`tools/all_hero_deep_audit.py`定向回归失败后保存完整日志与摘要并跳过耗时AI对局，`test_audit_review_packet.py`加失败早停场景。用户新目录复跑前仅静态检查，R253动态验收仍待完成。
 

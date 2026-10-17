@@ -66,6 +66,13 @@ def normalize_unit_ids(value):
 
 
 class MatchAuditToolTests(unittest.TestCase):
+    def test_design_profiles_accept_utf8_bom(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "design.json"
+            path.write_text(json.dumps({"heroes": [{"code": "excel_r305", "name": "电子龙。新星"}]}),
+                            encoding="utf-8-sig")
+            self.assertEqual(load_design_profiles(path)["excel_r305"]["name"], "电子龙。新星")
+
     def test_turn_audit_progress_identifies_actor_and_action(self) -> None:
         battle = create_battle("bard", "n")
         actor = battle.current_turn_unit()

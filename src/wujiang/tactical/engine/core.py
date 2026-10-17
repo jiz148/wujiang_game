@@ -2077,7 +2077,10 @@ class Battle:
         defense_reason: str = "",
         metadata: Optional[dict[str, Any]] = None,
     ) -> None:
-        if bool(getattr(self, "fast_ai_simulation", False)):
+        if bool(getattr(self, "fast_ai_simulation", False)) and (
+            not bool(getattr(self, "record_live_visual_events", False))
+            or bool(getattr(self, "_forecasting_action", False))
+        ):
             return
         payload = dict(metadata or {})
         wave = str(getattr(self, "army_strike_wave", "") or "")
@@ -2968,6 +2971,7 @@ class Battle:
         # The shared global end still belongs to the original slot's side.
         if hero is not None:
             ending_player = hero.player_id
+        self._resolving_turn_end_player_id = ending_player
         if hero is not None and not auto_started:
             self.log(f"{hero.name} 结束了自己的回合。")
         elif self.is_army_turn() and not auto_started:
@@ -2993,6 +2997,7 @@ class Battle:
         self.complete_turn_end_after_effects(ending_player)
 
     def complete_turn_end_after_effects(self, ending_player: int) -> None:
+        self._resolving_turn_end_player_id = None
         if parse_army_slot(self.current_turn_slot_unit_id()) is None:
             self.advance_hell_rebirths(ending_player)
         self.enforce_sandstorm_stealth_rules()
@@ -3049,9 +3054,23 @@ class Battle:
         previous = getattr(actor, "_paying_skill_cost", False)
         actor._paying_skill_cost = True
         try:
+            mana_before = actor.current_mana
             skill.prepay_resources(self, actor, payload)
             if skill.timing == "active":
                 actor._last_active_skill_code = skill.code
+            mana_paid = round(max(0.0, mana_before - actor.current_mana), 2)
+            if mana_paid > 0:
+                for effect in list(self.field_effects):
+                    hook = getattr(effect, "on_skill_mana_paid", None)
+                    if callable(hook):
+                        hook(self, actor, skill, mana_paid)
+                for observer in list(self.all_units()):
+                    if not observer.alive or observer.banished or observer.position is None:
+                        continue
+                    for component in list(observer.iter_components()):
+                        hook = getattr(component, "on_skill_mana_paid", None)
+                        if callable(hook):
+                            hook(self, actor, skill, mana_paid)
         finally:
             if previous:
                 actor._paying_skill_cost = previous
@@ -3455,6 +3474,8 @@ class Battle:
         return sorted(options, key=lambda cell: (cell.y, cell.x))
 
     def current_respawn_prompt(self) -> Optional[RespawnPrompt]:
+        if self.winner is not None:
+            return None
         while self.pending_respawn_unit_ids:
             unit_id = self.pending_respawn_unit_ids[0]
             unit = self.units.get(unit_id)
@@ -3516,6 +3537,8 @@ class Battle:
         if unit.unit_id in self.hell_rebirth_unit_ids or self.winner is not None:
             return
         self.hell_rebirth_unit_ids.add(unit.unit_id)
+        if getattr(self, "_resolving_turn_end_player_id", None) not in {None, unit.player_id}:
+            unit._hell_rebirth_skip_turn_number = self.turn_number
         self.log(f"{unit.name} 将在下个敌方武将回合结束时选择回场位置。")
 
     def hell_dragon_return_options_for(self, unit: Unit) -> list[Position]:
@@ -5119,6 +5142,9 @@ class Battle:
             if not ok:
                 raise ActionError(reason)
             self.prepay_skill_resources(skill, actor, payload)
+            if not actor.alive:
+                self.cleanup_dead_units()
+                return
         if (
             payload.get("queued_resolution")
             and self.declared_target_position(payload) is not None
@@ -6510,6 +6536,10 @@ class Battle:
                 skill = actor.get_skill(queued_action.payload["skill_code"])
                 self.prepay_skill_resources(skill, actor, queued_action.payload)
                 queued_action.payload["resources_prepaid"] = True
+                if not actor.alive:
+                    self.log_public_event(f"{actor.name} 支付【{skill.name}】费用后被破坏，技能未能结算。", source=actor)
+                    self.cleanup_dead_units()
+                    return
                 reaction_window_timing = skill.reaction_window_timing(self, actor, queued_action.payload)
             if queued_action.action_type in {"attack", "skill"}:
                 actor.notify_action_declared(self, queued_action.action_type, queued_action.payload)
@@ -6636,6 +6666,21 @@ class Battle:
             for player_id in (1, 2)
             if self.side_still_has_a_fighter(player_id)
         }
+        # A hunter's death rescue resolves in the current action. Finish that
+        # already-declared rescue before judging whether its team was wiped out.
+        # Delayed hell rebirths and the dragon's optional return do not count.
+        pending_effects = list(self.pending_followup_actions)
+        if self.pending_chain is not None:
+            pending_effects.append(self.pending_chain.queued_action)
+        for action in pending_effects:
+            if action.payload.get("effect_code") != "hell_hunter_rescue":
+                continue
+            rescued_id = str(action.payload.get("rescued_unit_id") or "")
+            rescued = next((unit for unit in self.destroyed_units
+                            if unit.unit_id == rescued_id and not unit.alive
+                            and not unit.is_summon and not unit.is_clone), None)
+            if rescued is not None:
+                alive_players.add(rescued.player_id)
         if len(alive_players) == 1 and self.units:
             self.winner = alive_players.pop()
             losing_player = 2 if self.winner == 1 else 1
@@ -6947,8 +6992,27 @@ class Battle:
                                   "floating_crane_checked", "action_failed_by_floating_crane"):
                         reaction_payload.pop(field, None)
                     reaction_payload.update(skill.queued_reaction_payload_metadata(self, reactor, reaction_payload))
+                    # Preserve a reaction that was already legal while destroyed;
+                    # payment killing a living reactor still cancels its action.
+                    after_death_reaction = (
+                        reactor in self.destroyed_units and not reactor.alive
+                        and skill.can_react_after_destroyed(self, reactor, self.pending_chain.queued_action)
+                    )
                     self.prepay_skill_resources(skill, reactor, reaction_payload)
                     reaction_payload["resources_prepaid"] = True
+                    if not reactor.alive and not after_death_reaction:
+                        skill.finalize_use(self, reactor)
+                        self.log_public_event(
+                            f"{reactor.name} 支付【{skill.name}】费用后被破坏，连锁未能结算。",
+                            source=reactor,
+                        )
+                        self.cleanup_dead_units()
+                        if self.winner is not None:
+                            self.pending_chain = None
+                        else:
+                            self.pending_chain.pending_reactor_ids.pop(0)
+                            self.advance_reaction_window()
+                        return
                     target_ids = self.payload_target_unit_ids(reaction_payload)
                     if target_ids:
                         target = self.get_unit(target_ids[0])
@@ -6967,10 +7031,6 @@ class Battle:
                         },
                     )
                     reaction_payload["declared_source_attack"] = reactor.stat("attack")
-                    after_death_reaction = (
-                        reactor in self.destroyed_units and not reactor.alive
-                        and skill.can_react_after_destroyed(self, reactor, self.pending_chain.queued_action)
-                    )
                     if (((reactor.unit_id not in self.units or not reactor.alive) and not after_death_reaction)
                             or reactor.banished):
                         skill.finalize_use(self, reactor)

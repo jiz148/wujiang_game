@@ -176,7 +176,7 @@ class MatchHistoryStore:
             "viewer_seat_id": row["seat_id"],
             "viewer_team_id": row["team_id"],
             "result": row["result"],
-            "replay_available": bool(row["replay_path"] and row["replay_step_count"]),
+            "replay_available": False,
         }
 
     def list_recent(self, user_id: int, *, limit: int = RECENT_MATCH_LIMIT) -> list[dict[str, Any]]:

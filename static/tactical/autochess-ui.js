@@ -19,8 +19,9 @@ let lastServerTimestamp = 0;
 
 function selectedHero(chess) {
   const me = chess.players.find((player) => player.seat_id === chess.viewer_id);
-  const code = (me?.pieces || []).find((piece) => piece.id === selectedPieceId)?.code || selectedHeroCode;
-  return chess.hero_previews?.[code] || null;
+  const piece = (me?.pieces || []).find((item) => item.id === selectedPieceId);
+  const code = piece?.code || selectedHeroCode;
+  return withPieceGrowth(chess.hero_previews?.[code], piece, me?.synergies);
 }
 
 function companionName(description) {
@@ -39,7 +40,29 @@ function matchingSynergies(hero, synergies) {
 function withPieceGrowth(hero, piece, synergies) {
   if (!hero) return null;
   const lines = piece?.synergyLines || matchingSynergies(hero, synergies);
-  return {...hero, upgrades: piece?.upgrades || {}, active_synergies: lines, star: Number(piece?.star || 0)};
+  const combat = piece?.hp != null && piece?.mana != null;
+  const waitingBattle = piece?.position && !combat;
+  const currentState = combat
+    ? [piece.restrictions?.length ? piece.restrictions.join('、') : '交战中', piece.position ? `位置 ${piece.position.x + 1}列${piece.position.y + 1}行` : '离场'].join(' · ')
+    : waitingBattle ? '等待开战'
+      : piece ? [piece.x == null ? '后备席' : `已上场 · ${piece.x + 1}列${piece.y + 1}行`,
+      `装备 ${piece.equipment?.length || 0}/3`, piece.pending_upgrades ? `待选能力 +${piece.pending_upgrades}` : ''].filter(Boolean).join(' · ')
+      : '商店待购';
+  return {...hero, stats: combat ? piece.stats || hero.stats : hero.stats,
+    upgrades: combat ? {} : piece?.upgrades || {}, active_synergies: lines,
+    star: Number(piece?.star || 0), current_state: currentState,
+    current_resources: combat ? `生命 ${piece.hp}/${piece.max_hp} · 魔法 ${piece.mana}/${piece.max_mana}` : '',
+    current_effects: combat ? piece.statuses || [] : []};
+}
+
+function chessActionText(event) {
+  const actor = event.actor_name || '战场效果';
+  const targets = [...new Set(event.target_names || [])].join('、');
+  const cells = event.target_cells || [];
+  const area = cells.length ? `第 ${cells[0].x + 1} 列 ${cells[0].y + 1} 行${cells.length > 1 ? `起共 ${cells.length} 格` : ''}` : '';
+  if (event.kind === 'attack') return `${actor} 攻击 ${targets || area || '目标'}`;
+  if (event.kind === 'defense') return `${actor} 防御 ${targets || area || ''}`.trim();
+  return `${actor} 对 ${area || targets || '战场'} 施放 ${event.display_name || '技能'}${targets ? ` · 目标：${targets}` : ''}`;
 }
 
 function updateCountdown() {
@@ -169,6 +192,7 @@ function renderStatus(chess, me) {
     const field = node('span', 'chess-status__field');
     field.innerHTML = `当前上场 <b>${me.budget_used}</b><span>/</span><b>${me.budget}</b>`;
     rowB.append(field);
+    rowB.append(node('span', 'chess-status__field', `${me.level}级 · 现有阵容按预算可上 ${me.roster_capacity ?? 0} 人${me.next_roster_capacity == null ? '' : ` · 下一级 ${me.next_roster_capacity} 人`}`));
   }
   if (chess.phase === 'preparation' || chess.phase === 'battle') rowB.append(battleSpeedControl());
   facts.append(rowA);
@@ -226,6 +250,7 @@ function renderStandings(chess) {
 
 function renderShop(chess, me, locked) {
   const section = node('section', 'autochess-shop');
+  section.append(node('p', 'meta-note', `武将价格随原生等级加速上涨（1/2/3/5/7…30金）；当前等级抽到已拥有武将的额外机会：${Math.round(Number(me.owned_shop_chance || 0) * 100)}%`));
   const list = node('div', 'chess-shop-list');
   (me.shop || []).forEach((entry) => {
     if (!entry.code) {
@@ -594,12 +619,16 @@ function renderBattleBoard(battle, previews, viewerSide = 1) {
   board.setAttribute('role', 'grid');
   board.setAttribute('aria-label', '自动战斗观战棋盘');
   const occupied = new Map();
+  const recentAction = (battle.actions || []).at(-1);
+  const markedTargets = new Set((recentAction?.target_cells || []).map((cell) => `${cell.x},${cell.y}`));
+  const markedSource = recentAction?.source_cell ? `${recentAction.source_cell.x},${recentAction.source_cell.y}` : '';
   const present = (battle.units || []).filter((unit) => unit.position && unit.alive && !unit.banished);
   const riddenMounts = new Set(present.map((unit) => unit.mounted_on_unit_id).filter(Boolean));
   const bodies = present.map((unit) => {
     for (const cell of unit.occupied_cells || []) occupied.set(`${cell.x},${cell.y}`, unit);
     const ridden = Boolean(unit.is_mount && riddenMounts.has(unit.id));
     return {
+      unit,
       side: unit.player_id,
       name: unit.name,
       extra: unit.is_mount ? '召唤坐骑' : '',
@@ -621,6 +650,8 @@ function renderBattleBoard(battle, previews, viewerSide = 1) {
       const shown = visualX(x);
       const cell = node('div', `cell ${shown >= Math.floor(width / 2) ? 'autochess-friendly-cell' : 'autochess-enemy-cell'}`);
       if (unit) cell.classList.add('has-unit');
+      if (markedTargets.has(`${x},${y}`)) cell.classList.add(recentAction?.kind === 'skill' ? 'is-chess-skill-target' : 'is-chess-attack-target');
+      if (markedSource === `${x},${y}`) cell.classList.add('is-chess-action-source');
       cell.dataset.x = String(shown);
       cell.dataset.y = String(y);
       cell.style.gridColumn = String(shown + 1);
@@ -639,7 +670,7 @@ function renderBattleBoard(battle, previews, viewerSide = 1) {
   renderBodies(pieces, bodies.map((body) => ({
     ...body,
     side: body.side === focusSide ? 1 : 2,
-    hero: withPieceGrowth(previews?.[body.heroCode], {upgrades: body.upgrades, synergyLines: body.synergyLines, star: body.star}),
+    hero: withPieceGrowth(previews?.[body.heroCode], {...body.unit, upgrades: body.upgrades, synergyLines: body.synergyLines, star: body.star}),
     cells: [...body.cells.values()].map((cell) => ({...cell, x: visualX(cell.x)})),
   })));
   return stage;
@@ -717,6 +748,13 @@ function renderChessRecord(chess, me) {
     renderAutoChessPanel();
   });
   wrap.append(select);
+  const actions = [...(selected.battle?.actions || [])].reverse();
+  if (actions.length) {
+    const actionList = node('div', 'chess-action-list');
+    actionList.append(node('strong', '', '最近动作'));
+    actions.forEach((event) => actionList.append(node('div', `chess-action-entry is-${event.kind}`, chessActionText(event))));
+    wrap.append(actionList);
+  }
   const lines = node('div', 'logs');
   const entries = [...(selected.battle?.logs || [])].reverse();
   if (!entries.length) {
@@ -779,7 +817,11 @@ export function renderAutoChessPanel() {
     stageHost.append(renderDeployment(chess, focus, locked));
   } else if (chess.phase !== 'lobby') {
     const match = (chess.matches || []).find((item) => item.left === focus?.seat_id || item.right === focus?.seat_id) || chess.matches?.[0];
-    if (match?.battle) stageHost.append(renderBattleBoard(match.battle, chess.hero_previews, match.right === focus?.seat_id ? 2 : 1));
+    if (match?.battle) {
+      stageHost.append(renderBattleBoard(match.battle, chess.hero_previews, match.right === focus?.seat_id ? 2 : 1));
+      const latest = (match.battle.actions || []).at(-1);
+      if (latest) stageHost.append(node('div', 'chess-live-action', chessActionText(latest)));
+    }
     else if (match) stageHost.append(renderMatchPreview(chess, match));
   }
   shell.append(stageHost);
@@ -861,9 +903,13 @@ export function renderAutoChessPanel() {
   const watched = (chess.matches || []).find((item) => item.left === focus?.seat_id || item.right === focus?.seat_id) || chess.matches?.[0];
   const stage = panel.querySelector('.autochess-board-stage');
   if (chess.phase === 'battle' && stage && watched?.battle) {
-    playChessEffects(stage, watched.battle, `${state.room?.room_id || ''}:${watched.index}`, watched.right === focus?.seat_id ? 2 : 1);
+    const viewerSide = watched.right === focus?.seat_id ? 2 : 1;
+    playChessEffects(stage, watched.battle, `${state.room?.room_id || ''}:${chess.round}:${watched.index}:${viewerSide}`, viewerSide);
   } else {
     chessVfxKey = '';
+    chessVfxSeen = 0;
+    chessVfxTimers.forEach(window.clearTimeout);
+    chessVfxTimers.clear();
     document.getElementById('chess-battle-vfx')?.replaceChildren();
   }
 }
@@ -876,10 +922,89 @@ let pieceView = 'card';
 
 let chessVfxKey = '';
 let chessVfxSeen = 0;
+const chessVfxTimers = new Set();
+
+function scheduleChessVfx(callback, delay) {
+  const timer = window.setTimeout(() => {
+    chessVfxTimers.delete(timer);
+    callback();
+  }, delay);
+  chessVfxTimers.add(timer);
+}
+
+function chessVfxTheme(event) {
+  if (event.kind === 'attack') return 'attack';
+  if (event.kind === 'defense') return 'barrier';
+  const name = `${event.action_code || ''} ${event.display_name || ''}`.toLowerCase();
+  if (/(fire|burn|flame|火|炎)/.test(name)) return 'fire';
+  if (/(lightning|storm|thunder|雷|电)/.test(name)) return 'storm';
+  if (/(shadow|dark|暗|影)/.test(name)) return 'shadow';
+  return 'arcane';
+}
+
+function drawChessEffect(stage, screen, battle, event, viewerSide) {
+  if (!stage?.isConnected || !screen?.isConnected) return;
+  const layer = document.getElementById('chess-battle-vfx');
+  if (!layer) return;
+  const width = Number(battle.board?.width || 10);
+  const flip = Number(viewerSide) === 1;
+  const host = screen.getBoundingClientRect();
+  const point = (cell) => {
+    if (!cell || !Number.isFinite(Number(cell.x)) || !Number.isFinite(Number(cell.y))) return null;
+    const x = flip ? width - 1 - Number(cell.x) : Number(cell.x);
+    const node = stage.querySelector(`.cell[data-x="${x}"][data-y="${Number(cell.y)}"]`);
+    if (!node) return null;
+    const rect = node.getBoundingClientRect();
+    return {x: rect.left - host.left + rect.width / 2, y: rect.top - host.top + rect.height / 2};
+  };
+  const units = new Map((battle.units || []).map((unit) => [unit.id, unit]));
+  const sourceCell = event.source_cell || units.get(event.actor_id)?.position;
+  const source = point(sourceCell);
+  const targetCells = event.target_cells?.length ? event.target_cells
+    : (event.target_unit_ids || []).map((id) => units.get(id)?.position).filter(Boolean);
+  const targets = [...new Map(targetCells.map((cell) => [`${cell.x},${cell.y}`, cell])).values()].slice(0, 10);
+  if (!targets.length && sourceCell) targets.push(sourceCell);
+  const theme = chessVfxTheme(event);
+  const reduced = Boolean(globalThis.WujiangBattleFeedback?.reducedMotion());
+  const duration = reduced ? 180 : 850;
+  const spawn = (className, location, delay = 0) => {
+    if (!location) return;
+    const effect = node('div', `${className} theme-${theme}`);
+    effect.style.left = `${location.x}px`;
+    effect.style.top = `${location.y}px`;
+    effect.style.setProperty('--vfx-duration', `${duration}ms`);
+    if (delay) {
+      effect.style.animationDelay = `${delay}ms`;
+      effect.style.animationFillMode = 'both';
+    }
+    layer.append(effect);
+    scheduleChessVfx(() => effect.remove(), duration + delay + 80);
+  };
+  spawn('battle-vfx-source', source);
+  targets.forEach((cell, index) => {
+    const target = point(cell);
+    if (!target) return;
+    const delay = reduced ? 0 : Math.min(index, 5) * 45;
+    if (!reduced && source && event.kind !== 'defense' && Math.hypot(target.x - source.x, target.y - source.y) > 12) {
+      const dx = target.x - source.x;
+      const dy = target.y - source.y;
+      const trail = node('div', `chess-vfx-trail theme-${theme}`);
+      trail.style.left = `${source.x}px`;
+      trail.style.top = `${source.y}px`;
+      trail.style.width = `${Math.hypot(dx, dy)}px`;
+      trail.style.rotate = `${Math.atan2(dy, dx)}rad`;
+      layer.append(trail);
+      scheduleChessVfx(() => trail.remove(), duration + 80);
+    }
+    const kind = event.kind === 'defense' ? 'battle-vfx-shield'
+      : event.kind === 'attack' ? 'battle-vfx-impact' : 'battle-vfx-burst';
+    spawn(kind, target, delay);
+  });
+}
 
 function playChessEffects(stage, battle, key, viewerSide) {
   const screen = document.getElementById('autochess-screen');
-  if (!screen) return;
+  if (!screen || !screen.getBoundingClientRect().width || document.visibilityState === 'hidden') return;
   let layer = document.getElementById('chess-battle-vfx');
   if (!layer) {
     layer = document.createElement('div');
@@ -890,30 +1015,20 @@ function playChessEffects(stage, battle, key, viewerSide) {
   const events = battle.visual_events || [];
   const newest = events.reduce((max, event) => Math.max(max, Number(event.id || 0)), 0);
   if (key !== chessVfxKey || newest < chessVfxSeen) {
+    chessVfxTimers.forEach(window.clearTimeout);
+    chessVfxTimers.clear();
+    layer.replaceChildren();
     chessVfxKey = key;
-    chessVfxSeen = newest;
-    return;
+    chessVfxSeen = Math.max(0, Number(events.at(-3)?.id || events[0]?.id || 1) - 1);
   }
-  const fresh = events.filter((event) => Number(event.id || 0) > chessVfxSeen);
+  const fresh = events.filter((event) => Number(event.id || 0) > chessVfxSeen).slice(-6);
   chessVfxSeen = Math.max(chessVfxSeen, newest);
   if (!fresh.length) return;
-  const width = Number(battle.board?.width || 10);
-  const flip = Number(viewerSide) === 1;
-  const visualX = (x) => flip ? width - 1 - x : x;
-  const host = screen.getBoundingClientRect();
-  fresh.slice(-8).forEach((event) => {
-    const cells = (event.target_cells && event.target_cells.length) ? event.target_cells : (event.source_cell ? [event.source_cell] : []);
-    cells.forEach((cell) => {
-      const node = stage.querySelector(`.cell[data-x="${visualX(cell.x)}"][data-y="${cell.y}"]`);
-      if (!node || typeof node.getBoundingClientRect !== 'function') return;
-      const rect = node.getBoundingClientRect();
-      const burst = document.createElement('div');
-      burst.className = `battle-vfx-burst theme-${event.kind === 'defense' ? 'barrier' : 'attack'}`;
-      burst.style.left = `${rect.left - host.left + rect.width / 2}px`;
-      burst.style.top = `${rect.top - host.top + rect.height / 2}px`;
-      layer.append(burst);
-      window.setTimeout(() => burst.remove(), 900);
-    });
+  fresh.forEach((event, index) => {
+    scheduleChessVfx(() => {
+      if (key !== chessVfxKey) return;
+      drawChessEffect(screen.querySelector('.autochess-board-stage'), screen, battle, event, viewerSide);
+    }, index * 180);
   });
 }
 

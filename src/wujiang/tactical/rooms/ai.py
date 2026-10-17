@@ -26,6 +26,7 @@ AI_DIFFICULTIES = {"easy", "standard", "aggressive"}
 
 SUPPORT_HERO_CODES = {"blood_eater", "ellie", "bard", "element_hunter", "chanter", "excel_r139", "excel_r031"}
 SUMMON_SKILL_CODES = {
+    "quantum_separation",
     "sacrifice_ritual",
     "medusa",
     "thunder_god",
@@ -572,20 +573,38 @@ def choose_hell_dragon_sacrifice_action(battle: Battle, prompt: dict[str, Any], 
         if viable:
             choice = max(viable, key=lambda target: (death_effect_value(target), -loss(target), target.unit_id)).unit_id
     elif kind == "hell_dragon_second":
-        if viable:
-            choice = min(viable, key=lambda target: (loss(target), target.unit_id)).unit_id
+        candidate_trait = next((trait for trait in unit.traits
+                                if callable(getattr(trait, "sacrifice_candidates", None))), None)
+        offered_ids = {target.unit_id for target in options if target is not None}
+        first_id = next((target.unit_id for target in candidate_trait.sacrifice_candidates(battle)
+                         if target.unit_id not in offered_ids), "") if candidate_trait is not None else ""
+        safe = [target for target in viable
+                if any(hero.unit_id not in {first_id, target.unit_id}
+                       for hero in battle.hero_units(unit.player_id)
+                       if not bool(getattr(hero, "is_siege_structure", False)))]
+        if safe:
+            choice = min(safe, key=lambda target: (loss(target), target.unit_id)).unit_id
     else:
         ranked = sorted(viable, key=lambda target: (loss(target), target.unit_id))
         if len(ranked) >= 2:
             enemies = living_hostile_combatants(battle, unit.player_id)
             return_value = 185.0 + unit.stat("attack") * 14.0
-            if enemies and return_value > loss(ranked[0]) + loss(ranked[1]) + 25.0:
-                choice = ranked[0].unit_id
+            for first in ranked:
+                second = next((target for target in ranked if target.unit_id != first.unit_id
+                               and any(hero.unit_id not in {first.unit_id, target.unit_id}
+                                       for hero in battle.hero_units(unit.player_id)
+                                       if not bool(getattr(hero, "is_siege_structure", False)))), None)
+                if (second is not None and enemies
+                        and return_value > loss(first) + loss(second) + 25.0):
+                    choice = first.unit_id
+                    break
     return {"type": "damage_choice", "unit_id": unit.unit_id, "target_unit_id": choice}
 
 
 @with_enemy_view("unit")
 def choose_hell_dragon_return_action(battle: Battle, unit: Unit) -> Optional[dict[str, Any]]:
+    if battle.winner is not None:
+        return None
     options = battle.hell_dragon_return_options_for(unit)
     if not options:
         return None
@@ -601,9 +620,14 @@ def choose_hell_dragon_return_action(battle: Battle, unit: Unit) -> Optional[dic
 
 def choose_hell_rescue_action(battle: Battle, prompt: dict[str, Any], unit: Unit) -> dict[str, Any]:
     best = (0.0, "decline")
+    needs_hero = not any(not bool(getattr(hero, "is_siege_structure", False))
+                         for hero in battle.hero_units(unit.player_id))
     for unit_id in prompt.get("options", []):
         target = next((body for body in battle.destroyed_units if body.unit_id == unit_id), None)
         if target is None or target.alive or target.player_id != unit.player_id:
+            continue
+        if needs_hero and (target.is_summon or target.is_clone
+                           or bool(getattr(target, "is_siege_structure", False))):
             continue
         if target.is_summon and target.summoner_id:
             summoner = battle.units.get(target.summoner_id)
@@ -2572,12 +2596,44 @@ def score_skill_payload(
     instant_only: bool,
 ) -> float:
     score = _score_skill_payload(battle, actor, action, payload, profile, instant_only=instant_only)
+    if score > -1000.0:
+        adjustment = nova_paid_action_adjustment(
+            battle, actor, str(action.get("code") or payload.get("skill_code") or ""), payload)
+        if adjustment <= -1000.0:
+            return -1000.0
+        score += adjustment
     if actor.hero_code == "excel_r123" and score > 0:
         skill = skill_from_ai_action(actor, action, str(action.get("code") or payload.get("skill_code") or ""))
         if skill.timing == "active":
             after_payment = actor.current_mana - skill.mana_cost_for_payload(battle, actor, payload)
             score += 0.5 * min(1.0, max(0.0, actor.max_mana() - after_payment)) * 24.0
     return score
+
+
+def nova_paid_action_adjustment(battle: Battle, actor: Unit, code: str, payload: dict[str, Any]) -> float:
+    """Account for the payment event before the skill's ordinary effect score."""
+    if not battle.has_weather("电磁场") and not any(
+        unit.hero_code == "excel_r305" and unit.alive for unit in battle.all_units()
+    ):
+        return 0.0
+    try:
+        cost = actor.get_skill(code).mana_cost_for_payload(battle, actor, payload)
+    except (ActionError, ValueError, KeyError, TypeError):
+        return 0.0
+    if cost <= 0 or actor.current_mana + 1e-9 < cost:
+        return 0.0
+    adjustment = 0.0
+    if battle.unit_in_weather("电磁场", actor):
+        loss = min(actor.current_hp, actor.max_health / 8.0)
+        if actor.current_hp <= actor.max_health / 8.0 + 1e-9:
+            return -1000.0
+        adjustment -= loss * 170.0
+    for nova in battle.all_units():
+        if (nova.hero_code != "excel_r305" or not nova.alive or nova.banished
+                or nova.position is None or battle.distance_between_units(nova, actor) > 3):
+            continue
+        adjustment += 16.0 if nova.player_id == actor.player_id else -24.0
+    return adjustment
 
 
 def hell_shuffle_score(battle: Battle, actor: Unit, payload: dict[str, Any]) -> float:
@@ -3051,6 +3107,8 @@ def _score_skill_payload(
         return electronic_unfuse_score(battle, actor, payload)
     if code == "electronic_repair":
         return electronic_repair_score(battle, actor, payload)
+    if code == "electromagnetic_field":
+        return nova_electromagnetic_weather_score(battle, actor, profile)
     if code == "satellite_cannon":
         return r23_paid_skill_value(battle, actor, payload)
     if code in {"flash_slash", "bird_dash", "bird_dash_free", "bird_soul", "bird_soul_free"}:
@@ -3431,6 +3489,8 @@ def _score_skill_payload(
         return world_seed_score(battle, actor, payload, profile)
     if code in SUMMON_SKILL_CODES:
         destination = payload_destination(payload)
+        if code == "quantum_separation":
+            return nova_quantum_separation_score(battle, actor, destination, profile)
         if code == "hell_dog":
             if destination is None:
                 return -1000.0
@@ -3609,6 +3669,23 @@ def _score_skill_payload(
 
 
 def score_reaction_payload(
+    battle: Battle,
+    reactor: Unit,
+    queued_action: QueuedAction,
+    option: dict[str, Any],
+    payload: dict[str, Any],
+    profile: DifficultyProfile,
+) -> float:
+    score = _score_reaction_payload(battle, reactor, queued_action, option, payload, profile)
+    if score > -1000.0:
+        adjustment = nova_paid_action_adjustment(battle, reactor, str(option.get("action_code") or ""), payload)
+        if adjustment <= -1000.0:
+            return -1000.0
+        score += adjustment
+    return score
+
+
+def _score_reaction_payload(
     battle: Battle,
     reactor: Unit,
     queued_action: QueuedAction,
@@ -7730,6 +7807,77 @@ def summon_position_score(battle: Battle, actor: Unit, destination: Position) ->
         return 0.0
     nearest = min(distance_to_position(battle, unit, destination) for unit in enemies)
     return max(0.0, 4.0 - nearest) * 8.0
+
+
+def nova_quantum_separation_score(
+    battle: Battle, actor: Unit, destination: Position | None, profile: DifficultyProfile,
+) -> float:
+    """Value only attacks the guard can cash in before its owner-turn expiry."""
+    if destination is None:
+        return -1000.0
+    opportunities: list[float] = []
+    for enemy in living_hostile_combatants(battle, actor.player_id):
+        if enemy.position is None:
+            continue
+        distance = distance_to_position(battle, enemy, destination)
+        if distance > 4:
+            continue
+        physical = min(enemy.current_hp, battle.damage_rule.calculate_damage(3, enemy.stat("defense")))
+        skill_damage = 0.0 if enemy.magic_immunity or getattr(enemy, "skill_damage_immunity", False) else physical
+        if enemy.total_shields() > 0:
+            skill_damage = 0.0
+        basic_line = any(
+            destination.x == cell.x or destination.y == cell.y
+            or abs(destination.x - cell.x) == abs(destination.y - cell.y)
+            for cell in battle.unit_cells(enemy)
+        )
+        basic_damage = physical if distance <= 3 and basic_line and enemy.total_shields() == 0 else 0.0
+        immediate = max(skill_damage * (2.0 if distance <= 3 else 1.0), basic_damage)
+        score = immediate * 150.0 + max(0, 4 - distance) * 8.0
+        if immediate >= enemy.current_hp - 1e-9:
+            score += 65.0
+        if enemy.total_shields() > 0:
+            score += 14.0
+        nearby_allies = sum(
+            ally.alive and ally.position is not None and ally.unit_id != actor.unit_id
+            and distance_to_position(battle, ally, enemy.position) <= 1
+            for ally in battle.player_units(actor.player_id)
+        )
+        score -= nearby_allies * 12.0
+        opportunities.append(score)
+    if not opportunities:
+        return -12.0
+    opportunities.sort(reverse=True)
+    return opportunities[0] + (opportunities[1] * 0.2 if len(opportunities) > 1 else 0.0)
+
+
+def nova_electromagnetic_weather_score(battle: Battle, actor: Unit, profile: DifficultyProfile) -> float:
+    if battle.has_weather("电磁场"):
+        return -1000.0
+    score = 0.0
+    for unit in battle.all_units():
+        if not unit.alive or unit.banished or unit.position is None:
+            continue
+        paid_options = [skill for skill in unit.skills
+                        if skill.mana_cost > 0 and skill.mana_cost <= unit.current_mana + 1e-9]
+        if not paid_options:
+            continue
+        uses = min(2.0, len(paid_options) * 0.7)
+        hp_loss = min(unit.current_hp, unit.max_health / 8.0)
+        pressure = uses * hp_loss * 170.0
+        if unit.current_hp <= unit.max_health / 8.0:
+            pressure += 28.0
+        if unit.player_id != actor.player_id and battle.distance_between_units(actor, unit) <= 3:
+            pressure += uses * 12.0
+        if unit.is_summon or unit.is_clone:
+            pressure *= 0.5
+        score += pressure if unit.player_id != actor.player_id else -pressure * 1.15
+    if any(getattr(effect, "global_weather", False)
+           and actor.player_id in getattr(effect, "weather_owner_player_ids", set())
+           for effect in battle.field_effects):
+        score -= 35.0
+    score = score * 2.0 - 8.0
+    return score if score >= profile.once_per_battle_threshold else -12.0
 
 
 def hell_dog_summon_score(battle: Battle, actor: Unit, destination: Position) -> float:
