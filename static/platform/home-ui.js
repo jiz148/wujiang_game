@@ -58,13 +58,7 @@
       const matchLabel = document.createElement("span");
       matchLabel.className = "meta-note";
       matchLabel.textContent = `场次 ${match.match_id}`;
-      const replay = document.createElement("button");
-      replay.type = "button";
-      replay.className = "ghost";
-      replay.textContent = "查看历史回放";
-      replay.disabled = !match.replay_available;
-      replay.addEventListener("click", () => onOpenReplay(match.match_id));
-      actions.append(matchLabel, replay);
+      actions.append(matchLabel);
       card.append(title, detail, rosters, actions);
       list.append(card);
     });

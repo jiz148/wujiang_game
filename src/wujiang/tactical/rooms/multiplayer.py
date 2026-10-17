@@ -649,7 +649,7 @@ def battle_state_for_viewer(
 ) -> dict[str, Any]:
     state = battle.to_public_dict()
     state["hell_dragon_returns"] = [
-        {**entry, "can_control": bool(viewer_player_id == entry["player_id"] and
+        {**entry, "can_control": bool(battle.winner is None and viewer_player_id == entry["player_id"] and
          (viewer_seat_id is None or battle_unit_owner_seat_id(
              battle, battle.get_unit(entry["unit_id"])) == viewer_seat_id))}
         for entry in state.get("hell_dragon_returns", [])
@@ -685,7 +685,7 @@ def battle_state_for_viewer(
             {
                 "unit_id": unit.unit_id,
                 "name": unit.name,
-                "actions": battle.action_snapshot_for(unit),
+                "actions": battle.action_snapshot_for(unit) if unit.alive else {"actions": []},
                 "reactions": battle.reaction_snapshot_for(unit),
             }
             for unit in _active_units_for_viewer(battle)
@@ -695,7 +695,7 @@ def battle_state_for_viewer(
     elif viewer_player_id is not None:
         instant_units = _instant_units_for_viewer(battle, viewer_player_id)
         dragon_returns = [entry for entry in state.get("hell_dragon_returns", [])
-                          if entry["player_id"] == viewer_player_id and entry["options"]
+                          if battle.winner is None and entry["player_id"] == viewer_player_id and entry["options"]
                           and (viewer_seat_id is None or battle_unit_owner_seat_id(
                               battle, battle.get_unit(entry["unit_id"])) == viewer_seat_id)]
         if instant_units or dragon_returns:
@@ -934,6 +934,17 @@ class PlayerSeat:
 
 _CHESS_WORKERS: dict[str, threading.Thread] = {}
 _CHESS_WORKER_GUARD = threading.Lock()
+_CHESS_FINAL_FRAME_SECONDS = 1.6
+
+
+def _autochess_final_frame_elapsed(room: "GameRoom", chess: Any, *, now: float | None = None) -> bool:
+    """Keep the final board observable across at least one normal room poll."""
+    timestamp = time.monotonic() if now is None else now
+    round_key = (id(chess), chess.round_number)
+    if getattr(room, "_chess_final_frame_round", None) != round_key:
+        room._chess_final_frame_round = round_key
+        room._chess_final_frame_since = timestamp
+    return timestamp - room._chess_final_frame_since >= _CHESS_FINAL_FRAME_SECONDS
 
 
 def _ensure_autochess_worker(room: "GameRoom") -> None:
@@ -964,29 +975,32 @@ def _autochess_battle_worker(room: "GameRoom") -> None:
     try:
         while True:
             with room._lock:
+                if getattr(room, "_closed", False):
+                    return
                 chess = room.autochess
                 if chess is None or chess.phase != "battle":
                     return
                 pending = [match for match in chess.matches if match.result is None]
                 if not pending:
-                    if chess.matches:
+                    if chess.matches and _autochess_final_frame_elapsed(room, chess):
                         chess._finish_round()
                         room.status = chess.phase
                         room.touch(persist_chess=True)
-                    return
-                cursor = int(getattr(chess, "next_match_cursor", 0))
-                match = pending[cursor % len(pending)]
-                chess.next_match_cursor = cursor + 1
-                chess._advance_match(match)
-                if chess.matches and all(item.result is not None for item in chess.matches):
-                    chess._finish_round()
-                    room.status = chess.phase
-                    room.touch(persist_chess=True)
-                    if chess.phase != "battle":
                         return
+                    if not chess.matches:
+                        return
+                else:
+                    cursor = int(getattr(chess, "next_match_cursor", 0))
+                    match = pending[cursor % len(pending)]
+                    chess.next_match_cursor = cursor + 1
+                    chess._advance_match(match)
                 speed = float(getattr(room, "chess_battle_speed", DEFAULT_SIMULATION_SPEED) or DEFAULT_SIMULATION_SPEED)
             time.sleep(max(0.05, 0.9 / max(speed, 0.1)))
     finally:
+        if getattr(room, "_closed", False):
+            room.autochess = None
+            room.battle = None
+            room.replay = None
         with _CHESS_WORKER_GUARD:
             if _CHESS_WORKERS.get(room.room_id) is threading.current_thread():
                 _CHESS_WORKERS.pop(room.room_id, None)
@@ -1066,6 +1080,7 @@ class GameRoom:
 
     def __getstate__(self) -> dict[str, Any]:
         state = dict(self.__dict__)
+        state["replay"] = None
         state.pop("_lock", None)
         state.pop("_bp_pair_cache", None)
         state.pop("_bp_legal_cache", None)
@@ -1073,6 +1088,7 @@ class GameRoom:
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         self.__dict__.update(state)
+        self.replay = None
         if not hasattr(self, "turn_timeout_seconds"):
             self.turn_timeout_seconds = DEFAULT_TURN_TIMEOUT_SECONDS
         if not hasattr(self, "board_width"):
@@ -1169,7 +1185,7 @@ class GameRoom:
         self._record_bp_win_if_finished()
         self.version += 1
         self.updated_at = time.time()
-        if self.mode == "autochess" and persist_chess:
+        if self.mode == "autochess" and persist_chess and self.autochess.phase != "battle":
             self._last_chess_persist_at = self.updated_at
             ROOMS.persist(self)
 
@@ -2207,7 +2223,7 @@ class GameRoom:
         self.battle.on_replay_checkpoint = self._record_replay_step
 
     def _replay_mode(self) -> str:
-        # 子战斗默认不录像。打开「自走棋录像」后，才按对战记录的档位记每一步。
+        # 子战斗默认不录像；开启后只在当前房间内存中保留本场步骤。
         forced = getattr(self, "replay_forced", None)
         if forced in {"off", "actions", "full"}:
             return str(forced)
@@ -2239,7 +2255,7 @@ class GameRoom:
                 match_id=self.current_match_id,
             )
         # 自走棋一场里单位很多。完整动作列表和多份视角会在锁里把内存和请求一起拖死。
-        # 训练用得上的是局面本身，这里每步只留一份观战快照。
+        # 自走棋每步只留一份观战快照，避免复制多份视角。
         if bool(getattr(self, "record_fast_replay_steps", False)):
             from wujiang.tactical.rooms.autochess import battle_observer_snapshot
             snapshot = battle_observer_snapshot(self.battle)
@@ -2297,10 +2313,10 @@ class GameRoom:
             seat_views=seat_views,
         )
 
-    def _ensure_replay_saved(self) -> None:
+    def _finish_replay(self) -> None:
         if self.battle is None or self.battle.winner is None or self.replay is None:
             return
-        self.replay.finish_and_save(room_summary=self.serialize_summary())
+        self.replay.finish()
 
     def _next_ai_planned_action(self) -> Optional[tuple[dict[str, Any], str, Optional[Unit]]]:
         if self.battle is None or self.battle.winner is not None:
@@ -2540,7 +2556,7 @@ class GameRoom:
         if self.battle.winner is not None:
             self.status = "finished"
             self._record_bp_win_if_finished()
-            self._ensure_replay_saved()
+            self._finish_replay()
         after_stale_count = int(getattr(self.battle, "stale_queued_action_count", 0))
         stale_queued_action = after_stale_count > before_stale_count or any(
             STALE_QUEUED_ACTOR_LOG_MARKER in line for line in new_logs
@@ -3580,7 +3596,7 @@ class GameRoom:
             "step_count": self.replay.step_count,
             "last_step_index": self.replay.last_index,
             "saved_path": self.replay.saved_path,
-            "finished": self.replay.saved_path is not None,
+            "finished": self.replay.finished_at is not None,
             "can_use_omniscient": self.status == "finished",
             "default_view": "seat" if viewer is not None else "spectator",
         }
@@ -3710,7 +3726,7 @@ class GameRoom:
             if self.status != "finished":
                 raise RoomError("åªæœ‰å¯¹å±€ç»“æŸåŽï¼Œæ‰èƒ½é‡æ–°å¼€å§‹é€‰å°†ã€‚")
             self._record_bp_win_if_finished()
-            self._ensure_replay_saved()
+            self._finish_replay()
             self.battle = None
             self.replay = None
             self.current_match_id = None
@@ -3886,7 +3902,7 @@ class GameRoom:
             steps = self._resolve_ai_until_human_input(max_steps=max_steps)
             if self.battle.winner is not None:
                 self.status = "finished"
-                self._ensure_replay_saved()
+                self._finish_replay()
             self.fast_ai_simulation = False
             if self.battle is not None:
                 self.battle.fast_ai_simulation = False
@@ -4277,7 +4293,7 @@ class GameRoom:
             )
             self.status = "finished"
             self._record_replay_step("surrender")
-            self._ensure_replay_saved()
+            self._finish_replay()
             self.touch()
 
 
@@ -4421,6 +4437,7 @@ class RoomRegistry:
             is_owner = owner_user_id is not None and owner is not None and int(owner) == int(owner_user_id)
             if not is_owner and room.human_seat_count() > 0:
                 room.require_host(token)
+            room._closed = True
             del self._rooms[normalized]
             if room.mode == "autochess":
                 self._chess_path(normalized).unlink(missing_ok=True)

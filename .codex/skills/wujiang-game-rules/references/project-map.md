@@ -1,10 +1,44 @@
 ﻿# wujiang_game Project Map
 
+- 2026-10-16 `dev-jinchi` 合并 `master`：`engine/core.py::check_win_condition`复用已排除攻城建筑及待回场死体的`side_still_has_a_fighter`；地狱系行为夹具保留存活友军并修正无落格场景的实际占位，避免把终局判定误当回场失败。仅静态检查，动态验证仍按既定统一测试安排。
+
+- 2026-10-16 R304复跑七项六过：剩余死态光墙未进入结算源于`engine/core.py`连锁预付费后无条件活体检查；现付款前锁定已授权死态反应，活体付费致死仍取消。R305用户七项全过、三场AI已结束且零高信号，`tools/all_hero_deep_audit.py`读取带UTF-8 BOM设计档案时汇总崩溃，现用`utf-8-sig`并补审计工具场景。两项仅静态修复，R305原目录可`--resume`复用三场；公开池115/388、余273，未新增武将。
+
+- 2026-10-16 Phase H R305：设计档与问卷先锁源设计；heroes/excel_roster.py接当轮行动/本轮末破坏守卫龙、全场电磁场及逐次近域攻守层；engine/core.py::prepay_skill_resources统一分发实际正数付魔事件并在付费致死时停止技能；rooms/ai.py评估守卫龙本轮火力、天气双方损血和已在场天气下的付魔代价。后端召唤合法格预览供前端，NewBatch305NovaBehaviorTests七项静态写入；天气说明同步。R304用户七项五过，两项死态候选排序错误已静态修复；两批动态待用户验证。公开池115/388，剩余273；助手未运行动态测试。
+
+- 2026-10-16 已开发地狱系列R238/R239/R240/R242–R248：`engine/core.py`胜负判定不再把死后预约再临、古龙待复活权计为存活；仅猎人死亡当次已排队的即时救援可在终局判定前完成。敌方武将末才发生的技能死亡跳过同次末尾，等下一次敌方末再临。`rooms/ai.py`古龙献祭避开己方全灭组合，终局不再下复活指令；`rooms/multiplayer.py`终局不再把古龙复活权展示为可操作。`tests/test_behavior.py`补单将团灭、队友支撑、末尾死亡、猎人救援成功/失败及古龙权利与AI边界。源表R241尚未公开；规则见《通用规则》《武将说明》，仅静态检查，动态待用户验证。
+- 2026-10-15 Phase H R304妖仙。柳：源304、保存R304-Q001=b、通用光墙及破魔/死亡规则先锁设计。excel_roster.py接一场一次双人多格合法交换、破盾/魔免/回避与死态光墙；engine/core.py仅向经技能显式授权的死亡反应者开放连锁、仍不算在场单位；rooms/multiplayer.py与static/core/net.js把死态当前响应者交给玩家，rooms/ai.py按真实挡伤与换位净值决策，NewBatch304WillowBehaviorTests七项静态写入待用户运行。R303用户报告六项回归、三场AI均完成且零高信号；公开池114/388、未实现274。助手未运行动态测试。
+- 2026-10-15 Phase H R303昼行武者：源303与通用规则先锁JSON/XLSX四项歧义自裁，`excel_roster.py`实现跨本人轮同真实目标普攻额度、同轮目标锁、严格低半血技能免伤、有效普攻破魔封主动及通用实伤吸血；`engine/core.py`保留直调普攻的目标ID供锁定；`rooms/ai.py`评追猎、转火与实际回血，预览沿后端普攻候选；`NewBatch303DaylightHunterBehaviorTests`六项及三场AI已由用户跑通且零高信号。当批公开池113/388；R304已转独立批次实施。
+
+
+- 2026-10-15 R308续跑定位：R302三场、R308后两场完成且零高信号；R308首场第24步R035龙息AI探针击破R030，聚变爆炸在`on_owner_removed`内再次伤害并重入`cleanup_dead_units`。正在移除的R030还在`units`中，内层旧循环无法前进。`engine/core.py`死亡清理现跳过`_removal_in_progress`单位，`NewBatch302308`增加同阵容场景；根因归R030死亡特性与共享清理，不归牛鬼或希尔法。静态检查待用户`--resume`验证；公开池112/388、剩余276。
+
+- 2026-10-15 R308用户复跑：定向回归11/11、R302三场完成且零高信号；R308首场在第24步`building_decision`停滞，旧进度没有演员或动作，不能归责武将。`tools/match_audit.py`现在逐动作写演员/技能、逐步落盘轨迹并在慢步骤留调用栈；`tools/per_hero_ai_debug.py`逐场子进程，60秒无进度即终止该场并记录高信号，其他场继续。`tests/test_match_audit.py`补进度和停滞守护场景。仅静态核对，待用户`--resume`复跑定位真正耗时路径；公开池112/388，剩余276。
+
+- 2026-10-15 R302/R308首次专场：`reports/new-batch-302308-20261015/regression_tests.log`十一项十过，唯一失败的免费次数场景在真红非当前轮时断言普通飞跃可用，`Skill.can_use`合法拒绝行动；回归早停未运行AI。`NewBatch302308TrueRedDemonBehaviorTests`现先配置真红轮槽并正式开轮，下一轮用单位刷新检查免费额度。战斗与AI无本报告证据需改，公开池112/388，剩余276；静态修正待用户复跑。
+
+- 2026-10-15 Phase H R302/R308：三将源设计R302/R304/R308先锁JSON/XLSX，R304死亡后光墙反应链留独立批次。`heroes/excel_roster.py`接R302额外免费位移/落点双方特性爆破和R308双端链接/真死反噬；`rooms/ai.py`评真实落点友敌净值和链接留距，后端技能预览供前端；`NewBatch302308TrueRedDemonBehaviorTests`十一项待用户运行。R277/R290复跑10/10回归、6/6对局；其中5条高信号共因R187万魔殿天气评估给龙区域普攻传单体载荷，AI改按区域形状选格并加复现场景。公开池112/388，剩余276；助手仅静态检查。
+
+- 2026-10-14 R277/R290首次专场：`reports/new-batch-277290-20261014`十项中九过，一项乌鸦光环测试把通用0魔导弹误作付费技能；AI依失败早停未运行。源规则和R290设计要求禁止实际0费技能，战斗/AI无需改；`NewBatch277290TianyuanCrowBehaviorTests`已核费用并改为导弹应禁、1魔飞越可用。静态修正待用户新目录复跑，原日志保留。
+
+- 2026-10-14 Phase H R277/R290：R262/R263用户专场7项回归、6场AI均完成且零高信号。源277/290、保存R277-Q001和独立歧义先锁JSON/XLSX。`heroes/excel_roster.py`接累计骰点、八向走满点数格突破并破地形/逐点伤双方，及雀皇半魔外邻召鸦、乌鸦减速/禁实际零费、己鸦换位、身前6×6伤敌将后召鸦、空格普攻召鸦；`engine/core.py`提供消耗普攻后的非伤害空格处理入口，`rooms/ai.py`评路径友敌净值、乌鸦光环、位置和普攻机会成本。后端预览供前端选择；`NewBatch277290TianyuanCrowBehaviorTests`十项静态写入待用户运行。公开池110/388，剩余278。
+
+- 2026-10-14 Phase H R262/R263：源表与保存答案先锁设计JSON/XLSX；`excel_roster.py`新增鸟人王大羽毛扇双边净化/封技、剧毒羽毛吸魔自降守和鸟人结阵，冰帝绝对零度五轮暂停固有特性及位移、浮鹤城全场降范/独立1/2主动失败、破魔减伤。`engine/core.py`按持续状态暂停固有特性并让浮鹤城已付款失败动作跳过结算；`rooms/ai.py`评双方状态与天气净值，后端选择形状供前端使用。`NewBatch262263BirdIceBehaviorTests`七项静态写入待用户运行。R259/R260用户专场10项、六场均过且零高信号；公开池108/388，剩余280。
+
+- 2026-10-14 Phase H R259/R260：源表与保存答案先锁设计JSON/XLSX，再由`heroes/excel_roster.py`接八步穿人冲锋、路径巨盾补给、国王双费用战斧/改名骚扰/下一本人轮暴食；`engine/core.py`只对战斧取消免费格挡反击，野人不能连锁国王动作，其他反应保留；`rooms/ai.py`评双方路径与区域净值、落点风险和补血低速取舍。后端预览驱动落点与双费用线型，`NewBatch259260KnightKingBehaviorTests`十项静态写入，动态由用户运行。公开池106/388，剩余282。
 - 2026-10-13 Phase H R250/R252：用户报告中R248优化6/6回归、3场AI零高信号；R249/R251 6/7回归（一项`WitnessSkill`夹具漏说明参数已修）及6场AI零高信号。新将源文/保存答案/独立推断先锁JSON/XLSX；`heroes/excel_roster.py`接机械兽破魔撕咬五属性持续弱化、实际损血夺目标最后公开主动技、真击毁剥特性，以及机械巨人2×2、范5的2×2半破魔机械臂、实际回血后恰四格可选移动和仅技能伤害免疫；两者共用古代融合。`engine/core.py`记录真正声明的最近主动技能及一次性借技额度，`next_five.py`区域生成允许显式射程，`rooms/ai.py`计双方区域净值、夺技与弱化、回血条件和融合牺牲；通用飞跃4格错误对齐已锁3格。`NewBatch250252AncientBehaviorTests`八项待用户动态验证；公开池99/388，剩余289。
 
 - 2026-10-12 `dev-jinchi` 与 `master` BP 冲突合并：全体选择沿用 66 人池、系统禁级和等级预算，随机等级沿用逐轮抽级与可选同名规则；两种流程均抽特殊模式并在战斗界面展示。`multiplayer.py` 的同名可选完成性、合法等级缓存纳入本局池；`bp-ui.js` 的等级矩阵仅列本局池，补可展开池/禁级资料。`tests/test_behavior.py` 前端断言对齐矩阵界面；相关规则见 `docs/武将游戏规则.md` 和 `docs/BP特殊模式规则.md`。动态验证按现阶段约定待用户统一运行。
 
 Update this file after every new gameplay requirement or code change in `wujiang_game`. Keep entries concise and durable; do not paste full docs.
+
+- 2026-10-16 自走棋战斗动画：快速 AI 模拟原在 `Battle.record_visual_event` 屏蔽全部事件，观战前端无可播放数据。`rooms/autochess.py`仅对真实自走棋战斗开启有限视觉事件，AI 试算仍过滤；`autochess-ui.js`对攻击/技能从来源格到目标格播放轨迹及命中效果，首进观战补播最近事件，保持最近 24 事件快照。`rooms/multiplayer.py`所有配对结束后留约 1.6 秒最终战场，防高倍速跨过浏览器轮询。`AutoChessBehaviorTests`新增快模事件、试算隔离、最终画面时间场景；仅静态检查，待用户新局验证。
+
+- 2026-10-16 录像生命周期：所有房间的录像步骤只在内存中供本场回看；`replay.py` 不写文件，`GameRoom.__getstate__` 与 `AutoChessState.__getstate__` 从持久检查点排除录像/战斗 runner，自走棋交战中不存检查点，下一轮/删除房间释放。战绩仅留结果；历史回放 API 对有权限战绩返回 410。设置界面明确本场回看；对战运行时内存开销仍取决于回看档位，动态验证由用户执行。
+
+- 2026-10-16 自走棋经济与观战：`rooms/autochess.py::hero_cost` 按原生等级用二次加速价格 `1+ceil(29(n-1)^2/81)`，1～10 级为 1/2/3/5/7/10/14/19/24/30 金（替代原始斐波那契售价）；`_draw_shop` 的五个概率档仍按原生等级划分，另按玩家等级给已拥有武将 0～35% 独立回抽机会；装备每抽 10 金。观战快照公开当前生命/魔法/状态与最近 24 动作、80 行战报，`autochess-ui.js` 和 `hero-hover.js` 展示攻击者、目标、技能区域及武将当前状态。规则与场景见《自走棋模式规则》和 `AutoChessBehaviorTests`；动态验证由用户执行。
+
+- 2026-10-15 R024鼓舞重复目标：用户AI对局连续记录电子修理工厂“已受鼓舞，同名效果不叠加”。已锁R024设计要求同名不叠、AI只选新增有效目标；`FriedInspireSkill.can_use`现对已有鼓舞目标在付款前拒绝，`preview`同步剔除，通用AI `payload_is_legal`自动过滤重复候选。可继续对其他友军施放。R08行为场景补2×2工厂、玩家预览与AI过滤；静态检查，动态待用户运行。今后可重复支援技能应把当前无效目标排除在声明合法性与预览之外，不能仅在结算时记一次无效日志。
 
 - 2026-10-13 R253首份用户报告：`reports/new-batch-253-20261013/regression_tests.log`七项六过，一项AI评分场景漏导入`score_skill_payload`已补；非战斗/AI缺陷。`tools/all_hero_deep_audit.py`定向回归失败后保存完整日志与摘要并跳过耗时AI对局，`test_audit_review_packet.py`加失败早停场景。用户新目录复跑前仅静态检查，R253动态验收仍待完成。
 

@@ -5,13 +5,13 @@ import { state } from "../core/state.js";
 
 const REPLAY_OPTIONS = [
   ["off", "关闭"],
-  ["actions", "只记动作"],
-  ["full", "完整回放"],
+  ["actions", "仅记录动作"],
+  ["full", "本场回看"],
 ];
 
 const CHESS_REPLAY_OPTIONS = [
   ["off", "关闭"],
-  ["on", "打开"],
+  ["on", "本场回看"],
 ];
 
 const AI_OPTIONS = [

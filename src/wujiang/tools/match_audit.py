@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import random
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from wujiang.tactical.engine.core import ActionError, Battle, Position, QueuedAction, Unit
 from wujiang.tactical.heroes.registry import CLASSIC_BATTLE_MODE, create_battle
@@ -16,6 +18,7 @@ from wujiang.tactical.rooms import ai as ai_policy
 DEFAULT_AUDIT_DIR = Path("reports") / "match-audit"
 DEFAULT_MAX_STEPS = 120
 TRACE_CANDIDATE_LIMIT = 12
+SLOW_STEP_TRACE_SECONDS = 15
 
 
 @dataclass(slots=True)
@@ -104,21 +107,27 @@ def run_match_audit(
     progress_path = run_dir / "match_progress.json"
     started = time.perf_counter()
 
-    def record_progress(stage: str, current_step: int, decision: Optional[dict[str, Any]] = None) -> None:
-        payload = dict((decision or {}).get("payload") or {})
+    def record_progress(
+        stage: str,
+        current_step: int,
+        decision: Optional[dict[str, Any]] = None,
+        *,
+        actor: Optional[Unit] = None,
+        action: Optional[dict[str, Any]] = None,
+    ) -> None:
+        payload = dict((decision or {}).get("payload") or action or {})
         write_json(progress_path, {
             "stage": stage,
             "step": current_step,
             "max_steps": max_steps,
             "elapsed_seconds": round(time.perf_counter() - started, 3),
             "phase": current_phase(battle),
-            "action_type": payload.get("type"),
-            "skill_code": payload.get("skill_code"),
-            "actor": (decision or {}).get("actor"),
+            "action_type": payload.get("type") or (action or {}).get("kind"),
+            "skill_code": payload.get("skill_code") or (action or {}).get("code"),
+            "actor": (decision or {}).get("actor") or unit_ref(actor),
         })
 
     findings = FindingRecorder()
-    trace_events: list[dict[str, Any]] = []
     report_lines: list[str] = [
         "# Battle Audit Report",
         "",
@@ -132,9 +141,18 @@ def run_match_audit(
     ]
 
     step = 0
+    trace_path = run_dir / "trace.jsonl"
+    write_jsonl(trace_path, [])
+    slow_step_path = run_dir / "slow_step_stack.log"
     while battle.winner is None and step < max_steps:
         record_progress("building_decision", step)
-        decision = next_decision(battle, difficulty, findings, step=step)
+        with slow_step_trace(slow_step_path):
+            decision = next_decision(
+                battle, difficulty, findings, step=step,
+                progress_callback=lambda stage, actor, action: record_progress(
+                    stage, step, actor=actor, action=action,
+                ),
+            )
         if decision is None:
             findings.add(
                 severity="error",
@@ -146,8 +164,10 @@ def run_match_audit(
             )
             break
         record_progress("applying_action", step, decision)
-        event = apply_decision(battle, decision, findings, step)
-        trace_events.append(event)
+        with slow_step_trace(slow_step_path):
+            event = apply_decision(battle, decision, findings, step)
+        with trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
         report_lines.extend(report_lines_for_event(event))
         step += 1
         record_progress("step_complete", step, decision)
@@ -213,13 +233,11 @@ def run_match_audit(
         report_lines.append("- No findings recorded.")
 
     manifest_path = run_dir / "manifest.json"
-    trace_path = run_dir / "trace.jsonl"
     report_path = run_dir / "battle_report.md"
     findings_jsonl_path = run_dir / "findings.jsonl"
     findings_markdown_path = run_dir / "findings.md"
 
     write_json(manifest_path, manifest)
-    write_jsonl(trace_path, trace_events)
     report_path.write_text("\n".join(report_lines).rstrip() + "\n", encoding="utf-8")
     write_jsonl(findings_jsonl_path, findings.items)
     findings_markdown_path.write_text(render_findings_markdown(findings.items), encoding="utf-8")
@@ -248,12 +266,23 @@ def sanitize_label(value: str) -> str:
     return cleaned.strip("-") or "match"
 
 
+@contextmanager
+def slow_step_trace(path: Path) -> Iterable[None]:
+    with path.open("a", encoding="utf-8") as handle:
+        faulthandler.dump_traceback_later(SLOW_STEP_TRACE_SECONDS, repeat=True, file=handle)
+        try:
+            yield
+        finally:
+            faulthandler.cancel_dump_traceback_later()
+
+
 def next_decision(
     battle: Battle,
     difficulty: str,
     findings: FindingRecorder,
     *,
     step: int,
+    progress_callback: Optional[Callable[[str, Optional[Unit], Optional[dict[str, Any]]], None]] = None,
 ) -> Optional[dict[str, Any]]:
     try:
         damage_prompt = battle.pending_damage_choice
@@ -297,7 +326,9 @@ def next_decision(
                 "payload": {"type": "end_turn"},
                 "summary": "no current turn unit",
             }
-        return build_turn_bundle_decision(battle, difficulty, findings, step=step)
+        return build_turn_bundle_decision(
+            battle, difficulty, findings, step=step, progress_callback=progress_callback,
+        )
     except ActionError as exc:
         return build_fallback_decision(battle, f"decision ActionError: {exc}")
     except Exception as exc:
@@ -320,8 +351,11 @@ def build_turn_decision(
     findings: FindingRecorder,
     *,
     step: int,
+    progress_callback: Optional[Callable[[str, Optional[Unit], Optional[dict[str, Any]]], None]] = None,
 ) -> dict[str, Any]:
     profile = ai_policy.difficulty_profile(difficulty)
+    if progress_callback is not None:
+        progress_callback("turn_snapshot", actor, None)
     snapshot = battle.action_snapshot_for(actor)
     active_candidates: list[Any] = []
     move_candidates: list[Any] = []
@@ -330,6 +364,8 @@ def build_turn_decision(
     for action in snapshot.get("actions", []):
         if not action.get("available"):
             continue
+        if progress_callback is not None:
+            progress_callback("turn_action_diagnostic", actor, action)
         kind = str(action.get("kind") or "")
         diag = action_diagnostic(battle, actor, action, profile, instant_only=False)
         diagnostics.append(diag)
@@ -386,6 +422,7 @@ def build_turn_bundle_decision(
     findings: FindingRecorder,
     *,
     step: int,
+    progress_callback: Optional[Callable[[str, Optional[Unit], Optional[dict[str, Any]]], None]] = None,
 ) -> dict[str, Any]:
     actors = [unit for unit in battle.current_turn_bundle_units(include_banished=False) if unit.can_take_turn_actions(battle)]
     if not actors:
@@ -400,7 +437,13 @@ def build_turn_bundle_decision(
             "top_candidates": [],
             "action_diagnostics": [],
         }
-    decisions = [build_turn_decision(battle, actor, difficulty, findings, step=step) for actor in actors]
+    decisions = [
+        build_turn_decision(
+            battle, actor, difficulty, findings, step=step,
+            progress_callback=progress_callback,
+        )
+        for actor in actors
+    ]
     actionable = [decision for decision in decisions if dict(decision.get("payload") or {}).get("type") != "end_turn"]
     if not actionable:
         return decisions[0]

@@ -32,7 +32,7 @@ DEFAULT_REVIEW_STATE_PATH = Path("docs") / "武将符合性审查.json"
 
 
 def read_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:

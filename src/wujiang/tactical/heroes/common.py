@@ -1947,6 +1947,7 @@ class PassiveProtectionSkill(MultiTargetChainShieldSkill):
             if target.direct_effects_blocked():
                 continue
             target.shields += self.shield_amount
+            target.protection_shields += self.shield_amount
             battle.log(f"{target.name} 获得了 {self.shield_amount} 层护盾，持续到回合结束。")
 
     def react(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any], queued_action: QueuedAction) -> None:

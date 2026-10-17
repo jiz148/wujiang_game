@@ -94,7 +94,8 @@ def get_matches_replay(ctx: RequestContext) -> None:
         auth_error_response(handler, exc)
         return
     except MatchHistoryError as exc:
-        json_response(handler, HTTPStatus.NOT_FOUND, {"error": str(exc)})
+        status = HTTPStatus.GONE if "历史录像已取消" in str(exc) else HTTPStatus.NOT_FOUND
+        json_response(handler, status, {"error": str(exc)})
         return
     json_response(handler, HTTPStatus.OK, payload)
     return

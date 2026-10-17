@@ -32,7 +32,7 @@ class AutoChessConfig:
     bench_capacity: int = 8
     shop_slots: int = 5
     reroll_cost: int = 2
-    equipment_draw_cost: int = 5
+    equipment_draw_cost: int = 10
     equipment_slots: int = 3
     board_width: int = 10
     board_height: int = 10
@@ -90,7 +90,14 @@ def _hero_preview(hero: dict[str, Any]) -> dict[str, Any]:
 
 
 def hero_cost(level: int) -> int:
-    return max(1, min(5, (int(level) + 1) // 2))
+    """Convex native-level price: 1, 2, 3, 5, ... and level 10 costs 30."""
+    native_level = max(1, int(level))
+    distance = native_level - 1
+    return 1 + (29 * distance * distance + 80) // 81
+
+
+def owned_shop_chance(level: int) -> float:
+    return min(0.35, 0.05 * max(0, int(level) - 1))
 
 
 def live_units(battle: Battle, side: int) -> list[Any]:
@@ -129,6 +136,7 @@ def chess_timeout_result(battle: Battle) -> dict[str, Any]:
 def battle_observer_snapshot(battle: Battle) -> dict[str, Any]:
     """Only the fields used by the read-only chess board; avoid action previews."""
     units = []
+    known_units = {unit.unit_id: unit for unit in [*battle.all_units(), *battle.destroyed_units]}
     for unit in battle.all_units():
         if not unit.alive or unit.position is None or unit.banished:
             continue
@@ -137,17 +145,37 @@ def battle_observer_snapshot(battle: Battle) -> dict[str, Any]:
                       "position": unit.position.to_dict(), "alive": True, "banished": False,
                       "occupied_cells": [cell.to_dict() for cell in battle.unit_cells(unit)],
                       "hp": unit.current_hp, "max_hp": unit.max_health,
+                      "mana": unit.current_mana, "max_mana": unit.max_mana(),
+                      "stats": {key: unit.stat(key) for key in STATS},
+                      "statuses": [status.description or status.name for status in unit.statuses
+                                   if not isinstance(status, (SynergyStatus, EquipmentStatus))][-8:],
+                      "restrictions": [label for active, label in (
+                          (unit.cannot_move, "无法移动"), (unit.cannot_attack, "无法普攻"),
+                          (unit.cannot_use_skills, "无法施法"), (unit.cannot_heal, "无法治疗"),
+                          (unit.cannot_be_targeted, "无法成为目标"),
+                          (unit.magic_immunity, "魔法免疫"),
+                          (getattr(unit, "physical_immunity", False), "物理免疫"),
+                          (unit.total_shields() > 0, f"护盾 {unit.total_shields()}"),
+                          (unit.dodge_charges > 0, f"闪避次数 {unit.dodge_charges}")) if active],
                       "is_mount": unit.is_mount,
                       "mounted_on_unit_id": unit.mounted_on_unit_id,
                       "chess_star": int(getattr(unit, "chess_star", 0) or 0),
                       "chess_upgrades": {key: int(value) for key, value in dict(getattr(unit, "chess_upgrades", {}) or {}).items()},
                       "synergy_lines": [status.description for status in unit.statuses
                                        if isinstance(status, SynergyStatus) and status.tier]})
+    actions = []
+    for event in battle.visual_events[-24:]:
+        item = event.to_public_dict()
+        actor = known_units.get(event.actor_id)
+        item["actor_name"] = actor.name if actor else "战场效果"
+        item["target_names"] = [known_units[target_id].name for target_id in event.target_unit_ids
+                                if target_id in known_units]
+        actions.append(item)
     return {"board": {"width": battle.width, "height": battle.height},
             "round_number": battle.round_number, "winner": battle.winner,
-            "units": units, "logs": list(battle.logs),
+            "units": units, "logs": battle.logs[-80:], "actions": actions,
             "field_effects": [effect.to_public_dict(battle) for effect in battle.field_effects],
-            "visual_events": [event.to_public_dict() for event in battle.visual_events[-12:]]}
+            "visual_events": [event.to_public_dict() for event in battle.visual_events[-24:]]}
 
 
 @dataclass
@@ -203,6 +231,13 @@ class ChessMatch:
 
 
 class AutoChessState:
+    def __getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        # Battle runners contain live replay frames and remain memory-only.
+        state["matches"] = [ChessMatch(match.left, match.right, match.mirror, result=match.result)
+                            for match in self.matches]
+        return state
+
     def __init__(self, seat_count: int, *, seed: int | None = None) -> None:
         if seat_count not in (4, 8):
             _error("自走棋只支持 4 人或 8 人。")
@@ -251,17 +286,26 @@ class AutoChessState:
             _error("本轮已确认，不能继续更改。")
         return player
 
-    def _draw_shop(self, level: int) -> list[str]:
+    def _draw_shop(self, player: ChessPlayer) -> list[str]:
         catalog = hero_catalog()
         by_tier: list[list[str]] = [[] for _ in range(5)]
         for code, hero in catalog.items():
-            by_tier[hero_cost(int(hero["level"])) - 1].append(code)
+            # Shop odds retain their five native-level bands; prices are independent.
+            by_tier[min(4, (max(1, int(hero["level"])) - 1) // 2)].append(code)
         weights = [weight if by_tier[index] else 0
-                   for index, weight in enumerate(self.config.shop_weights[level - 1])]
+                   for index, weight in enumerate(self.config.shop_weights[player.level - 1])]
         if not any(weights):
             _error("当前没有可出售的公开武将。")
-        tiers = self.rng.choices(range(5), weights=weights, k=self.config.shop_slots)
-        return [self.rng.choice(by_tier[tier]) for tier in tiers]
+        owned = sorted({piece.code for piece in player.pieces if piece.code in catalog})
+        owned_chance = owned_shop_chance(player.level)
+        result = []
+        for _ in range(self.config.shop_slots):
+            if owned_chance and owned and self.rng.random() < owned_chance:
+                result.append(self.rng.choice(owned))
+            else:
+                tier = self.rng.choices(range(5), weights=weights, k=1)[0]
+                result.append(self.rng.choice(by_tier[tier]))
+        return result
 
     def start(self) -> None:
         if self.phase != "lobby":
@@ -290,7 +334,7 @@ class AutoChessState:
                 player.gold += self.config.base_income + min(
                     self.config.interest_cap, player.gold // self.config.interest_step)
             player.ready = False
-            player.shop = self._draw_shop(player.level)
+            player.shop = self._draw_shop(player)
         self.phase = "preparation"
         seconds = int(self.config.preparation_seconds or 0)
         self.deadline_at = time.time() + seconds if seconds > 0 else None
@@ -384,7 +428,7 @@ class AutoChessState:
         if player.gold < self.config.reroll_cost:
             _error("金币不足。")
         player.gold -= self.config.reroll_cost
-        player.shop = self._draw_shop(player.level)
+        player.shop = self._draw_shop(player)
         self._change()
 
     def level_up(self, seat_id: int) -> None:
@@ -598,8 +642,10 @@ class AutoChessState:
         runner.status = "battle"
         runner.fast_ai_simulation = True
         battle.fast_ai_simulation = True
+        # Keep lightweight attack/skill cues for spectators without disabling fast AI.
+        battle.record_live_visual_events = True
         from wujiang.platform.app_settings import autochess_replay_enabled, replay_recording
-        # 默认不记。打开设置后才按「对战记录」的档位存每一步，方便回看和训练。
+        # 默认不记；开启后仅在当前房间内存中保留步骤。
         if autochess_replay_enabled() and replay_recording() != "off":
             runner.replay_mode_name = "autochess"
             runner.record_fast_replay_steps = True
@@ -673,7 +719,7 @@ class AutoChessState:
         match.result["hero_kills"] = defeated_heroes
         runner = match.runner
         if runner is not None and getattr(runner, "replay", None) is not None and battle.winner is not None:
-            runner._ensure_replay_saved()
+            runner._finish_replay()
 
     def force_finish_open_matches(self) -> None:
         """End every unfinished fight in this round using the stall score.
@@ -841,6 +887,7 @@ class AutoChessState:
                                           if code else {})} for index, code in enumerate(player.shop)],
                                "equipment_inventory": list(player.equipment_inventory),
                                "equipment_drawn_this_round": player.equipment_drawn_round == self.round_number,
+                               "owned_shop_chance": owned_shop_chance(player.level),
                                "budget": self.config.level_budgets[player.level - 1],
                                "budget_used": self._budget_used(player),
                                "roster_capacity": self._roster_capacity(player, self.config.level_budgets[player.level - 1]),

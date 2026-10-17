@@ -9418,6 +9418,21 @@ body.battle-mode .board-piece.is-hero:not(.is-footprint):not(.is-mounted-rider):
 
 #autochess-screen { position: relative; }
 #chess-battle-vfx { z-index: 12; pointer-events: none; }
+.chess-vfx-trail {
+  position: absolute;
+  height: 7px;
+  border-radius: 999px;
+  transform-origin: left center;
+  background: linear-gradient(90deg, var(--vfx-core), var(--vfx-main));
+  box-shadow: 0 0 16px var(--vfx-glow);
+  animation: chess-vfx-travel 850ms ease-out forwards;
+}
+@keyframes chess-vfx-travel {
+  0% { opacity: 0; transform: scaleX(0); }
+  20% { opacity: 1; }
+  72% { opacity: 1; transform: scaleX(1); }
+  100% { opacity: 0; transform: scaleX(1); }
+}
 
 .battle-screen {
   position: relative;
@@ -10345,6 +10360,20 @@ body.battle-mode .chess-log__select {
   pointer-events: auto;
 }
 .chess-record .logs { max-height: none; }
+.chess-live-action {
+  position: absolute; left: 50%; bottom: 1rem; z-index: 8;
+  transform: translateX(-50%); max-width: min(70vw, 40rem);
+  padding: .55rem .85rem; border: 1px solid rgba(239, 204, 119, .65);
+  border-radius: .55rem; background: rgba(17, 25, 36, .92);
+  color: #fff0ca; text-align: center; font-weight: 700;
+  pointer-events: none; box-shadow: 0 4px 16px rgba(0, 0, 0, .35);
+}
+.chess-action-list { display: flex; flex-direction: column; gap: .35rem; }
+.chess-action-entry { padding: .4rem .55rem; border-left: 3px solid #d4a74f; background: rgba(212, 167, 79, .1); }
+.chess-action-entry.is-skill { border-left-color: #90b8ee; background: rgba(111, 159, 226, .12); }
+.autochess-battle-board .cell.is-chess-attack-target { box-shadow: inset 0 0 0 3px #e6aa4f; }
+.autochess-battle-board .cell.is-chess-skill-target { box-shadow: inset 0 0 0 3px #81b7fc; }
+.autochess-battle-board .cell.is-chess-action-source { outline: 3px solid #f5e495; outline-offset: -3px; }
 .autochess-board-piece.is-hostile .autochess-body-cell { border-color: #f0b4b4; background: rgba(122, 36, 36, .82); }
 .autochess-battle-log { max-height: 12rem; overflow: auto; font-size: .82rem; }
 .autochess-battle-log p, .autochess-history p { margin: .2rem 0; }

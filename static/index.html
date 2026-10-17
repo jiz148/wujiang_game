@@ -83,13 +83,13 @@
             <section id="settings-panel" class="flow-panel settings-panel hidden" aria-labelledby="settings-title">
               <h3 id="settings-title" class="visually-hidden">设置</h3>
               <div class="settings-row">
-                <span class="settings-row__label">对战记录</span>
-                <div id="settings-replay" class="settings-seg" role="group" aria-label="对战记录"></div>
+                <span class="settings-row__label">本场回看</span>
+                <div id="settings-replay" class="settings-seg" role="group" aria-label="本场回看"></div>
               </div>
               <div class="settings-row">
                 <div class="settings-row__text">
-                  <span class="settings-row__label">自走棋录像</span>
-                  <p class="settings-row__hint">默认关闭。打开后，自走棋里的每场战斗按上面的对战记录来记，方便回看，也能当训练数据。完整回放会让战斗变慢，文件也会变大。</p>
+                  <span class="settings-row__label">自走棋本场回看</span>
+                  <p class="settings-row__hint">默认关闭。打开后可在当前房间回看自走棋战斗；离开或开始下一场即释放录像，不保存文件。完整回看会增加战斗中的内存和计算负担。</p>
                 </div>
                 <div id="settings-chess-replay" class="settings-seg" role="group" aria-label="自走棋录像"></div>
               </div>
@@ -105,7 +105,7 @@
             <section id="library-panel" class="library-panel flow-panel hidden">
               <aside class="library-nav" aria-label="数据库">
                 <button id="library-tab-heroes" class="library-nav__item is-on" type="button">武将列表</button>
-                <button id="library-tab-replays" class="library-nav__item" type="button">回放</button>
+                <button id="library-tab-replays" class="library-nav__item" type="button">战绩</button>
               </aside>
               <div class="library-main">
                 <div id="library-heroes" class="library-heroes">
@@ -146,7 +146,7 @@
               <!-- 标题由页头承担。这一层只留操作与一条补充说明的悬浮提示。 -->
               <div class="section-head recent-matches-head">
                 <h3 id="recent-matches-title" class="visually-hidden">最近战绩与回放</h3>
-                <button type="button" class="hint" aria-label="战绩说明">i<span class="hint__bubble">历史回放只对实际参战的账号开放。</span></button>
+                <button type="button" class="hint" aria-label="战绩说明">i<span class="hint__bubble">这里保留比赛结果；逐步回看只在当前房间可用。</span></button>
                 <button id="refresh-recent-matches" class="ghost" type="button">刷新战绩</button>
               </div>
               <div id="recent-matches-message" class="meta-note"></div>
