@@ -1,5 +1,7 @@
 ﻿# wujiang_game Project Map
 
+- 2026-10-16 `dev-jinchi` 合并 `master`：`engine/core.py::check_win_condition`复用已排除攻城建筑及待回场死体的`side_still_has_a_fighter`；地狱系行为夹具保留存活友军并修正无落格场景的实际占位，避免把终局判定误当回场失败。仅静态检查，动态验证仍按既定统一测试安排。
+
 - 2026-10-16 R304复跑七项六过：剩余死态光墙未进入结算源于`engine/core.py`连锁预付费后无条件活体检查；现付款前锁定已授权死态反应，活体付费致死仍取消。R305用户七项全过、三场AI已结束且零高信号，`tools/all_hero_deep_audit.py`读取带UTF-8 BOM设计档案时汇总崩溃，现用`utf-8-sig`并补审计工具场景。两项仅静态修复，R305原目录可`--resume`复用三场；公开池115/388、余273，未新增武将。
 
 - 2026-10-16 Phase H R305：设计档与问卷先锁源设计；heroes/excel_roster.py接当轮行动/本轮末破坏守卫龙、全场电磁场及逐次近域攻守层；engine/core.py::prepay_skill_resources统一分发实际正数付魔事件并在付费致死时停止技能；rooms/ai.py评估守卫龙本轮火力、天气双方损血和已在场天气下的付魔代价。后端召唤合法格预览供前端，NewBatch305NovaBehaviorTests七项静态写入；天气说明同步。R304用户七项五过，两项死态候选排序错误已静态修复；两批动态待用户验证。公开池115/388，剩余273；助手未运行动态测试。
