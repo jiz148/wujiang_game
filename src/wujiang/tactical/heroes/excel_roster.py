@@ -65,12 +65,26 @@ from wujiang.tactical.heroes.common import (
     match_payload_pattern,
     pattern_signature,
     pattern_selection_preview,
+    payload_cells,
     payload_position,
     payload_target_unit,
     payload_target_units,
     positions_to_dict,
 )
 from wujiang.tactical.heroes.excel_roster_data import EXCEL_HERO_SPECS
+from wujiang.tactical.heroes.storm_spirit import (
+    AfterimageSkill, ElectronicStormSkill, LightningChainSkill, StormSpiritTrait,
+)
+from wujiang.tactical.heroes.fisher_garden_demon import (
+    BlackNightShadowSkill, BlackTransformationSkill, EnterDarknessSkill,
+    FisherGrowthTrait, FisherStealthSkill, GaleHalberdSkill, GardenSkillFeastTrait,
+)
+from wujiang.tactical.heroes.flame_manager import (
+    ChimeraSkill, FireWallSkill, FlameManagerAttackCountTrait, FlamePasswordSkill,
+)
+from wujiang.tactical.heroes.wyvern_raider import (
+    NightSkyPartySkill, WyvernMountedStartTrait, WyvernRiderCombatTrait, WyvernSkill,
+)
 from wujiang.tactical.heroes.next_five import (
     ArcAttackTrait,
     DeclaredAreaSkillMixin,
@@ -10518,7 +10532,30 @@ class SolarJudgmentSkill(Skill):
         return remote_rectangle_patterns(battle, actor, 10, 10)
 
     def chosen_cells(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
-        return battle.payload_positions(payload, "declared_area_cells") or match_payload_pattern(payload, self.patterns(battle, actor))
+        declared = battle.payload_positions(payload, "declared_area_cells")
+        if declared:
+            return declared
+        chosen = payload_cells(payload)
+        xs = {cell.x for cell in chosen}
+        ys = {cell.y for cell in chosen}
+        invalid = ActionError("所选格子不符合该技能的形状要求。")
+        if (actor.position is None or any(not battle.in_bounds(cell) for cell in chosen)
+                or len(chosen) != len(xs) * len(ys)
+                or max(xs) - min(xs) + 1 != len(xs)
+                or max(ys) - min(ys) + 1 != len(ys)):
+            raise invalid
+        x_bounds = (min(xs), max(xs))
+        y_bounds = (min(ys), max(ys))
+        if not any((max(0, start), min(battle.width - 1, start + 9)) == x_bounds
+                   for start in range(-9, battle.width)):
+            raise invalid
+        if not any((max(0, start), min(battle.height - 1, start + 9)) == y_bounds
+                   for start in range(-9, battle.height)):
+            raise invalid
+        range_limit = actor.targeting_range()
+        if not any(battle.unit_distance_to_cell(actor, cell) <= range_limit for cell in chosen):
+            raise invalid
+        return sorted(chosen, key=lambda cell: (cell.x, cell.y))
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         cells = self.chosen_cells(battle, actor, payload)
@@ -10565,7 +10602,9 @@ class SolarJudgmentSkill(Skill):
     def queued_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
         return {
             "ignore_magic_immunity": True,
-            "declared_area_cells": positions_to_dict(match_payload_pattern(payload, self.patterns(battle, actor))),
+            # Declaration metadata must be derived from the actual selected cells,
+            # never from an untrusted caller-supplied frozen-area field.
+            "declared_area_cells": positions_to_dict(self.chosen_cells(battle, actor, {"cells": payload.get("cells")})),
         }
 
 
@@ -15979,6 +16018,37 @@ class NovaManaReactionTrait(Trait):
 def _special_skill_factory(spec: dict[str, Any], fragment: dict[str, Any]) -> Skill | None:
     name = _text(fragment.get("name"))
     source = _text(fragment.get("fragment"))
+    if spec.get("code") == "excel_r322":
+        if name == "火墙":
+            return FireWallSkill()
+        if name == "奇美拉":
+            return ChimeraSkill()
+        if name == "火焰密码":
+            return FlamePasswordSkill()
+    if spec.get("code") == "excel_r323":
+        if name == "翼龙":
+            return WyvernSkill()
+        if name == "夜空派对":
+            return NightSkyPartySkill()
+    if spec.get("code") == "excel_r320":
+        if name == "神风之戟":
+            return GaleHalberdSkill()
+        if name == "潜行":
+            return FisherStealthSkill()
+    if spec.get("code") == "excel_r321":
+        if name == "黑魔化":
+            return BlackTransformationSkill()
+        if name == "黑夜魔影":
+            return BlackNightShadowSkill()
+        if name == "入魔":
+            return EnterDarknessSkill()
+    if spec.get("code") == "excel_r306":
+        if name == "电子风暴":
+            return ElectronicStormSkill()
+        if name == "残影":
+            return AfterimageSkill()
+        if name == "雷电锁链":
+            return LightningChainSkill()
     if spec.get("code") == "excel_r305":
         if name == "离子盾":
             return IonShieldSkill()
@@ -16506,7 +16576,19 @@ def _common_trait_factory(fragment: dict[str, Any]) -> Trait | None:
 
 
 def _special_trait_factory(spec: dict[str, Any], fragment: dict[str, Any]) -> Trait | None:
+    if spec.get("code") == "excel_r322" and "每个进攻回合开始时当回合攻击次数增加" in _text(fragment.get("fragment")):
+        return FlameManagerAttackCountTrait()
+    if spec.get("code") == "excel_r323" and "此单位位移时对周围和经过" in _text(fragment.get("fragment")):
+        return WyvernRiderCombatTrait()
     text = _text(fragment.get("fragment"))
+    if spec.get("code") == "excel_r320" and (
+            "1/2几率" in text or "每破坏一个武将" in text
+            or "在“暴雨”或“大海”" in text or "飞跃，回避不费魔" in text):
+        return FisherGrowthTrait()
+    if spec.get("code") == "excel_r321" and "对方单位使用技能" in text:
+        return GardenSkillFeastTrait()
+    if spec.get("code") == "excel_r306" and text == "魔上限15":
+        return StormSpiritTrait()
     if spec.get("code") == "excel_r305" and "周围7*7内对方单位使用魔时" in text:
         return NovaManaReactionTrait()
     if spec.get("code") == "excel_r304" and "被破坏的状态" in text:
@@ -16807,6 +16889,8 @@ def _make_build_traits(spec: dict[str, Any]) -> Callable[[AbstractHero], list[Tr
         if spec.get("code") == "excel_r253" and "机械马开局乘骑" not in seen_names:
             traits.append(AncientMechanicalHorseStartTrait())
             seen_names.add("机械马开局乘骑")
+        if spec.get("code") == "excel_r323":
+            traits.extend([AttackManaDrainTrait(), WyvernMountedStartTrait()])
         if spec.get("code") == "excel_r303" and "攻击吸血" not in seen_names:
             traits.append(AttackLifeStealTrait())
         if spec.get("code") == "excel_r034" and "浮游炮回补" not in seen_names:
@@ -16832,7 +16916,7 @@ def _hero_class_from_spec(spec: dict[str, Any]) -> type[AbstractHero]:
             defense=float(spec["defense"]),
             speed=float(spec["speed"]),
             attack_range=float(spec["range"]),
-            mana=float(spec["mana"]),
+            mana=15.0 if spec.get("code") == "excel_r306" else float(spec["mana"]),
         ),
         "raw_skill_text": spec["raw_skill_text"],
         "raw_trait_text": spec["raw_trait_text"],
@@ -16847,7 +16931,7 @@ def _hero_class_from_spec(spec: dict[str, Any]) -> type[AbstractHero]:
         attrs["footprint_height"] = height
         attrs["entry_footprint_width"] = width
         attrs["entry_footprint_height"] = height
-    if spec.get("code") in {"excel_r032", "excel_r253"}:
+    if spec.get("code") in {"excel_r032", "excel_r253", "excel_r323"}:
         # 骑士开场会在自己的锚点召唤 1*2 坐骑。编队落位必须提前
         # 为坐骑预留第二格，否则紧凑战场上的下一名队友会与坐骑重叠。
         attrs["entry_footprint_width"] = 1
@@ -16948,6 +17032,11 @@ IMPLEMENTED_EXCEL_HERO_CODES: frozenset[str] = frozenset(
         "excel_r303",
         "excel_r304",
         "excel_r305",
+        "excel_r306",
+        "excel_r320",
+        "excel_r321",
+        "excel_r322",
+        "excel_r323",
         "excel_r308",
         "excel_r326",
         "excel_r327",

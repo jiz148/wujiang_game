@@ -99,7 +99,7 @@ export function openRoomSetup() {
     bpLevelCap: String(state.room.bp?.level_cap || 15),
     bpLevelCaps: {...(state.room.bp?.level_caps || {3: 15, 5: 25})},
     bpShowWinCount: state.room.bp?.show_win_count !== false,
-    bpFormat: state.room.bp?.format === "tier" ? "tier" : "full",
+    bpFormat: state.room.bp?.format === "full" ? "full" : "tier",
     bpAllowSameHero: Boolean(state.room.bp?.allow_same_hero),
     bpTierPool: Array.isArray(state.room.bp?.tier_pool) && state.room.bp.tier_pool.length
       ? state.room.bp.tier_pool.map(Number)
@@ -230,7 +230,7 @@ export async function confirmRoomSetup() {
   const nextBpTeamSize = Number(draft.bpTeamSize) === 5 ? 5 : 3;
   const nextBpLevelCap = Math.max(1, Math.min(50, Number.parseInt(draft.bpLevelCap, 10) || nextBpTeamSize * 5));
   const nextBpShowWinCount = Boolean(draft.bpShowWinCount);
-  const nextBpFormat = draft.bpFormat === "tier" ? "tier" : "full";
+  const nextBpFormat = draft.bpFormat === "full" ? "full" : "tier";
   const nextBpAllowSameHero = Boolean(draft.bpAllowSameHero);
   const nextBpTierPool = [...new Set((draft.bpTierPool || []).map(Number))].filter((level) => level >= 1 && level <= 10).sort((left, right) => left - right);
   const nextBpTierRounds = Math.max(1, Math.min(12, Number.parseInt(draft.bpTierRounds, 10) || 3));
@@ -250,7 +250,7 @@ export async function confirmRoomSetup() {
     nextBpTeamSize !== Number(state.room?.bp?.team_size || 3)
     || nextBpLevelCap !== Number(state.room?.bp?.level_cap || 15)
     || nextBpShowWinCount !== Boolean(state.room?.bp?.show_win_count)
-    || nextBpFormat !== (state.room?.bp?.format === "tier" ? "tier" : "full")
+    || nextBpFormat !== (state.room?.bp?.format === "full" ? "full" : "tier")
     || nextBpAllowSameHero !== Boolean(state.room?.bp?.allow_same_hero)
     || nextBpTierPool.join(",") !== (state.room?.bp?.tier_pool || [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]).map(Number).sort((left, right) => left - right).join(",")
     || nextBpTierRounds !== Math.max(1, Math.min(12, Number(state.room?.bp?.tier_rounds) || 3))
@@ -420,7 +420,7 @@ export function renderRoomSetupDialog() {
   const randomControl = $("random-roster-size-control");
   const randomInput = $("random-roster-size-input");
   randomControl?.classList.toggle("hidden", draft.mode !== "random");
-  const bpFormat = draft.bpFormat === "tier" ? "tier" : "full";
+  const bpFormat = draft.bpFormat === "full" ? "full" : "tier";
   const bpMode = draft.mode === "bp";
   $("setup-block-bp")?.classList.toggle("hidden", !bpMode);
   $("setup-block-rule")?.classList.toggle("hidden", !bpMode);

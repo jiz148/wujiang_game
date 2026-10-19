@@ -107,7 +107,7 @@ ROOM_MODES: dict[str, dict[str, str]] = {
     },
     "bp": {
         "name": "BP模式",
-        "description": "全体选择从66名武将池中禁选并随机禁两个等级；随机等级逐轮抽等级。每局随机特殊模式，支持3v3和5v5。",
+        "description": "默认标准模式（等级随机规则）逐轮抽等级；沙盒模式（全局选择规则）从66名武将池中禁选。每局启用特殊模式，支持3v3和5v5。",
     },
     "autochess": {
         "name": "自走棋",
@@ -122,6 +122,10 @@ class RoomError(Exception):
 
 BP_FORMAT_FULL = "full"
 BP_FORMAT_TIER = "tier"
+BP_FORMAT_NAMES = {
+    BP_FORMAT_TIER: "标准模式（等级随机规则）",
+    BP_FORMAT_FULL: "沙盒模式（全局选择规则）",
+}
 BP_TIER_LEVELS = tuple(range(1, 11))
 BP_TIER_ROUNDS = 3
 BP_TIER_ROUNDS_MIN = 1
@@ -131,7 +135,7 @@ BP_TIER_ROUNDS_MAX = 12
 def bp_tier_round_shape(hero_count: int, *, allow_same_hero: bool = False) -> Optional[tuple[int, int]]:
     """一个等级这一轮，双方各禁几个、各选 1 个。
 
-    随机等级是一轮一轮选人，每边每轮只选一名。禁用会从公共池里拿掉武将。
+    标准模式（等级随机规则）是一轮一轮选人，每边每轮只选一名。禁用会从公共池里拿掉武将。
     人够双方各禁 2 再各选 1，就禁 2；只够各禁 1，就禁 1；再少就不禁。
     不允许重复时，选取也会拿走武将，所以至少要 2 人才能开这一轮。
     返回 None 表示这个等级已经不够双方各拿到一名。
@@ -175,12 +179,16 @@ def normalize_bp_format(value: Any) -> str:
     aliases = {
         "full": BP_FORMAT_FULL,
         "全体选择": BP_FORMAT_FULL,
+        "沙盒模式": BP_FORMAT_FULL,
+        "沙盒模式（全局选择规则）": BP_FORMAT_FULL,
         "tier": BP_FORMAT_TIER,
         "随机等级": BP_FORMAT_TIER,
+        "标准模式": BP_FORMAT_TIER,
+        "标准模式（等级随机规则）": BP_FORMAT_TIER,
     }
     mapped = aliases.get(text)
     if mapped is None:
-        raise RoomError("BP 类型只能是全体选择或随机等级。")
+        raise RoomError("BP 类型只能是标准模式（等级随机规则）或沙盒模式（全局选择规则）。")
     return mapped
 
 
@@ -965,6 +973,12 @@ def _ensure_autochess_worker(room: "GameRoom") -> None:
         thread.start()
 
 
+def _autochess_step_delay(speed: float, active_matches: int) -> float:
+    # A speed setting describes each board's cadence. Do not charge a full
+    # board interval after every board in the sequential round-robin loop.
+    return max(0.05, 0.9 / max(speed, 0.1) / max(1, active_matches))
+
+
 def _autochess_battle_worker(room: "GameRoom") -> None:
     """Step chess fights beside the request threads.
 
@@ -995,7 +1009,7 @@ def _autochess_battle_worker(room: "GameRoom") -> None:
                     chess.next_match_cursor = cursor + 1
                     chess._advance_match(match)
                 speed = float(getattr(room, "chess_battle_speed", DEFAULT_SIMULATION_SPEED) or DEFAULT_SIMULATION_SPEED)
-            time.sleep(max(0.05, 0.9 / max(speed, 0.1)))
+            time.sleep(_autochess_step_delay(speed, len(pending)))
     finally:
         if getattr(room, "_closed", False):
             room.autochess = None
@@ -1023,7 +1037,7 @@ class GameRoom:
         self.bp_wins = {1: 0, 2: 0}
         self.bp_counted_match_ids: set[str] = set()
         self.bp_captains: dict[int, int] = {}
-        self.bp_format = BP_FORMAT_FULL
+        self.bp_format = BP_FORMAT_TIER
         self.bp_allow_same_hero = False
         self.bp_tier_pool = BP_TIER_LEVELS
         self.bp_tier_rounds = BP_TIER_ROUNDS
@@ -1759,7 +1773,7 @@ class GameRoom:
             "total_levels": {team: self._bp_total_level(team) for team in TEAM_IDS},
             "captains": dict(self.bp_captains),
             "format": self.bp_format,
-            "format_name": "随机等级" if self.bp_format == BP_FORMAT_TIER else "全体选择",
+            "format_name": BP_FORMAT_NAMES[self.bp_format],
             "allow_same_hero": bool(self.bp_allow_same_hero),
             "tier_pool": list(self.bp_tier_pool),
             "tier_rounds": int(self.bp_tier_rounds),

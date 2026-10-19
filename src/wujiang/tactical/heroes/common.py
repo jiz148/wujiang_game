@@ -3,6 +3,8 @@
 import random
 from typing import Any, Optional
 
+from wujiang.tactical.engine.geometry import localized_line_coordinates
+
 from wujiang.tactical.engine.core import (
     ActionMiss,
     ActionError,
@@ -159,6 +161,13 @@ def localized_line_patterns(
     if origin is None or length <= 0:
         return []
     radius = length if max_distance is None else max_distance
+    # Custom bounds/distance behavior retains the original virtual queries.
+    if (type(origin) is Position and type(origin.x) is int and type(origin.y) is int
+            and getattr(battle.in_bounds, "__func__", None) is Battle.in_bounds):
+        coordinates = localized_line_coordinates(battle.width, battle.height, origin.x, origin.y,
+                                                 directions, length, radius, touch_distance)
+        if coordinates is not None:
+            return [[Position(x, y) for x, y in cells] for cells in coordinates]
     patterns: list[list[Position]] = []
     seen: set[tuple[tuple[int, int], ...]] = set()
     for direction in directions:
@@ -2062,7 +2071,7 @@ class BackstepShotSkill(Skill):
         super().__init__(
             "backstep_shot",
             "撤步射击",
-            "被动技能：费 0.5 魔，连锁速度 2，被敌方普攻或技能影响时先由玩家选择一个直线穿人的 2 格撤步落点；随后可选择是否只反击连锁来源的对象。",
+            "被动技能：费 0.5 魔，连锁速度 2，受到敌方动作影响时先由玩家选择一个直线穿人的 2 格撤步落点；随后可选择是否只反击连锁来源的对象。",
             mana_cost=0.5,
             max_uses_per_turn=2,
             timing="passive",
@@ -2075,8 +2084,8 @@ class BackstepShotSkill(Skill):
         ok, reason = super().can_react_to(battle, actor, queued_action)
         if not ok:
             return ok, reason
-        if queued_action.source_player_id == actor.player_id or queued_action.action_type not in {"attack", "skill"}:
-            return False, "撤步射击只能响应敌方普攻或技能。"
+        if queued_action.source_player_id == actor.player_id:
+            return False, "只能连锁敌方动作。"
         if actor.unit_id not in queued_action.target_unit_ids:
             return False, "当前动作没有影响到自己。"
         if not self.retreat_cells(battle, actor):

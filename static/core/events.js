@@ -666,7 +666,7 @@ export function fallbackRoomModes() {
     {
       code: "bp",
       name: "BP模式",
-      description: "两人轮流禁选。全体选择沿用等级上限；随机等级每一轮抽一个点数。",
+      description: "两人轮流禁选。默认标准模式（等级随机规则）逐轮抽等级；沙盒模式（全局选择规则）从本局武将池中禁选。",
     },
     {
       code: "autochess",
@@ -1408,7 +1408,7 @@ export function renderRoomPanels() {
 
   const modeMeta = roomModeMeta();
   $("room-mode-label").textContent = state.room.mode === "bp"
-    ? `BP · ${state.room.bp?.format === "tier" ? "随机等级" : "全体选择"}`
+    ? `BP · ${state.room.bp?.format === "full" ? "沙盒模式（全局选择规则）" : "标准模式（等级随机规则）"}`
     : modeMeta.name;
   const ruleFact = $("room-bp-rule-fact");
   if (ruleFact) {

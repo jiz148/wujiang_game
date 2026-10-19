@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from abc import ABC
-from itertools import count
 from typing import Optional
+
+from wujiang.platform.id_sequence import IdSequence
 
 from wujiang.tactical.engine.core import HeroUnit, Stats
 
 
-_unit_counter = count(1)
+_unit_counter = IdSequence(1)
 
 
 def build_unit_id(prefix: str) -> str:
