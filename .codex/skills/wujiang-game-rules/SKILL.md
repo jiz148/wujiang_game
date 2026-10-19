@@ -9,6 +9,8 @@ Use this skill as the always-on project onboarding and maintenance workflow for 
 
 ## Mandatory Workflow
 
+Before selecting any "new" hero, run the static candidate gate `python tools/check_new_hero_candidates.py <codes>` and confirm each code is absent from `IMPLEMENTED_EXCEL_HERO_CODES`. Cross-check the existing design archive and hero description too; source-row proximity is never evidence of implementation status. If a candidate is already public, stop that candidate's new-hero workflow and preserve its existing design baseline.
+
 1. Read `references/project-map.md` at the start of any hero, rule, battle-engine, or gameplay UI task.
 2. Read `docs/产品开发路线图.md` before planning or implementing any new player-visible feature. Treat its active Phase, pause list, exit gates, and definition of done as the default product priority. Do not implement a later-Phase feature unless the user explicitly overrides the roadmap, or the work is a rule/stability/security fix allowed by the roadmap. Update the roadmap when Phase status, scope, gates, or priority changes.
 3. Read `references/hero-rule-index.md` when the task involves a specific hero, skill, trait, or current implementation lookup.

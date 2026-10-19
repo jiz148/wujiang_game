@@ -274,7 +274,10 @@ def analyze_target(
     findings: list[dict[str, Any]],
     design: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    expectations = dict((design or {}).get("audit_expectations") or {})
+    raw_expectations = (design or {}).get("audit_expectations")
+    # Older and newly locked design records may use a prose audit note here.
+    # Structured tracking fields are optional; prose must not abort the report.
+    expectations = raw_expectations if isinstance(raw_expectations, dict) else {}
     related_codes = set(str(code) for code in expectations.get("related_actor_codes", []) if code)
     related_codes.add(target)
     related_names = {str(hero.get("name") or "")}
@@ -467,6 +470,7 @@ def render_hero_review(review: dict[str, Any]) -> str:
             ("关键规则", "key_rules"),
             ("预期信号", "expected_signals"),
             ("风险反模式", "risk_patterns"),
+            ("专场审计关注点", "audit_expectations"),
         ):
             lines.extend([f"### {label}", "", str(design.get(key) or "（未记录）"), ""])
     else:

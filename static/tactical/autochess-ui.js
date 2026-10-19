@@ -16,6 +16,18 @@ let actionError = '';
 let messageRound = 0;
 let serverClockOffset = 0;
 let lastServerTimestamp = 0;
+let lastChessPanelKey = '';
+
+function chessPanelRenderKey(chess) {
+  // Poll timestamps change while the battle frame stays the same. Include all
+  // room data and local controls so only truly unchanged battle panels reuse DOM.
+  return JSON.stringify([
+    {...state.room, autochess: {...chess, server_time: 0}},
+    selectedPieceId, selectedHeroCode, selectedMatchIndex, watchSeatId,
+    actionMessage, actionError, messageRound, chessDock, logMatchKey,
+    leftDockOpen, rightDockOpen, pieceView,
+  ]);
+}
 
 function selectedHero(chess) {
   const me = chess.players.find((player) => player.seat_id === chess.viewer_id);
@@ -786,7 +798,18 @@ export function renderAutoChessPanel() {
   if (chess && focused && panel.contains(focused) && (focused.classList.contains('chess-speed__select') || focused.classList.contains('chess-log__select'))) return;
   panel.classList.toggle('hidden', !chess);
   if (!chess) {
+    lastChessPanelKey = '';
     hideHeroHover();
+    return;
+  }
+  if (Number(chess.server_time) && Number(chess.server_time) !== lastServerTimestamp) {
+    lastServerTimestamp = Number(chess.server_time);
+    serverClockOffset = Date.now() / 1000 - lastServerTimestamp;
+  }
+  if (chess.phase === 'battle' && panel.firstElementChild && chessPanelRenderKey(chess) === lastChessPanelKey) {
+    updateCountdown();
+    paintChessCamera();
+    paintChessBattleEffects(chess);
     return;
   }
   hideHeroHover();
@@ -799,10 +822,6 @@ export function renderAutoChessPanel() {
     dock: chessDock,
   } : null;
   panel.replaceChildren();
-  if (Number(chess.server_time) && Number(chess.server_time) !== lastServerTimestamp) {
-    lastServerTimestamp = Number(chess.server_time);
-    serverClockOffset = Date.now() / 1000 - lastServerTimestamp;
-  }
   const living = chess.players.filter((player) => !player.eliminated);
   const readyCount = living.filter((player) => player.ready).length;
   const me = chess.players.find((player) => player.seat_id === chess.viewer_id);
@@ -900,6 +919,14 @@ export function renderAutoChessPanel() {
   }
   updateCountdown();
   paintChessCamera();
+  paintChessBattleEffects(chess);
+  lastChessPanelKey = chess.phase === 'battle' ? chessPanelRenderKey(chess) : '';
+}
+
+function paintChessBattleEffects(chess) {
+  const panel = $('autochess-panel');
+  const me = chess.players.find((player) => player.seat_id === chess.viewer_id);
+  const focus = chess.players.find((player) => player.seat_id === watchSeatId) || me;
   const watched = (chess.matches || []).find((item) => item.left === focus?.seat_id || item.right === focus?.seat_id) || chess.matches?.[0];
   const stage = panel.querySelector('.autochess-board-stage');
   if (chess.phase === 'battle' && stage && watched?.battle) {

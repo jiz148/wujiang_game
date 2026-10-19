@@ -20,6 +20,7 @@ from wujiang.tactical.engine.core import (
     Trait,
 )
 from wujiang.tactical.engine.army import is_army_soldier
+from wujiang.tactical.engine.geometry import rectangle_pattern_coordinates
 from wujiang.tactical.heroes.base import AbstractHero
 from wujiang.tactical.heroes.common import (
     AttackCountTrait,
@@ -136,17 +137,20 @@ def remote_rectangle_patterns(battle: Battle, actor: HeroUnit, width: int, heigh
         return []
     patterns: list[list[Position]] = []
     seen: set[tuple[tuple[int, int], ...]] = set()
+    range_limit = attack_range if attack_range is not None else actor.targeting_range()
+    in_range = {(cell.x, cell.y) for cell in battle.cells_within_distance(actor, range_limit)}
+    coordinates = rectangle_pattern_coordinates(battle.width, battle.height, width, height, in_range)
+    if coordinates is not None:
+        return [[Position(x, y) for x, y in cells] for cells in coordinates]
     for start_x in range(1 - width, battle.width):
         for start_y in range(1 - height, battle.height):
             cells: list[Position] = []
             contains_range_cell = False
-            for dx in range(width):
-                for dy in range(height):
-                    cell = Position(start_x + dx, start_y + dy)
-                    if not battle.in_bounds(cell):
-                        continue
+            for x in range(max(0, start_x), min(battle.width, start_x + width)):
+                for y in range(max(0, start_y), min(battle.height, start_y + height)):
+                    cell = Position(x, y)
                     cells.append(cell)
-                    if battle.unit_distance_to_cell(actor, cell) <= (attack_range if attack_range is not None else actor.targeting_range()):
+                    if (x, y) in in_range:
                         contains_range_cell = True
             if not cells or not contains_range_cell:
                 continue
@@ -4655,14 +4659,7 @@ class ChanterCardSkill(Skill):
     def selectable_centers(self, battle: Battle, actor: HeroUnit) -> list[Position]:
         if actor.position is None:
             return []
-        cells: list[Position] = []
-        for x in range(battle.width):
-            for y in range(battle.height):
-                cell = Position(x, y)
-                if battle.unit_distance_to_cell(actor, cell) <= actor.targeting_range():
-                    cells.append(cell)
-        cells.sort(key=lambda cell: (cell.y, cell.x))
-        return cells
+        return battle.cells_within_distance(actor, actor.targeting_range())
 
     def queued_payload_metadata(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> dict[str, Any]:
         return {"declared_card_center": positions_to_dict([self.selected_center(battle, actor, payload)])}

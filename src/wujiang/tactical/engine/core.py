@@ -1,15 +1,20 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
+from abc import ABC, ABCMeta, abstractmethod
 from collections import deque
 from copy import deepcopy
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 import heapq
 from itertools import count
+from functools import lru_cache
 import random
 import weakref
+from types import GetSetDescriptorType
 from typing import Any, Callable, Iterable, Literal, Optional
+
+from wujiang.platform.id_sequence import IdSequence
+from wujiang.tactical.engine.geometry import body_coordinates, neighbor_coordinates, range_coordinates
 
 from wujiang.tactical.engine.army import (
     army_public_state,
@@ -24,26 +29,103 @@ from wujiang.tactical.engine.army import (
 from wujiang.tactical.heroes.weather_descriptions import hero_weather_effect_text
 
 
+@lru_cache(maxsize=None)
+def _rollback_slot_names(cls: type) -> tuple[str, ...]:
+    """Dataclass field layouts do not change between nested battle probes."""
+    return tuple(item.name for item in fields(cls))
+
+
+_ROLLBACK_SCALAR_TYPES = frozenset((type(None), bool, int, float, str, bytes))
+
+
+def _rollback_copy_dict(value):
+    return {key: item if type(item) in _ROLLBACK_SCALAR_TYPES else _rollback_copy_value(item)
+            for key, item in value.items()}
+
+
+def _rollback_copy_list(value):
+    return [item if type(item) in _ROLLBACK_SCALAR_TYPES else _rollback_copy_value(item) for item in value]
+
+
+def _rollback_copy_tuple(value):
+    return tuple(item if type(item) in _ROLLBACK_SCALAR_TYPES else _rollback_copy_value(item) for item in value)
+
+
+def _rollback_copy_deque(value):
+    return deque(item if type(item) in _ROLLBACK_SCALAR_TYPES else _rollback_copy_value(item) for item in value)
+
+
+def _rollback_copy_fallback(value):
+    # Preserve isinstance's ordered virtual __class__ checks and every custom
+    # iterator/items hook. Unsupported classes never enter a guessed plan.
+    if type(value) in _ROLLBACK_SCALAR_TYPES:
+        return value
+    if isinstance(value, dict):
+        return _rollback_copy_dict(value)
+    if isinstance(value, list):
+        return _rollback_copy_list(value)
+    if isinstance(value, tuple):
+        return _rollback_copy_tuple(value)
+    if isinstance(value, set):
+        return set(value)
+    if isinstance(value, deque):
+        return _rollback_copy_deque(value)
+    return value
+
+
+_ROLLBACK_BUILTIN_COPIERS = {dict: _rollback_copy_dict, list: _rollback_copy_list,
+                             tuple: _rollback_copy_tuple, set: set, deque: _rollback_copy_deque}
+
+
+@lru_cache(maxsize=256)
+def _rollback_type_plan(cls):
+    """Retain type dispatch only; field names, values and snapshots stay live.
+
+    Like the existing slot-layout cache, plans describe loaded Python class
+    definitions. Custom metaclasses bypass this cache before hashing a class.
+    """
+    copier = _ROLLBACK_BUILTIN_COPIERS.get(cls)
+    if copier is not None:
+        return copier, False
+    namespaces = tuple(base.__dict__ for base in cls.__mro__)
+    getattribute = next((namespace["__getattribute__"] for namespace in namespaces
+                         if "__getattribute__" in namespace), None)
+    if (getattribute is not object.__getattribute__
+            or any("__getattr__" in namespace for namespace in namespaces)
+            or any("__class__" in base.__dict__ for base in cls.__mro__ if base is not object)):
+        return _rollback_copy_fallback, False
+    for container, handler in _ROLLBACK_BUILTIN_COPIERS.items():
+        if issubclass(cls, container):
+            copier = handler
+            break
+    dictionary = next((namespace["__dict__"] for namespace in namespaces if "__dict__" in namespace), None)
+    return copier, type(dictionary) is GetSetDescriptorType
+
+
+def _rollback_copy_value(value):
+    cls = type(value)
+    # Guard before lru_cache/dict lookup: a custom metaclass may make class
+    # hashing/equality observable, although the old copier never hashes it.
+    if type(cls) is not type and type(cls) is not ABCMeta:
+        return _rollback_copy_fallback(value)
+    copier = _rollback_type_plan(cls)[0]
+    return value if copier is None else copier(value)
+
+
 @contextmanager
 def battle_state_rollback(battle: "Battle", *, ai_probe: bool = True) -> Iterable[None]:
     """Reuse the same reversible calculation boundary for AI and reaction causality."""
-    def value_copy(value: Any) -> Any:
-        if isinstance(value, dict):
-            return {key: value_copy(item) for key, item in value.items()}
-        if isinstance(value, list):
-            return [value_copy(item) for item in value]
-        if isinstance(value, tuple):
-            return tuple(value_copy(item) for item in value)
-        if isinstance(value, set):
-            return set(value)
-        if isinstance(value, deque):
-            return deque(value_copy(item) for item in value)
-        return value
-
     def state(obj: Any) -> dict[str, Any]:
+        cls = type(obj)
+        if (type(cls) is type or type(cls) is ABCMeta) and _rollback_type_plan(cls)[1]:
+            return _rollback_copy_dict(obj.__dict__)
         if hasattr(obj, "__dict__"):
-            return {key: value_copy(value) for key, value in obj.__dict__.items()}
-        return {item.name: value_copy(getattr(obj, item.name)) for item in fields(obj)}
+            return _rollback_copy_dict(obj.__dict__)
+        snapshot = {}
+        for name in _rollback_slot_names(type(obj)):
+            value = getattr(obj, name)
+            snapshot[name] = value if type(value) in _ROLLBACK_SCALAR_TYPES else _rollback_copy_value(value)
+        return snapshot
 
     units = list({unit.unit_id: unit for unit in [*battle.all_units(), *battle.destroyed_units]}.values())
     objects = [battle, *units, *battle.field_effects]
@@ -65,7 +147,7 @@ def battle_state_rollback(battle: "Battle", *, ai_probe: bool = True) -> Iterabl
     # payloads and reactor lists must roll back with units, including nested probes.
     saved = [(obj, state(obj)) for obj in {id(obj): obj for obj in objects}.values()
              if hasattr(obj, "__dict__") or (is_dataclass(obj) and not obj.__dataclass_params__.frozen)]
-    stats = [(unit.base_stats, replace(unit.base_stats)) for unit in units]
+    # base_stats is already in objects and saved above, including every slot.
     rng = random.getstate()
     try:
         if ai_probe:
@@ -75,15 +157,19 @@ def battle_state_rollback(battle: "Battle", *, ai_probe: bool = True) -> Iterabl
         yield
     finally:
         for obj, snapshot in reversed(saved):
+            cls = type(obj)
+            if (type(cls) is type or type(cls) is ABCMeta) and _rollback_type_plan(cls)[1]:
+                # Re-read after clear, as before: a custom namespace clear or
+                # a released value's finalizer can replace the dictionary.
+                obj.__dict__.clear()
+                obj.__dict__.update(snapshot)
+                continue
             if hasattr(obj, "__dict__"):
                 obj.__dict__.clear()
                 obj.__dict__.update(snapshot)
             else:
                 for name, value in snapshot.items():
                     setattr(obj, name, value)
-        for original, snapshot in stats:
-            for name in ("attack", "defense", "speed", "attack_range", "mana"):
-                setattr(original, name, getattr(snapshot, name))
         random.setstate(rng)
 
 
@@ -93,7 +179,7 @@ SIEGE_HERO_TURN_LIMIT = 200
 ENCOUNTER_HERO_TURN_LIMIT = 50
 
 
-_id_counter = count(1)
+_id_counter = IdSequence(1)
 
 
 class ActionError(RuntimeError):
@@ -323,6 +409,14 @@ class BattleComponent(ABC):
         return None
 
     def on_unit_moved(self, battle: "Battle", ctx: "MoveContext") -> None:
+        return None
+
+    def on_unit_destroyed(self, battle: "Battle", destroyed_unit: "Unit") -> None:
+        """Observe a real destruction after its final board cells are recorded."""
+        return None
+
+    def on_any_skill_declared(self, battle: "Battle", actor: "Unit", skill: "Skill") -> None:
+        """Observe one formally prepaid skill declaration, independent of its hit count."""
         return None
 
     def on_before_normal_move(self, battle: "Battle", ctx: "MoveContext") -> None:
@@ -1542,7 +1636,7 @@ class Unit(ABC):
         self.set_footprint_offsets(self.base_footprint_offsets)
 
     def footprint_cells_at(self, position: Position) -> list[Position]:
-        return [position.offset(dx, dy) for dx, dy in self.footprint_offsets]
+        return [Position(x, y) for x, y in body_coordinates(position.x, position.y, tuple(self.footprint_offsets))]
 
     def footprint_cells(self) -> list[Position]:
         if self.position is None or not self.alive or self.banished:
@@ -2448,6 +2542,10 @@ class Battle:
         unit.destruction_count = getattr(unit, "destruction_count", 0) + 1
         unit.position = None
         self.log(f"{unit.name} 被击破。")
+        for observer in list(self.all_units()):
+            for component in list(observer.iter_components()):
+                component.on_unit_destroyed(self, unit)
+        unit.__dict__.pop("_destroying_source_unit_id", None)
         if unit.is_summon and unit.summoner_id:
             summoner = self.units.get(unit.summoner_id)
             if summoner is not None and summoner.alive:
@@ -3071,6 +3169,12 @@ class Battle:
                         hook = getattr(component, "on_skill_mana_paid", None)
                         if callable(hook):
                             hook(self, actor, skill, mana_paid)
+            if actor.alive:
+                for observer in list(self.all_units()):
+                    if not observer.alive or observer.banished or observer.position is None:
+                        continue
+                    for component in list(observer.iter_components()):
+                        component.on_any_skill_declared(self, actor, skill)
         finally:
             if previous:
                 actor._paying_skill_cost = previous
@@ -3193,7 +3297,11 @@ class Battle:
         return self.unit_cells_at(unit, unit.position)
 
     def unit_occupies(self, unit: Unit, position: Position) -> bool:
-        return position in self.unit_cells(unit)
+        if unit.position is None or not unit.alive or unit.banished:
+            return False
+        # Compare relative body offsets without allocating Position objects for
+        # every occupant tested by movement, previews and area candidates.
+        return (position.x - unit.position.x, position.y - unit.position.y) in unit.footprint_offsets
 
     def path_crossing_units(self, mover: Unit, path: list[Position]) -> list[Unit]:
         """Return an event each time the path enters a unit after fully leaving it."""
@@ -3261,19 +3369,21 @@ class Battle:
         return self.can_place_unit(unit, position, ignore=unit, mover=unit, ignore_units=ignore_units)
 
     def unit_distance_to_cell(self, unit: Unit, cell: Position) -> int:
-        cells = self.unit_cells(unit)
-        if not cells:
-            if unit.position is None:
-                return 10**9
-            cells = self.unit_cells_at(unit, unit.position)
-        return min(origin.distance_to(cell) for origin in cells)
+        if unit.position is None:
+            return 10**9
+        x, y = unit.position.x - cell.x, unit.position.y - cell.y
+        # This query deliberately includes dead/banished bodies at their saved
+        # anchor, just as the previous fallback to unit_cells_at did.
+        return min(max(abs(x + dx), abs(y + dy)) for dx, dy in unit.footprint_offsets)
 
     def distance_between_units(self, left: Unit, right: Unit) -> int:
-        left_cells = self.unit_cells(left)
-        right_cells = self.unit_cells(right)
-        if not left_cells or not right_cells:
+        if (left.position is None or right.position is None
+                or not left.alive or not right.alive or left.banished or right.banished
+                or not left.footprint_offsets or not right.footprint_offsets):
             return 10**9
-        return min(left_cell.distance_to(right_cell) for left_cell in left_cells for right_cell in right_cells)
+        x, y = left.position.x - right.position.x, left.position.y - right.position.y
+        return min(max(abs(x + lx - rx), abs(y + ly - ry))
+                   for lx, ly in left.footprint_offsets for rx, ry in right.footprint_offsets)
 
     def cells_are_straight_aligned(self, start: Position, end: Position) -> bool:
         dx = end.x - start.x
@@ -3697,10 +3807,28 @@ class Battle:
             return
 
     def units_at_cells(self, cells: Iterable[Position]) -> list[Unit]:
+        # Keep cell-major / insertion order: damage and reaction order depend on
+        # it. The index is local to this call, so movement and nested probes can
+        # never reuse stale occupancy. Previously every cell scanned all units.
+        cells = list(cells)
+        if not cells:
+            return []
+        if len(cells) == 1:
+            occupants = {(cells[0].x, cells[0].y): self.units_at(cells[0])}
+        else:
+            occupants: dict[tuple[int, int], list[Unit]] = {(cell.x, cell.y): [] for cell in cells}
+            for unit in self.units.values():
+                if not unit.alive or unit.banished or unit.position is None:
+                    continue
+                x, y = unit.position.x, unit.position.y
+                for dx, dy in set(unit.footprint_offsets):
+                    bucket = occupants.get((x + dx, y + dy))
+                    if bucket is not None:
+                        bucket.append(unit)
         units: list[Unit] = []
         seen: set[str] = set()
         for cell in cells:
-            for unit in self.units_at(cell):
+            for unit in occupants[(cell.x, cell.y)]:
                 if unit.unit_id in seen:
                     continue
                 seen.add(unit.unit_id)
@@ -3728,15 +3856,14 @@ class Battle:
         return self.units[unit_id]
 
     def neighbors(self, position: Position) -> list[Position]:
-        result: list[Position] = []
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                if dx == 0 and dy == 0:
-                    continue
-                candidate = position.offset(dx, dy)
-                if self.in_bounds(candidate):
-                    result.append(candidate)
-        return result
+        return [Position(x, y) for x, y in neighbor_coordinates(self.width, self.height, position.x, position.y)]
+
+    def cells_within_distance(self, unit: Unit, distance: int) -> list[Position]:
+        """Exact body-to-cell range, row-major, with fresh caller-owned output."""
+        if unit.position is None:
+            return []
+        return [Position(x, y) for x, y in range_coordinates(
+            self.width, self.height, unit.position.x, unit.position.y, tuple(unit.footprint_offsets), distance)]
 
     def line_positions(
         self,
@@ -4318,6 +4445,7 @@ class Battle:
             def notify_confirmed_destruction() -> None:
                 if ctx.target.alive or ctx.source is None:
                     return
+                ctx.target._destroying_source_unit_id = ctx.source.unit_id
                 for component in list(ctx.source.iter_components()):
                     hook = getattr(component, "on_confirmed_damage_destruction", None)
                     if callable(hook):
@@ -6344,6 +6472,9 @@ class Battle:
                 actor.actions_taken_this_turn.append("move")
                 return
             if queued_action.action_type == "attack":
+                if payload.get("movement_followup_attack") and queued_action.effect_resolver is not None:
+                    queued_action.effect_resolver(self, actor, queued_action)
+                    return
                 if payload.get("separate_attack_segments") and int(payload.get("separate_attack_index", 0)) > 0:
                     self.resolve_separate_attack_segment(actor, queued_action)
                     return

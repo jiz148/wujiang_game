@@ -1321,6 +1321,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--label", default=None, help="Optional label for the default output directory name.")
     args = parser.parse_args(argv)
 
+    # The parent process captures stderr in worker_stderr.log. Native Windows
+    # failures can otherwise leave that file empty and hide the crashing stack.
+    faulthandler.enable(all_threads=True)
     result = run_match_audit(
         parse_roster(args.team1),
         parse_roster(args.team2),
