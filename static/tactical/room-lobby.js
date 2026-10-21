@@ -10,7 +10,7 @@ import { $ } from '../core/dom.js';
 import { fetchJson, hasRoom, viewerPlayerId } from '../core/net.js';
 import { render } from '../core/render.js';
 import { state } from '../core/state.js';
-import { applyRoomPayload, autoConfigureRoom, availableRoomModes, isRandomRoomMode, reportRoomError, selectRoomHero, setBpSettings, setRandomRosterSize, setRoomArmyEnabled, setRoomBoardSize, setRoomChessPrep, setRoomHeroLimit, setRoomMode, setRoomSeatCount, setRoomTurnTimeout } from '../tactical/room-api.js';
+import { applyRoomPayload, autoConfigureRoom, availableRoomModes, isRandomRoomMode, reportRoomError, selectRoomHero, setBpSettings, setForgeLimits, setRandomRosterSize, setRoomArmyEnabled, setRoomBoardSize, setRoomChessPrep, setRoomHeroLimit, setRoomMode, setRoomSeatCount, setRoomTurnTimeout } from '../tactical/room-api.js';
 import { randomRoomRosterSize, seatHeroCount, seatIdentityLabel, setRoomEditSeat } from '../tactical/targeting.js';
 import { bindHeroHover, hideHeroHover } from './hero-hover.js';
 
@@ -113,6 +113,11 @@ export function openRoomSetup() {
     armyEnabled: Boolean(state.room.army_enabled),
     turnTimeout: String(Number(state.room.turn_timeout_seconds ?? 0)),
     chessPrep: String(Number(state.room.chess_prep_seconds ?? 90)),
+    forgeStatCap: String(Number(state.room.forge?.stat_cap ?? 6)),
+    forgePointCap: String(Number(state.room.forge?.point_cap ?? 15)),
+    forgeLossPay: String(Number(state.room.forge?.loss_pay ?? 2)),
+    forgePromotePay: String(Number(state.room.forge?.promote_pay ?? 3)),
+    forgePlay: state.room.forge?.play === "coop" ? "coop" : "duel",
     boardWidth: String(Number(state.room.board_width || 10)),
     boardHeight: String(Number(state.room.board_height || 10)),
   };
@@ -271,8 +276,26 @@ export async function confirmRoomSetup() {
       rulePool: nextBpRulePool,
     });
   }
-  if (!["bp", "autochess"].includes(state.room?.mode) && nextHeroLimit !== Number(state.room?.hero_limit || 0)) await setRoomHeroLimit(nextHeroLimit);
-  if (Boolean(draft.armyEnabled) !== Boolean(state.room?.army_enabled)) await setRoomArmyEnabled(draft.armyEnabled);
+  if (!["bp", "autochess", "skill_random"].includes(state.room?.mode) && nextHeroLimit !== Number(state.room?.hero_limit || 0)) await setRoomHeroLimit(nextHeroLimit);
+  if (!["bp", "autochess", "skill_random"].includes(state.room?.mode) && Boolean(draft.armyEnabled) !== Boolean(state.room?.army_enabled)) await setRoomArmyEnabled(draft.armyEnabled);
+  if (state.room?.mode === "skill_random") {
+    const nextStatCap = Math.max(0, Math.min(12, Number.parseInt($("forge-stat-cap-input")?.value, 10) || 6));
+    const nextPointCap = Math.max(0, Math.min(99, Number.parseInt($("forge-point-cap-input")?.value, 10) || 15));
+    const parsedLoss = Number.parseInt($("forge-loss-pay-input")?.value, 10);
+    const nextLossPay = Math.max(0, Math.min(99, Number.isFinite(parsedLoss) ? parsedLoss : 2));
+    const parsedPromote = Number.parseInt($("forge-promote-pay-input")?.value, 10);
+    const nextPromotePay = Math.max(0, Math.min(99, Number.isFinite(parsedPromote) ? parsedPromote : 3));
+    const nextPlay = $("forge-play-select")?.value === "coop" ? "coop" : "duel";
+    if (
+      nextStatCap !== Number(state.room?.forge?.stat_cap ?? 6)
+      || nextPointCap !== Number(state.room?.forge?.point_cap ?? 15)
+      || nextLossPay !== Number(state.room?.forge?.loss_pay ?? 2)
+      || nextPromotePay !== Number(state.room?.forge?.promote_pay ?? 3)
+      || nextPlay !== (state.room?.forge?.play === "coop" ? "coop" : "duel")
+    ) {
+      await setForgeLimits(nextStatCap, nextPointCap, nextLossPay, nextPlay, nextPromotePay);
+    }
+  }
   const nextTurnTimeout = [0, 30, 60, 120].includes(Number.parseInt(draft.turnTimeout, 10))
     ? Number.parseInt(draft.turnTimeout, 10)
     : 0;
@@ -422,10 +445,13 @@ export function renderRoomSetupDialog() {
   randomControl?.classList.toggle("hidden", draft.mode !== "random");
   const bpFormat = draft.bpFormat === "full" ? "full" : "tier";
   const bpMode = draft.mode === "bp";
+  const showRoomMode = ["classic", "random"].includes(draft.mode);
+  const showForgePlay = draft.mode === "skill_random";
+  $("setup-block-mode")?.classList.toggle("hidden", !showRoomMode && !showForgePlay);
   $("setup-block-bp")?.classList.toggle("hidden", !bpMode);
   $("setup-block-rule")?.classList.toggle("hidden", !bpMode);
   $("setup-block-field")?.classList.toggle("hidden", false);
-  $("room-army-switch")?.classList.toggle("hidden", draft.mode === "bp" || draft.mode === "autochess");
+  $("room-army-switch")?.classList.toggle("hidden", draft.mode === "bp" || draft.mode === "autochess" || draft.mode === "skill_random");
   $("room-turn-timeout-select")?.closest("label")?.classList.toggle("hidden", draft.mode === "autochess");
   $("room-chess-prep-field")?.classList.toggle("hidden", draft.mode !== "autochess");
   $("room-board-width-input")?.closest(".field")?.classList.toggle("hidden", false);
@@ -461,12 +487,27 @@ export function renderRoomSetupDialog() {
   if (limitEnabled) limitEnabled.checked = Boolean(draft.heroLimitEnabled);
   const limitControl = $("room-hero-limit-control");
   const limitInput = $("room-hero-limit-input");
-  limitControl?.classList.toggle("hidden", ["bp", "autochess"].includes(draft.mode) || !draft.heroLimitEnabled);
-  $("room-hero-limit-switch")?.classList.toggle("hidden", ["bp", "autochess"].includes(draft.mode));
+  limitControl?.classList.toggle("hidden", ["bp", "autochess", "skill_random"].includes(draft.mode) || !draft.heroLimitEnabled);
+  $("room-hero-limit-switch")?.classList.toggle("hidden", ["bp", "autochess", "skill_random"].includes(draft.mode));
   $("room-turn-timeout-select")?.closest("label")?.classList.toggle("hidden", draft.mode === "autochess");
   $("room-chess-prep-field")?.classList.toggle("hidden", draft.mode !== "autochess");
   $("room-board-width-input")?.closest(".field")?.classList.remove("hidden");
-  $("room-army-switch")?.classList.toggle("hidden", draft.mode === "bp" || draft.mode === "autochess");
+  $("room-army-switch")?.classList.toggle("hidden", draft.mode === "bp" || draft.mode === "autochess" || draft.mode === "skill_random");
+  $("forge-stat-cap-control")?.classList.toggle("hidden", draft.mode !== "skill_random");
+  $("forge-point-cap-control")?.classList.toggle("hidden", draft.mode !== "skill_random");
+  $("forge-play-control")?.classList.toggle("hidden", draft.mode !== "skill_random");
+  $("forge-loss-pay-control")?.classList.toggle("hidden", draft.mode !== "skill_random");
+  $("forge-promote-pay-control")?.classList.toggle("hidden", draft.mode !== "skill_random" || draft.forgePlay !== "coop");
+  const forgePlay = $("forge-play-select");
+  if (forgePlay && document.activeElement !== forgePlay) forgePlay.value = draft.forgePlay === "coop" ? "coop" : "duel";
+  const forgePromotePay = $("forge-promote-pay-input");
+  if (forgePromotePay && document.activeElement !== forgePromotePay) forgePromotePay.value = String(draft.forgePromotePay ?? 3);
+  const forgeStatCap = $("forge-stat-cap-input");
+  if (forgeStatCap && document.activeElement !== forgeStatCap) forgeStatCap.value = String(draft.forgeStatCap ?? 6);
+  const forgePointCap = $("forge-point-cap-input");
+  if (forgePointCap && document.activeElement !== forgePointCap) forgePointCap.value = String(draft.forgePointCap ?? 15);
+  const forgeLossPay = $("forge-loss-pay-input");
+  if (forgeLossPay && document.activeElement !== forgeLossPay) forgeLossPay.value = String(draft.forgeLossPay ?? 2);
   const armyEnabled = $("room-army-enabled");
   if (armyEnabled) armyEnabled.checked = Boolean(draft.armyEnabled);
   if (limitInput && document.activeElement !== limitInput) {

@@ -419,7 +419,7 @@ class AutoChessState:
         if target is None:
             player.pieces.append(ChessPiece(secrets.token_hex(5), code))
         else:
-            target.star = min(3, target.star + 1)
+            target.star += 1
             target.pending_upgrades += 1
         self._change()
 

@@ -1,0 +1,77 @@
+{
+  "heroes": [
+    {
+      "id": "custom-fab6a36d1eeb",
+      "origin": "custom",
+      "tags": [
+        "自建"
+      ],
+      "name": "未命名",
+      "role": "",
+      "attribute": "土",
+      "race": "人类",
+      "level": 3,
+      "intro": "",
+      "stats": {
+        "attack": 3,
+        "defense": 3,
+        "speed": 3,
+        "attack_range": 3,
+        "mana": 3
+      },
+      "skills": [],
+      "traits": [],
+      "created_at": 1792545874
+    },
+    {
+      "id": "custom-b7dee8fab155",
+      "origin": "custom",
+      "tags": [
+        "自建"
+      ],
+      "name": "未命名",
+      "role": "贤者",
+      "attribute": "光",
+      "race": "兽人",
+      "level": 5,
+      "intro": "",
+      "stats": {
+        "attack": 4,
+        "defense": 4,
+        "speed": 3,
+        "attack_range": 3,
+        "mana": 3
+      },
+      "skills": [
+        {
+          "id": "s:crazy_sand",
+          "name": "狂沙",
+          "description": "普通技能：冷却 2轮，选择有效方向；直线 5 格造成当前攻伤害，并瞬移到第 6 格，第 6 格越界或被占用则不能选择。"
+        },
+        {
+          "id": "s:summon_mage_cloak",
+          "name": "法师斗篷",
+          "description": "大招：本场一次，在周围合法格召唤可行动的法师斗篷。"
+        },
+        {
+          "id": "s:paralyzing_glove",
+          "name": "麻痹手套",
+          "description": "破魔，以攻4结算伤害，并使目标3轮不能普通移动。"
+        },
+        {
+          "id": "s:martial_god_seal",
+          "name": "魔界武神之印",
+          "description": "普通技能：2 轮一次；全能力 +2，血 +1/2，持续到下一个敌方英雄回合结束。"
+        }
+      ],
+      "traits": [
+        {
+          "id": "t:excel_r219:0",
+          "name": "次时代机动",
+          "description": "因技能真实位移后，本轮和下本人轮攻守翻倍，同名刷新。"
+        }
+      ],
+      "created_at": 1792546108
+    }
+  ]
+}

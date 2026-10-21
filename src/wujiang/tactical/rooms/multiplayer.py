@@ -96,6 +96,7 @@ DEFAULT_BOARD_HEIGHT = 10
 MIN_BOARD_SIZE = 6
 MAX_BOARD_SIZE = 100
 STALE_QUEUED_ACTOR_LOG_MARKER = "行动者已不在战场"
+FORGE_RIVAL_SEAT_ID = 90
 ROOM_MODES: dict[str, dict[str, str]] = {
     "classic": {
         "name": "标准选将",
@@ -112,6 +113,10 @@ ROOM_MODES: dict[str, dict[str, str]] = {
     "autochess": {
         "name": "自走棋",
         "description": "8 人经营阵容、自动战斗，最后存活者获胜。",
+    },
+    "skill_random": {
+        "name": "技能组合",
+        "description": "双方用点数各自拼一名武将，准备后对战，打完可以再改再打。",
     },
 }
 
@@ -1049,6 +1054,25 @@ class GameRoom:
         self.bp_rule_mode = "random"
         self.bp_fixed_rule = "none"
         self.bp_rule_pool = tuple(SPECIAL_MODE_BY_CODE)
+        self.forge_stat_cap = 6
+        self.forge_point_cap = 15
+        self.forge_loss_pay = 2
+        self.forge_promote_pay = 3
+        self.forge_play = "duel"
+        self.forge_stage = 1
+        self.forge_rivals: list[dict[str, Any]] = []
+        self.forge_failed = False
+        self.forge_hidden_clear = False
+        self.forge_run = 1
+        self.forge_run_ack: dict[int, int] = {}
+        self.forge_ceremony_view = None
+        self.forge_team_bonus = {1: 0, 2: 0}
+        self.forge_round_note = {1: None, 2: None}
+        self.forge_phase = "edit"
+        self.forge_builds = {1: None, 2: None}
+        self.forge_ready = {1: False, 2: False}
+        self.forge_team_ai = {1: True, 2: True}
+        self.forge_last_winner = None
         self.bp_actions: list[dict[str, Any]] = []
         self.bp_assignments: dict[str, int | str] = {}
         self.bp_assign_opened = False
@@ -1115,6 +1139,34 @@ class GameRoom:
             self.hero_turn_limit = SKIRMISH_HERO_TURN_LIMIT
         if not hasattr(self, "turn_limit_winner"):
             self.turn_limit_winner = 2
+        if not hasattr(self, "forge_stat_cap"):
+            self.forge_stat_cap = 6
+            self.forge_point_cap = 15
+            self.forge_phase = "edit"
+            self.forge_builds = {1: None, 2: None}
+            self.forge_ready = {1: False, 2: False}
+            self.forge_team_ai = {1: True, 2: True}
+            self.forge_last_winner = None
+        if not hasattr(self, "forge_loss_pay"):
+            self.forge_loss_pay = 2
+            self.forge_team_bonus = {1: 0, 2: 0}
+        if not hasattr(self, "forge_play"):
+            self.forge_play = "duel"
+            self.forge_promote_pay = 3
+            self.forge_stage = 1
+            self.forge_rivals = []
+            self.forge_failed = False
+            self.forge_hidden_clear = False
+        if not hasattr(self, "forge_round_note"):
+            self.forge_round_note = {1: None, 2: None}
+        if not hasattr(self, "forge_failed"):
+            self.forge_failed = False
+            self.forge_hidden_clear = False
+        if not hasattr(self, "forge_run"):
+            self.forge_run = 1
+            self.forge_run_ack = {}
+        if not hasattr(self, "forge_ceremony_view"):
+            self.forge_ceremony_view = None
         if not hasattr(self, "bp_team_size"):
             self.bp_team_size = 3
         if not hasattr(self, "bp_level_caps"):
@@ -3063,6 +3115,372 @@ class GameRoom:
             self.invalidate_readiness()
             self.touch()
 
+    def _forge_budget(self, team: int) -> int:
+        stored = getattr(self, "forge_team_bonus", None) or {}
+        try:
+            bonus = int(stored.get(team, stored.get(str(team), 0)) or 0)
+        except (TypeError, ValueError):
+            bonus = 0
+        return max(0, int(self.forge_point_cap) + max(0, bonus))
+
+    def _forge_coop(self) -> bool:
+        return self.mode == "skill_random" and getattr(self, "forge_play", "duel") == "coop"
+
+    def _seat_battle_side(self, seat: PlayerSeat) -> int:
+        if self._forge_coop() and seat.player_id != FORGE_RIVAL_SEAT_ID:
+            return 1
+        return int(seat.team_id)
+
+    def _listed_seats(self) -> list[PlayerSeat]:
+        return [seat for seat in self.seats.values() if seat.player_id != FORGE_RIVAL_SEAT_ID]
+
+    def _clear_forge_round_note(self) -> None:
+        self.forge_round_note = {1: None, 2: None}
+
+    def _grant_forge_points(self, teams: tuple[int, ...], amount: int, kind: str) -> None:
+        pay = max(0, int(amount or 0))
+        if pay <= 0:
+            return
+        bonus = self.forge_team_bonus if isinstance(getattr(self, "forge_team_bonus", None), dict) else {1: 0, 2: 0}
+        note = self.forge_round_note if isinstance(getattr(self, "forge_round_note", None), dict) else {1: None, 2: None}
+        for team in teams:
+            team_id = int(team)
+            bonus[team_id] = int(bonus.get(team_id, 0) or 0) + pay
+            note[team_id] = {"kind": kind, "amount": pay}
+        self.forge_team_bonus = bonus
+        self.forge_round_note = note
+
+    def _roll_forge_rivals(self, stage: int) -> None:
+        from wujiang.tactical.rooms.forge import ForgeError, coop_rival_pair
+        try:
+            self.forge_rivals = coop_rival_pair(stage)
+        except ForgeError as exc:
+            raise RoomError(str(exc)) from exc
+        self.forge_stage = max(1, min(4, int(stage or 1)))
+
+    def _bind_rival_seat(self) -> int:
+        self.seats[FORGE_RIVAL_SEAT_ID] = PlayerSeat(
+            player_id=FORGE_RIVAL_SEAT_ID,
+            team_id=2,
+            controller_type="ai",
+            name="对手",
+        )
+        return FORGE_RIVAL_SEAT_ID
+
+    def _release_rival_seat(self) -> None:
+        self.seats.pop(FORGE_RIVAL_SEAT_ID, None)
+
+    def set_forge_limits(self, token: str, stat_cap: Any, point_cap: Any, loss_pay: Any = None, play: Any = None, promote_pay: Any = None) -> None:
+        with self._lock:
+            self.require_host(token)
+            if self.mode != "skill_random" or self.status != "lobby":
+                raise RoomError("只有技能组合房间在大厅里才能改点数。")
+            try:
+                stat_value = int(stat_cap)
+                point_value = int(point_cap)
+                loss_value = int(getattr(self, "forge_loss_pay", 2) if loss_pay is None else loss_pay)
+                promote_value = int(getattr(self, "forge_promote_pay", 3) if promote_pay is None else promote_pay)
+            except (TypeError, ValueError):
+                raise RoomError("上限必须是整数。") from None
+            if not 0 <= stat_value <= 12 or not 0 <= point_value <= 99:
+                raise RoomError("属性上限是 0 到 12，点数上限是 0 到 99。")
+            if not 0 <= loss_value <= 99:
+                raise RoomError("失败补偿是 0 到 99。")
+            if not 0 <= promote_value <= 99:
+                raise RoomError("晋级奖励是 0 到 99。")
+            play_value = "coop" if str(play if play is not None else getattr(self, "forge_play", "duel")) == "coop" else "duel"
+            self.forge_stat_cap = stat_value
+            self.forge_point_cap = point_value
+            self.forge_loss_pay = loss_value
+            self.forge_promote_pay = promote_value
+            self.forge_play = play_value
+            if play_value != "coop":
+                self.forge_stage = 1
+                self.forge_rivals = []
+                self.forge_failed = False
+                self.forge_hidden_clear = False
+                self.forge_ceremony_view = None
+            self.touch()
+
+    def _forge_viewer_team(self, token: str) -> int:
+        seat = self.require_seat(token)
+        if seat.team_id in (1, 2):
+            humans = [item for item in self._team_seats(seat.team_id) if item.is_human]
+            if humans or seat.player_id == self.host_player_id:
+                return int(seat.team_id)
+        if seat.player_id == self.host_player_id:
+            return 1
+        raise RoomError("只能编辑自己这一侧。")
+
+    def update_forge_build(self, token: str, team_id: Any, raw: Any) -> None:
+        with self._lock:
+            if self.mode != "skill_random" or self.status != "forge" or self.forge_phase != "edit":
+                raise RoomError("现在不能改武将。")
+            team = int(team_id)
+            editor = self._forge_viewer_team(token)
+            if team != editor and self.require_seat(token).player_id != self.host_player_id:
+                raise RoomError("只能编辑自己这一侧。")
+            from wujiang.tactical.rooms.forge import ForgeError, normalize_build
+            try:
+                build = normalize_build(raw, stat_cap=self.forge_stat_cap, point_cap=self._forge_budget(team))
+            except ForgeError as exc:
+                raise RoomError(str(exc)) from exc
+            self.forge_builds[team] = build
+            self.forge_ready[team] = False
+            self.touch()
+
+    def set_forge_ready(self, token: str, team_id: Any, ready: bool) -> None:
+        with self._lock:
+            if self.mode != "skill_random" or self.status != "forge" or self.forge_phase != "edit":
+                raise RoomError("现在不能准备。")
+            team = int(team_id)
+            editor = self._forge_viewer_team(token)
+            if team != editor and self.require_seat(token).player_id != self.host_player_id:
+                raise RoomError("只能准备自己这一侧。")
+            if ready and not self.forge_builds.get(team):
+                raise RoomError("先放下一张武将。")
+            self.forge_ready[team] = bool(ready)
+            if self.forge_ready.get(1) and self.forge_ready.get(2):
+                self.forge_phase = "reveal"
+                self.forge_team_ai = {1: True, 2: True}
+            self.touch()
+
+    def set_forge_team_ai(self, token: str, team_id: Any, enabled: Any) -> None:
+        with self._lock:
+            if self.mode != "skill_random" or self.status != "forge" or self.forge_phase != "reveal":
+                raise RoomError("亮牌之后才能交给 AI。")
+            team = int(team_id)
+            seat = self.require_seat(token)
+            if seat.team_id != team and seat.player_id != self.host_player_id:
+                raise RoomError("只能设置自己这一侧。")
+            self.forge_team_ai[team] = bool(enabled)
+            self.touch()
+
+    def _begin_forge(self) -> None:
+        from wujiang.tactical.rooms.forge import blank_build
+        self.status = "forge"
+        self.forge_phase = "edit"
+        self.forge_ready = {1: False, 2: False}
+        self.forge_run = 1
+        self.forge_run_ack = {}
+        self.forge_ceremony_view = None
+        for team in (1, 2):
+            if not isinstance(self.forge_builds.get(team), dict):
+                self.forge_builds[team] = blank_build()
+        if self._forge_coop() and not self.forge_rivals:
+            self.forge_stage = 1
+            self.forge_failed = False
+            self.forge_hidden_clear = False
+            self._roll_forge_rivals(1)
+        self._clear_forge_round_note()
+
+    def _begin_forge_battle(self) -> None:
+        from wujiang.tactical.heroes.registry import RoomBattleEntry, create_room_battle
+        from wujiang.tactical.rooms.forge import install_forge_hero
+        for team in (1, 2):
+            if not isinstance(self.forge_builds.get(team), dict):
+                raise RoomError("双方都要有武将。")
+            install_forge_hero(team, self.forge_builds[team])
+        def owner_for(team: int) -> int:
+            seats = self._team_seats(team)
+            occupied = [seat for seat in seats if seat.occupied]
+            return (occupied or seats)[0].player_id
+        for seat in self.seats.values():
+            if self.forge_team_ai.get(seat.team_id) and seat.is_human:
+                seat.ai_takeover = True
+        self.match_number += 1
+        self.current_match_id = f"{self.room_id}-{self.match_number}"
+        board_width = int(getattr(self, "board_width", 8) or 8)
+        board_height = int(getattr(self, "board_height", 8) or 8)
+        if self._forge_coop():
+            if not self.forge_rivals:
+                self._roll_forge_rivals(int(getattr(self, "forge_stage", 1) or 1))
+            rival_seat = self._bind_rival_seat()
+            allies = [
+                RoomBattleEntry(hero_code="forge_1", player_id=1, owner_seat_id=owner_for(1)),
+                RoomBattleEntry(hero_code="forge_2", player_id=1, owner_seat_id=owner_for(2)),
+            ]
+            enemies = [
+                RoomBattleEntry(hero_code=str(hero["code"]), player_id=2, owner_seat_id=rival_seat)
+                for hero in self.forge_rivals
+            ]
+            player1_entries, player2_entries = allies, enemies
+            need = max(12, len(self.forge_rivals) + 6)
+            board_width = max(board_width, need)
+            board_height = max(board_height, need)
+        else:
+            player1_entries = [RoomBattleEntry(hero_code="forge_1", player_id=1, owner_seat_id=owner_for(1))]
+            player2_entries = [RoomBattleEntry(hero_code="forge_2", player_id=2, owner_seat_id=owner_for(2))]
+        try:
+            self.battle = create_room_battle(
+                player1_entries,
+                player2_entries,
+                mode="classic",
+                board_width=board_width,
+                board_height=board_height,
+                turn_timeout_limit=int(getattr(self, "hero_turn_limit", 0) or 0),
+                turn_timeout_winner=int(getattr(self, "turn_limit_winner", 2) or 2),
+            )
+        except (ActionError, ValueError) as exc:
+            self._release_rival_seat()
+            raise RoomError("这些对手现在进不了战场。") from exc
+        self.battle.forge_match = True
+        self.status = "battle"
+        self._bind_replay_checkpoint()
+        self._record_replay_step("battle_start")
+
+    def return_to_forge_editor(self, token: str) -> None:
+        with self._lock:
+            if self.mode != "skill_random":
+                raise RoomError("当前不是技能组合房间。")
+            self.require_seat(token)
+            if self.battle is not None and self.battle.winner is None:
+                raise RoomError("对局还没结束。")
+            if self.status == "forge" and self.battle is None:
+                return
+            self._finish_replay()
+            next_phase = "edit"
+            self._clear_forge_round_note()
+            if self.battle is not None and self.battle.winner is not None:
+                self.forge_last_winner = self.battle.winner
+                winner = int(self.battle.winner)
+                if self._forge_coop():
+                    if winner == 1:
+                        self._grant_forge_points((1, 2), int(getattr(self, "forge_promote_pay", 3) or 0), "promote")
+                        stage = int(getattr(self, "forge_stage", 1) or 1)
+                        failed = bool(getattr(self, "forge_failed", False))
+                        if stage >= 4:
+                            self.forge_hidden_clear = True
+                            next_phase = "ceremony"
+                        elif stage >= 3 and failed:
+                            self.forge_hidden_clear = False
+                            next_phase = "ceremony"
+                        elif stage >= 3:
+                            self._roll_forge_rivals(4)
+                            next_phase = "omen"
+                        else:
+                            self._roll_forge_rivals(stage + 1)
+                    else:
+                        self.forge_failed = True
+                        self._grant_forge_points((1, 2), int(getattr(self, "forge_loss_pay", 2) or 0), "loss")
+                else:
+                    loser = 2 if winner == 1 else 1 if winner == 2 else None
+                    if loser is not None:
+                        self._grant_forge_points((loser,), int(getattr(self, "forge_loss_pay", 2) or 0), "loss")
+            self.battle = None
+            self._release_rival_seat()
+            self.status = "forge"
+            if next_phase == "ceremony":
+                self._remember_forge_ceremony()
+            self.forge_phase = next_phase
+            self.forge_ready = {1: False, 2: False}
+            for seat in self.seats.values():
+                seat.ai_takeover = False
+            self.touch()
+
+    def _remember_forge_ceremony(self) -> None:
+        builds = {}
+        for team in (1, 2):
+            raw = self.forge_builds.get(team)
+            build = raw if isinstance(raw, dict) else {}
+            builds[str(team)] = {
+                "name": str(build.get("name") or ""),
+                "role": str(build.get("role") or ""),
+                "attribute": str(build.get("attribute") or ""),
+                "race": str(build.get("race") or ""),
+            }
+        self.forge_ceremony_view = {
+            "hidden_clear": bool(getattr(self, "forge_hidden_clear", False)),
+            "builds": builds,
+        }
+
+    def restart_forge_coop(self, token: str) -> None:
+        with self._lock:
+            host = self.require_host(token)
+            if not self._forge_coop() or self.forge_phase != "ceremony":
+                raise RoomError("现在不能再来一趟。")
+            self.forge_failed = False
+            self.forge_hidden_clear = False
+            self.forge_stage = 1
+            self.forge_run = int(getattr(self, "forge_run", 1) or 1) + 1
+            self.forge_run_ack = {int(host.player_id): self.forge_run}
+            self._roll_forge_rivals(1)
+            self._clear_forge_round_note()
+            self.forge_phase = "edit"
+            self.forge_ready = {1: False, 2: False}
+            self.touch()
+
+    def ack_forge_omen(self, token: str) -> None:
+        with self._lock:
+            self.require_seat(token)
+            if not self._forge_coop():
+                raise RoomError("现在没有隐藏事件。")
+            if self.forge_phase == "edit" and int(getattr(self, "forge_stage", 1) or 1) >= 4:
+                return
+            if self.forge_phase != "omen":
+                raise RoomError("现在没有隐藏事件。")
+            self.forge_phase = "edit"
+            self.forge_ready = {1: False, 2: False}
+            self.touch()
+
+    def ack_forge_run(self, token: str) -> None:
+        with self._lock:
+            seat = self.require_seat(token)
+            if not self._forge_coop() or self.forge_phase != "edit":
+                raise RoomError("现在不能开始下一轮。")
+            run = int(getattr(self, "forge_run", 1) or 1)
+            ack = dict(getattr(self, "forge_run_ack", None) or {})
+            ack[int(seat.player_id)] = run
+            self.forge_run_ack = ack
+            self.touch()
+
+    def _forge_viewer_phase(self, viewer_player_id: int | None) -> str:
+        phase = str(self.forge_phase or "edit")
+        run = int(getattr(self, "forge_run", 1) or 1)
+        if phase != "edit" or not self._forge_coop() or run <= 1 or viewer_player_id is None:
+            return phase
+        seen = 0
+        for key, value in (getattr(self, "forge_run_ack", None) or {}).items():
+            if int(key) == int(viewer_player_id):
+                seen = int(value or 0)
+                break
+        if seen < run:
+            return "resume"
+        return phase
+
+    def _forge_public_state(self, viewer_team: int | None, viewer_player_id: int | None = None) -> dict[str, Any]:
+        from wujiang.tactical.rooms.forge import public_catalog
+        show_all = self.forge_phase in {"reveal", "ceremony", "omen"}
+        builds = {}
+        for team in (1, 2):
+            if show_all or viewer_team == team:
+                builds[str(team)] = self.forge_builds.get(team)
+            else:
+                builds[str(team)] = None
+        return {
+            "phase": self._forge_viewer_phase(viewer_player_id),
+            "stat_cap": self.forge_stat_cap,
+            "point_cap": self.forge_point_cap,
+            "loss_pay": int(getattr(self, "forge_loss_pay", 2) or 0),
+            "promote_pay": int(getattr(self, "forge_promote_pay", 3) or 0),
+            "play": "coop" if self._forge_coop() else "duel",
+            "stage": int(getattr(self, "forge_stage", 1) or 1),
+            "run": int(getattr(self, "forge_run", 1) or 1),
+            "hidden_clear": bool(getattr(self, "forge_hidden_clear", False)),
+            "ceremony_view": getattr(self, "forge_ceremony_view", None),
+            "rivals": list(getattr(self, "forge_rivals", None) or []),
+            "bonus": {str(team): int((getattr(self, "forge_team_bonus", None) or {}).get(team, 0) or 0) for team in (1, 2)},
+            "round_note": {
+                str(team): (getattr(self, "forge_round_note", None) or {}).get(team)
+                for team in (1, 2)
+            },
+            "ready": {str(team): bool(self.forge_ready.get(team)) for team in (1, 2)},
+            "team_ai": {str(team): bool(self.forge_team_ai.get(team)) for team in (1, 2)},
+            "builds": builds,
+            "last_winner": self.forge_last_winner,
+            "catalog": public_catalog() if self.status == "forge" else None,
+        }
+
     def can_start(self) -> bool:
         return self._start_blocker() is None
 
@@ -3403,7 +3821,7 @@ class GameRoom:
             if unit_id not in self.battle.hell_dragon_return_cells:
                 return False
             actor = self.battle.get_unit(unit_id)
-            return actor.player_id == seat.team_id and self._unit_owner_seat_id(actor) == seat.player_id
+            return actor.player_id == self._seat_battle_side(seat) and self._unit_owner_seat_id(actor) == seat.player_id
         if payload.get("type") != "skill":
             return False
         actor_unit_id = payload.get("unit_id")
@@ -3411,7 +3829,7 @@ class GameRoom:
         if not actor_unit_id or not skill_code:
             return False
         actor = self.battle.get_unit(str(actor_unit_id))
-        if actor.player_id != seat.team_id:
+        if actor.player_id != self._seat_battle_side(seat):
             return False
         if self._unit_owner_seat_id(actor) != seat.player_id:
             return False
@@ -3473,9 +3891,10 @@ class GameRoom:
     def serialize_summary(self, *, base_url: Optional[str] = None) -> dict[str, Any]:
         with self._lock:
             heroes_by_code = hero_lookup()
-            seats = [seat.to_public_dict(heroes_by_code, self.host_player_id) for seat in self.seats.values()]
-            occupied_count = self.occupied_seat_count()
-            is_full = occupied_count == len(self.seats)
+            listed = self._listed_seats()
+            seats = [seat.to_public_dict(heroes_by_code, self.host_player_id) for seat in listed]
+            occupied_count = sum(1 for seat in listed if seat.occupied)
+            is_full = occupied_count == len(listed)
             mode_meta = room_mode_payload(self.mode)
             return {
                 "room_id": self.room_id,
@@ -3491,6 +3910,7 @@ class GameRoom:
                 "owner_user_id": getattr(self, "owner_user_id", None),
                 "random_roster_size": self.random_roster_size,
                 "bp": self._bp_public_state() if self.mode == "bp" else None,
+                "forge": self._forge_public_state(locals().get("viewer_team_id")) if self.mode == "skill_random" else None,
                 "hero_limit": self.hero_limit,
                 "army_enabled": bool(getattr(self, "army_enabled", False)),
                 "board_width": int(getattr(self, "board_width", DEFAULT_BOARD_WIDTH) or DEFAULT_BOARD_WIDTH),
@@ -3500,9 +3920,9 @@ class GameRoom:
                 "turn_limit_winner": int(getattr(self, "turn_limit_winner", 2) or 2),
                 "default_ai_difficulty": self.default_ai_difficulty,
                 "occupied_seat_count": occupied_count,
-                "human_seat_count": self.human_seat_count(),
-                "ai_seat_count": self.ai_seat_count(),
-                "seat_count": len(self.seats),
+                "human_seat_count": sum(1 for seat in self._listed_seats() if seat.is_human),
+                "ai_seat_count": sum(1 for seat in self._listed_seats() if seat.is_ai),
+                "seat_count": len(self._listed_seats()),
                 "is_full": is_full,
                 "can_join": self.status == "lobby" and any(seat.can_join for seat in self.seats.values()),
                 "can_start": self.can_start(),
@@ -3531,6 +3951,10 @@ class GameRoom:
             return None
         if self.mode == "bp" and self.status == "bp":
             return self._bp_assignment_blocker()
+        if self.mode == "skill_random" and self.status == "forge":
+            if self.forge_phase != "reveal":
+                return "双方还没准备好。"
+            return None
         blocker = self._configuration_blocker()
         if blocker is not None:
             return blocker
@@ -3569,6 +3993,8 @@ class GameRoom:
             for team_id in TEAM_IDS:
                 if self._team_quota_sum(team_id) != self.random_roster_size:
                     return f"{team_name(team_id)}的随机武将配额之和必须等于 n = {self.random_roster_size}。"
+            return None
+        if self.mode == "skill_random":
             return None
         for team_id in TEAM_IDS:
             if sum(seat.hero_total_count for seat in self._team_seats(team_id)) <= 0:
@@ -3648,6 +4074,21 @@ class GameRoom:
                 self.autochess.use_preparation_seconds(int(getattr(self, "chess_prep_seconds", 90) or 0))
                 self.autochess.start()
                 self.status = "preparation"
+                self.touch()
+                return
+            if self.mode == "skill_random" and self.status == "lobby":
+                self.require_host(token)
+                blocker = self._start_blocker()
+                if blocker is not None:
+                    raise RoomError(blocker)
+                self._begin_forge()
+                self.touch()
+                return
+            if self.mode == "skill_random" and self.status == "forge" and self.forge_phase in {"ceremony", "omen"}:
+                raise RoomError("这一级还没开始。")
+            if self.mode == "skill_random" and self.status == "forge" and self.forge_phase == "reveal":
+                self.require_host(token)
+                self._begin_forge_battle()
                 self.touch()
                 return
             if self.mode == "bp" and self.status == "lobby":
@@ -3977,12 +4418,13 @@ class GameRoom:
                 raise RoomError("å½“å‰æˆ¿é—´è¿˜æ²¡æœ‰å¼€å§‹å¯¹å±€ã€‚")
             current_player = self.current_input_player_id()
             instant_override = self.allows_instant_action_override(seat, payload)
-            if current_player != seat.team_id and not instant_override:
+            side = self._seat_battle_side(seat)
+            if current_player != side and not instant_override:
                 raise RoomError("çŽ°åœ¨è¿˜æ²¡è½®åˆ°ä½ è¿™è¾¹æ“ä½œã€‚")
             actor_unit_id = payload.get("unit_id")
             if actor_unit_id:
                 actor = self.battle.get_unit(str(actor_unit_id))
-                if actor.player_id != seat.team_id:
+                if actor.player_id != side:
                     raise RoomError("ä¸èƒ½æ“ä½œå¯¹æ–¹å•ä½ã€‚")
                 if self._unit_owner_seat_id(actor) != seat.player_id:
                     raise RoomError("ä¸èƒ½æ“ä½œåŒé˜Ÿå…¶ä»–å¸­ä½æ‹¥æœ‰çš„å•ä½ã€‚")
@@ -4019,14 +4461,17 @@ class GameRoom:
 
     def control_simulation(self, token: str, action: str, *, speed: Any = None) -> None:
         with self._lock:
-            self.require_host(token)
-            if self.battle is None or self.replay is None:
-                raise RoomError("å½“å‰è¿˜æ²¡æœ‰å¯æŽ§åˆ¶çš„ AI å¯¹å±€ / å›žæ”¾ã€‚")
+            if self.mode == "skill_random":
+                self.require_seat(token)
+            else:
+                self.require_host(token)
             normalized = str(action or "").strip().lower()
             if normalized == "set_speed":
                 self.simulation_speed = normalize_simulation_speed(speed)
                 self.touch()
                 return
+            if self.battle is None or self.replay is None:
+                raise RoomError("å½“å‰è¿˜æ²¡æœ‰å¯æŽ§åˆ¶çš„ AI å¯¹å±€ / å›žæ”¾ã€‚")
             if normalized == "pause":
                 if not self._simulation_enabled():
                     raise RoomError("å½“å‰æ²¡æœ‰å¯ä»¥æš‚åœçš„è‡ªåŠ¨æ¨¡æ‹Ÿã€‚")
@@ -4109,6 +4554,8 @@ class GameRoom:
                 self._process_due_turn_timeout()
             viewer_player_id = viewer.player_id if viewer else None
             viewer_team_id = viewer.team_id if viewer else None
+            if viewer is not None and self._forge_coop() and self.status == "battle":
+                viewer_team_id = 1
             viewer_name = viewer.name if viewer else None
             heroes_by_code = hero_lookup()
             mode_meta = room_mode_payload(self.mode)
@@ -4131,6 +4578,7 @@ class GameRoom:
                 "host_player_id": self.host_player_id,
                 "random_roster_size": self.random_roster_size,
                 "bp": self._bp_public_state() if self.mode == "bp" else None,
+                "forge": self._forge_public_state(viewer_team_id, viewer_player_id) if self.mode == "skill_random" else None,
                 "hero_limit": self.hero_limit,
                 "army_enabled": bool(getattr(self, "army_enabled", False)),
                 "board_width": int(getattr(self, "board_width", DEFAULT_BOARD_WIDTH) or DEFAULT_BOARD_WIDTH),
@@ -4139,7 +4587,7 @@ class GameRoom:
                 "hero_turn_limit": int(getattr(self, "hero_turn_limit", 0) or SKIRMISH_HERO_TURN_LIMIT),
                 "turn_limit_winner": int(getattr(self, "turn_limit_winner", 2) or 2),
                 "default_ai_difficulty": self.default_ai_difficulty,
-                "seat_count": len(self.seats),
+                "seat_count": len(self._listed_seats()),
                 "seat_count_min": MIN_ROOM_SEAT_COUNT,
                 "seat_count_max": MAX_ROOM_SEAT_COUNT,
                 "viewer_player_id": viewer_player_id,
@@ -4149,10 +4597,10 @@ class GameRoom:
                 "viewer_hero_ai_style": getattr(viewer, "hero_ai_style", DEFAULT_HERO_AI_STYLE) if viewer else DEFAULT_HERO_AI_STYLE,
                 "viewer_army_ai_style": getattr(viewer, "army_ai_style", DEFAULT_ARMY_AI_STYLE) if viewer else DEFAULT_ARMY_AI_STYLE,
                 "viewer_is_host": viewer_player_id == self.host_player_id if viewer_player_id is not None else False,
-                "occupied_seat_count": self.occupied_seat_count(),
-                "human_seat_count": self.human_seat_count(),
-                "ai_seat_count": self.ai_seat_count(),
-                "is_full": all(seat.occupied for seat in self.seats.values()),
+                "occupied_seat_count": sum(1 for seat in self._listed_seats() if seat.occupied),
+                "human_seat_count": sum(1 for seat in self._listed_seats() if seat.is_human),
+                "ai_seat_count": sum(1 for seat in self._listed_seats() if seat.is_ai),
+                "is_full": all(seat.occupied for seat in self._listed_seats()),
                 "can_start": self.can_start(),
                 "configuration_ready": self._configuration_blocker() is None,
                 "start_blocker": self._start_blocker(),
@@ -4162,7 +4610,7 @@ class GameRoom:
                     and viewer_player_id == self.host_player_id
                     and public_launch_context(self).get("allow_rematch", True)
                 ),
-                "seats": [seat.to_public_dict(heroes_by_code, self.host_player_id) for seat in self.seats.values()],
+                "seats": [seat.to_public_dict(heroes_by_code, self.host_player_id) for seat in self._listed_seats()],
                 "army_orders": {
                     1: dict(self.army_orders_by_team.get(1) or default_army_orders()[1]),
                     2: dict(self.army_orders_by_team.get(2) or default_army_orders()[2]),
@@ -4441,7 +4889,7 @@ class RoomRegistry:
         with self._lock:
             self._rooms.pop(normalized, None)
 
-    def delete_room(self, room_id: str, token: str, *, owner_user_id: Optional[int] = None) -> None:
+    def delete_room(self, room_id: str, token: str, *, owner_user_id: Optional[int] = None, force: bool = False) -> None:
         normalized = normalize_room_id(room_id)
         with self._lock:
             room = self._rooms.get(normalized)
@@ -4449,7 +4897,7 @@ class RoomRegistry:
                 raise RoomError("房间不存在，可能是房间码输错了。")
             owner = getattr(room, "owner_user_id", None)
             is_owner = owner_user_id is not None and owner is not None and int(owner) == int(owner_user_id)
-            if not is_owner and room.human_seat_count() > 0:
+            if not force and not is_owner and room.human_seat_count() > 0:
                 room.require_host(token)
             room._closed = True
             del self._rooms[normalized]

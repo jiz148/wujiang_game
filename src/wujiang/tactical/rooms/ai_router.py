@@ -16,7 +16,9 @@ from wujiang.tactical.rooms import simple_ai
 from wujiang.tactical.rooms import tendency
 
 
-def _picker():
+def _picker(battle=None):
+    if battle is not None and getattr(battle, "forge_match", False):
+        return detailed
     mode = ai_decision_mode()
     if mode == "model":
         return model_ai
@@ -32,7 +34,7 @@ def choose_turn_bundle_action(
     units: Iterable[Unit],
     difficulty: str,
 ) -> tuple[dict[str, Any], Optional[Unit]]:
-    return _picker().choose_turn_bundle_action(battle, units, difficulty)
+    return _picker(battle).choose_turn_bundle_action(battle, units, difficulty)
 
 
 def choose_instant_action(
@@ -40,7 +42,7 @@ def choose_instant_action(
     units: Iterable[Unit],
     difficulty: str,
 ) -> Optional[dict[str, Any]]:
-    return _picker().choose_instant_action(battle, units, difficulty)
+    return _picker(battle).choose_instant_action(battle, units, difficulty)
 
 
 def choose_chain_reaction(
@@ -49,7 +51,7 @@ def choose_chain_reaction(
     options: list[dict[str, Any]],
     difficulty: str,
 ) -> Optional[dict[str, Any]]:
-    return _picker().choose_chain_reaction(battle, reactor, options, difficulty)
+    return _picker(battle).choose_chain_reaction(battle, reactor, options, difficulty)
 
 
 def choose_respawn_action(
@@ -58,8 +60,8 @@ def choose_respawn_action(
     options: list[Position],
     difficulty: str,
 ) -> Optional[dict[str, Any]]:
-    return _picker().choose_respawn_action(battle, unit, options, difficulty)
+    return _picker(battle).choose_respawn_action(battle, unit, options, difficulty)
 
 
 def choose_damage_choice_action(battle: Battle) -> dict[str, Any]:
-    return _picker().choose_damage_choice_action(battle)
+    return _picker(battle).choose_damage_choice_action(battle)

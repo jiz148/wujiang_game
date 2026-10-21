@@ -1044,13 +1044,15 @@ export function scheduleBoardOverlayRender() {
 
 function renderUnitHoverCard(unit) {
   const statuses = unitStatusSummary(unit).join(" · ") || "无";
-  const traits = unit.traits.map((trait) => trait.name).join(" · ") || "无";
+  const skills = (unit.skills || []).map((skill) => skill.name).filter(Boolean).join(" · ") || "无";
+  const traits = (unit.traits || []).map((trait) => trait.name).filter(Boolean).join(" · ") || "无";
   return `
     <strong>${unit.name}</strong>
     <p>${unit.role} · ${unit.attribute} / ${unit.race} · 玩家 ${unit.player_id}</p>
     <p>血 ${trimNumber(unit.hp)} / ${trimNumber(unit.max_hp)} · 魔 ${unit.unbounded_mana ? "∞" : `${trimNumber(unit.mana)} / ${trimNumber(unit.max_mana || unit.base_stats?.mana || unit.stats?.max_mana || unit.stats?.mana || unit.mana)}`} · 魔力点 ${trimNumber(unit.mana_points || unit.stats?.mana_points || 0)}</p>
     <p>盾 ${unit.total_shields} · 闪 ${unit.dodge_charges} · 攻 ${trimNumber(unit.stats.attack)} / 守 ${trimNumber(unit.stats.defense)}</p>
     <p>状态:${statuses}</p>
+    <p>技能:${skills}</p>
     <p>特性:${traits}</p>
   `;
 }
@@ -1237,6 +1239,28 @@ function unitMaxMana(unit) {
   return Number(unit.max_mana || unit.base_stats?.mana || unit.stats?.max_mana || unit.stats?.mana || unit.mana || 0);
 }
 
+function escapeCardText(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[char]));
+}
+
+function kitMarkup(title, items) {
+  const rows = (items || []).filter((item) => item && item.name);
+  if (!rows.length) {
+    return `<div class="statline"><strong>${escapeCardText(title)}</strong> 无</div>`;
+  }
+  const body = rows.map((item) => {
+    const desc = String(item.description || "").trim();
+    return `<div class="kit-row"><b>${escapeCardText(item.name)}</b>${desc ? `<small>${escapeCardText(desc)}</small>` : ""}</div>`;
+  }).join("");
+  return `<div class="kit"><div class="statline"><strong>${escapeCardText(title)}</strong></div>${body}</div>`;
+}
+
 export function renderSelectedCard() {
   const panel = $("selected-card");
   const unit = inspectedUnit();
@@ -1252,7 +1276,6 @@ export function renderSelectedCard() {
     statusEntries.unshift(`消失${unit.banish_turns_remaining > 0 ? `(${unit.banish_turns_remaining})` : ""}`);
   }
   const statuses = statusEntries.join(" · ") || "无";
-  const traits = (unit.traits || []).map((trait) => trait.name).join(" · ") || "无";
   const maxMana = unitMaxMana(unit);
   const hpPercent = Math.round(resourceRatio(unit.hp, unit.max_hp) * 100);
   const manaPercent = unit.unbounded_mana ? 100 : Math.round(resourceRatio(unit.mana, maxMana) * 100);
@@ -1296,9 +1319,8 @@ export function renderSelectedCard() {
       </div>
     </div>
     <div class="selected-card__section">
-      <div class="statline"><strong>特性</strong> ${traits}</div>
-      <div class="statline"><strong>原始技能</strong> ${unit.raw_skill_text || "无"}</div>
-      <div class="statline"><strong>原始特性</strong> ${unit.raw_trait_text || "无"}</div>
+      ${kitMarkup("技能", unit.skills)}
+      ${kitMarkup("特性", unit.traits)}
       ${unit.weather_effect_text ? `<div class="statline"><strong>天气效果</strong> ${unit.weather_effect_text}</div>` : ""}
     </div>
   `;
@@ -1787,6 +1809,10 @@ function bpSidePlayerName(teamId, room) {
 
 export function battleWinnerLabel(battle, room) {
   const winner = Number(battle?.winner || 0);
+  if (room?.forge?.play === "coop") {
+    if (winner === 1) return "合作通过";
+    if (winner === 2) return "对手";
+  }
   if (room?.mode === "bp") {
     const name = bpSidePlayerName(winner, room);
     if (name) return name;
