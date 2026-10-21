@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>武将</title>
     <link rel="stylesheet" href="/theme.css?v=r27" />
-    <link rel="stylesheet" href="/styles.css?v=r147" />
+    <link rel="stylesheet" href="/styles.css?v=r151" />
   </head>
   <!-- 哪一屏该显示，要等 /api/auth/me 回来才知道。在那之前先什么都不显示，
        否则标记里默认可见的那一屏会先闪出来，再被换掉。 -->
@@ -109,6 +109,8 @@
             <section id="library-panel" class="library-panel flow-panel hidden">
               <aside class="library-nav" aria-label="数据库">
                 <button id="library-tab-heroes" class="library-nav__item is-on" type="button">武将列表</button>
+                <button id="library-tab-skills" class="library-nav__item" type="button">技能</button>
+                <button id="library-tab-traits" class="library-nav__item" type="button">特性</button>
                 <button id="library-tab-custom" class="library-nav__item" type="button">自建武将列表</button>
                 <button id="library-tab-replays" class="library-nav__item" type="button">战绩</button>
               </aside>
@@ -181,6 +183,42 @@
                   </div>
                   <div id="library-custom-list" class="library-hero-list"></div>
                   <article id="library-custom-detail" class="library-hero-detail"></article>
+                </div>
+                <div id="library-skills" class="library-heroes hidden">
+                  <div class="library-toolbar">
+                    <label class="library-filter"><span>种类</span>
+                      <select id="library-skill-kind" class="select">
+                        <option value="all">全部</option>
+                        <option value="ultimate">大招</option>
+                        <option value="passive">被动</option>
+                        <option value="active">主动</option>
+                        <option value="mana">费魔</option>
+                        <option value="free">不费魔</option>
+                      </select>
+                    </label>
+                    <label class="library-filter"><span>排序</span>
+                      <select id="library-skill-sort" class="select">
+                        <option value="name">名称</option>
+                      </select>
+                    </label>
+                    <input id="library-skill-search" class="input library-search" type="search" placeholder="搜索技能" aria-label="搜索技能" />
+                  </div>
+                  <div id="library-skill-list" class="library-hero-list"></div>
+                  <article id="library-skill-detail" class="library-hero-detail"></article>
+                </div>
+                <div id="library-traits" class="library-heroes hidden">
+                  <div class="library-toolbar">
+                    <label class="library-filter"><span>种类</span>
+                      <select id="library-trait-kind" class="select">
+                        <option value="all">全部</option>
+                        <option value="normal">一般</option>
+                        <option value="strong">强力</option>
+                      </select>
+                    </label>
+                    <input id="library-trait-search" class="input library-search" type="search" placeholder="搜索特性" aria-label="搜索特性" />
+                  </div>
+                  <div id="library-trait-list" class="library-hero-list"></div>
+                  <article id="library-trait-detail" class="library-hero-detail"></article>
                 </div>
                 <div id="recent-matches-panel" class="library-replays recent-matches-panel hidden">
               <!-- 标题由页头承担。这一层只留操作与一条补充说明的悬浮提示。 -->
@@ -294,6 +332,14 @@
                 <span id="room-forge-point-fact" class="room-setup__fact hidden">
                   <span class="room-setup__label">点数设置</span>
                   <strong id="room-forge-point-label" class="room-setup__value">15</strong>
+                </span>
+                <span id="room-forge-skill-pool-fact" class="room-setup__fact hidden">
+                  <span class="room-setup__label">技能池</span>
+                  <strong id="room-forge-skill-pool-label" class="room-setup__value">1/3随机</strong>
+                </span>
+                <span id="room-forge-trait-pool-fact" class="room-setup__fact hidden">
+                  <span class="room-setup__label">特性池</span>
+                  <strong id="room-forge-trait-pool-label" class="room-setup__value">1/3随机</strong>
                 </span>
                 <span id="room-random-size-fact" class="room-setup__fact hidden">
                   <span class="room-setup__label">每队随机武将数</span>
@@ -715,6 +761,26 @@
             <span class="field__label">晋级奖励</span>
             <input id="forge-promote-pay-input" class="input" type="number" min="0" max="99" step="1" value="3" />
           </label>
+          <label id="forge-skill-pool-control" class="field hidden" for="forge-skill-pool-select">
+            <span class="field__label">技能池</span>
+            <select id="forge-skill-pool-select" class="select">
+              <option value="twenty">20个</option>
+              <option value="fifth">1/5随机</option>
+              <option value="third" selected>1/3随机</option>
+              <option value="half">1/2随机</option>
+              <option value="all">全部</option>
+            </select>
+          </label>
+          <label id="forge-trait-pool-control" class="field hidden" for="forge-trait-pool-select">
+            <span class="field__label">特性池</span>
+            <select id="forge-trait-pool-select" class="select">
+              <option value="twenty">20个</option>
+              <option value="fifth">1/5随机</option>
+              <option value="third" selected>1/3随机</option>
+              <option value="half">1/2随机</option>
+              <option value="all">全部</option>
+            </select>
+          </label>
           <label id="room-army-switch" class="switch" for="room-army-enabled">
             <input id="room-army-enabled" type="checkbox" />
             <span class="switch__track" aria-hidden="true"></span>
@@ -877,6 +943,6 @@
     <script src="/platform/home-ui.js?v=r13" defer></script>
     <script src="/tactical/replay-ui.js?v=r14" defer></script>
     <script src="/tactical/battle-feedback.js?v=r15" defer></script>
-    <script type="module" src="/app.js?v=r136"></script>
+    <script type="module" src="/app.js?v=r141"></script>
   </body>
 </html>

@@ -169,7 +169,7 @@ def _catalog() -> dict[str, Any]:
                     "name": skill.name,
                     "heroes": [hero_name],
                     "ultimate": ultimate,
-                    "cost": 3 if ultimate else 1,
+                    "cost": 3 if ultimate else 2,
                     "source": code,
                     "description": _part_text(skill, skill=True),
                     "search": _skill_search(skill, ultimate),
@@ -184,7 +184,7 @@ def _catalog() -> dict[str, Any]:
                 "name": trait.name,
                 "heroes": [hero_name],
                 "ultimate": False,
-                "cost": 1,
+                "cost": 2,
                 "source": code,
                 "index": index,
                 "description": _part_text(trait, skill=False),
@@ -271,9 +271,15 @@ def coop_rival_pair(stage: int) -> list[dict[str, Any]]:
 
 
 def public_catalog() -> dict[str, Any]:
+    from wujiang.tactical.trait_tiers import trait_category
     data = _catalog()
     def brief(entry: dict[str, Any]) -> dict[str, Any]:
-        return {key: entry[key] for key in ("id", "kind", "name", "heroes", "ultimate", "cost", "description", "search") if key in entry}
+        payload = {key: entry[key] for key in ("id", "kind", "name", "heroes", "ultimate", "cost", "description", "search") if key in entry}
+        if entry.get("kind") == "trait":
+            category = trait_category(str(entry.get("name") or ""))
+            payload["category"] = category
+            payload["cost"] = 4 if category == "strong" else 2
+        return payload
     return {
         "skills": [brief(item) for item in data["skills"]],
         "traits": [brief(item) for item in data["traits"]],
@@ -281,6 +287,45 @@ def public_catalog() -> dict[str, Any]:
         "attributes": data["attributes"],
         "roles": data["roles"],
     }
+
+
+FORGE_POOL_FRACTIONS = {
+    "fifth": (1, 5),
+    "third": (1, 3),
+    "half": (1, 2),
+    "all": (1, 1),
+}
+FORGE_POOL_FIXED = {
+    "twenty": 20,
+}
+
+
+def forge_pool_fraction(value: Any) -> str:
+    text = str(value or "third")
+    if text in FORGE_POOL_FRACTIONS or text in FORGE_POOL_FIXED:
+        return text
+    return "third"
+
+
+def roll_part_pool(kind: str, fraction: str, keep: list[str] | None = None) -> list[str]:
+    """Pick a fraction of implemented parts. `keep` is merged in afterwards."""
+    rows = public_catalog()["skills" if kind == "skill" else "traits"]
+    ids = [str(item["id"]) for item in rows if item.get("id")]
+    known = set(ids)
+    mode = forge_pool_fraction(fraction)
+    if mode == "all" or not ids:
+        chosen = set(ids)
+    elif mode in FORGE_POOL_FIXED:
+        count = min(len(ids), FORGE_POOL_FIXED[mode])
+        chosen = set(random.sample(ids, count))
+    else:
+        num, den = FORGE_POOL_FRACTIONS[mode]
+        count = max(1, min(len(ids), (len(ids) * num + den // 2) // den))
+        chosen = set(random.sample(ids, count))
+    for part_id in keep or []:
+        if part_id in known:
+            chosen.add(part_id)
+    return [part_id for part_id in ids if part_id in chosen]
 
 
 def _entry(part_id: str) -> dict[str, Any] | None:
@@ -292,7 +337,7 @@ def _entry(part_id: str) -> dict[str, Any] | None:
     return None
 
 
-def normalize_build(raw: Any, *, stat_cap: int, point_cap: int) -> dict[str, Any]:
+def normalize_build(raw: Any, *, stat_cap: int, point_cap: int, skill_pool: set[str] | None = None, trait_pool: set[str] | None = None) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ForgeError("武将配置无效。")
     cap = max(0, min(12, int(stat_cap)))
@@ -333,13 +378,18 @@ def normalize_build(raw: Any, *, stat_cap: int, point_cap: int) -> dict[str, Any
         entry = _entry(part_id)
         if entry is None or entry["kind"] != "skill":
             raise ForgeError("有技能不在可选列表里。")
+        if skill_pool is not None and part_id not in skill_pool:
+            raise ForgeError("这个技能不在这一轮的池子里。")
         spent += int(entry["cost"])
         build["skills"].append(part_id)
     for part_id in list(dict.fromkeys(str(item) for item in (raw.get("traits") or []))):
         entry = _entry(part_id)
         if entry is None or entry["kind"] != "trait":
             raise ForgeError("有特性不在可选列表里。")
-        spent += int(entry["cost"])
+        if trait_pool is not None and part_id not in trait_pool:
+            raise ForgeError("这个特性不在这一轮的池子里。")
+        from wujiang.tactical.trait_tiers import trait_point_cost
+        spent += trait_point_cost(str(entry.get("name") or ""))
         build["traits"].append(part_id)
     if spent > budget:
         raise ForgeError("点数不够。")
