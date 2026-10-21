@@ -1066,6 +1066,12 @@ class GameRoom:
         self.forge_run = 1
         self.forge_run_ack: dict[int, int] = {}
         self.forge_ceremony_view = None
+        self.forge_skill_fraction = "third"
+        self.forge_trait_fraction = "third"
+        self.forge_skill_pool = None
+        self.forge_trait_pool = None
+        self.forge_skill_kept = {1: [], 2: []}
+        self.forge_trait_kept = {1: [], 2: []}
         self.forge_team_bonus = {1: 0, 2: 0}
         self.forge_round_note = {1: None, 2: None}
         self.forge_phase = "edit"
@@ -1167,6 +1173,13 @@ class GameRoom:
             self.forge_run_ack = {}
         if not hasattr(self, "forge_ceremony_view"):
             self.forge_ceremony_view = None
+        if not hasattr(self, "forge_skill_fraction"):
+            self.forge_skill_fraction = "third"
+            self.forge_trait_fraction = "third"
+            self.forge_skill_pool = None
+            self.forge_trait_pool = None
+            self.forge_skill_kept = {1: [], 2: []}
+            self.forge_trait_kept = {1: [], 2: []}
         if not hasattr(self, "bp_team_size"):
             self.bp_team_size = 3
         if not hasattr(self, "bp_level_caps"):
@@ -3170,11 +3183,12 @@ class GameRoom:
     def _release_rival_seat(self) -> None:
         self.seats.pop(FORGE_RIVAL_SEAT_ID, None)
 
-    def set_forge_limits(self, token: str, stat_cap: Any, point_cap: Any, loss_pay: Any = None, play: Any = None, promote_pay: Any = None) -> None:
+    def set_forge_limits(self, token: str, stat_cap: Any, point_cap: Any, loss_pay: Any = None, play: Any = None, promote_pay: Any = None, skill_fraction: Any = None, trait_fraction: Any = None) -> None:
         with self._lock:
             self.require_host(token)
             if self.mode != "skill_random" or self.status != "lobby":
                 raise RoomError("只有技能组合房间在大厅里才能改点数。")
+            from wujiang.tactical.rooms.forge import forge_pool_fraction
             try:
                 stat_value = int(stat_cap)
                 point_value = int(point_cap)
@@ -3194,6 +3208,8 @@ class GameRoom:
             self.forge_loss_pay = loss_value
             self.forge_promote_pay = promote_value
             self.forge_play = play_value
+            self.forge_skill_fraction = forge_pool_fraction(getattr(self, "forge_skill_fraction", "third") if skill_fraction is None else skill_fraction)
+            self.forge_trait_fraction = forge_pool_fraction(getattr(self, "forge_trait_fraction", "third") if trait_fraction is None else trait_fraction)
             if play_value != "coop":
                 self.forge_stage = 1
                 self.forge_rivals = []
@@ -3222,7 +3238,13 @@ class GameRoom:
                 raise RoomError("只能编辑自己这一侧。")
             from wujiang.tactical.rooms.forge import ForgeError, normalize_build
             try:
-                build = normalize_build(raw, stat_cap=self.forge_stat_cap, point_cap=self._forge_budget(team))
+                build = normalize_build(
+                    raw,
+                    stat_cap=self.forge_stat_cap,
+                    point_cap=self._forge_budget(team),
+                    skill_pool=self._allowed_forge_parts(team, "skill"),
+                    trait_pool=self._allowed_forge_parts(team, "trait"),
+                )
             except ForgeError as exc:
                 raise RoomError(str(exc)) from exc
             self.forge_builds[team] = build
@@ -3273,6 +3295,39 @@ class GameRoom:
             self.forge_hidden_clear = False
             self._roll_forge_rivals(1)
         self._clear_forge_round_note()
+        self._roll_forge_pools()
+
+    def _forge_part_ids(self, team: int, key: str) -> list[str]:
+        build = self.forge_builds.get(team)
+        if not isinstance(build, dict):
+            return []
+        return [str(item) for item in (build.get(key) or []) if str(item)]
+
+    def _roll_forge_pools(self) -> None:
+        from wujiang.tactical.rooms.forge import forge_pool_fraction, roll_part_pool
+        self.forge_skill_fraction = forge_pool_fraction(getattr(self, "forge_skill_fraction", "third"))
+        self.forge_trait_fraction = forge_pool_fraction(getattr(self, "forge_trait_fraction", "third"))
+        self.forge_skill_kept = {team: self._forge_part_ids(team, "skills") for team in (1, 2)}
+        self.forge_trait_kept = {team: self._forge_part_ids(team, "traits") for team in (1, 2)}
+        self.forge_skill_pool = roll_part_pool("skill", self.forge_skill_fraction)
+        self.forge_trait_pool = roll_part_pool("trait", self.forge_trait_fraction)
+
+    def _allowed_forge_parts(self, team: int, kind: str) -> set[str] | None:
+        base = self.forge_skill_pool if kind == "skill" else self.forge_trait_pool
+        kept = (self.forge_skill_kept if kind == "skill" else self.forge_trait_kept) or {}
+        if not isinstance(base, list):
+            return None
+        return set(base) | {str(item) for item in (kept.get(int(team)) or [])}
+
+    def _presented_forge_pool(self, viewer_team: int | None, kind: str) -> list[str] | None:
+        base = self.forge_skill_pool if kind == "skill" else self.forge_trait_pool
+        if not isinstance(base, list):
+            return None
+        if viewer_team not in (1, 2):
+            return list(base)
+        allowed = self._allowed_forge_parts(int(viewer_team), kind) or set()
+        seen = set(base)
+        return list(base) + [part_id for part_id in allowed if part_id not in seen]
 
     def _begin_forge_battle(self) -> None:
         from wujiang.tactical.heroes.registry import RoomBattleEntry, create_room_battle
@@ -3340,6 +3395,7 @@ class GameRoom:
                 return
             self._finish_replay()
             next_phase = "edit"
+            reroll_pool = False
             self._clear_forge_round_note()
             if self.battle is not None and self.battle.winner is not None:
                 self.forge_last_winner = self.battle.winner
@@ -3358,20 +3414,26 @@ class GameRoom:
                         elif stage >= 3:
                             self._roll_forge_rivals(4)
                             next_phase = "omen"
+                            reroll_pool = True
                         else:
                             self._roll_forge_rivals(stage + 1)
+                            reroll_pool = True
                     else:
                         self.forge_failed = True
                         self._grant_forge_points((1, 2), int(getattr(self, "forge_loss_pay", 2) or 0), "loss")
+                        reroll_pool = True
                 else:
                     loser = 2 if winner == 1 else 1 if winner == 2 else None
                     if loser is not None:
                         self._grant_forge_points((loser,), int(getattr(self, "forge_loss_pay", 2) or 0), "loss")
+                        reroll_pool = True
             self.battle = None
             self._release_rival_seat()
             self.status = "forge"
             if next_phase == "ceremony":
                 self._remember_forge_ceremony()
+            elif reroll_pool:
+                self._roll_forge_pools()
             self.forge_phase = next_phase
             self.forge_ready = {1: False, 2: False}
             for seat in self.seats.values():
@@ -3405,6 +3467,7 @@ class GameRoom:
             self.forge_run = int(getattr(self, "forge_run", 1) or 1) + 1
             self.forge_run_ack = {int(host.player_id): self.forge_run}
             self._roll_forge_rivals(1)
+            self._roll_forge_pools()
             self._clear_forge_round_note()
             self.forge_phase = "edit"
             self.forge_ready = {1: False, 2: False}
@@ -3468,6 +3531,10 @@ class GameRoom:
             "run": int(getattr(self, "forge_run", 1) or 1),
             "hidden_clear": bool(getattr(self, "forge_hidden_clear", False)),
             "ceremony_view": getattr(self, "forge_ceremony_view", None),
+            "skill_fraction": str(getattr(self, "forge_skill_fraction", "third") or "third"),
+            "trait_fraction": str(getattr(self, "forge_trait_fraction", "third") or "third"),
+            "skill_pool": self._presented_forge_pool(viewer_team, "skill"),
+            "trait_pool": self._presented_forge_pool(viewer_team, "trait"),
             "rivals": list(getattr(self, "forge_rivals", None) or []),
             "bonus": {str(team): int((getattr(self, "forge_team_bonus", None) or {}).get(team, 0) or 0) for team in (1, 2)},
             "round_note": {

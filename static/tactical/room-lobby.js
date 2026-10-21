@@ -118,6 +118,8 @@ export function openRoomSetup() {
     forgeLossPay: String(Number(state.room.forge?.loss_pay ?? 2)),
     forgePromotePay: String(Number(state.room.forge?.promote_pay ?? 3)),
     forgePlay: state.room.forge?.play === "coop" ? "coop" : "duel",
+    forgeSkillFraction: ["twenty", "fifth", "third", "half", "all"].includes(state.room.forge?.skill_fraction) ? state.room.forge.skill_fraction : "third",
+    forgeTraitFraction: ["twenty", "fifth", "third", "half", "all"].includes(state.room.forge?.trait_fraction) ? state.room.forge.trait_fraction : "third",
     boardWidth: String(Number(state.room.board_width || 10)),
     boardHeight: String(Number(state.room.board_height || 10)),
   };
@@ -286,14 +288,18 @@ export async function confirmRoomSetup() {
     const parsedPromote = Number.parseInt($("forge-promote-pay-input")?.value, 10);
     const nextPromotePay = Math.max(0, Math.min(99, Number.isFinite(parsedPromote) ? parsedPromote : 3));
     const nextPlay = $("forge-play-select")?.value === "coop" ? "coop" : "duel";
+    const nextSkillFraction = ["twenty", "fifth", "third", "half", "all"].includes($("forge-skill-pool-select")?.value) ? $("forge-skill-pool-select").value : "third";
+    const nextTraitFraction = ["twenty", "fifth", "third", "half", "all"].includes($("forge-trait-pool-select")?.value) ? $("forge-trait-pool-select").value : "third";
     if (
       nextStatCap !== Number(state.room?.forge?.stat_cap ?? 6)
       || nextPointCap !== Number(state.room?.forge?.point_cap ?? 15)
       || nextLossPay !== Number(state.room?.forge?.loss_pay ?? 2)
       || nextPromotePay !== Number(state.room?.forge?.promote_pay ?? 3)
       || nextPlay !== (state.room?.forge?.play === "coop" ? "coop" : "duel")
+      || nextSkillFraction !== (state.room?.forge?.skill_fraction || "third")
+      || nextTraitFraction !== (state.room?.forge?.trait_fraction || "third")
     ) {
-      await setForgeLimits(nextStatCap, nextPointCap, nextLossPay, nextPlay, nextPromotePay);
+      await setForgeLimits(nextStatCap, nextPointCap, nextLossPay, nextPlay, nextPromotePay, nextSkillFraction, nextTraitFraction);
     }
   }
   const nextTurnTimeout = [0, 30, 60, 120].includes(Number.parseInt(draft.turnTimeout, 10))
@@ -498,6 +504,12 @@ export function renderRoomSetupDialog() {
   $("forge-play-control")?.classList.toggle("hidden", draft.mode !== "skill_random");
   $("forge-loss-pay-control")?.classList.toggle("hidden", draft.mode !== "skill_random");
   $("forge-promote-pay-control")?.classList.toggle("hidden", draft.mode !== "skill_random" || draft.forgePlay !== "coop");
+  $("forge-skill-pool-control")?.classList.toggle("hidden", draft.mode !== "skill_random");
+  $("forge-trait-pool-control")?.classList.toggle("hidden", draft.mode !== "skill_random");
+  const forgeSkillPool = $("forge-skill-pool-select");
+  if (forgeSkillPool && document.activeElement !== forgeSkillPool) forgeSkillPool.value = draft.forgeSkillFraction || "third";
+  const forgeTraitPool = $("forge-trait-pool-select");
+  if (forgeTraitPool && document.activeElement !== forgeTraitPool) forgeTraitPool.value = draft.forgeTraitFraction || "third";
   const forgePlay = $("forge-play-select");
   if (forgePlay && document.activeElement !== forgePlay) forgePlay.value = draft.forgePlay === "coop" ? "coop" : "duel";
   const forgePromotePay = $("forge-promote-pay-input");

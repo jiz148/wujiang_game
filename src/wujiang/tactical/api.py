@@ -20,6 +20,8 @@ from wujiang.tactical.rooms.launch import make_launch_context
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.heroes.registry import create_battle
 from wujiang.tactical.heroes.registry import list_heroes
+from wujiang.tactical.trait_tiers import TraitTierError
+from wujiang.tactical.trait_tiers import set_trait_category
 from wujiang.tactical.custom_heroes import CustomHeroError
 from wujiang.tactical.custom_heroes import delete_custom_hero
 from wujiang.tactical.custom_heroes import list_custom_heroes
@@ -65,6 +67,38 @@ def get_custom_heroes(ctx: RequestContext) -> None:
         json_response(handler, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         return
     json_response(handler, HTTPStatus.OK, {"heroes": heroes})
+    return
+
+
+@get("/api/skills")
+def get_implemented_skills(ctx: RequestContext) -> None:
+    from wujiang.tactical.rooms.forge import public_catalog
+    handler = ctx.handler
+    json_response(handler, HTTPStatus.OK, {"skills": public_catalog()["skills"]})
+    return
+
+
+@get("/api/traits")
+def get_implemented_traits(ctx: RequestContext) -> None:
+    from wujiang.tactical.rooms.forge import public_catalog
+    handler = ctx.handler
+    json_response(handler, HTTPStatus.OK, {"traits": public_catalog()["traits"]})
+    return
+
+
+@post("/api/traits/category")
+def post_trait_category(ctx: RequestContext) -> None:
+    handler = ctx.handler
+    try:
+        category = set_trait_category(
+            str((ctx.payload or {}).get("name") or ""),
+            str((ctx.payload or {}).get("category") or ""),
+        )
+    except TraitTierError as exc:
+        json_response(handler, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        return
+    from wujiang.tactical.rooms.forge import public_catalog
+    json_response(handler, HTTPStatus.OK, {"category": category, "traits": public_catalog()["traits"]})
     return
 
 
@@ -899,6 +933,8 @@ def post_rooms_forge_action(ctx: RequestContext) -> None:
                 payload.get("loss_pay"),
                 payload.get("play"),
                 payload.get("promote_pay"),
+                payload.get("skill_fraction"),
+                payload.get("trait_fraction"),
             )
         elif action == "build":
             room.update_forge_build(token, payload.get("team_id"), payload.get("build"))

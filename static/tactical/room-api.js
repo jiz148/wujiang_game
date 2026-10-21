@@ -672,7 +672,7 @@ export const bpChoose = (heroCode) => postBpAction("choose", {hero_code: heroCod
 export const openBpAssign = () => postBpAction("open-assign", {});
 export const setBpTeamAi = (teamId, enabled) => postBpAction("team-ai", {team_id: teamId, enabled});
 
-export async function setForgeLimits(statCap, pointCap, lossPay = 2, play = "duel", promotePay = 3) {
+export async function setForgeLimits(statCap, pointCap, lossPay = 2, play = "duel", promotePay = 3, skillFraction = "third", traitFraction = "third") {
   if (!hasRoom() || !state.playerToken || state.room?.mode !== "skill_random") return;
   try {
     const payload = await fetchJson("/api/rooms/forge/action", {
@@ -686,6 +686,8 @@ export async function setForgeLimits(statCap, pointCap, lossPay = 2, play = "due
         loss_pay: lossPay,
         play,
         promote_pay: promotePay,
+        skill_fraction: skillFraction,
+        trait_fraction: traitFraction,
       }),
     });
     applyRoomPayload(payload, {preserveScreen: true});

@@ -14,6 +14,8 @@ const STATS = [
 
 let query = "";
 let tab = "skill";
+let skillKind = "all";
+let traitKind = "all";
 let composing = false;
 let forgeOverlayOpen = false;
 
@@ -70,8 +72,8 @@ function spent(build, catalog) {
   const byId = catalogIndex(catalog);
   let total = 0;
   for (const [key] of STATS) total += (Number(build[key]) - 3) * 3;
-  for (const id of build.skills || []) total += Number(byId.get(id)?.cost || 1);
-  for (const id of build.traits || []) total += Number(byId.get(id)?.cost || 1);
+  for (const id of build.skills || []) total += Number(byId.get(id)?.cost || 2);
+  for (const id of build.traits || []) total += Number(byId.get(id)?.cost || 2);
   return total;
 }
 
@@ -268,20 +270,55 @@ function fillOwned(host, build, items, removable) {
   }
 }
 
+function editableCatalog(forge) {
+  const catalog = forge.catalog || {skills: [], traits: [], races: [], attributes: [], roles: []};
+  const allow = (items, ids) => Array.isArray(ids)
+    ? (items || []).filter((item) => ids.includes(item.id))
+    : (items || []);
+  return {
+    ...catalog,
+    skills: allow(catalog.skills, forge.skill_pool),
+    traits: allow(catalog.traits, forge.trait_pool),
+  };
+}
+
+function skillTokens(item) {
+  return String(item?.search || "").split(/\s+/).filter(Boolean);
+}
+
+function matchesSkillKind(item, kind) {
+  if (!kind || kind === "all") return true;
+  const tokens = skillTokens(item);
+  if (kind === "ultimate") return Boolean(item.ultimate);
+  if (kind === "passive") return tokens.includes("被动");
+  if (kind === "active") return !tokens.includes("被动");
+  if (kind === "mana") return tokens.includes("费魔");
+  if (kind === "free") return tokens.includes("不费魔");
+  return true;
+}
+
+function traitIsStrong(item) {
+  if (item?.category === "strong") return true;
+  if (item?.category === "normal") return false;
+  return item?.name === "魔免" || item?.name === "物免";
+}
+
+function matchesTraitKind(item, kind) {
+  if (!kind || kind === "all") return true;
+  if (kind === "strong") return traitIsStrong(item);
+  if (kind === "normal") return !traitIsStrong(item);
+  return true;
+}
+
 function picker(build, catalog) {
   const pane = document.createElement("section");
   pane.className = "forge-picker";
   const picks = document.createElement("div");
   picks.className = "forge-picks";
   fillOwned(picks, build, chosenItems(build, catalog), true);
-  const search = document.createElement("input");
-  search.className = "forge-search";
-  search.placeholder = "技能、特性、武将";
-  search.value = query;
-  search.setAttribute("aria-label", "检索");
   const tabs = document.createElement("div");
   tabs.className = "forge-tabs";
-  for (const [id, label] of [["skill", "技能"], ["ultimate", "大招"], ["trait", "特性"]]) {
+  for (const [id, label] of [["skill", "技能"], ["trait", "特性"]]) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = tab === id ? "is-on" : "";
@@ -292,12 +329,41 @@ function picker(build, catalog) {
     });
     tabs.append(button);
   }
+  const filters = document.createElement("div");
+  filters.className = "forge-filter-row";
+  const kind = document.createElement("select");
+  kind.className = "forge-select forge-kind";
+  const kindOptions = tab === "trait"
+    ? [["all", "全部"], ["normal", "一般"], ["strong", "强力"]]
+    : [["all", "全部"], ["ultimate", "大招"], ["passive", "被动"], ["active", "主动"], ["mana", "费魔"], ["free", "不费魔"]];
+  for (const [value, label] of kindOptions) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    kind.append(option);
+  }
+  kind.value = tab === "trait" ? traitKind : skillKind;
+  const search = document.createElement("input");
+  search.className = "forge-search forge-search--inline";
+  search.placeholder = tab === "trait" ? "搜索特性" : "搜索技能";
+  search.value = query;
+  search.setAttribute("aria-label", "检索");
+  const counts = document.createElement("span");
+  counts.className = "forge-pool-count";
+  counts.textContent = tab === "trait"
+    ? `可选特性 ${catalog.traits?.length || 0}`
+    : `可选技能 ${catalog.skills?.length || 0}`;
+  filters.append(kind, search, counts);
   const list = document.createElement("div");
   list.className = "forge-results";
   const paintResults = () => {
     hideForgeTip();
     const pool = tab === "trait" ? catalog.traits : catalog.skills;
-    const rows = (pool || []).filter((item) => (tab !== "ultimate" || item.ultimate) && (tab !== "skill" || !item.ultimate) && matches(item, query)).slice(0, 80);
+    const kindNow = tab === "trait" ? traitKind : skillKind;
+    const rows = (pool || []).filter((item) => (
+      (tab === "trait" ? matchesTraitKind(item, kindNow) : matchesSkillKind(item, kindNow))
+      && matches(item, query)
+    ));
     const chosen = new Set([...(build.skills || []), ...(build.traits || [])]);
     const budget = pointBudget(build);
     const used = spent(build, catalog);
@@ -343,8 +409,13 @@ function picker(build, catalog) {
     if (composing || event.isComposing) return;
     applyQuery();
   });
+  kind.addEventListener("change", () => {
+    if (tab === "trait") traitKind = kind.value;
+    else skillKind = kind.value;
+    paintResults();
+  });
   paintResults();
-  pane.append(picks, search, tabs, list);
+  pane.append(picks, tabs, filters, list);
   return pane;
 }
 
@@ -1112,7 +1183,7 @@ export function renderForgePanel() {
     return;
   }
   const build = {...(forge.builds?.[String(team)] || forge.builds?.[team] || {}), team};
-  const catalog = forge.catalog || {skills: [], traits: [], races: [], attributes: []};
+  const catalog = editableCatalog(forge);
   const bar = document.createElement("header");
   bar.className = "forge-bar";
   const points = document.createElement("div");

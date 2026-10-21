@@ -931,6 +931,16 @@ function bindRoomLobbyDialogs() {
     state.libraryTab = "heroes";
     render();
   });
+  $("library-tab-skills")?.addEventListener("click", () => {
+    if (state.librarySkillsError) state.librarySkillsLoaded = false;
+    state.libraryTab = "skills";
+    render();
+  });
+  $("library-tab-traits")?.addEventListener("click", () => {
+    if (state.libraryTraitsError) state.libraryTraitsLoaded = false;
+    state.libraryTab = "traits";
+    render();
+  });
   $("library-tab-custom")?.addEventListener("click", () => {
     if (state.customHeroesError) state.customHeroesLoaded = false;
     state.libraryTab = "custom";
@@ -970,6 +980,26 @@ function bindRoomLobbyDialogs() {
   });
   $("library-custom-sort-dir")?.addEventListener("click", () => {
     state.customSortDir = state.customSortDir === "asc" ? "desc" : "asc";
+    render();
+  });
+  $("library-skill-search")?.addEventListener("input", (event) => {
+    state.librarySkillQuery = event.target.value;
+    render();
+  });
+  $("library-skill-kind")?.addEventListener("change", (event) => {
+    state.librarySkillKind = event.target.value;
+    render();
+  });
+  $("library-skill-sort")?.addEventListener("change", (event) => {
+    state.librarySkillSort = event.target.value;
+    render();
+  });
+  $("library-trait-search")?.addEventListener("input", (event) => {
+    state.libraryTraitQuery = event.target.value;
+    render();
+  });
+  $("library-trait-kind")?.addEventListener("change", (event) => {
+    state.libraryTraitKind = event.target.value;
     render();
   });
   $("bp-tier-pool")?.addEventListener("click", (event) => {
@@ -1472,15 +1502,22 @@ export function renderRoomPanels() {
   $("room-forge-promote-fact")?.classList.toggle("hidden", !forgeLobby || !forgeCoop);
   $("room-forge-stat-fact")?.classList.toggle("hidden", !forgeLobby);
   $("room-forge-point-fact")?.classList.toggle("hidden", !forgeLobby);
+  $("room-forge-skill-pool-fact")?.classList.toggle("hidden", !forgeLobby);
+  $("room-forge-trait-pool-fact")?.classList.toggle("hidden", !forgeLobby);
   if (forgeLobby) {
     const statLabel = $("room-forge-stat-label");
     const pointLabel = $("room-forge-point-label");
     const playLabel = $("room-forge-play-label");
     const promoteLabel = $("room-forge-promote-label");
+    const skillPoolLabel = $("room-forge-skill-pool-label");
+    const traitPoolLabel = $("room-forge-trait-pool-label");
+    const poolName = {twenty: "20个", fifth: "1/5随机", third: "1/3随机", half: "1/2随机", all: "全部"};
     if (statLabel) statLabel.textContent = String(forge.stat_cap ?? 6);
     if (pointLabel) pointLabel.textContent = String(forge.point_cap ?? 15);
     if (playLabel) playLabel.textContent = forgeCoop ? "谁尽力，谁犯罪（合作）" : "谁的理解最纯粹（对战）";
     if (promoteLabel) promoteLabel.textContent = String(forge.promote_pay ?? 3);
+    if (skillPoolLabel) skillPoolLabel.textContent = poolName[forge.skill_fraction] || "1/3随机";
+    if (traitPoolLabel) traitPoolLabel.textContent = poolName[forge.trait_fraction] || "1/3随机";
   }
   const heroLimitLabel = $("room-hero-limit-label");
   if (heroLimitLabel) heroLimitLabel.textContent = String(heroLimit);
