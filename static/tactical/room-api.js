@@ -104,12 +104,14 @@ export function applyRoomPayload(payload, { preserveScreen = false } = {}) {
   const nextMatchId = String(payload?.room?.match_id || "");
   const nextFight = Boolean(payload?.battle && !payload.battle.winner && nextMatchId && nextMatchId !== previousMatchId);
   if (nextFight) state.holdBattleView = false;
+  const forgeBack = payload?.room?.mode === "skill_random" && payload?.room?.status === "forge";
   const keepLocalBattle = Boolean(
     previousScreen === "battle"
     && state.battle
     && !state.replayMode
     && sameRoom
     && !nextFight
+    && !(forgeBack && !state.holdBattleView)
     && (state.holdBattleView || !payload.battle)
   );
   const frozenBattle = keepLocalBattle ? state.battle : null;
@@ -418,6 +420,19 @@ async function restartRoomDraft() {
   }
 }
 
+async function returnSkillRandomToEditor() {
+  if (!hasRoom() || !state.playerToken) return;
+  const payload = await fetchJson("/api/rooms/forge/action", {
+    method: "POST",
+    body: JSON.stringify({
+      room_id: state.room.room_id,
+      player_token: state.playerToken,
+      action: "return",
+    }),
+  });
+  applyRoomPayload(payload);
+}
+
 export async function leaveFinishedBattle() {
   state.holdBattleView = false;
   state.settlementPostgame = null;
@@ -425,6 +440,17 @@ export async function leaveFinishedBattle() {
   const launch = currentBattleLaunch();
   if (!launch.allowLobby || launch.source === "campaign") {
     exitBattle();
+    return;
+  }
+  if (state.room?.mode === "skill_random") {
+    try {
+      await returnSkillRandomToEditor();
+    } catch (error) {
+      state.holdBattleView = true;
+      reportRoomError(error.error || "回到编辑失败。");
+      return;
+    }
+    setScreen("draft");
     return;
   }
   if (state.room?.status === "finished" && state.playerToken && state.room.viewer_is_host) {
@@ -645,6 +671,30 @@ export const setBpCaptain = (teamId, seatId) => postBpAction("captain", {team_id
 export const bpChoose = (heroCode) => postBpAction("choose", {hero_code: heroCode});
 export const openBpAssign = () => postBpAction("open-assign", {});
 export const setBpTeamAi = (teamId, enabled) => postBpAction("team-ai", {team_id: teamId, enabled});
+
+export async function setForgeLimits(statCap, pointCap, lossPay = 2, play = "duel", promotePay = 3) {
+  if (!hasRoom() || !state.playerToken || state.room?.mode !== "skill_random") return;
+  try {
+    const payload = await fetchJson("/api/rooms/forge/action", {
+      method: "POST",
+      body: JSON.stringify({
+        room_id: state.room.room_id,
+        player_token: state.playerToken,
+        action: "limits",
+        stat_cap: statCap,
+        point_cap: pointCap,
+        loss_pay: lossPay,
+        play,
+        promote_pay: promotePay,
+      }),
+    });
+    applyRoomPayload(payload, {preserveScreen: true});
+    render();
+  } catch (error) {
+    if (error.state) applyRoomPayload(error.state, {preserveScreen: true});
+    reportRoomError(error.error || "点数设置失败。");
+  }
+}
 export const bpAssign = (heroCode, controller) => postBpAction("assign", {hero_code: heroCode, controller});
 
 export async function setRandomRosterSize(rosterSize) {
@@ -1052,10 +1102,11 @@ export async function deleteListedRoom(roomId) {
     const identity = loadStoredIdentity(roomId);
     const payload = await fetchJson("/api/rooms/delete", {
       method: "POST",
-      body: JSON.stringify({
-        room_id: roomId,
-        player_token: identity.token || state.playerToken || "",
-      }),
+        body: JSON.stringify({
+          room_id: roomId,
+          player_token: identity.token || state.playerToken || "",
+          force: true,
+        }),
     });
     state.rooms = payload.rooms || [];
     if (state.room?.room_id === roomId) resetRoomSession({ rooms: state.rooms, roomId });
@@ -1132,18 +1183,8 @@ export function renderRoomListActive() {
       actions.append(resumeBtn);
     }
 
-    const emptyRoom = Number(room.human_seat_count || 0) === 0;
-    if (!emptyRoom && Number(room.owner_user_id) === Number(state.authUser?.id || 0)) {
-      const remove = document.createElement("button");
-      remove.className = "ghost";
-      remove.textContent = "删除";
-      remove.addEventListener("click", () => deleteListedRoom(room.room_id));
-      actions.append(remove);
-    }
-
     main.append(actions);
-    card.append(plate, main);
-    if (emptyRoom) card.append(roomCardMore(room.room_id));
+    card.append(plate, main, roomCardMore(room.room_id));
     list.append(card);
   });
 }
@@ -1156,6 +1197,12 @@ function roomCardMore(roomId) {
   toggle.className = "room-card-more__toggle";
   toggle.textContent = "⋯";
   toggle.setAttribute("aria-label", "房间操作");
+  toggle.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const open = more.classList.contains("is-open");
+    document.querySelectorAll(".room-card-more.is-open").forEach((node) => node.classList.remove("is-open"));
+    if (!open) more.classList.add("is-open");
+  });
   const menu = document.createElement("div");
   menu.className = "room-card-more__menu";
   const remove = document.createElement("button");
@@ -1163,10 +1210,17 @@ function roomCardMore(roomId) {
   remove.textContent = "删除房间";
   remove.addEventListener("click", (event) => {
     event.stopPropagation();
+    more.classList.remove("is-open");
     void deleteListedRoom(roomId);
   });
   menu.append(remove);
   more.append(toggle, menu);
+  if (!roomCardMore.bound) {
+    document.addEventListener("click", () => {
+      document.querySelectorAll(".room-card-more.is-open").forEach((node) => node.classList.remove("is-open"));
+    });
+    roomCardMore.bound = true;
+  }
   return more;
 }
 
@@ -1174,6 +1228,7 @@ function roomModeFace(room) {
   const code = room?.mode || "classic";
   if (code === "bp") return { tone: "bp", title: "BP", hint: "禁选" };
   if (code === "autochess") return { tone: "chess", title: "自走棋", hint: "多路" };
+  if (code === "skill_random") return { tone: "bp", title: "技能组合", hint: "组合" };
   if (code === "random") return { tone: "battle", title: "战场对战", hint: "随机" };
   return { tone: "battle", title: "战场对战", hint: "选将" };
 }
@@ -1379,7 +1434,7 @@ export async function startRoomBattle() {
       }),
     });
     applyRoomPayload(payload);
-    if (state.room?.status === "bp") {
+    if (state.room?.status === "bp" || (state.room?.mode === "skill_random" && state.room?.status === "forge")) {
       setScreen("draft", { renderAfter: false });
     } else {
       setScreen(state.room?.mode === "autochess" ? "autochess" : "battle", { renderAfter: false });

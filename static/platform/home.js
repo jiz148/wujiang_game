@@ -70,7 +70,7 @@ export function renderHomeFlow() {
     createButton.setAttribute("aria-busy", state.roomCreateBusy ? "true" : "false");
     createButton.textContent = state.roomCreateBusy ? "正在创建" : "创建房间";
   }
-  for (const id of ["mode-classic", "mode-bp", "mode-autochess"]) {
+  for (const id of ["mode-classic", "mode-bp", "mode-autochess", "mode-skill-random"]) {
     const button = $(id);
     if (button) button.disabled = Boolean(state.roomCreateBusy);
   }

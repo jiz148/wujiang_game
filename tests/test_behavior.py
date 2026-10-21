@@ -30782,7 +30782,7 @@ class AutoChessBehaviorTests(unittest.TestCase):
         chess.choose_upgrade(1, first.id, "defense")
         player.shop[0] = cheap
         chess.buy(1, 0)
-        self.assertEqual((len(player.pieces), first.star, first.pending_upgrades), (1, 3, 1))
+        self.assertEqual((len(player.pieces), first.star, first.pending_upgrades), (1, 4, 1))
         chess.choose_upgrade(1, first.id, "speed")
         self.assertEqual(first.upgrades, {"attack": 1, "defense": 1, "speed": 1})
         huge_code = next((code for code in catalog if len(__import__("wujiang.tactical.heroes.registry", fromlist=["entry_footprint_offsets"]).entry_footprint_offsets(

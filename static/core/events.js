@@ -12,6 +12,7 @@ import { battleWinnerLabel, chainQueuedActionPrompt, hideTooltip, renderHoverCar
 import { closeKeyboardHelp, focusMainContent, handleBattleKeyboard, onBoardClick, openKeyboardHelp } from '../tactical/board-input.js';
 import { canEditRoomSetup, canManageSeatArmy, canManageSeatRoster, closeAutoConfigure, closeHeroDetail, closeHeroPicker, closeRoomSetup, confirmAutoConfigure, confirmRoomSetup, isSeatLocked, openAutoConfigure, openHeroDetail, openHeroPicker, openRoomSetup, renderAutoConfigureDialog, renderHeroPicker, renderRoomSetupDialog, roomHeroLimit, seatHeroEntries, updateAutoConfigureDraft, updateRoomSetupDraft } from '../tactical/room-lobby.js';
 import { renderBpPanel } from '../tactical/bp-ui.js';
+import { renderForgeLobbyConfig, renderForgePanel } from '../tactical/forge-ui.js';
 import { bindAutoChessEvents, renderAutoChessPanel } from '../tactical/autochess-ui.js';
 import { applyRoomPayload, canReclaimSeatByName, claimRoomSeat, closeModePicker, controlSimulation, copyInviteLink, createRoom, deleteRoom, exitTutorial, fillEmptySeatsWithAi, isRandomRoomMode, joinRoom, leaveFinishedBattle, leaveReplayMode, leaveRoom, loadReplayStep, openModePicker, performAction, removeRoomSeat, renderTutorialGuide, restartFromGameOver, resumeStoredSeat, resumeTutorialBattle, retryTutorialStep, roomModeMeta, selectRoomHero, setAiStyles, setRoomSeatController, setRoomSeatCount, setRoomSeatTeam, setSeatArmyComposition, setSeatRandomQuota, shouldShowLobbyPanel, startRoomBattle, startTutorialBattle, surrenderBattle, toggleAiTakeover, toggleRoomReady } from '../tactical/room-api.js';
 import { clearActionSelection, loadStoredIdentity } from '../tactical/session.js';
@@ -110,6 +111,7 @@ export function bindEvents() {
   $("mode-classic")?.addEventListener("click", () => createRoom("classic"));
   $("mode-bp")?.addEventListener("click", () => createRoom("bp"));
   $("mode-autochess")?.addEventListener("click", () => createRoom("autochess"));
+  $("mode-skill-random")?.addEventListener("click", () => createRoom("skill_random"));
   $("join-room").addEventListener("click", () => joinRoom());
   $("resume-room").addEventListener("click", () => resumeStoredSeat());
   $("recover-room").addEventListener("click", () => resumeStoredSeat());
@@ -128,7 +130,10 @@ export function bindEvents() {
     adjustBoardZoom(0.15);
   });
   $("sim-speed")?.addEventListener("change", (event) => {
-    if (!state.room?.viewer_is_host) return;
+    const canSet = state.room?.mode === "skill_random"
+      ? state.room?.viewer_player_id != null
+      : Boolean(state.room?.viewer_is_host);
+    if (!canSet) return;
     controlSimulation("set_speed", Number(event.target.value || 1));
   });
   $("replay-step-back").addEventListener("click", () => {
@@ -673,6 +678,11 @@ export function fallbackRoomModes() {
       name: "自走棋",
       description: "8 人经营阵容、自动战斗，最后存活者获胜。",
     },
+    {
+      code: "skill_random",
+      name: "技能组合",
+      description: "双方用点数各自拼一名武将，准备后对战，打完可以再改再打。",
+    },
   ];
 }
 
@@ -806,7 +816,9 @@ export function renderBoardZoomControls() {
   if (speed && document.activeElement !== speed) {
     const current = String(Number(state.room?.simulation?.speed ?? 1));
     if ([...speed.options].some((option) => option.value === current)) speed.value = current;
-    speed.disabled = !state.room?.viewer_is_host;
+    speed.disabled = state.room?.mode === "skill_random"
+      ? state.room?.viewer_player_id == null
+      : !state.room?.viewer_is_host;
   }
 }
 
@@ -863,6 +875,10 @@ function bindRoomLobbyDialogs() {
     updateRoomSetupDraft("mode", event.target.value);
     renderRoomSetupDialog();
   });
+  $("forge-play-select")?.addEventListener("change", (event) => {
+    updateRoomSetupDraft("forgePlay", event.target.value === "coop" ? "coop" : "duel");
+    renderRoomSetupDialog();
+  });
   $("room-seat-count-input")?.addEventListener("input", (event) => {
     updateRoomSetupDraft("seatCount", event.target.value);
   });
@@ -915,6 +931,11 @@ function bindRoomLobbyDialogs() {
     state.libraryTab = "heroes";
     render();
   });
+  $("library-tab-custom")?.addEventListener("click", () => {
+    if (state.customHeroesError) state.customHeroesLoaded = false;
+    state.libraryTab = "custom";
+    render();
+  });
   $("library-tab-replays")?.addEventListener("click", () => {
     state.libraryTab = "replays";
     render();
@@ -933,6 +954,22 @@ function bindRoomLobbyDialogs() {
   });
   $("library-sort-dir")?.addEventListener("click", () => {
     state.librarySortDir = state.librarySortDir === "desc" ? "asc" : "desc";
+    render();
+  });
+  $("library-custom-search")?.addEventListener("input", (event) => {
+    state.customHeroQuery = event.target.value;
+    render();
+  });
+  $("library-custom-level")?.addEventListener("change", (event) => {
+    state.customLevel = event.target.value;
+    render();
+  });
+  $("library-custom-sort")?.addEventListener("change", (event) => {
+    state.customSort = event.target.value;
+    render();
+  });
+  $("library-custom-sort-dir")?.addEventListener("click", () => {
+    state.customSortDir = state.customSortDir === "asc" ? "desc" : "asc";
     render();
   });
   $("bp-tier-pool")?.addEventListener("click", (event) => {
@@ -1113,7 +1150,7 @@ function createSeatCard(seat) {
   const manageRoster = canManageSeatRoster(seat);
   const entries = seatHeroEntries(seat);
   const showReady = Boolean(seat.ready || seat.is_ai);
-  card.className = `seat-card${isViewer ? " is-viewer" : ""}${seat.occupied ? "" : " is-empty"}${showReady ? " is-ready" : ""}`;
+  card.className = `seat-card${isViewer ? " is-viewer" : ""}${seat.occupied ? "" : " is-empty"}${showReady ? " is-ready" : ""}${Number(seat.team_id) === 2 ? " is-team-2" : " is-team-1"}`;
   card.dataset.seatId = String(seat.player_id);
 
   const title = document.createElement("div");
@@ -1159,7 +1196,7 @@ function createSeatCard(seat) {
       roster.append(empty);
     }
   }
-  if (state.room.mode !== "autochess") card.append(roster);
+  if (state.room.mode !== "autochess" && state.room.mode !== "skill_random") card.append(roster);
 
   const armyKinds = state.room.army_kinds?.length
     ? state.room.army_kinds
@@ -1427,7 +1464,24 @@ export function renderRoomPanels() {
   $("room-random-size-label").textContent = String(randomRoomRosterSize());
   const heroLimit = roomHeroLimit();
   const heroLimitFact = $("room-hero-limit-fact");
-  if (heroLimitFact) heroLimitFact.classList.toggle("hidden", ["bp", "autochess"].includes(state.room.mode) || !heroLimit);
+  if (heroLimitFact) heroLimitFact.classList.toggle("hidden", ["bp", "autochess", "skill_random"].includes(state.room.mode) || !heroLimit);
+  const forgeLobby = state.room.mode === "skill_random" && state.room.status === "lobby";
+  const forge = state.room.forge || {};
+  const forgeCoop = forge.play === "coop";
+  $("room-forge-play-fact")?.classList.toggle("hidden", !forgeLobby);
+  $("room-forge-promote-fact")?.classList.toggle("hidden", !forgeLobby || !forgeCoop);
+  $("room-forge-stat-fact")?.classList.toggle("hidden", !forgeLobby);
+  $("room-forge-point-fact")?.classList.toggle("hidden", !forgeLobby);
+  if (forgeLobby) {
+    const statLabel = $("room-forge-stat-label");
+    const pointLabel = $("room-forge-point-label");
+    const playLabel = $("room-forge-play-label");
+    const promoteLabel = $("room-forge-promote-label");
+    if (statLabel) statLabel.textContent = String(forge.stat_cap ?? 6);
+    if (pointLabel) pointLabel.textContent = String(forge.point_cap ?? 15);
+    if (playLabel) playLabel.textContent = forgeCoop ? "谁尽力，谁犯罪（合作）" : "谁的理解最纯粹（对战）";
+    if (promoteLabel) promoteLabel.textContent = String(forge.promote_pay ?? 3);
+  }
   const heroLimitLabel = $("room-hero-limit-label");
   if (heroLimitLabel) heroLimitLabel.textContent = String(heroLimit);
   const timeoutLabel = $("room-turn-timeout-label");
@@ -1451,7 +1505,7 @@ export function renderRoomPanels() {
   const openSetup = $("open-room-setup");
   if (openSetup) openSetup.classList.toggle("hidden", !canEditRoomSetup());
   const autoConfigure = $("auto-configure-room");
-  if (autoConfigure) autoConfigure.classList.toggle("hidden", ["bp", "autochess"].includes(state.room.mode) || !canEditRoomSetup());
+  if (autoConfigure) autoConfigure.classList.toggle("hidden", ["bp", "autochess", "skill_random"].includes(state.room.mode) || !canEditRoomSetup());
   const addSeat = $("add-seat");
   if (addSeat) {
     const maxSeats = Number(state.room.seat_count_max || 6);
@@ -1486,26 +1540,30 @@ export function renderRoomPanels() {
     ? Boolean(state.room.viewer_is_host && state.room.status === "lobby")
     : state.room.status === "finished"
     ? state.room.viewer_player_id !== null
-    : Boolean(state.room.viewer_is_host && (state.room.status === "lobby" || state.room.status === "bp" && state.room.bp?.phase === "assign"));
+    : Boolean(state.room.viewer_is_host && (state.room.status === "lobby" || state.room.status === "bp" && state.room.bp?.phase === "assign" || state.room.mode === "skill_random" && state.room.status === "forge" && state.room.forge?.phase === "reveal"));
   startRoom.classList.toggle("hidden", !canShowStart);
   startRoom.disabled = state.room.status === "finished" ? !state.room.can_rematch : !state.room.can_start;
   startRoom.textContent = state.room.status === "finished"
     ? (state.room.mode === "bp"
       ? (state.room.viewer_is_host ? "进入下一局 BP" : "等待房主开启下一局 BP")
       : (state.room.viewer_is_host ? "同配置再来一局" : "等待房主再开一局"))
-    : (state.room.mode === "autochess" ? "开始自走棋" : (state.room.mode === "bp" ? (state.room.status === "lobby" ? "开始禁选" : "完成分配并开战") : (isRandomRoomMode() ? "开始随机对局" : "开始对局")));
+    : (state.room.mode === "autochess" ? "开始自走棋" : (state.room.mode === "skill_random" ? (state.room.status === "lobby" ? "开始游戏" : "开战") : (state.room.mode === "bp" ? (state.room.status === "lobby" ? "开始禁选" : "完成分配并开战") : (isRandomRoomMode() ? "开始随机对局" : "开始对局"))));
   // 开不了局的原因挂在按钮上。它只有在你想开局时才有意义，不值得为它常设一段文字。
   startRoom.title = startRoom.disabled ? String(state.room.start_blocker || "") : "";
   renderRoomOverflowMenu();
 
   const seatCards = $("seat-cards");
   const inBp = state.room.mode === "bp" && state.room.status === "bp";
+  const inForge = state.room.mode === "skill_random" && state.room.status === "forge";
   const inChess = state.room.mode === "autochess";
-  $("room-setup-section")?.classList.toggle("hidden", inBp || (inChess && state.room.status !== "lobby"));
-  seatCards.classList.toggle("hidden", inBp || (inChess && state.room.status !== "lobby"));
+  $("room-setup-section")?.classList.toggle("hidden", inBp || inForge || (inChess && state.room.status !== "lobby"));
+  $("seat-column")?.classList.toggle("hidden", inForge);
+  seatCards.classList.toggle("hidden", inBp || inForge || (inChess && state.room.status !== "lobby"));
   seatCards.replaceChildren();
   (state.room.seats || []).forEach((seat) => seatCards.append(createSeatCard(seat)));
   renderBpPanel();
+  renderForgePanel();
+  renderForgeLobbyConfig();
   renderAutoChessPanel();
 }
 

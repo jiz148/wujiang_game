@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>武将</title>
     <link rel="stylesheet" href="/theme.css?v=r27" />
-    <link rel="stylesheet" href="/styles.css?v=r129" />
+    <link rel="stylesheet" href="/styles.css?v=r147" />
   </head>
   <!-- 哪一屏该显示，要等 /api/auth/me 回来才知道。在那之前先什么都不显示，
        否则标记里默认可见的那一屏会先闪出来，再被换掉。 -->
@@ -64,6 +64,10 @@
                     <strong>自走棋</strong>
                     <span>多路同时对战</span>
                   </button>
+                  <button id="mode-skill-random" class="mode-card" type="button">
+                    <strong>技能组合</strong>
+                    <span>用点数拼一名武将</span>
+                  </button>
                 </div>
               </div>
             </section>
@@ -105,6 +109,7 @@
             <section id="library-panel" class="library-panel flow-panel hidden">
               <aside class="library-nav" aria-label="数据库">
                 <button id="library-tab-heroes" class="library-nav__item is-on" type="button">武将列表</button>
+                <button id="library-tab-custom" class="library-nav__item" type="button">自建武将列表</button>
                 <button id="library-tab-replays" class="library-nav__item" type="button">战绩</button>
               </aside>
               <div class="library-main">
@@ -141,6 +146,41 @@
                   </div>
                   <div id="library-hero-list" class="library-hero-list"></div>
                   <article id="library-hero-detail" class="library-hero-detail"></article>
+                </div>
+                <div id="library-custom" class="library-heroes hidden">
+                  <div class="library-toolbar">
+                    <label class="library-filter"><span>等级</span>
+                      <select id="library-custom-level" class="select">
+                        <option value="0">全部</option>
+                        <option value="1">1</option>
+                        <option value="2">2</option>
+                        <option value="3">3</option>
+                        <option value="4">4</option>
+                        <option value="5">5</option>
+                        <option value="6">6</option>
+                        <option value="7">7</option>
+                        <option value="8">8</option>
+                        <option value="9">9</option>
+                        <option value="10">10</option>
+                      </select>
+                    </label>
+                    <label class="library-filter"><span>排序</span>
+                      <select id="library-custom-sort" class="select">
+                        <option value="created">保存时间</option>
+                        <option value="level">等级</option>
+                        <option value="attack">攻击</option>
+                        <option value="defense">防御</option>
+                        <option value="speed">速度</option>
+                        <option value="attack_range">范围</option>
+                        <option value="mana">魔力</option>
+                        <option value="name">名称</option>
+                      </select>
+                    </label>
+                    <button id="library-custom-sort-dir" class="ghost" type="button">倒序</button>
+                    <input id="library-custom-search" class="input library-search" type="search" placeholder="搜索自建武将" aria-label="搜索自建武将" />
+                  </div>
+                  <div id="library-custom-list" class="library-hero-list"></div>
+                  <article id="library-custom-detail" class="library-hero-detail"></article>
                 </div>
                 <div id="recent-matches-panel" class="library-replays recent-matches-panel hidden">
               <!-- 标题由页头承担。这一层只留操作与一条补充说明的悬浮提示。 -->
@@ -231,6 +271,14 @@
                   <span class="room-setup__label">模式</span>
                   <strong id="room-mode-label" class="room-setup__value">标准选将</strong>
                 </span>
+                <span id="room-forge-play-fact" class="room-setup__fact hidden">
+                  <span class="room-setup__label">玩法</span>
+                  <strong id="room-forge-play-label" class="room-setup__value">谁的理解最纯粹（对战）</strong>
+                </span>
+                <span id="room-forge-promote-fact" class="room-setup__fact hidden">
+                  <span class="room-setup__label">晋级奖励</span>
+                  <strong id="room-forge-promote-label" class="room-setup__value">3</strong>
+                </span>
                 <span id="room-bp-rule-fact" class="room-setup__fact hidden">
                   <span class="room-setup__label">规则</span>
                   <strong id="room-bp-rule-label" class="room-setup__value">随机</strong>
@@ -238,6 +286,14 @@
                 <span class="room-setup__fact">
                   <span class="room-setup__label">席位数</span>
                   <strong id="room-seat-count-label" class="room-setup__value">2</strong>
+                </span>
+                <span id="room-forge-stat-fact" class="room-setup__fact hidden">
+                  <span class="room-setup__label">属性上限</span>
+                  <strong id="room-forge-stat-label" class="room-setup__value">6</strong>
+                </span>
+                <span id="room-forge-point-fact" class="room-setup__fact hidden">
+                  <span class="room-setup__label">点数设置</span>
+                  <strong id="room-forge-point-label" class="room-setup__value">15</strong>
                 </span>
                 <span id="room-random-size-fact" class="room-setup__fact hidden">
                   <span class="room-setup__label">每队随机武将数</span>
@@ -288,6 +344,8 @@
               <div id="seat-cards" class="seat-grid"></div>
             </div>
             <section id="bp-panel" class="bp-panel hidden" aria-label="BP禁选与控制权分配"></section>
+            <section id="forge-panel" class="forge-panel hidden" aria-label="技能组合"></section>
+            <div id="forge-lobby-config" class="forge-lobby hidden"></div>
           </div>
         </section>
       </section>
@@ -555,20 +613,22 @@
           <h2 id="room-setup-title" class="modal-card__title">房间设置</h2>
         </div>
         <div class="modal-card__body">
-          <div class="setup-grid">
+          <section id="setup-block-mode" class="setup-block">
+            <h3 class="setup-section">模式配置</h3>
+            <div class="setup-grid">
           <label class="field" for="room-mode-select">
             <span class="field__label">模式</span>
             <select id="room-mode-select" class="select"></select>
           </label>
-          <label class="field hidden" for="room-seat-count-input">
-            <span class="field__label">席位数</span>
-            <input id="room-seat-count-input" class="input" type="number" min="2" max="8" step="1" value="2" />
+          <label id="forge-play-control" class="field hidden" for="forge-play-select">
+            <span class="field__label">模式</span>
+            <select id="forge-play-select" class="input">
+              <option value="coop">谁尽力，谁犯罪（合作）</option>
+              <option value="duel">谁的理解最纯粹（对战）</option>
+            </select>
           </label>
-          <label id="random-roster-size-control" class="field hidden" for="random-roster-size-input">
-            <span class="field__label">每队随机武将数</span>
-            <input id="random-roster-size-input" class="input" type="number" min="1" step="1" value="1" />
-          </label>
-          </div>
+            </div>
+          </section>
           <section id="setup-block-bp" class="setup-block hidden">
             <h3 id="setup-section-bp" class="setup-section">BP类型</h3>
             <div class="setup-grid">
@@ -628,9 +688,33 @@
           </div>
             </div>
           </section>
-          <section id="setup-block-field" class="setup-block">
-            <h3 id="setup-section-field" class="setup-section">战场配置</h3>
+          <section id="setup-block-rules" class="setup-block">
+            <h3 class="setup-section">规则配置</h3>
             <div class="setup-grid">
+          <label class="field hidden" for="room-seat-count-input">
+            <span class="field__label">席位数</span>
+            <input id="room-seat-count-input" class="input" type="number" min="2" max="8" step="1" value="2" />
+          </label>
+          <label id="random-roster-size-control" class="field hidden" for="random-roster-size-input">
+            <span class="field__label">每队随机武将数</span>
+            <input id="random-roster-size-input" class="input" type="number" min="1" step="1" value="1" />
+          </label>
+          <label id="forge-stat-cap-control" class="field hidden" for="forge-stat-cap-input">
+            <span class="field__label">属性上限</span>
+            <input id="forge-stat-cap-input" class="input" type="number" min="0" max="12" step="1" value="6" />
+          </label>
+          <label id="forge-point-cap-control" class="field hidden" for="forge-point-cap-input">
+            <span class="field__label">点数设置</span>
+            <input id="forge-point-cap-input" class="input" type="number" min="0" max="99" step="1" value="15" />
+          </label>
+          <label id="forge-loss-pay-control" class="field hidden" for="forge-loss-pay-input">
+            <span class="field__label">失败补偿</span>
+            <input id="forge-loss-pay-input" class="input" type="number" min="0" max="99" step="1" value="2" />
+          </label>
+          <label id="forge-promote-pay-control" class="field hidden" for="forge-promote-pay-input">
+            <span class="field__label">晋级奖励</span>
+            <input id="forge-promote-pay-input" class="input" type="number" min="0" max="99" step="1" value="3" />
+          </label>
           <label id="room-army-switch" class="switch" for="room-army-enabled">
             <input id="room-army-enabled" type="checkbox" />
             <span class="switch__track" aria-hidden="true"></span>
@@ -655,6 +739,11 @@
               <option value="0">无限</option>
             </select>
           </label>
+            </div>
+          </section>
+          <section id="setup-block-field" class="setup-block">
+            <h3 id="setup-section-field" class="setup-section">战场配置</h3>
+            <div class="setup-grid">
           <label class="field" for="room-turn-timeout-select">
             <span class="field__label">回合时限</span>
             <select id="room-turn-timeout-select" class="select">
@@ -788,6 +877,6 @@
     <script src="/platform/home-ui.js?v=r13" defer></script>
     <script src="/tactical/replay-ui.js?v=r14" defer></script>
     <script src="/tactical/battle-feedback.js?v=r15" defer></script>
-    <script type="module" src="/app.js?v=r118"></script>
+    <script type="module" src="/app.js?v=r136"></script>
   </body>
 </html>
