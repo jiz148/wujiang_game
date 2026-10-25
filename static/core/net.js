@@ -244,6 +244,10 @@ export function unitsAtCell(x, y) {
 export function unitsCanOverlapOnBoard(left, right) {
   if (!left || !right || left.id === right.id) return false;
   if (Boolean(left.standable_terrain) !== Boolean(right.standable_terrain)) return true;
+  if (right.allows_multiple_riders && left.player_id === right.player_id
+      && !left.is_mount && (left.footprint?.width || 1) * (left.footprint?.height || 1) === 1) return true;
+  if (left.allows_multiple_riders && right.player_id === left.player_id
+      && !right.is_mount && (right.footprint?.width || 1) * (right.footprint?.height || 1) === 1) return true;
   return left.mounted_on_unit_id === right.id
     || right.mounted_on_unit_id === left.id
     || left.ridden_by_unit_id === right.id

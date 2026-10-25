@@ -1,6 +1,6 @@
 ﻿from __future__ import annotations
 
-import random
+from wujiang.tactical.prediction import random, direct_scoring
 from typing import Any, Optional
 
 from wujiang.tactical.engine.geometry import localized_line_coordinates
@@ -750,11 +750,16 @@ class PrecisionTrainingTrait(Trait):
             tags.add(self.PROC_TAG)
 
     def _apply_slow(self, battle: Battle, target: HeroUnit) -> None:
-        target.add_status(SlowStatus(2, duration=1))
+        amount = min(2, max(0, target.stat("speed") - 1)) / 3 if direct_scoring() else 2
+        target.add_status(SlowStatus(amount, duration=1))
         battle.log(f"{target.name} 被精兵压制，下一回合速度下降。")
 
     def on_before_damage(self, battle: Battle, ctx: DamageContext) -> None:
         if not self._is_owners_attack(ctx):
+            return
+        if direct_scoring():
+            ctx.tags.add(self.CHECKED_TAG)
+            ctx.tags.add(self.PROC_TAG)
             return
         if getattr(battle, "_ai_probe_active", False):
             return

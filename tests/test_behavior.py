@@ -9,7 +9,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import replace
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -146,8 +146,3467 @@ def end_turns(battle, count: int) -> None:
         battle.perform_action({"type": "end_turn"})
 
 
+class QueuedActionScopeRegressionBehaviorTests(unittest.TestCase):
+    """Area declarations and real reactions keep their own local context."""
+
+    def area_fixture(self):
+        from wujiang.tactical.engine.core import BattleFieldEffect
+        battle = create_battle("bard", "bard")
+        actor, target = primary_hero(battle, 1), primary_hero(battle, 2)
+        actor.position, target.position = Position(2, 2), Position(3, 2)
+        battle.configure_turn_order([actor.unit_id, target.unit_id])
+        battle.start_current_turn()
+        class AreaAttack(StatusEffect):
+            def basic_attack_area_cells(self, world, source, payload=None):
+                return [Position(3, 2)]
+        actor.add_status(AreaAttack("范围普攻复现"))
+        field = BattleFieldEffect("现存场地")
+        battle.add_field_effect(field)
+        return battle, actor, target, field
+
+    def test_area_attack_with_existing_field_builds_without_reaction_or_ship_context(self):
+        battle, actor, target, _ = self.area_fixture()
+        payload = {"type": "attack", "unit_id": actor.unit_id, "target_unit_id": target.unit_id}
+        with mock.patch.object(battle, "passive_support_ship", side_effect=AssertionError("unrelated reaction lookup")):
+            queued = battle.build_queued_action(payload)
+        self.assertEqual(queued.actor_id, actor.unit_id)
+        self.assertEqual(queued.target_unit_ids, [target.unit_id])
+        self.assertEqual(queued.target_cells, [Position(3, 2)])
+        self.assertIsNone(battle.pending_chain)
+        self.assertNotIn("declaration_id", payload)
+
+    def test_area_attack_still_obeys_field_target_restrictions(self):
+        battle, actor, target, field = self.area_fixture()
+        with mock.patch.object(field, "can_attack_target", return_value=(False, "场地禁止攻击")), \
+                mock.patch.object(battle, "passive_support_ship", side_effect=AssertionError("unrelated reaction lookup")):
+            with self.assertRaisesRegex(ActionError, "场地禁止攻击"):
+                battle.build_queued_action({"type": "attack", "unit_id": actor.unit_id, "target_unit_id": target.unit_id})
+
+    def react_with_protection(self, battle, source, defender, recipient):
+        battle.configure_turn_order([source.unit_id, defender.unit_id,
+                                     *(unit.unit_id for unit in battle.hero_units(defender.player_id)
+                                       if unit.unit_id != defender.unit_id)])
+        battle.start_current_turn()
+        battle.perform_action({"type": "attack", "unit_id": source.unit_id, "target_unit_id": recipient.unit_id})
+        for _ in range(12):
+            self.assertIsNotNone(battle.pending_chain)
+            if battle.pending_chain.current_unit_id() == defender.unit_id:
+                break
+            battle.perform_action({"type": "chain_skip"})
+        self.assertEqual(battle.pending_chain.current_unit_id(), defender.unit_id)
+        queued = battle.pending_chain.queued_action
+        before = defender.current_mana
+        cost = defender.get_skill("protection").mana_cost_for_payload(battle, defender, {"target_unit_id": recipient.unit_id})
+        battle.perform_action({"type": "chain_react", "unit_id": defender.unit_id,
+                               "action_code": "protection", "target_unit_id": recipient.unit_id})
+        self.assertAlmostEqual(defender.current_mana, before - cost)
+        return queued
+
+    def test_normal_passive_reaction_without_ship_initializes_its_context(self):
+        battle = create_battle("bard", "elite_soldier")
+        defender, source = primary_hero(battle, 1), primary_hero(battle, 2)
+        defender.position, source.position = Position(2, 2), Position(4, 2)
+        self.react_with_protection(battle, source, defender, defender)
+        self.assertTrue(defender.alive)
+
+    def test_ship_passive_claim_is_recorded_by_actual_reactor_after_payment(self):
+        from wujiang.tactical.heroes.flying_dragon_ship import allied_ship
+        battle = create_battle(["excel_r328", "excel_r329"], "elite_soldier")
+        captain, adviser = battle.hero_units(1)
+        source = primary_hero(battle, 2)
+        captain.position, adviser.position, source.position = Position(1, 2), Position(1, 4), Position(6, 2)
+        captain.get_skill("flying_dragon_ship").execute(battle, captain, {"x": 2, "y": 2})
+        ship = allied_ship(battle, 1)
+        battle.move_unit(captain, Position(2, 2), via_skill=True, forced=True, max_distance=1)
+        battle.move_unit(adviser, Position(2, 4), via_skill=True, forced=True, max_distance=1)
+        queued = self.react_with_protection(battle, source, captain, ship)
+        self.assertEqual(ship.ship_passive_claim_turn, battle.turn_number)
+        self.assertEqual(ship.ship_passive_claim_rider_id, captain.unit_id)
+        self.assertFalse(adviser.get_skill("light_wall").can_react_with_payload(
+            battle, adviser, queued, {"target_unit_id": ship.unit_id})[0])
+
+    def test_full_ai_kings_insight_scores_area_attack_with_field_without_mutation(self):
+        import math
+        import pickle
+        from wujiang.tactical import prediction
+        from wujiang.tactical.engine.core import BattleFieldEffect
+        from wujiang.tactical.heroes.excel_roster import InnerDimensionSwordStatus
+        from wujiang.tactical.rooms import ai
+        from wujiang.tactical.rooms.ai_acceleration import _id_state
+        battle = create_battle("excel_r028", "bard")
+        actor, target = primary_hero(battle, 1), primary_hero(battle, 2)
+        actor.position, target.position = Position(2, 2), Position(3, 2)
+        battle.configure_turn_order([actor.unit_id, target.unit_id])
+        battle.start_current_turn()
+        actor.add_status(InnerDimensionSwordStatus())
+        actor.cannot_move = True
+        for code in ("gale", "large_pierce_plus"):
+            actor.get_skill(code).cooldown_remaining = 10
+        battle.add_field_effect(BattleFieldEffect("现存场地"))
+        battle.chess_rng = random.Random(74)
+        before = pickle.dumps(battle), random.getstate(), battle.chess_rng.getstate(), _id_state()
+        with prediction.prediction_rules(True), ai.ai_enemy_view(battle, actor.player_id):
+            value = ai.score_skill_payload(battle, actor, {"code": "kings_insight", "timing": "active"},
+                    {"type": "skill", "unit_id": actor.unit_id, "skill_code": "kings_insight"},
+                    difficulty_profile("standard"), instant_only=False)
+        self.assertTrue(math.isfinite(value))
+        self.assertEqual((pickle.dumps(battle), random.getstate(), battle.chess_rng.getstate(), _id_state()), before)
+
+
 class FullAIEquivalenceBehaviorTests(unittest.TestCase):
     """Exact old/new operations, including order and transient probe state."""
+
+    def test_battle_rng_dependency_tracks_reads_writes_deletes_and_nested_exceptions(self):
+        import pickle
+        from wujiang.tactical.engine import core
+        battle = core.Battle()
+        self.assertFalse(hasattr(battle, "chess_rng"))
+        rng = random.Random(101)
+        battle.chess_rng = rng
+        original = pickle.dumps(battle)
+        with core.battle_rng_dependencies() as outer:
+            with self.assertRaisesRegex(ValueError, "interrupted"):
+                with core.battle_rng_dependencies() as inner:
+                    saved = battle.chess_rng.getstate()
+                    battle.chess_rng.random()
+                    battle.chess_rng.setstate(saved)
+                    raise ValueError("interrupted")
+        self.assertEqual((outer, inner), ([True], [True]))
+        self.assertEqual(pickle.dumps(battle), original)
+        self.assertEqual(core._battle_rng_readers.get(), ())
+        with core.battle_rng_dependencies() as write:
+            battle.chess_rng = rng
+        with core.battle_rng_dependencies() as delete:
+            del battle.chess_rng
+        self.assertEqual((write, delete), ([True], [True]))
+        self.assertFalse(hasattr(battle, "chess_rng"))
+        with core.battle_rng_dependencies() as clean:
+            self.assertEqual(battle.width, 8)
+        self.assertEqual(clean, [False])
+
+    @contextmanager
+    def _registered_tactical_query(self, callback):
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        module, name = callback.__module__, callback.__name__
+        callback.__module__, callback.__name__ = ai.__name__, "_behavior_tactical_query"
+        wrapped = acceleration.cached_tactical_query(callback)
+        try:
+            with mock.patch.object(ai, callback.__name__, wrapped, create=True), \
+                    mock.patch.object(ai, "_TACTICAL_QUERY_ROOTS", (*ai._TACTICAL_QUERY_ROOTS, wrapped)), \
+                    mock.patch.object(acceleration, "_TACTICAL_QUERIES_ENABLED", True), \
+                    acceleration.decision_memo_scope():
+                yield wrapped
+        finally:
+            callback.__module__, callback.__name__ = module, name
+
+    def test_tactical_reachability_keeps_original_order_and_returns_fresh_positions(self):
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        battle, actor, _ = self._small_baseline_battle(live=4, destroyed=0)
+        options = [dict(max_distance=2, use_movement_cost=True), dict(max_distance=2),
+                   dict(max_distance=2, exact_distance=2), dict(max_distance=2, straight_only=True),
+                   dict(max_distance=2, ignore_units=True), dict(max_distance=2, allow_anywhere=True)]
+        expected = [battle.reachable_positions(actor, **query) for query in options]
+        before = acceleration._snapshot(battle), acceleration._id_state()
+        with mock.patch.object(acceleration, "_TACTICAL_QUERIES_ENABLED", True), acceleration.decision_memo_scope():
+            for query, original in zip(options, expected):
+                with self.subTest(options=query):
+                    first = ai.ai_reachable_positions(battle, actor, **query)
+                    second = ai.ai_reachable_positions(battle, actor, **query)
+                    self.assertEqual(first, original)
+                    self.assertEqual(second, original)
+                    self.assertIsNot(first, second)
+                    self.assertTrue(first)
+                    self.assertTrue(all(a is not b for a, b in zip(first, second)))
+                    first.clear()
+                    self.assertEqual(ai.ai_reachable_positions(battle, actor, **query), original)
+        self.assertEqual(acceleration.last_statistics()["tactical_query_hits"], len(options) * 2)
+        self.assertEqual((acceleration._snapshot(battle), acceleration._id_state()), before)
+        with mock.patch.object(acceleration, "_TACTICAL_QUERIES_ENABLED", True), acceleration.decision_memo_scope():
+            ai.ai_reachable_positions(battle, actor, max_distance=2, use_movement_cost=True)
+        self.assertEqual(acceleration.last_statistics()["tactical_query_hits"], 0)
+
+    def test_tactical_queries_include_parameter_aliases_full_graph_and_both_rngs(self):
+        from dataclasses import replace
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        battle, actor, _ = self._small_baseline_battle(live=4, destroyed=1)
+        battle.chess_rng = random.Random(109)
+        original_rng = random.getstate()
+        def query(current, unit, *, sample):
+            return sample is unit.base_stats
+        try:
+            with self._registered_tactical_query(query) as wrapped:
+                self.assertTrue(wrapped(battle, actor, sample=actor.base_stats))
+                self.assertTrue(wrapped(battle, actor, sample=actor.base_stats))
+                self.assertFalse(wrapped(battle, actor, sample=replace(actor.base_stats)))
+                battle.destroyed_units[0].query_marker = 1
+                self.assertTrue(wrapped(battle, actor, sample=actor.base_stats))
+                random.random()
+                self.assertTrue(wrapped(battle, actor, sample=actor.base_stats))
+                battle.chess_rng.random()
+                self.assertTrue(wrapped(battle, actor, sample=actor.base_stats))
+            stats = acceleration.last_statistics()
+            self.assertEqual((stats["tactical_query_hits"], stats["tactical_query_misses"]), (1, 5))
+        finally:
+            random.setstate(original_rng)
+
+    def test_tactical_query_side_effects_keep_original_execution_and_bypass_future_checks(self):
+        from wujiang.tactical.engine import core
+        from wujiang.tools.ai_equivalence import isolated_id_stream
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        for effect in ("state", "local_rng", "global_rng", "id"):
+            with self.subTest(effect=effect), isolated_id_stream():
+                battle, actor, _ = self._small_baseline_battle(live=4, destroyed=0)
+                battle.chess_rng = random.Random(109)
+                before_rng = random.getstate()
+                calls = []
+                def query(current, unit):
+                    calls.append(effect)
+                    if effect == "state":
+                        current.query_marker = len(calls)
+                    elif effect == "local_rng":
+                        current.chess_rng.random()
+                    elif effect == "global_rng":
+                        random.random()
+                    else:
+                        next(core._id_counter)
+                    return 0.0
+                try:
+                    with self._registered_tactical_query(query) as wrapped:
+                        self.assertEqual([wrapped(battle, actor) for _ in range(3)], [0.0] * 3)
+                    stats = acceleration.last_statistics()
+                    self.assertEqual(len(calls), 3)
+                    self.assertEqual((stats["tactical_query_hits"], stats["tactical_query_bypasses"]), (0, 2))
+                finally:
+                    random.setstate(before_rng)
+
+    def test_tactical_query_rng_witnesses_propagate_on_hits_and_clear_after_exceptions(self):
+        from wujiang.tactical.engine import core
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        battle, actor, _ = self._small_baseline_battle(live=4, destroyed=0)
+        battle.chess_rng = random.Random(109)
+        def query(current, unit):
+            saved = current.chess_rng.getstate()
+            value = current.chess_rng.random()
+            current.chess_rng.setstate(saved)
+            return value
+        with self._registered_tactical_query(query) as wrapped:
+            with core.battle_rng_dependencies() as cold:
+                first = wrapped(battle, actor)
+            with core.battle_rng_dependencies() as warm:
+                second = wrapped(battle, actor)
+            self.assertEqual((first, cold, warm), (second, [True], [True]))
+        self.assertEqual(acceleration.last_statistics()["tactical_query_hits"], 1)
+        def fail(current, unit):
+            current.chess_rng.getstate()
+            raise ValueError("interrupted")
+        with self._registered_tactical_query(fail) as wrapped:
+            with self.assertRaisesRegex(ValueError, "interrupted"):
+                wrapped(battle, actor)
+        self.assertEqual(core._battle_rng_readers.get(), ())
+
+    def test_tactical_queries_reject_foreign_protocols_nonfinite_values_and_replaced_bindings(self):
+        from wujiang.tactical.engine import core
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        battle, actor, _ = self._small_baseline_battle(live=4, destroyed=0)
+        invoked = []
+        class Foreign:
+            def __getstate__(self):
+                invoked.append("foreign")
+                return {}
+        def query(current, unit):
+            invoked.append("query")
+            return 1.0
+        battle.foreign_query_state = Foreign()
+        with self._registered_tactical_query(query) as wrapped:
+            self.assertEqual([wrapped(battle, actor) for _ in range(2)], [1.0, 1.0])
+        self.assertEqual(invoked, ["query", "query"])
+        self.assertEqual(acceleration.last_statistics()["tactical_query_unsupported"], 1)
+        del battle.foreign_query_state
+        with self._registered_tactical_query(query) as wrapped:
+            wrapped(battle, actor)
+            with mock.patch.object(wrapped, "__wrapped__", lambda *_: 3.0):
+                wrapped(battle, actor)
+                wrapped(battle, actor)
+            with mock.patch.object(core.Battle, "chess_rng", property(lambda _: random.Random(1))):
+                wrapped(battle, actor)
+                wrapped(battle, actor)
+        self.assertEqual(acceleration.last_statistics()["tactical_query_hits"], 0)
+        for value in (float("nan"), float("inf"), [1.0]):
+            with self.subTest(value=value):
+                def nonfinite(current, unit):
+                    return value
+                with self._registered_tactical_query(nonfinite) as wrapped:
+                    self.assertIs(wrapped(battle, actor), value)
+                    self.assertIs(wrapped(battle, actor), value)
+                self.assertEqual(acceleration.last_statistics()["tactical_query_hits"], 0)
+
+    def test_tactical_queries_keep_real_control_candidates_state_rng_and_ids(self):
+        from wujiang.tools.ai_control_diagnostics import create_control_fixture, _exact_candidate_tree
+        from wujiang.tools.ai_equivalence import capture_turn, isolated_id_stream
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        results = []
+        rng = random.getstate()
+        try:
+            for enabled in (False, True):
+                with isolated_id_stream(), mock.patch.object(acceleration, "_TACTICAL_QUERIES_ENABLED", enabled):
+                    battle, _ = create_control_fixture(seed=109, casts=1, destroyed=0, fast=True)
+                    initial = acceleration._snapshot(battle), acceleration._id_state()
+                    value, _ = capture_turn(battle)
+                    results.append((initial, _exact_candidate_tree(value), acceleration._snapshot(battle), acceleration._id_state()))
+            self.assertEqual(results[0], results[1])
+        finally:
+            random.setstate(rng)
+
+    def test_control_query_comparison_alternates_and_keeps_exact_candidates_outside_timing(self):
+        from wujiang.tactical.engine import core
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        from wujiang.tools import ai_equivalence
+        from wujiang.tools.ai_control_diagnostics import compare_control_queries
+        from wujiang.tools.ai_validation import check_tactical_control_report
+        modes, candidates = [], []
+        def choose(battle, units, difficulty):
+            modes.append(acceleration._TACTICAL_QUERIES_ENABLED)
+            battle.query_trace = random.random(), next(core._id_counter)
+            return {"type": "end_turn"}, units[0]
+        def capture(battle):
+            candidates.append(acceleration._TACTICAL_QUERIES_ENABLED)
+            return {"candidates": [("actor", [[({"type": "end_turn"}, 0.0, "end")], []])]}, 0.0
+        rng, ids = random.getstate(), acceleration._id_state()
+        with tempfile.TemporaryDirectory() as temporary, \
+                mock.patch.object(ai, "choose_turn_bundle_action", side_effect=choose), \
+                mock.patch.object(ai_equivalence, "capture_turn", side_effect=capture), \
+                mock.patch.object(acceleration, "last_statistics", side_effect=lambda: {"tactical_query_hits": int(acceleration._TACTICAL_QUERIES_ENABLED)}):
+            report = compare_control_queries(temporary, repeats=2)
+            check_tactical_control_report(report, full=False)
+            self.assertEqual(modes, [False, True, True, False] * 12)
+            self.assertEqual(candidates, [False, True] * 12)
+            self.assertTrue(all(len(row["seconds"]["optimized"]) == 2 for row in report["scenes"]))
+            report["scenes"][0]["candidates_equal"] = False
+            with self.assertRaises(ValueError):
+                check_tactical_control_report(report, full=False)
+            def changed_candidates(battle):
+                score = -0.0 if acceleration._TACTICAL_QUERIES_ENABLED else 0.0
+                return {"candidates": [("actor", [[({"type": "end_turn"}, score, "end")], []])]}, 0.0
+            with mock.patch.object(ai_equivalence, "capture_turn", side_effect=changed_candidates), \
+                    self.assertRaisesRegex(RuntimeError, "candidate score"):
+                compare_control_queries(temporary, repeats=1, policies=(True,), histories=(0,), cast_counts=(0,))
+        self.assertEqual((random.getstate(), acceleration._id_state()), (rng, ids))
+
+    def test_tactical_query_ablation_requires_actual_off_on_and_dense_score_witnesses(self):
+        from wujiang.tools.ai_control_diagnostics import _exact_candidate_tree
+        from wujiang.tools.ai_equivalence import package_reference
+        from wujiang.tools.ai_validation import check_tactical_query_ablation, validation_environment
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        self.assertNotEqual(_exact_candidate_tree(0.0), _exact_candidate_tree(-0.0))
+        self.assertNotEqual(_exact_candidate_tree(0), _exact_candidate_tree(0.0))
+        with mock.patch.object(acceleration, "_TACTICAL_QUERIES_ENABLED", True):
+            with package_reference("no-tactical-queries"):
+                self.assertFalse(acceleration._TACTICAL_QUERIES_ENABLED)
+            self.assertTrue(acceleration._TACTICAL_QUERIES_ENABLED)
+        row = dict(reference_kind="no-tactical-queries", reference_tactical_queries=False, optimized_tactical_queries=True,
+                   optimized_parallel_boards=False, optimized_native_checkpoint=False, optimized_native_flat_copy=False,
+                   fixture_variant="standard", repeats=3,
+                   steps={"reference": [[{}]] * 3, "optimized": [[{}]] * 3})
+        check_tactical_query_ablation(row)
+        with self.assertRaises(ValueError):
+            check_tactical_query_ablation({**row, "reference_tactical_queries": True})
+        with self.assertRaises(ValueError):
+            check_tactical_query_ablation({**row, "fixture_variant": "electronic-heavy"})
+        self.assertEqual(validation_environment(4)["WUJIANG_AI_TACTICAL_QUERIES"], "1")
+
+    def _random_baseline_battle(self):
+        from wujiang.tactical.rooms.equipment_effects import EquipmentStatus
+        battle, actor, units = self._small_baseline_battle(live=12, destroyed=0)
+        for index, unit in enumerate(units):
+            unit.position = Position(2 if unit.player_id == 1 else 3, index // 2)
+        next(unit for unit in units if unit.player_id == 1).add_status(EquipmentStatus("木盾", "无", "近战随机减伤"))
+        battle.chess_rng = random.Random(101)
+        battle.fast_ai_simulation = True
+        return battle, actor, units
+
+    def test_independent_rows_keep_random_equipment_values_full_state_rng_ids_and_order(self):
+        import pickle
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        from wujiang.tools.ai_equivalence import isolated_id_stream, reference_rollback
+        battle, actor, units = self._random_baseline_battle()
+        rng = battle.chess_rng
+        initial = rng.getstate()
+        results, metrics = [], []
+        try:
+            for enabled in (False, True):
+                rng.setstate(initial)
+                with isolated_id_stream(), reference_rollback(battle, ai_probe=False), \
+                        mock.patch.object(acceleration, "_RNG_INDEPENDENT_ROWS_ENABLED", enabled), \
+                        mock.patch.object(acceleration, "_ADAPTIVE_ROWS_ENABLED", False), \
+                        mock.patch.object(acceleration, "_BASELINE_BATCHES_ENABLED", True), \
+                        mock.patch.object(acceleration, "_PARALLEL_BASELINES_ENABLED", False), \
+                        acceleration.decision_memo_scope():
+                    rows = [ai.reviewed_effect_baseline(battle, actor, units, include_pending=pending)
+                            for pending in (False, True, False, True, False, True)]
+                    results.append((pickle.dumps(rows), acceleration._snapshot(battle),
+                                    rng.getstate(), acceleration._id_state()))
+                metrics.append(acceleration.last_statistics())
+            self.assertEqual(results[0], results[1])
+            self.assertNotEqual(results[1][2], initial)
+            self.assertGreater(metrics[1]["independent_row_hits"], 0)
+            self.assertGreater(metrics[1]["independent_row_dependent"], 0)
+            self.assertGreater(metrics[1]["baseline_impure_graph"], 0)
+            self.assertEqual(metrics[0]["independent_row_hits"], 0)
+        finally:
+            rng.setstate(initial)
+
+    def test_independent_row_snapshots_keep_all_other_state_order_aliases_and_rng_identity(self):
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        battle, actor, units = self._random_baseline_battle()
+        rng, memo = battle.chess_rng, acceleration._Memo()
+        def snapshot():
+            return acceleration._independent_row_snapshot(battle, rng, memo)
+        first = snapshot()
+        self.assertIsNotNone(first)
+        rng.random()
+        self.assertEqual(snapshot(), first)
+        actor.current_hp -= 0.125
+        self.assertNotEqual(snapshot(), first)
+        actor.current_hp += 0.125
+        battle.units = dict(reversed(tuple(battle.units.items())))
+        reordered = snapshot()
+        self.assertNotEqual(reordered, first)
+        shared = [1]
+        actor.cache_aliases = [shared, shared]
+        aliased = snapshot()
+        actor.cache_aliases = [[1], [1]]
+        self.assertNotEqual(snapshot(), aliased)
+        actor.cache_aliases = rng
+        self.assertIsNone(snapshot())
+        del actor.cache_aliases
+        battle.chess_rng = random.Random(101)
+        self.assertNotEqual(acceleration._independent_row_snapshot(battle, battle.chess_rng, memo), reordered)
+
+    def test_adaptive_rows_execute_random_queries_each_time_without_repeated_snapshots(self):
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        battle, actor, _ = self._random_baseline_battle()
+        expected_rng = random.Random(101)
+        expected = [-expected_rng.random() * 1.4 for _ in range(3)]
+        def danger(current, unit):
+            return current.chess_rng.random()
+        with mock.patch.object(acceleration, "_ADAPTIVE_ROWS_ENABLED", True), \
+                mock.patch.object(ai, "offensive_reach_score_at", return_value=0), \
+                mock.patch.object(ai, "natsume_unit_danger", side_effect=danger) as query:
+            memo = acceleration._Memo()
+            values = [acceleration._independent_position_value(
+                ai.reviewed_r17_position_value.__wrapped__, battle, actor, actor, memo) for _ in range(3)]
+        self.assertEqual(values, expected)
+        self.assertEqual(battle.chess_rng.getstate(), expected_rng.getstate())
+        self.assertEqual((query.call_count, memo.statistics["independent_row_snapshots"],
+                          memo.statistics["independent_row_bypasses"]), (3, 1, 2))
+
+    def test_adaptive_rows_fall_back_for_low_coverage_and_keep_high_coverage_per_decision(self):
+        from wujiang.tactical.engine.core import Battle
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        for enabled, reusable, disabled in ((True, 3, True), (True, 4, False), (True, 7, False), (False, 0, False)):
+            with self.subTest(enabled=enabled, reusable=reusable), \
+                    mock.patch.object(acceleration, "_ADAPTIVE_ROWS_ENABLED", enabled):
+                battle, other = Battle(), Battle()
+                memo = acceleration._Memo()
+                for index in range(8):
+                    acceleration._record_independent_trial(memo, (id(battle), "actor", str(index)), index < reusable)
+                acceleration._finish_independent_batch(memo, battle)
+                acceleration._finish_independent_batch(memo, battle)
+                self.assertEqual(id(battle) in memo.independent_row_disabled, disabled)
+                self.assertNotIn(id(other), memo.independent_row_disabled)
+                self.assertEqual(memo.statistics["independent_row_fallbacks"], int(disabled))
+                fresh = acceleration._Memo()
+                self.assertFalse(fresh.independent_row_disabled)
+                self.assertFalse(fresh.independent_row_bypass)
+
+    def test_adaptive_rows_keep_every_baseline_value_state_rng_and_id_after_fallback(self):
+        import pickle
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        from wujiang.tools.ai_equivalence import reference_rollback, isolated_id_stream
+        battle, actor, units = self._random_baseline_battle()
+        rng, initial, results, metrics = battle.chess_rng, battle.chess_rng.getstate(), [], []
+        def draw(current, *args, **kwargs):
+            return current.chess_rng.random()
+        try:
+            for rows_enabled, adaptive in ((False, False), (True, False), (True, True)):
+                rng.setstate(initial)
+                with isolated_id_stream(), reference_rollback(battle, ai_probe=False), \
+                        mock.patch.object(ai, "offensive_reach_score_at", side_effect=draw), \
+                        mock.patch.object(ai, "estimate_attack_damage", side_effect=draw), \
+                        mock.patch.object(ai, "natsume_unit_danger", return_value=0), \
+                        mock.patch.object(acceleration, "_RNG_INDEPENDENT_ROWS_ENABLED", rows_enabled), \
+                        mock.patch.object(acceleration, "_ADAPTIVE_ROWS_ENABLED", adaptive), \
+                        mock.patch.object(acceleration, "_BASELINE_BATCHES_ENABLED", True), \
+                        mock.patch.object(acceleration, "_PARALLEL_BASELINES_ENABLED", False), \
+                        acceleration.decision_memo_scope():
+                    rows = [ai.reviewed_effect_baseline(battle, actor, units, include_pending=bool(index % 2))
+                            for index in range(6)]
+                    results.append((pickle.dumps(rows), acceleration._snapshot(battle), acceleration._id_state()))
+                metrics.append(acceleration.last_statistics())
+            self.assertEqual(results[0], results[1])
+            self.assertEqual(results[0], results[2])
+            self.assertEqual(metrics[2]["independent_row_fallbacks"], 1)
+            self.assertEqual(metrics[2]["independent_row_hits"], 0)
+            self.assertLess(metrics[2]["independent_row_snapshots"], metrics[1]["independent_row_snapshots"])
+        finally:
+            rng.setstate(initial)
+
+    def test_control_diagnostic_fixture_preserves_legal_first_and_paid_cast_windows(self):
+        from wujiang.tools.ai_control_diagnostics import create_control_fixture
+        from wujiang.tools.ai_equivalence import isolated_id_stream
+        original_rng = random.getstate()
+        try:
+            for fast, destroyed in ((False, 0), (True, 21)):
+                for casts in (0, 1, 2):
+                    with self.subTest(fast=fast, destroyed=destroyed, casts=casts), isolated_id_stream():
+                        battle, actor = create_control_fixture(seed=109, casts=casts, destroyed=destroyed, fast=fast)
+                        self.assertEqual((len(battle.units), len(battle.destroyed_units)), (4, destroyed))
+                        self.assertIs(battle.current_turn_unit(), actor)
+                        self.assertEqual(actor.get_skill("eagle_eye").uses_this_turn, casts)
+                        self.assertEqual(actor.current_mana, 3.5 if casts == 2 else 4)
+                        self.assertFalse(actor.has_status("鹰眼"))
+                        self.assertTrue(actor.can_take_turn_actions(battle))
+                        self.assertEqual(sum(unit.has_status("鹰眼") for unit in battle.all_units()), 2 if casts else 0)
+                        self.assertTrue(all(unit.current_hp == unit.max_health for unit in battle.all_units()))
+        finally:
+            random.setstate(original_rng)
+
+    def test_control_diagnostic_profiles_separate_replays_and_preserves_rng_and_ids(self):
+        import copy
+        from wujiang.tactical.engine import core
+        from wujiang.tactical.heroes import base
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        from wujiang.tools.ai_control_diagnostics import diagnose_control
+        from wujiang.tools.ai_validation import check_control_diagnostic
+        rng, ids = random.getstate(), acceleration._id_state()
+        def choose(battle, units, difficulty):
+            battle.control_witness = (random.random(), next(core._id_counter), next(base._unit_counter))
+            return {"type": "end_turn"}, units[0]
+        with tempfile.TemporaryDirectory() as temporary, \
+                mock.patch.object(ai, "choose_turn_bundle_action", side_effect=choose) as choose_call:
+            report = diagnose_control(temporary, repeats=2)
+            check_control_diagnostic(report)
+            self.assertEqual(choose_call.call_count, 36)
+            self.assertEqual(len(report["scenes"]), 12)
+            self.assertTrue(all(len(row["seconds"]) == 2 for row in report["scenes"]))
+            self.assertTrue(all(row["component_id_delta"] == row["unit_id_delta"] == 1 for row in report["scenes"]))
+            for key, value in (("equal_replays", False), ("profile_excluded_from_timings", False), ("seconds", [])):
+                broken = copy.deepcopy(report)
+                broken["scenes"][0][key] = value
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    check_control_diagnostic(broken)
+            with self.assertRaises(ValueError):
+                check_control_diagnostic({**report, "scenes": report["scenes"][:-1]})
+            with mock.patch.object(acceleration, "_snapshot", return_value=None), \
+                    self.assertRaisesRegex(RuntimeError, "requires complete state"):
+                diagnose_control(temporary, policies=(True,), histories=(0,), cast_counts=(0,))
+        self.assertEqual((random.getstate(), acceleration._id_state()), (rng, ids))
+
+    def test_adaptive_ablation_keeps_both_row_paths_on_and_requires_real_fallback(self):
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        from wujiang.tools.ai_equivalence import package_reference
+        from wujiang.tools.ai_validation import check_independent_row_ablation, validation_environment
+        with mock.patch.object(acceleration, "_RNG_INDEPENDENT_ROWS_ENABLED", True), \
+                mock.patch.object(acceleration, "_ADAPTIVE_ROWS_ENABLED", True):
+            with self.assertRaisesRegex(ValueError, "failed"):
+                with package_reference("no-independent-adaptation"):
+                    self.assertTrue(acceleration._RNG_INDEPENDENT_ROWS_ENABLED)
+                    self.assertFalse(acceleration._ADAPTIVE_ROWS_ENABLED)
+                    raise ValueError("failed")
+            self.assertTrue(acceleration._ADAPTIVE_ROWS_ENABLED)
+        selected = (45, 67, 91)
+        run = [{"step": step, "active_boards": 4, "unit_count": 24,
+                "acceleration": {"independent_row_fallbacks": 1}} for step in selected]
+        row = dict(reference_kind="no-independent-adaptation", reference_rng_independent_rows=True,
+                   optimized_rng_independent_rows=True, reference_adaptive_rows=False, optimized_adaptive_rows=True,
+                   optimized_parallel_boards=False, optimized_native_checkpoint=False, optimized_native_flat_copy=False,
+                   fixture_variant="hell-heavy", repeats=3,
+                   steps={"reference": [[{"step": step, "acceleration": {"independent_row_hits": 2}}
+                                          for step in selected]] * 3, "optimized": [run] * 3},
+                   query_witness_replays_equivalent=True, query_witnesses_excluded_from_timing=True,
+                   position_query_witnesses=[dict(step=step, equal=True, reference_calls=2, optimized_calls=2) for step in selected])
+        check_independent_row_ablation(row)
+        for key in ("reference_adaptive_rows", "optimized_adaptive_rows"):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                check_independent_row_ablation({**row, key: not row[key]})
+        self.assertEqual(validation_environment(4)["WUJIANG_AI_ADAPTIVE_ROWS"], "1")
+
+    def test_independent_rows_never_reuse_a_rng_read_even_when_its_state_is_restored(self):
+        from wujiang.tactical.engine import core
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        battle, actor, _ = self._random_baseline_battle()
+        calls = []
+        def danger(current, unit):
+            saved = current.chess_rng.getstate()
+            value = current.chess_rng.random()
+            current.chess_rng.setstate(saved)
+            calls.append(value)
+            return value
+        with mock.patch.object(ai, "natsume_unit_danger", danger), \
+                mock.patch.object(ai, "offensive_reach_score_at", return_value=0), \
+                mock.patch.object(acceleration, "_RNG_INDEPENDENT_ROWS_ENABLED", True), \
+                acceleration.decision_memo_scope():
+            memo = acceleration._memo.get()
+            memo.random_baseline_battles.add(id(battle))
+            with mock.patch.object(acceleration, "_baseline_batch_active") as active:
+                active.get.return_value = True
+                first = ai.reviewed_r17_position_value(battle, actor, actor)
+                battle.chess_rng.random()
+                second = ai.reviewed_r17_position_value(battle, actor, actor)
+            self.assertNotEqual(first, second)
+            self.assertEqual(len(calls), 2)
+        self.assertEqual(acceleration.last_statistics()["independent_row_hits"], 0)
+        self.assertGreater(acceleration.last_statistics()["independent_row_dependent"], 0)
+        self.assertEqual(core._battle_rng_readers.get(), ())
+
+    def test_independent_rows_reject_id_consumption_and_clear_dependency_after_failure(self):
+        from wujiang.tactical.engine import core
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        from wujiang.tools.ai_equivalence import isolated_id_stream
+        battle, actor, _ = self._random_baseline_battle()
+        with isolated_id_stream(), mock.patch.object(ai, "offensive_reach_score_at", return_value=0), \
+                mock.patch.object(acceleration, "_RNG_INDEPENDENT_ROWS_ENABLED", True), \
+                acceleration.decision_memo_scope():
+            memo = acceleration._memo.get()
+            memo.random_baseline_battles.add(id(battle))
+            token = acceleration._baseline_batch_active.set(True)
+            try:
+                with mock.patch.object(ai, "natsume_unit_danger", side_effect=lambda *_: next(core._id_counter)) as query:
+                    ai.reviewed_r17_position_value(battle, actor, actor)
+                    ai.reviewed_r17_position_value(battle, actor, actor)
+                    self.assertEqual(query.call_count, 2)
+                with mock.patch.object(ai, "natsume_unit_danger", side_effect=ValueError("failed")):
+                    with self.assertRaisesRegex(ValueError, "failed"):
+                        ai.reviewed_r17_position_value(battle, actor, battle.player_units(1)[1])
+                self.assertEqual(core._battle_rng_readers.get(), ())
+            finally:
+                acceleration._baseline_batch_active.reset(token)
+        self.assertEqual(acceleration.last_statistics()["independent_row_hits"], 0)
+        self.assertGreater(acceleration.last_statistics()["independent_row_impure"], 0)
+
+    def test_independent_rows_keep_state_changes_and_unknown_graphs_on_original_path(self):
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        battle, actor, _ = self._random_baseline_battle()
+        def danger(current, unit):
+            unit.current_mana += 0.125
+            return unit.current_mana
+        with mock.patch.object(ai, "offensive_reach_score_at", return_value=0), \
+                mock.patch.object(ai, "natsume_unit_danger", side_effect=danger) as query, \
+                acceleration.decision_memo_scope():
+            memo = acceleration._memo.get()
+            function = ai.reviewed_r17_position_value.__wrapped__
+            acceleration._independent_position_value(function, battle, actor, actor, memo)
+            acceleration._independent_position_value(function, battle, actor, actor, memo)
+            self.assertEqual(query.call_count, 2)
+            self.assertEqual(memo.statistics["independent_row_hits"], 0)
+            self.assertGreater(memo.statistics["independent_row_impure"], 0)
+            battle.foreign_graph = Path("custom-protocol")
+            self.assertIsNone(acceleration._independent_row_snapshot(battle, battle.chess_rng, memo))
+
+    def test_independent_row_reference_restores_opt_in_on_normal_and_exception_exit(self):
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        from wujiang.tools.ai_equivalence import package_reference
+        with mock.patch.object(acceleration, "_RNG_INDEPENDENT_ROWS_ENABLED", True):
+            for fail in (False, True):
+                try:
+                    with package_reference("no-rng-independent"):
+                        self.assertFalse(acceleration._RNG_INDEPENDENT_ROWS_ENABLED)
+                        if fail:
+                            raise ValueError("interrupted")
+                except ValueError:
+                    if not fail:
+                        raise
+                self.assertTrue(acceleration._RNG_INDEPENDENT_ROWS_ENABLED)
+
+    def test_independent_rows_invalidate_when_live_scoring_inputs_change(self):
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        battle, actor, _ = self._random_baseline_battle()
+        def danger(current, unit):
+            return unit.current_hp + unit.total_shields() + unit.position.x
+        with mock.patch.object(ai, "offensive_reach_score_at", return_value=0), \
+                mock.patch.object(ai, "natsume_unit_danger", side_effect=danger) as query, \
+                acceleration.decision_memo_scope():
+            memo = acceleration._memo.get()
+            function = ai.reviewed_r17_position_value.__wrapped__
+            def value():
+                return acceleration._independent_position_value(function, battle, actor, actor, memo)
+            first = value()
+            battle.chess_rng.random()
+            self.assertEqual(value(), first)
+            self.assertEqual(query.call_count, 1)
+            actor.current_hp -= 0.125
+            self.assertNotEqual(value(), first)
+            actor.shields += 1
+            value()
+            actor.position = actor.position.offset(1, 0)
+            self.assertEqual(value(), -danger(battle, actor) * 1.4)
+            self.assertEqual(query.call_count, 4)
+            self.assertEqual(memo.statistics["independent_row_hits"], 1)
+
+    def test_independent_rows_reject_foreign_pickle_protocols_before_invoking_them(self):
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        battle, _, _ = self._random_baseline_battle()
+        events = []
+        class Foreign:
+            def __reduce_ex__(self, protocol):
+                events.append("custom reducer")
+                battle.chess_rng.random()
+                return str, ("foreign",)
+        battle.foreign = Foreign()
+        before = battle.chess_rng.getstate()
+        self.assertIsNone(acceleration._independent_row_snapshot(battle, battle.chess_rng, acceleration._Memo()))
+        self.assertEqual(events, [])
+        self.assertEqual(battle.chess_rng.getstate(), before)
+        del battle.foreign
+        unit = battle.all_units()[0]
+        original_binding = unit._battle_ref
+        unit._battle_ref = lambda: events.append("custom binding") or battle
+        try:
+            self.assertIsNone(acceleration._independent_row_snapshot(battle, battle.chess_rng, acceleration._Memo()))
+            self.assertEqual(events, [])
+        finally:
+            unit._battle_ref = original_binding
+
+    def test_independent_rows_require_the_loaded_dependency_descriptor_and_canonical_query(self):
+        from wujiang.tactical.engine import core
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        battle, actor, _ = self._random_baseline_battle()
+        with mock.patch.object(ai, "offensive_reach_score_at", return_value=0), \
+                mock.patch.object(ai, "natsume_unit_danger", return_value=2) as query:
+            replacement = property(lambda current: current.__dict__["chess_rng"])
+            with mock.patch.object(core.Battle, "chess_rng", replacement):
+                memo = acceleration._Memo()
+                for _ in range(2):
+                    self.assertEqual(acceleration._independent_position_value(
+                        ai.reviewed_r17_position_value.__wrapped__, battle, actor, actor, memo), -2.8)
+                self.assertEqual((query.call_count, memo.statistics["independent_row_hits"]), (2, 0))
+            calls = []
+            def custom(current, source, target):
+                calls.append(target.unit_id)
+                return 12.5
+            for _ in range(2):
+                self.assertEqual(acceleration._independent_position_value(custom, battle, actor, actor, memo), 12.5)
+            self.assertEqual(len(calls), 2)
+            battle.chess_rng.gauss_next = []
+            for _ in range(2):
+                self.assertEqual(acceleration._independent_position_value(
+                    ai.reviewed_r17_position_value.__wrapped__, battle, actor, actor, memo), -2.8)
+            self.assertEqual((query.call_count, memo.statistics["independent_row_hits"]), (4, 0))
+
+    def test_independent_row_ablation_rejects_shallow_missing_and_unexercised_tail_evidence(self):
+        import copy
+        from wujiang.tools.ai_validation import check_independent_row_ablation, _ablation, validation_environment
+        selected = (117, 137, 196)
+        run = [{"step": step, "active_boards": 4, "unit_count": 24,
+                "acceleration": {"independent_row_hits": 2}} for step in selected]
+        row = dict(reference_kind="no-rng-independent", reference_rng_independent_rows=False,
+                   optimized_rng_independent_rows=True, optimized_parallel_boards=False,
+                   optimized_native_checkpoint=False, optimized_native_flat_copy=False,
+                   fixture_variant="electronic-heavy", repeats=3,
+                   query_witness_replays_equivalent=True, query_witnesses_excluded_from_timing=True,
+                   position_query_witnesses=[dict(step=step, equal=True, reference_calls=2, optimized_calls=2)
+                                             for step in selected],
+                   steps={"reference": [[{"acceleration": {}}]] * 3, "optimized": [run] * 3},
+                   reference_seconds=20, optimized_seconds=10,
+                   latency={"reference": {"step_max": 10}, "optimized": {"step_max": 5}})
+        check_independent_row_ablation(row)
+        self.assertEqual(_ablation([row])["verdict"], "measured_gain")
+        for kind in ("missing", "sparse", "no_hits", "reference_hits", "flag", "witness"):
+            broken = copy.deepcopy(row)
+            if kind == "missing":
+                broken["steps"]["optimized"][0].pop()
+            elif kind == "sparse":
+                broken["steps"]["optimized"][0][0]["unit_count"] = 8
+            elif kind == "no_hits":
+                for step in broken["steps"]["optimized"][0]:
+                    step["acceleration"]["independent_row_hits"] = 0
+            elif kind == "reference_hits":
+                broken["steps"]["reference"][0][0]["acceleration"]["independent_row_hits"] = 1
+            elif kind == "flag":
+                broken["reference_rng_independent_rows"] = True
+            else:
+                broken["query_witness_replays_equivalent"] = False
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                check_independent_row_ablation(broken)
+        self.assertEqual(validation_environment(4)["WUJIANG_AI_RNG_INDEPENDENT_ROWS"], "1")
+
+    def test_position_score_witnesses_keep_exact_float_bits_order_and_scope_on_failure(self):
+        from types import SimpleNamespace
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        values, events = iter((0.0, -0.0, 12, True)), []
+        @acceleration.cached_position_value
+        def query(battle, actor, unit):
+            return next(values)
+        unit = SimpleNamespace(unit_id="source")
+        with acceleration.acceleration_disabled(), acceleration.position_value_diagnostic_scope(events.append):
+            for _ in range(4):
+                query(None, unit, unit)
+        self.assertEqual([event[2] for event in events], [
+            ("float", "0000000000000000"), ("float", "8000000000000000"), ("int", 12), ("bool", True)])
+        self.assertTrue(all(event[:2] == ("source", "source") for event in events))
+        with self.assertRaisesRegex(ValueError, "failed"):
+            with acceleration.position_value_diagnostic_scope(events.append):
+                raise ValueError("failed")
+        self.assertIsNone(acceleration._position_diagnostic_sink.get())
+        from wujiang.tactical.rooms import ai
+        from wujiang.tactical.rooms.autochess import AutoChessState
+        from wujiang.tools.ai_equivalence import compare_late_chess
+        @acceleration.cached_position_value
+        def signed_zero(battle, actor, unit):
+            return -0.0
+        def advance(chess, match):
+            current = match.runner.battle
+            actor = current.current_turn_unit()
+            current.rng_row_witness = ai.reviewed_r17_position_value(current, actor, actor)
+        with mock.patch.object(AutoChessState, "_advance_match", advance), \
+                mock.patch.object(ai, "reviewed_r17_position_value", signed_zero):
+            result = compare_late_chess(sweeps=50, repeats=1, variant="electronic-heavy", seed=97,
+                                        baseline="no-rng-independent")
+        self.assertTrue(result["equal"], result["mismatches"])
+        self.assertTrue(result["query_witness_replays_equivalent"])
+        self.assertEqual([item["step"] for item in result["position_query_witnesses"]], [117, 137, 196])
+        for mode in ("reference", "optimized"):
+            self.assertEqual(len(result["timing_samples"][mode]), 1)
+            self.assertEqual(len(result["steps"][mode]), 1)
+            self.assertEqual(len(result["steps"][mode][0]), 200)
+        self.assertEqual(sum(item["witnessed"] for item in result["initial_id_states"]), 2)
+
+    def _require_native_rng_mask(self):
+        from wujiang.platform.ai_native import load_rng_mask
+        factory = load_rng_mask()
+        if factory is None:
+            if os.environ.get("WUJIANG_AI_REQUIRE_NATIVE") == "1":
+                self.fail("Native row-key validation cannot skip a missing encoder")
+            self.skipTest("Optional native RNG mask not built")
+        return factory
+
+    def test_native_rng_mask_uses_identity_keeps_marker_identity_and_rejects_second_reference(self):
+        factory = self._require_native_rng_mask()
+        marker, target = object(), object()
+        mask = factory(target, marker)
+        class NoEquality:
+            def __eq__(self, other):
+                raise AssertionError("must compare identity only")
+        self.assertIsNone(mask.persistent_id(NoEquality()))
+        self.assertIs(mask.persistent_id(target), marker)
+        with self.assertRaisesRegex(ValueError, "RNG alias"):
+            mask.persistent_id(target)
+        self.assertEqual((mask.references, mask.visits), (2, 3))
+        with self.assertRaises(AttributeError):
+            mask.references = 0
+        fresh = factory(target, marker)
+        self.assertEqual((fresh.references, fresh.visits), (0, 0))
+        self.assertIs(fresh.persistent_id(target), marker)
+
+    def test_native_rng_mask_owns_and_releases_target_including_reference_cycles(self):
+        import gc
+        import weakref
+        factory = self._require_native_rng_mask()
+        rng = random.Random(101)
+        reference = weakref.ref(rng)
+        mask = factory(rng, "battle-local-rng")
+        del rng
+        gc.collect()
+        self.assertIsNotNone(reference())
+        reference().mask_cycle = mask
+        del mask
+        gc.collect()
+        self.assertIsNone(reference())
+
+    def test_native_row_pickles_are_byte_exact_with_order_cycles_shared_containers_and_marker_alias(self):
+        from io import BytesIO
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        factory = self._require_native_rng_mask()
+        rng, other = random.Random(101), random.Random(303)
+        shared, cycle = [-0.0, 0.0, True, 1, 1.0, b"text", None], []
+        cycle.append(cycle)
+        # The persistent marker itself already occurs in the graph. A new
+        # equal string in the native callback would change pickle memo bytes.
+        marker = acceleration._INDEPENDENT_RNG_MARKER
+        graph = {"marker_before": marker, "shared": [shared, shared], "cycle": cycle,
+                 "rng": rng, "other_rng": other, "marker_after": marker}
+        before = rng.getstate(), other.getstate(), random.getstate(), acceleration._id_state()
+        for shape in (graph, dict(reversed(tuple(graph.items()))), {"no_rng": shared}):
+            streams = [BytesIO(), BytesIO()]
+            mask = factory(rng, marker)
+            writers = (acceleration._IndependentRowPickler(streams[0], rng),
+                       acceleration._NativeIndependentRowPickler(streams[1], rng, mask))
+            for writer in writers:
+                writer.dump(shape)
+            self.assertEqual(streams[0].getvalue(), streams[1].getvalue())
+            self.assertEqual(writers[0].rng_references, mask.references)
+            self.assertGreater(mask.visits, 0)
+        self.assertEqual(before, (rng.getstate(), other.getstate(), random.getstate(), acceleration._id_state()))
+
+    def test_native_row_keys_keep_complete_battle_bytes_bindings_and_all_invalidation_fields(self):
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        self._require_native_rng_mask()
+        battle, actor, _ = self._small_baseline_battle(live=12, destroyed=3)
+        battle.chess_rng = random.Random(101)
+        rng = battle.chess_rng
+        def compare():
+            keys = []
+            for enabled in (False, True):
+                memo = acceleration._Memo()
+                with mock.patch.object(acceleration, "_NATIVE_ROW_KEYS_ENABLED", enabled):
+                    keys.append(acceleration._independent_row_snapshot(battle, rng, memo))
+                self.assertIsNotNone(keys[-1])
+                self.assertEqual(memo.statistics["independent_row_native_snapshots"], int(enabled))
+                self.assertEqual(memo.statistics["independent_row_native_fallbacks"], 0)
+                self.assertGreaterEqual(memo.statistics["independent_row_snapshot_seconds"], 0)
+            self.assertEqual(*keys)
+            return keys[0]
+        first = compare()
+        rng.random()
+        self.assertEqual(compare(), first)
+        battle.destroyed_units[0].native_key_death_marker = "retained"
+        self.assertNotEqual(compare(), first)
+        del battle.destroyed_units[0].native_key_death_marker
+        self.assertEqual(compare(), first)
+        actor.current_hp -= 0.125
+        self.assertNotEqual(compare(), first)
+        actor.current_hp += 0.125
+        battle.units = dict(reversed(tuple(battle.units.items())))
+        reordered = compare()
+        self.assertNotEqual(reordered, first)
+        binding = actor._battle_ref
+        try:
+            actor._battle_ref = None
+            self.assertNotEqual(compare(), reordered)
+        finally:
+            actor._battle_ref = binding
+        shared = [1, 2]
+        actor.native_key_aliases = [shared, shared]
+        aliased = compare()
+        actor.native_key_aliases = [[1, 2], [1, 2]]
+        self.assertNotEqual(compare(), aliased)
+
+    def test_native_row_keys_reject_rng_aliases_foreign_protocols_and_custom_weakrefs(self):
+        from io import BytesIO
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        factory = self._require_native_rng_mask()
+        battle, actor, _ = self._random_baseline_battle()
+        rng, events = battle.chess_rng, []
+        class Foreign:
+            def __reduce_ex__(self, protocol):
+                events.append("foreign reducer")
+                rng.random()
+                return str, ("foreign",)
+        original_binding = actor._battle_ref
+        before = rng.getstate(), random.getstate(), acceleration._id_state()
+        for native in (False, True):
+            with mock.patch.object(acceleration, "_NATIVE_ROW_KEYS_ENABLED", native):
+                for value in (rng, [rng], {"nested": (rng,)}):
+                    actor.native_key_extra = value
+                    self.assertIsNone(acceleration._independent_row_snapshot(battle, rng, acceleration._Memo()))
+                actor.native_key_extra = Foreign()
+                self.assertIsNone(acceleration._independent_row_snapshot(battle, rng, acceleration._Memo()))
+                del actor.native_key_extra
+                try:
+                    actor._battle_ref = lambda: events.append("binding callback") or battle
+                    self.assertIsNone(acceleration._independent_row_snapshot(battle, rng, acceleration._Memo()))
+                finally:
+                    actor._battle_ref = original_binding
+            stream = BytesIO()
+            writer = (acceleration._NativeIndependentRowPickler(stream, rng,
+                       factory(rng, acceleration._INDEPENDENT_RNG_MARKER)) if native
+                      else acceleration._IndependentRowPickler(stream, rng))
+            with self.assertRaisesRegex(ValueError, "RNG alias"):
+                writer.dump([rng, rng])
+        self.assertEqual(events, [])
+        self.assertEqual(before, (rng.getstate(), random.getstate(), acceleration._id_state()))
+
+    def test_native_row_keys_keep_exact_real_random_baselines_state_rng_ids_and_reuse(self):
+        import pickle
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        from wujiang.tools.ai_equivalence import isolated_id_stream, reference_rollback
+        self._require_native_rng_mask()
+        battle, actor, units = self._random_baseline_battle()
+        rng, initial, results, metrics = battle.chess_rng, battle.chess_rng.getstate(), [], []
+        try:
+            for native in (False, True):
+                rng.setstate(initial)
+                with isolated_id_stream(), reference_rollback(battle, ai_probe=False), \
+                        mock.patch.object(acceleration, "_NATIVE_ROW_KEYS_ENABLED", native), \
+                        mock.patch.object(acceleration, "_RNG_INDEPENDENT_ROWS_ENABLED", True), \
+                        mock.patch.object(acceleration, "_ADAPTIVE_ROWS_ENABLED", True), \
+                        mock.patch.object(acceleration, "_TACTICAL_QUERIES_ENABLED", False), \
+                        mock.patch.object(acceleration, "_BASELINE_BATCHES_ENABLED", True), \
+                        mock.patch.object(acceleration, "_PARALLEL_BASELINES_ENABLED", False), \
+                        acceleration.decision_memo_scope():
+                    values = [ai.reviewed_effect_baseline(battle, actor, units, include_pending=pending)
+                              for pending in (False, True, False, True, False, True)]
+                    results.append((pickle.dumps(values), acceleration._snapshot(battle), rng.getstate(), acceleration._id_state()))
+                metrics.append(acceleration.last_statistics())
+            self.assertEqual(*results)
+            self.assertNotEqual(results[0][2], initial)
+            self.assertEqual(metrics[0]["independent_row_native_snapshots"], 0)
+            self.assertGreater(metrics[1]["independent_row_native_snapshots"], 0)
+            self.assertGreater(metrics[1]["independent_row_native_visits"], metrics[1]["independent_row_native_snapshots"])
+            for key in ("independent_row_hits", "independent_row_dependent", "independent_row_snapshots"):
+                self.assertEqual(metrics[0][key], metrics[1][key])
+            self.assertGreater(metrics[1]["independent_row_hits"], 0)
+        finally:
+            rng.setstate(initial)
+
+    def test_missing_native_row_encoder_falls_back_to_the_identical_python_key(self):
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        battle, _, _ = self._random_baseline_battle()
+        rng = battle.chess_rng
+        with mock.patch.object(acceleration, "_NATIVE_ROW_KEYS_ENABLED", False):
+            expected = acceleration._independent_row_snapshot(battle, rng, acceleration._Memo())
+        self.assertIsNotNone(expected)
+        with mock.patch.object(acceleration, "_NATIVE_ROW_KEYS_ENABLED", True), \
+                mock.patch.object(acceleration, "load_rng_mask", return_value=None):
+            memo = acceleration._Memo()
+            self.assertEqual(acceleration._independent_row_snapshot(battle, rng, memo), expected)
+            self.assertEqual((memo.statistics["independent_row_native_snapshots"],
+                              memo.statistics["independent_row_native_fallbacks"]), (0, 1))
+
+    def test_native_row_reference_restores_flags_and_refuses_two_python_encoders(self):
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        from wujiang.tools.ai_equivalence import package_reference, compare_late_chess
+        with mock.patch.object(acceleration, "_NATIVE_ROW_KEYS_ENABLED", True):
+            for fail in (False, True):
+                try:
+                    with package_reference("no-native-row-keys"):
+                        self.assertFalse(acceleration._NATIVE_ROW_KEYS_ENABLED)
+                        if fail:
+                            raise ValueError("interrupted")
+                except ValueError:
+                    if not fail:
+                        raise
+                self.assertTrue(acceleration._NATIVE_ROW_KEYS_ENABLED)
+        with mock.patch.object(acceleration, "load_rng_mask", return_value=None), \
+                self.assertRaisesRegex(RuntimeError, "compiled RNG mask"):
+            compare_late_chess(baseline="no-native-row-keys")
+
+    def test_native_row_keys_keep_replaced_persistent_id_on_the_original_python_path(self):
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        battle, _, _ = self._random_baseline_battle()
+        rng, events = battle.chess_rng, []
+        original = acceleration._IndependentRowPickler.persistent_id
+        def replacement(writer, value):
+            events.append(type(value))
+            return original(writer, value)
+        with mock.patch.object(acceleration._IndependentRowPickler, "persistent_id", replacement), \
+                mock.patch.object(acceleration, "_NATIVE_ROW_KEYS_ENABLED", True):
+            memo = acceleration._Memo()
+            actual = acceleration._independent_row_snapshot(battle, rng, memo)
+            self.assertIsNotNone(actual)
+            self.assertGreater(len(events), 0)
+            self.assertEqual((memo.statistics["independent_row_native_snapshots"],
+                              memo.statistics["independent_row_native_fallbacks"]), (0, 1))
+            with mock.patch.object(acceleration, "_NATIVE_ROW_KEYS_ENABLED", False):
+                self.assertEqual(acceleration._independent_row_snapshot(battle, rng, acceleration._Memo()), actual)
+
+    def test_row_key_ablation_requires_native_activity_exact_tail_witnesses_and_separate_profiles(self):
+        import copy
+        from wujiang.tools.ai_validation import check_row_key_ablation, _ablation, validation_environment
+        selected = (117, 137, 196)
+        with tempfile.TemporaryDirectory() as directory:
+            profile = Path(directory) / "offline.prof"
+            profile.write_bytes(b"profile-presence-fixture")
+            steps = {mode: [[dict(step=step, active_boards=4, unit_count=24, acceleration=dict(
+                            independent_row_snapshots=10, independent_row_native_snapshots=10 if mode == "optimized" else 0,
+                            independent_row_native_visits=100 if mode == "optimized" else 0,
+                            independent_row_native_fallbacks=0, independent_row_snapshot_seconds=0.01))
+                            for step in selected] for _ in range(3)] for mode in ("reference", "optimized")}
+            row = dict(reference_kind="no-native-row-keys", reference_native_row_keys=False, optimized_native_row_keys=True,
+                       reference_rng_independent_rows=True, optimized_rng_independent_rows=True,
+                       reference_adaptive_rows=True, optimized_adaptive_rows=True,
+                       reference_tactical_queries=False, optimized_tactical_queries=False,
+                       optimized_parallel_boards=False, optimized_native_checkpoint=False, optimized_native_flat_copy=False,
+                       fixture_variant="electronic-heavy", repeats=3, steps=steps,
+                       query_witness_replays_equivalent=True, query_witnesses_excluded_from_timing=True,
+                       position_query_witnesses=[dict(step=step, equal=True, reference_calls=5, optimized_calls=5) for step in selected],
+                       profile_replays_equivalent=True, profiles={mode: dict(path=str(profile), excluded_from_timing_samples=True,
+                       slowest=[dict(path=str(profile))]) for mode in ("reference", "optimized")},
+                       reference_seconds=10, optimized_seconds=5,
+                       latency={"reference": {"step_max": 2}, "optimized": {"step_max": 1}})
+            check_row_key_ablation(row)
+            self.assertEqual(_ablation([row])["verdict"], "measured_gain")
+            self.assertEqual(_ablation([row])["row_key_snapshots"], {"reference": 90, "optimized": 90})
+            for kind in ("reference", "native", "fallback", "timer", "sparse", "witness", "profile", "query"):
+                broken = copy.deepcopy(row)
+                stats = broken["steps"]["optimized"][0][0]["acceleration"]
+                if kind == "reference": broken["steps"]["reference"][0][0]["acceleration"]["independent_row_native_snapshots"] = 1
+                elif kind == "native": stats["independent_row_native_snapshots"] = 0
+                elif kind == "fallback": stats["independent_row_native_fallbacks"] = 1
+                elif kind == "timer": del stats["independent_row_snapshot_seconds"]
+                elif kind == "sparse": broken["steps"]["optimized"][0][0]["unit_count"] = 4
+                elif kind == "witness": broken["position_query_witnesses"][0]["equal"] = False
+                elif kind == "profile": broken["profiles"]["optimized"]["excluded_from_timing_samples"] = False
+                else: broken["optimized_tactical_queries"] = True
+                with self.subTest(kind=kind), self.assertRaises(ValueError):
+                    check_row_key_ablation(broken)
+            unused = copy.deepcopy(row)
+            unused["fixture_variant"] = "standard"
+            for mode in ("reference", "optimized"):
+                for run in unused["steps"][mode]:
+                    for step in run:
+                        step["acceleration"] = {}
+            check_row_key_ablation(unused)
+            self.assertEqual(_ablation([unused])["verdict"], "not_exercised")
+        self.assertEqual(validation_environment(4)["WUJIANG_AI_NATIVE_ROW_KEYS"], "1")
+
+    def test_dense_row_key_comparison_isolates_flags_spawn_environment_and_timing_samples(self):
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        from wujiang.tactical.rooms.autochess import AutoChessState
+        from wujiang.tools.ai_equivalence import compare_late_chess
+        from wujiang.tools.ai_validation import check_row_key_ablation
+        self._require_native_rng_mask()
+        seen, keys = [], []
+        def advance(chess, match):
+            flags = (acceleration._NATIVE_ROW_KEYS_ENABLED, acceleration._RNG_INDEPENDENT_ROWS_ENABLED,
+                     acceleration._ADAPTIVE_ROWS_ENABLED, acceleration._TACTICAL_QUERIES_ENABLED)
+            environment = tuple(os.environ.get(name) for name in ("WUJIANG_AI_NATIVE_ROW_KEYS",
+                                "WUJIANG_AI_RNG_INDEPENDENT_ROWS", "WUJIANG_AI_ADAPTIVE_ROWS", "WUJIANG_AI_TACTICAL_QUERIES"))
+            seen.append((flags, environment))
+            battle = match.runner.battle
+            with acceleration.decision_memo_scope():
+                key = acceleration._independent_row_snapshot(battle, battle.chess_rng, acceleration._memo.get())
+            self.assertIsNotNone(key)
+            keys.append(key[:4])
+        with mock.patch.object(AutoChessState, "_advance_match", advance):
+            result = compare_late_chess(sweeps=1, repeats=1, baseline="no-native-row-keys")
+        self.assertTrue(result["equal"], result["mismatches"])
+        self.assertEqual(seen[:4], [((False, True, True, False), ("0", "1", "1", "0"))] * 4)
+        self.assertEqual(seen[4:], [((True, True, True, False), ("1", "1", "1", "0"))] * 4)
+        self.assertEqual(keys[:4], keys[4:])
+        for mode in ("reference", "optimized"):
+            self.assertEqual(len(result["timing_samples"][mode]), 1)
+            self.assertEqual(len(result["steps"][mode]), 1)
+        check_row_key_ablation(result, full=False)
+
+    def _require_native_component_scan(self):
+        from wujiang.tactical.engine import core
+        if core._NATIVE_COMPONENT_SCAN is None:
+            if os.environ.get("WUJIANG_AI_REQUIRE_NATIVE") == "1":
+                self.fail("Native component validation cannot skip a missing scanner")
+            self.skipTest("Optional native component scanner not built")
+        return core._NATIVE_COMPONENT_SCAN
+
+    def test_native_component_scan_keeps_live_order_attribute_reads_truth_and_short_circuit(self):
+        from types import FunctionType, SimpleNamespace
+        from wujiang.tactical.engine import core
+        scanner, counters = self._require_native_component_scan()
+        for short in (False, True):
+            outcomes = []
+            for native in (False, True):
+                events = []
+                namespace = {"__builtins__": dict(core._PYTHON_INNATE_TRAITS_SUPPRESSED.__builtins__)}
+                owner = SimpleNamespace(statuses=[])
+                class Flag:
+                    def __init__(self, label, truth): self.label, self.truth = label, truth
+                    def __bool__(self):
+                        events.append(("bool", self.label))
+                        if self.label == "first": owner.statuses.append(Status("appended", True))
+                        return self.truth
+                class Status:
+                    def __init__(self, label, truth): self.label, self.truth = label, truth
+                    @property
+                    def suppresses_innate_traits(self):
+                        events.append(("read", self.label))
+                        return Flag(self.label, self.truth)
+                owner.statuses.extend([Status("first", short), Status("second", False)])
+                before = counters()
+                result = (scanner(owner, namespace, namespace["__builtins__"], core._COMPONENT_SCAN_NAMES) if native else
+                          FunctionType(core._PYTHON_INNATE_TRAITS_SUPPRESSED.__code__, namespace)(owner))
+                after = counters()
+                outcomes.append((result, events, [status.label for status in owner.statuses]))
+                self.assertEqual(after["calls"] - before["calls"], int(native))
+                if native:
+                    self.assertEqual(after["statuses"] - before["statuses"], 1 if short else 3)
+            self.assertEqual(*outcomes)
+            self.assertTrue(outcomes[0][0])
+        for statuses in ([], [object()], [SimpleNamespace(suppresses_innate_traits=0)]):
+            owner = SimpleNamespace(statuses=statuses)
+            self.assertIs(scanner(owner, core._COMPONENT_SCAN_GLOBALS, core._COMPONENT_SCAN_BUILTINS,
+                                  core._COMPONENT_SCAN_NAMES), False)
+        self.assertIs(scanner(object(), core._COMPONENT_SCAN_GLOBALS, core._COMPONENT_SCAN_BUILTINS,
+                              core._COMPONENT_SCAN_NAMES), False)
+
+    def test_native_component_scan_rereads_replaced_globals_and_builtins_getattr(self):
+        from types import FunctionType, SimpleNamespace
+        from wujiang.tactical.engine import core
+        scanner, _ = self._require_native_component_scan()
+        for target in ("globals", "builtins"):
+            results = []
+            for native in (False, True):
+                events = []
+                namespace = {"__builtins__": dict(core._PYTHON_INNATE_TRAITS_SUPPRESSED.__builtins__)}
+                destination = namespace if target == "globals" else namespace["__builtins__"]
+                owner = SimpleNamespace(statuses=[object(), object(), object()])
+                actual_getattr = getattr
+                def replacement(obj, name, default):
+                    events.append(("replacement", name))
+                    return True
+                def lookup(obj, name, default):
+                    events.append(("lookup", name))
+                    if name == "suppresses_innate_traits":
+                        destination["getattr"] = replacement
+                        return False
+                    return actual_getattr(obj, name, default)
+                destination["getattr"] = lookup
+                value = (scanner(owner, namespace, namespace["__builtins__"], core._COMPONENT_SCAN_NAMES) if native else
+                         FunctionType(core._PYTHON_INNATE_TRAITS_SUPPRESSED.__code__, namespace)(owner))
+                results.append((value, events))
+            self.assertEqual(*results)
+            self.assertEqual(results[0][1], [("lookup", "statuses"), ("lookup", "suppresses_innate_traits"),
+                                             ("replacement", "suppresses_innate_traits")])
+
+    def test_native_component_scan_matches_generator_and_truth_exception_boundaries(self):
+        from types import FunctionType, SimpleNamespace
+        from wujiang.tactical.engine import core
+        scanner, _ = self._require_native_component_scan()
+        for where in ("owner", "iter", "getter", "truth", "next"):
+            for error_type in (ValueError, StopIteration):
+                results = []
+                for native in (False, True):
+                    namespace = {"__builtins__": dict(core._PYTHON_INNATE_TRAITS_SUPPRESSED.__builtins__)}
+                    class Flag:
+                        def __bool__(self):
+                            if where == "truth": raise error_type("boundary")
+                            return False
+                    class Status:
+                        @property
+                        def suppresses_innate_traits(self):
+                            if where == "getter": raise error_type("boundary")
+                            return Flag()
+                    class Stream:
+                        def __iter__(self):
+                            if where == "iter": raise error_type("boundary")
+                            return self
+                        def __next__(self):
+                            raise error_type("boundary")
+                    class Owner:
+                        @property
+                        def statuses(self):
+                            if where == "owner": raise error_type("boundary")
+                            return Stream() if where in ("iter", "next") else [Status()]
+                    try:
+                        value = (scanner(Owner(), namespace, namespace["__builtins__"], core._COMPONENT_SCAN_NAMES) if native else
+                                 FunctionType(core._PYTHON_INNATE_TRAITS_SUPPRESSED.__code__, namespace)(Owner()))
+                        results.append(("result", value))
+                    except BaseException as exc:
+                        results.append((type(exc), exc.args, type(exc.__cause__) if exc.__cause__ else None,
+                                        exc.__cause__.args if exc.__cause__ else None))
+                with self.subTest(where=where, error=error_type):
+                    self.assertEqual(*results)
+
+    def test_native_component_scan_preserves_iterator_and_status_finalizer_order(self):
+        from types import FunctionType
+        from wujiang.tactical.engine import core
+        scanner, _ = self._require_native_component_scan()
+        for short in (False, True):
+            results = []
+            for native in (False, True):
+                events = []
+                namespace = {"__builtins__": dict(core._PYTHON_INNATE_TRAITS_SUPPRESSED.__builtins__)}
+                class Status:
+                    def __init__(self, index): self.index = index
+                    @property
+                    def suppresses_innate_traits(self):
+                        events.append(("read", self.index))
+                        return short
+                    def __del__(self): events.append(("release_status", self.index))
+                class Stream:
+                    def __init__(self): self.index = 0
+                    def __iter__(self): return self
+                    def __next__(self):
+                        events.append(("next", self.index))
+                        if self.index == 2: raise StopIteration
+                        item = Status(self.index)
+                        self.index += 1
+                        return item
+                    def __del__(self): events.append(("release_iterator", self.index))
+                class Owner:
+                    @property
+                    def statuses(self): return Stream()
+                result = (scanner(Owner(), namespace, namespace["__builtins__"], core._COMPONENT_SCAN_NAMES) if native else
+                          FunctionType(core._PYTHON_INNATE_TRAITS_SUPPRESSED.__code__, namespace)(Owner()))
+                results.append((result, events))
+            self.assertEqual(*results)
+
+    def test_native_component_scan_keeps_side_effect_rng_and_id_consumption_exact(self):
+        from types import FunctionType, SimpleNamespace
+        from wujiang.tactical.engine import core
+        from wujiang.tactical.heroes import base
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        from wujiang.tools.ai_equivalence import isolated_id_stream
+        scanner, _ = self._require_native_component_scan()
+        before_global = random.getstate()
+        results = []
+        try:
+            for native in (False, True):
+                random.setstate(before_global)
+                rng, events = random.Random(133), []
+                namespace = {"__builtins__": dict(core._PYTHON_INNATE_TRAITS_SUPPRESSED.__builtins__)}
+                class Status:
+                    @property
+                    def suppresses_innate_traits(self):
+                        events.append((rng.random(), random.random(), next(core._id_counter), next(base._unit_counter)))
+                        return False
+                owner = SimpleNamespace(statuses=[Status(), Status()])
+                with isolated_id_stream():
+                    value = (scanner(owner, namespace, namespace["__builtins__"], core._COMPONENT_SCAN_NAMES) if native else
+                             FunctionType(core._PYTHON_INNATE_TRAITS_SUPPRESSED.__code__, namespace)(owner))
+                    results.append((value, events, random.getstate(), rng.getstate(), acceleration._id_state()))
+            self.assertEqual(*results)
+            self.assertEqual(len(results[0][1]), 2)
+        finally:
+            random.setstate(before_global)
+
+    def test_native_component_wrapper_keeps_replaced_any_and_unavailable_backend_on_python(self):
+        from types import SimpleNamespace
+        from wujiang.tactical.engine import core
+        from wujiang.tools.ai_equivalence import package_reference
+        self._require_native_component_scan()
+        owner = SimpleNamespace(statuses=[SimpleNamespace(suppresses_innate_traits=True)])
+        with mock.patch.object(core, "any", lambda values: (tuple(values), "custom any"), create=True):
+            self.assertEqual(core._native_innate_traits_suppressed(owner), ((True,), "custom any"))
+        with mock.patch.object(core, "_NATIVE_COMPONENT_SCAN", None):
+            self.assertTrue(core._native_innate_traits_suppressed(owner))
+        for fail in (False, True):
+            with mock.patch.object(core, "_NATIVE_COMPONENT_SCAN_ENABLED", True), \
+                    mock.patch.object(core.Unit, "innate_traits_suppressed", core._native_innate_traits_suppressed):
+                try:
+                    with package_reference("no-component-scan"):
+                        self.assertIs(core.Unit.innate_traits_suppressed, core._PYTHON_INNATE_TRAITS_SUPPRESSED)
+                        self.assertFalse(core._NATIVE_COMPONENT_SCAN_ENABLED)
+                        if fail: raise ValueError("interrupted")
+                except ValueError:
+                    if not fail: raise
+                self.assertIs(core.Unit.innate_traits_suppressed, core._native_innate_traits_suppressed)
+                self.assertTrue(core._NATIVE_COMPONENT_SCAN_ENABLED)
+
+    def test_native_component_wrapper_respects_changed_python_code_and_original_live_inheritance(self):
+        import pickle
+        from types import SimpleNamespace
+        from wujiang.tactical.engine import core
+        self._require_native_component_scan()
+        original = core._PYTHON_INNATE_TRAITS_SUPPRESSED
+        saved = original.__code__
+        def changed(unit): return 12.5
+        try:
+            original.__code__ = changed.__code__
+            self.assertEqual(core._native_innate_traits_suppressed(SimpleNamespace(statuses=[])), 12.5)
+        finally:
+            original.__code__ = saved
+        battle, actor, _ = self._small_baseline_battle(live=2, destroyed=0)
+        class Suppress:
+            suppresses_innate_traits = True
+        blobs = []
+        for function in (core._PYTHON_INNATE_TRAITS_SUPPRESSED, core._native_innate_traits_suppressed):
+            with mock.patch.object(core.Unit, "innate_traits_suppressed", function):
+                actor.statuses.append(Suppress())
+                self.assertTrue(actor.innate_traits_suppressed())
+                actor.statuses.pop()
+                self.assertFalse(actor.innate_traits_suppressed())
+                actor.saved_predicate = actor.innate_traits_suppressed
+                try:
+                    blobs.append(pickle.dumps(actor))
+                    self.assertFalse(pickle.loads(blobs[-1]).saved_predicate())
+                    self.assertFalse(function(self=actor))
+                finally:
+                    del actor.saved_predicate
+        self.assertEqual(*blobs)
+
+    def test_native_component_scan_keeps_real_attack_probe_results_state_rng_and_both_ids(self):
+        import pickle
+        from wujiang.tactical.engine import core
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        from wujiang.tools.ai_equivalence import isolated_id_stream, reference_rollback
+        self._require_native_component_scan()
+        battle, actor, units = self._random_baseline_battle()
+        actor = next(unit for unit in units if unit.player_id == 2)
+        target = next(unit for unit in units if unit.player_id == 1)
+        actor.position, target.position = Position(3, 1), Position(2, 1)
+        initial = battle.chess_rng.getstate()
+        results = []
+        try:
+            for native in (False, True):
+                battle.chess_rng.setstate(initial)
+                with isolated_id_stream(), reference_rollback(battle, ai_probe=False), \
+                        mock.patch.object(core.Unit, "innate_traits_suppressed", core._native_innate_traits_suppressed if native
+                                          else core._PYTHON_INNATE_TRAITS_SUPPRESSED):
+                    values = [ai.probe_attack_damage_impact(battle, actor, target, {}, attack_power=3.0),
+                              ai.probe_attack_damage_impact(battle, actor, target, {}, attack_power=3.0)]
+                    # Real default traits/statuses and nested rollback are
+                    # exercised without caching or skipping either attack.
+                    results.append((pickle.dumps(values), acceleration._snapshot(battle),
+                                    battle.chess_rng.getstate(), acceleration._id_state()))
+            self.assertEqual(*results)
+            self.assertNotEqual(results[0][2], initial)
+        finally:
+            battle.chess_rng.setstate(initial)
+
+    def test_component_scan_dense_comparison_keeps_actual_bindings_environment_and_step_counts(self):
+        from wujiang.tactical.engine import core
+        from wujiang.tactical.rooms.autochess import AutoChessState
+        from wujiang.tools.ai_equivalence import compare_late_chess
+        from wujiang.tools.ai_validation import check_component_scan_ablation
+        self._require_native_component_scan()
+        seen = []
+        def advance(chess, match):
+            seen.append((core.Unit.innate_traits_suppressed is core._native_innate_traits_suppressed,
+                         os.environ.get("WUJIANG_AI_NATIVE_COMPONENT_SCAN")))
+            for unit in match.runner.battle.all_units():
+                unit.innate_traits_suppressed()
+        with mock.patch.object(AutoChessState, "_advance_match", advance):
+            result = compare_late_chess(sweeps=1, repeats=1, baseline="no-component-scan")
+        self.assertTrue(result["equal"], result["mismatches"])
+        self.assertEqual(seen, [(False, "0")] * 4 + [(True, "1")] * 4)
+        check_component_scan_ablation(result, full=False)
+        with mock.patch.object(core, "_NATIVE_COMPONENT_SCAN", None), self.assertRaisesRegex(RuntimeError, "compiled scanner"):
+            compare_late_chess(baseline="no-component-scan")
+
+    def test_component_scan_gate_requires_actual_work_dense_witnesses_and_separate_profiles(self):
+        import copy
+        from wujiang.tools.ai_validation import check_component_scan_ablation, _ablation, validation_environment
+        selected = (117, 137, 196)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "presence.prof"
+            path.write_bytes(b"profile-presence-fixture")
+            row = dict(reference_kind="no-component-scan", reference_native_component_scan=False,
+                       optimized_native_component_scan=True, reference_rng_independent_rows=True, optimized_rng_independent_rows=True,
+                       reference_adaptive_rows=True, optimized_adaptive_rows=True, reference_native_row_keys=True,
+                       optimized_native_row_keys=True, reference_tactical_queries=False, optimized_tactical_queries=False,
+                       optimized_parallel_boards=False, optimized_native_checkpoint=False, optimized_native_flat_copy=False,
+                       fixture_variant="electronic-heavy", repeats=3, timing_samples={"reference": [10]*3, "optimized": [8]*3},
+                       steps={mode: [[dict(step=step, active_boards=4, unit_count=24,
+                              native_component_scan=dict(calls=20 if mode == "optimized" else 0)) for step in selected]
+                              for _ in range(3)] for mode in ("reference", "optimized")},
+                       position_query_witnesses=[dict(step=step, equal=True, reference_calls=3, optimized_calls=3) for step in selected],
+                       query_witness_replays_equivalent=True, query_witnesses_excluded_from_timing=True,
+                       profile_replays_equivalent=True, profiles={mode: dict(path=str(path), excluded_from_timing_samples=True,
+                              slowest=[dict(path=str(path))]) for mode in ("reference", "optimized")},
+                       reference_seconds=10, optimized_seconds=8, latency={"reference": {"step_max": 5}, "optimized": {"step_max": 4}})
+            check_component_scan_ablation(row)
+            self.assertEqual(_ablation([row])["activity"]["native_component_scans"], 180)
+            for kind in ("reference", "unused", "sparse", "missing", "witness", "profile", "samples", "keys", "queries"):
+                broken = copy.deepcopy(row)
+                if kind == "reference": broken["steps"]["reference"][0][0]["native_component_scan"]["calls"] = 1
+                elif kind == "unused":
+                    for run in broken["steps"]["optimized"]:
+                        for step in run: step["native_component_scan"]["calls"] = 0
+                elif kind == "sparse": broken["steps"]["optimized"][0][0]["unit_count"] = 4
+                elif kind == "missing": broken["steps"]["optimized"][0].pop()
+                elif kind == "witness": broken["position_query_witnesses"][0]["equal"] = False
+                elif kind == "profile": broken["profiles"]["optimized"]["excluded_from_timing_samples"] = False
+                elif kind == "samples": broken["timing_samples"]["reference"].pop()
+                elif kind == "keys": broken["reference_native_row_keys"] = False
+                else: broken["optimized_tactical_queries"] = True
+                with self.subTest(kind=kind), self.assertRaises(ValueError):
+                    check_component_scan_ablation(broken)
+        self.assertEqual(validation_environment(4)["WUJIANG_AI_NATIVE_COMPONENT_SCAN"], "1")
+
+    def _require_native_copy(self):
+        from wujiang.tactical.engine import core
+        if core._NATIVE_ROLLBACK_COPY is None:
+            if os.environ.get("WUJIANG_AI_REQUIRE_NATIVE") == "1":
+                self.fail("Native validation cannot silently skip a missing backend")
+            self.skipTest("Optional native copy module not built")
+        return core._NATIVE_ROLLBACK_COPY
+
+    def test_server_profile_overrides_inherited_experiments_without_changing_other_settings(self):
+        from run import configure_server_ai
+        expected = {
+            "WUJIANG_AI_SERVER_PROFILE": "legacy-measured-fast",
+            "WUJIANG_AI_SCORING_RULES": "legacy", "WUJIANG_AI_WORKERS": "4",
+            **dict.fromkeys(("WUJIANG_AI_ATTACK_IDS", "WUJIANG_AI_MOVE_BATCHES",
+                            "WUJIANG_AI_SMALL_BASELINES", "WUJIANG_AI_BASELINE_BATCHES",
+                            "WUJIANG_AI_PARALLEL_BASELINES", "WUJIANG_AI_RNG_INDEPENDENT_ROWS",
+                            "WUJIANG_AI_ADAPTIVE_ROWS", "WUJIANG_AI_NATIVE_ROW_KEYS",
+                            "WUJIANG_AI_ROLLBACK_PLANS", "WUJIANG_AI_NATIVE_ROLLBACK"), "1"),
+            **dict.fromkeys(("WUJIANG_AI_TACTICAL_QUERIES", "WUJIANG_AI_NATIVE_COMPONENT_SCAN",
+                            "WUJIANG_AI_NATIVE_CHECKPOINT", "WUJIANG_AI_NATIVE_FLAT_COPY",
+                            "WUJIANG_AI_PARALLEL_BOARDS"), "0"),
+        }
+        inherited = {key: "stale-experiment" for key in expected}
+        inherited["WUJIANG_PUBLIC_BASE_URL"] = "https://example.invalid"
+        with mock.patch.dict(os.environ, inherited):
+            configure_server_ai("legacy")
+            self.assertEqual({key: os.environ[key] for key in expected}, expected)
+            self.assertEqual(os.environ["WUJIANG_PUBLIC_BASE_URL"], "https://example.invalid")
+
+    def test_server_profile_loads_legacy_policy_and_acceleration_before_any_server_starts(self):
+        import subprocess
+        self._require_native_copy()
+        environment = dict(os.environ, WUJIANG_AI_SCORING_RULES="expected-visible-v1",
+                           WUJIANG_AI_WORKERS="0", WUJIANG_AI_PARALLEL_BOARDS="1",
+                           WUJIANG_AI_NATIVE_COMPONENT_SCAN="1", WUJIANG_AI_NATIVE_ROLLBACK="0")
+        script = (
+            "import json,sys,run; run.configure_server_ai('legacy'); "
+            "assert 'wujiang.platform.ai_scoring_policy' not in sys.modules; "
+            "info=run.server_ai_build_info(); "
+            "assert 'wujiang.platform.http.server' not in sys.modules; "
+            "print(json.dumps(info['features']))"
+        )
+        result = subprocess.run([sys.executable, "-c", script], cwd=str(ROOT), env=environment,
+                                capture_output=True, text=True, timeout=30,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        features = json.loads(result.stdout)
+        self.assertEqual(features["server_profile"], "legacy-measured-fast")
+        self.assertEqual(features["scoring_rules"], "legacy")
+        self.assertFalse(features["expected_random_scoring"])
+        self.assertFalse(features["enemy_stealth_ignored_for_scoring"])
+        self.assertFalse(features["enemy_clone_identity_hidden_for_scoring"])
+        for key in ("rng_independent_rows", "adaptive_rows", "native_row_keys_active",
+                    "native_rollback_active", "small_baselines", "baseline_batches", "parallel_baselines"):
+            self.assertTrue(features[key], key)
+        for key in ("parallel_boards", "native_checkpoint_active", "native_flat_copy_active",
+                    "tactical_queries", "native_component_scan_active"):
+            self.assertFalse(features[key], key)
+        self.assertEqual(features["worker_limit"], min(4, max(0, (os.cpu_count() or 1) - 1)))
+
+    def test_unconfigured_import_disables_retired_paths_and_keeps_native_copy_and_caches(self):
+        import subprocess
+        self._require_native_copy()
+        environment = dict(os.environ, WUJIANG_AI_NATIVE_ROLLBACK="1", WUJIANG_AI_ROLLBACK_PLANS="1",
+                           WUJIANG_AI_SMALL_BASELINES="1", WUJIANG_AI_BASELINE_BATCHES="1",
+                           WUJIANG_AI_PARALLEL_BASELINES="1", WUJIANG_AI_WORKERS="4")
+        environment.pop("WUJIANG_AI_NATIVE_CHECKPOINT", None)
+        environment.pop("WUJIANG_AI_PARALLEL_BOARDS", None)
+        environment.pop("WUJIANG_AI_NATIVE_FLAT_COPY", None)
+        environment.pop("WUJIANG_AI_RNG_INDEPENDENT_ROWS", None)
+        environment.pop("WUJIANG_AI_TACTICAL_QUERIES", None)
+        environment.pop("WUJIANG_AI_NATIVE_ROW_KEYS", None)
+        environment.pop("WUJIANG_AI_NATIVE_COMPONENT_SCAN", None)
+        script = (
+            "import json, sys; import run; "
+            "from wujiang.platform.ai_build import build_info; "
+            "info=run.server_ai_build_info(); "
+            "assert 'wujiang.platform.http.server' not in sys.modules; "
+            "print(json.dumps({'loaded':info['features'],'metadata':build_info()['features']}))"
+        )
+        result = subprocess.run([sys.executable, "-c", script], cwd=str(ROOT), env=environment,
+                                capture_output=True, text=True, timeout=30,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        info = json.loads(result.stdout)
+        for features in info.values():
+            self.assertFalse(features["parallel_boards"])
+            self.assertFalse(features["native_checkpoint_requested"])
+            self.assertFalse(features["native_flat_copy_requested"])
+            self.assertTrue(features["small_baselines"])
+            self.assertTrue(features["baseline_batches"])
+            self.assertFalse(features["rng_independent_rows"])
+            self.assertFalse(features["tactical_queries"])
+            self.assertFalse(features["native_row_keys"])
+            self.assertFalse(features["native_component_scan"])
+            self.assertTrue(features["parallel_baselines"])
+            self.assertEqual(features["worker_limit"], min(4, max(0, (os.cpu_count() or 1) - 1)))
+        self.assertTrue(info["loaded"]["native_rollback_active"])
+        self.assertFalse(info["loaded"]["native_checkpoint_active"])
+        self.assertFalse(info["loaded"]["native_flat_copy_active"])
+        self.assertTrue(info["loaded"]["native_row_keys_loaded"])
+        self.assertFalse(info["loaded"]["native_row_keys_active"])
+        self.assertTrue(info["loaded"]["native_component_scan_loaded"])
+        self.assertFalse(info["loaded"]["native_component_scan_active"])
+
+    def test_disabled_native_checkpoint_keeps_native_copy_and_exact_rollback(self):
+        from wujiang.tactical.engine import core
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        native = self._require_native_copy()
+        battle = create_battle("elite_soldier", "elite_soldier")
+        actor = primary_hero(battle, 1)
+        before = acceleration._snapshot(battle), acceleration._id_state()
+        capture, restore = mock.Mock(), mock.Mock()
+        with mock.patch.object(core, "_ROLLBACK_TYPE_PLANS_ENABLED", True), \
+                mock.patch.object(core, "_ROLLBACK_NATIVE_ENABLED", True), \
+                mock.patch.object(core, "_NATIVE_CHECKPOINT_ENABLED", False), \
+                mock.patch.object(core, "_NATIVE_CHECKPOINT", (capture, restore)), \
+                mock.patch.object(core, "_NATIVE_ROLLBACK_COPY", wraps=native) as copier:
+            with core.battle_state_rollback(battle):
+                actor.current_hp = 0.25
+                battle.logs.append("retired checkpoint rollback probe")
+                random.random()
+            copier.assert_called()
+            capture.assert_not_called()
+            restore.assert_not_called()
+        self.assertEqual((acceleration._snapshot(battle), acceleration._id_state()), before)
+
+    def test_disabled_board_path_uses_original_step_without_worker_or_global_state_queries(self):
+        from wujiang.tactical.rooms.autochess import AutoChessState
+        from wujiang.tactical.rooms import ai_acceleration as acceleration, ai_parallel as parallel
+        chess, match = AutoChessState.__new__(AutoChessState), object()
+        for value in (False, True):
+            with self.subTest(value=value), \
+                    mock.patch.object(parallel, "_BOARDS_ENABLED", False), \
+                    mock.patch.object(AutoChessState, "_advance_match_serial", autospec=True, return_value=value) as original, \
+                    mock.patch.object(parallel, "_submit_wave") as submit, \
+                    mock.patch.object(acceleration, "_executor") as executor, \
+                    mock.patch.object(acceleration, "_id_state") as ids:
+                self.assertIs(chess._advance_match(match), value)
+                original.assert_called_once_with(chess, match)
+                submit.assert_not_called()
+                executor.assert_not_called()
+                ids.assert_not_called()
+                self.assertEqual(parallel.last_statistics(), {})
+
+    def test_validation_profile_overrides_old_experiments_and_rejects_mislabeled_production(self):
+        from wujiang.tools.ai_validation import validation_environment, check_production_features
+        from wujiang.platform.ai_build import build_info
+        inherited = {"WUJIANG_AI_NATIVE_CHECKPOINT": "1", "WUJIANG_AI_PARALLEL_BOARDS": "1",
+                     "WUJIANG_AI_NATIVE_FLAT_COPY": "1",
+                     "WUJIANG_AI_BASELINE_BATCHES": "0", "WUJIANG_AI_NATIVE_ROLLBACK": "0"}
+        with mock.patch.dict(os.environ, inherited):
+            environment = validation_environment(4)
+            self.assertEqual(os.environ["WUJIANG_AI_PARALLEL_BOARDS"], "1")
+            with mock.patch.dict(os.environ, environment):
+                check_production_features(build_info()["features"])
+        for name in ("WUJIANG_AI_NATIVE_CHECKPOINT", "WUJIANG_AI_PARALLEL_BOARDS", "WUJIANG_AI_NATIVE_FLAT_COPY"):
+            self.assertEqual(environment[name], "0")
+        for name in ("WUJIANG_AI_NATIVE_ROLLBACK", "WUJIANG_AI_BASELINE_BATCHES", "WUJIANG_AI_PARALLEL_BASELINES"):
+            self.assertEqual(environment[name], "1")
+        self.assertEqual(environment["WUJIANG_AI_WORKERS"], "4")
+        for row, keys in ((False, ("parallel_boards", "native_checkpoint_requested", "native_flat_copy_requested")),
+                          (True, ("optimized_parallel_boards", "optimized_native_checkpoint", "optimized_native_flat_copy"))):
+            valid = dict.fromkeys(keys, False)
+            check_production_features(valid, row=row)
+            for key in keys:
+                for invalid in ({**valid, key: True}, {name: value for name, value in valid.items() if name != key}):
+                    with self.assertRaisesRegex(ValueError, "retired"):
+                        check_production_features(invalid, row=row)
+
+    def test_previous_defaults_reference_reenables_only_retired_paths_then_restores_them(self):
+        from wujiang.tactical.engine import core
+        from wujiang.tactical.rooms import ai_acceleration as acceleration, ai_parallel as parallel
+        from wujiang.tools.ai_equivalence import package_reference
+        copier = core._NATIVE_ROLLBACK_COPY
+        for interrupted in (False, True):
+            with mock.patch.object(core, "_NATIVE_CHECKPOINT_ENABLED", False), \
+                    mock.patch.object(parallel, "_BOARDS_ENABLED", False), \
+                    mock.patch.object(core, "_ROLLBACK_NATIVE_ENABLED", True), \
+                    mock.patch.object(acceleration, "_BASELINE_BATCHES_ENABLED", True), \
+                    mock.patch.object(acceleration, "_PARALLEL_BASELINES_ENABLED", True):
+                try:
+                    with package_reference("previous-defaults"):
+                        self.assertTrue(core._NATIVE_CHECKPOINT_ENABLED)
+                        self.assertTrue(parallel._BOARDS_ENABLED)
+                        self.assertTrue(core._ROLLBACK_NATIVE_ENABLED)
+                        self.assertIs(core._NATIVE_ROLLBACK_COPY, copier)
+                        self.assertTrue(acceleration._BASELINE_BATCHES_ENABLED)
+                        self.assertTrue(acceleration._PARALLEL_BASELINES_ENABLED)
+                        if interrupted:
+                            raise RuntimeError("comparison interrupted")
+                except RuntimeError as error:
+                    if not interrupted or str(error) != "comparison interrupted":
+                        raise
+                self.assertFalse(core._NATIVE_CHECKPOINT_ENABLED)
+                self.assertFalse(parallel._BOARDS_ENABLED)
+
+    def test_cold_baseline_batches_keep_exact_rows_order_and_remove_inner_snapshots(self):
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        battle, actor, units = self._small_baseline_battle()
+        outcomes, snapshots = [], []
+        for enabled in (False, True):
+            calls = []
+            @acceleration.cached_position_value
+            def query(current, source, unit):
+                calls.append(unit.unit_id)
+                return unit.current_hp * 0.125 - 0.0
+            with mock.patch.object(ai, "reviewed_r17_position_value", query), \
+                    mock.patch.object(acceleration, "_BASELINE_BATCHES_ENABLED", enabled), \
+                    mock.patch.object(acceleration, "_PARALLEL_BASELINES_ENABLED", False), \
+                    acceleration.decision_memo_scope():
+                rows = ai.reviewed_effect_baseline(battle, actor, units)
+            outcomes.append((rows, calls))
+            snapshots.append(acceleration.last_statistics()["snapshots"])
+        self.assertEqual(outcomes[0], outcomes[1])
+        self.assertEqual(outcomes[1][1], [unit.unit_id for unit in units])
+        self.assertEqual(snapshots, [2 + 2 * len(units), 2])
+
+    def test_cold_baseline_batches_preserve_impure_reads_and_exception_position(self):
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        from wujiang.tools.ai_equivalence import isolated_id_stream, reference_rollback
+        battle, actor, units = self._small_baseline_battle()
+        for fail in (False, True):
+            outcomes = []
+            for enabled in (False, True):
+                calls = []
+                @acceleration.cached_position_value
+                def query(current, source, unit):
+                    calls.append((unit.unit_id, source.current_hp))
+                    source.current_hp -= 0.125
+                    if fail and len(calls) == 3:
+                        raise ValueError("third row failed")
+                    return source.current_hp
+                with isolated_id_stream(), reference_rollback(battle, ai_probe=False), \
+                        mock.patch.object(ai, "reviewed_r17_position_value", query), \
+                        mock.patch.object(acceleration, "_BASELINE_BATCHES_ENABLED", enabled), \
+                        mock.patch.object(acceleration, "_PARALLEL_BASELINES_ENABLED", False), \
+                        acceleration.decision_memo_scope():
+                    if fail:
+                        with self.assertRaisesRegex(ValueError, "third row"):
+                            ai.reviewed_effect_baseline(battle, actor, units)
+                        rows = None
+                    else:
+                        rows = ai.reviewed_effect_baseline(battle, actor, units)
+                    outcomes.append((rows, calls, acceleration._snapshot(battle), acceleration._id_state()))
+            self.assertEqual(outcomes[0], outcomes[1])
+
+    def test_native_checkpoint_runs_capture_restore_and_commits_success_only(self):
+        from wujiang.tactical.engine import core
+        self._require_native_copy()
+        self.assertIsNotNone(core._NATIVE_CHECKPOINT)
+        capture, restore = (mock.Mock(wraps=function) for function in core._NATIVE_CHECKPOINT)
+        battle = create_battle("fire_funeral", "ellie")
+        actor = primary_hero(battle, 1)
+        hp, rng = actor.current_hp, random.getstate()
+        with mock.patch.object(core, "_ROLLBACK_NATIVE_ENABLED", True), \
+                mock.patch.object(core, "_NATIVE_CHECKPOINT_ENABLED", True), \
+                mock.patch.object(core, "_NATIVE_CHECKPOINT", (capture, restore)):
+            with self.assertRaisesRegex(RuntimeError, "outer failure"):
+                with core.battle_state_rollback(battle, commit_on_success=True):
+                    actor.current_hp -= 0.25
+                    with core.battle_state_rollback(battle):
+                        actor.current_hp = 0
+                        random.random()
+                    self.assertEqual(actor.current_hp, hp - 0.25)
+                    raise RuntimeError("outer failure")
+            self.assertEqual((actor.current_hp, random.getstate()), (hp, rng))
+            with core.battle_state_rollback(battle, commit_on_success=True):
+                actor.current_hp -= 0.5
+            self.assertEqual(actor.current_hp, hp - 0.5)
+        self.assertEqual((capture.call_count, restore.call_count), (3, 2))
+
+    def test_native_checkpoint_preserves_protocols_runtime_children_and_slots(self):
+        from wujiang.tactical.engine import core
+        self._require_native_copy()
+        self.assertIsNotNone(core._NATIVE_CHECKPOINT)
+        with mock.patch.object(core, "_ROLLBACK_NATIVE_ENABLED", True), \
+                mock.patch.object(core, "_NATIVE_CHECKPOINT_ENABLED", True):
+            self.test_rollback_plans_restore_slots_runtime_children_nested_failures_and_rng()
+            self.test_rollback_plans_reread_a_replaced_instance_dictionary_during_restore()
+            self.test_rollback_plans_keep_custom_items_key_hashes_and_live_read_order()
+
+    def test_position_worker_reuses_one_load_and_reloads_after_impure_query(self):
+        from types import SimpleNamespace
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        from wujiang.tools.ai_equivalence import isolated_id_stream
+        battle = create_battle("fire_funeral", "ellie")
+        actor, target = battle.all_units()
+        key, ids = acceleration._snapshot(battle), acceleration._id_state()
+        for impure in (False, True):
+            calls = []
+            def query(current, source, unit):
+                calls.append(source.current_hp)
+                if impure and len(calls) == 1:
+                    source.current_hp -= 0.25
+                return 1.25
+            with isolated_id_stream(), mock.patch.object(ai, "reviewed_r17_position_value", SimpleNamespace(__wrapped__=query)), \
+                    mock.patch.object(acceleration, "_restore_worker_battle", wraps=acceleration._restore_worker_battle) as load:
+                rows, counts = acceleration._position_batch((key, actor.unit_id, [actor.unit_id, target.unit_id], ids), True)
+            self.assertEqual(load.call_count, 2 if impure else 1)
+            self.assertEqual(calls, [actor.current_hp] * 2)
+            self.assertEqual(rows, [(actor.unit_id, None if impure else 1.25), (target.unit_id, 1.25)])
+            self.assertEqual(counts["worker_impure"], int(impure))
+        self.assertEqual((acceleration._snapshot(battle), acceleration._id_state()), (key, ids))
+
+    def _parallel_baseline_executor(self, battle, actor, units, *, reject=False, timeout=False):
+        from concurrent.futures import Future
+        from wujiang.tactical.rooms import ai
+        expected = ai.reviewed_effect_baseline.__wrapped__(battle, actor, units)
+        executor = mock.Mock()
+        def submit(function, kind, request, source_id):
+            self.assertEqual(kind, "baseline")
+            future = Future()
+            if timeout:
+                future.set_exception(TimeoutError("worker deadline"))
+            else:
+                future.set_result(None if reject else tuple((key, expected[key]) for key in request[2]))
+            return future
+        executor.submit.side_effect = submit
+        return executor, expected
+
+    def test_parallel_baseline_gathers_original_order_without_parent_row_queries(self):
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        battle, actor, units = self._small_baseline_battle()
+        with mock.patch.object(ai, "reviewed_r17_position_value", return_value=1.25) as query:
+            executor, expected = self._parallel_baseline_executor(battle, actor, units)
+            query.reset_mock()
+            # This parent-side gather test supplies both a fake kernel and a
+            # fake executor; real implementation-binding rejection is below.
+            with mock.patch.object(acceleration, "_PARALLEL_BASELINE_MIN_SECONDS", 0), \
+                    mock.patch.object(acceleration, "_PARALLEL_BASELINES_ENABLED", True), \
+                    mock.patch.object(acceleration, "_BASELINE_BATCHES_ENABLED", True), \
+                    mock.patch.object(acceleration, "_baseline_worker_implementation_matches", return_value=True), \
+                    mock.patch.object(acceleration, "_executor", return_value=executor), \
+                    mock.patch.object(acceleration, "_worker_count", return_value=4), \
+                    acceleration.decision_memo_scope():
+                actual = ai.reviewed_effect_baseline(battle, actor, units)
+                self.assertEqual(actual, expected)
+                self.assertEqual(tuple(actual), tuple(unit.unit_id for unit in units))
+                query.assert_not_called()
+        self.assertEqual(executor.submit.call_count, 4)
+        self.assertEqual(acceleration.last_statistics()["parallel_baseline_hits"], 1)
+
+    def test_parallel_baseline_rejection_and_timeout_execute_every_original_row(self):
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        battle, actor, units = self._small_baseline_battle()
+        for timeout in (False, True):
+            with mock.patch.object(ai, "reviewed_r17_position_value", return_value=1.25) as query:
+                executor, expected = self._parallel_baseline_executor(battle, actor, units, reject=True, timeout=timeout)
+                query.reset_mock()
+                with mock.patch.object(acceleration, "_PARALLEL_BASELINE_MIN_SECONDS", 0), \
+                        mock.patch.object(acceleration, "_PARALLEL_BASELINES_ENABLED", True), \
+                        mock.patch.object(acceleration, "_BASELINE_BATCHES_ENABLED", True), \
+                        mock.patch.object(acceleration, "_baseline_worker_implementation_matches", return_value=True), \
+                        mock.patch.object(acceleration, "_worker_disabled", False), \
+                        mock.patch.object(acceleration, "_executor", return_value=executor), \
+                        mock.patch.object(acceleration, "_worker_count", return_value=4), \
+                        mock.patch.object(acceleration, "shutdown_workers") as shutdown, \
+                        acceleration.decision_memo_scope():
+                    self.assertEqual(ai.reviewed_effect_baseline(battle, actor, units), expected)
+                    self.assertEqual(query.call_count, len(units))
+                    if timeout:
+                        shutdown.assert_called_once_with(terminate=True)
+                        self.assertTrue(acceleration._worker_disabled)
+                    else:
+                        shutdown.assert_not_called()
+
+    def test_parallel_baseline_runtime_binding_guard_keeps_loaded_functions_and_code(self):
+        from contextlib import nullcontext
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        raw_baseline = ai._PARALLEL_BASELINE_BINDINGS[0][2]
+        baseline = ai._PARALLEL_BASELINE_BINDINGS[0][0]
+        position = ai._PARALLEL_BASELINE_BINDINGS[1][0]
+        raw_position = ai._PARALLEL_BASELINE_BINDINGS[1][2]
+        def replacement(battle, actor, unit):
+            return 12.5
+        self.assertTrue(acceleration._baseline_worker_implementation_matches(raw_baseline))
+        for interrupted in (False, True):
+            for target, name, value in (
+                    (ai, "reviewed_r17_position_value", mock.Mock(return_value=12.5)),
+                    (ai, "reviewed_effect_baseline", mock.Mock()),
+                    (baseline, "__wrapped__", replacement),
+                    (position, "__wrapped__", replacement),
+                    (raw_baseline, "__code__", replacement.__code__),
+                    (raw_position, "__code__", replacement.__code__)):
+                with self.subTest(target=getattr(target, "__name__", ""), name=name, interrupted=interrupted):
+                    original = getattr(target, name)
+                    expected_exit = (self.assertRaisesRegex(RuntimeError, "^binding probe interrupted$")
+                                     if interrupted else nullcontext())
+                    with expected_exit:
+                        try:
+                            # Function __code__ is a descriptor, not an entry
+                            # in its __dict__. mock.patch would delete it on
+                            # exit, raising before restoring the real code.
+                            setattr(target, name, value)
+                            self.assertFalse(acceleration._baseline_worker_implementation_matches(raw_baseline))
+                            if interrupted:
+                                raise RuntimeError("binding probe interrupted")
+                        finally:
+                            setattr(target, name, original)
+                    self.assertIs(getattr(target, name), original)
+                    self.assertTrue(acceleration._baseline_worker_implementation_matches(raw_baseline))
+        self.assertFalse(acceleration._baseline_worker_implementation_matches(replacement))
+
+    def test_parallel_replaced_query_stays_local_even_when_prior_cost_would_schedule_workers(self):
+        from collections import OrderedDict
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        from wujiang.tools.ai_equivalence import reference_effect_baseline
+        for live in (8, 12):
+            with self.subTest(live=live):
+                battle, actor, units = self._small_baseline_battle(live=live)
+                cost_key = acceleration._baseline_cost_key(battle, False)
+                with mock.patch.object(ai, "reviewed_r17_position_value", return_value=12.5) as query, \
+                        mock.patch.object(acceleration, "_baseline_costs", OrderedDict([(cost_key, 10.0)])), \
+                        mock.patch.object(acceleration, "_PARALLEL_BASELINES_ENABLED", True), \
+                        mock.patch.object(acceleration, "_BASELINE_BATCHES_ENABLED", True), \
+                        mock.patch.object(acceleration, "_SMALL_BASELINES_ENABLED", True), \
+                        mock.patch.object(acceleration, "_executor") as executor:
+                    expected = reference_effect_baseline(battle, actor, units)
+                    query.reset_mock()
+                    with acceleration.decision_memo_scope():
+                        acceleration.prepare_position_values(battle, actor, units)
+                        first = ai.reviewed_effect_baseline(battle, actor, units)
+                        second = ai.reviewed_effect_baseline(battle, actor, units)
+                    self.assertEqual((first, second), (expected, expected))
+                    self.assertEqual(query.call_count, live)
+                    executor.assert_not_called()
+                self.assertEqual(acceleration.last_statistics()["baseline_hits"], 1)
+                self.assertEqual(acceleration.last_statistics()["parallel_baseline_jobs"], 0)
+
+    def test_spawned_baseline_groups_match_serial_rows_rng_and_both_ids(self):
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        from wujiang.tools.ai_equivalence import isolated_id_stream, reference_rollback
+        battle, actor, units = self._small_baseline_battle()
+        battle.width = 60
+        for index, unit in enumerate(units):
+            unit.position = Position(0 if unit.player_id == 1 else 59, index)
+        key, ids = acceleration._snapshot(battle), acceleration._id_state()
+        with isolated_id_stream(), reference_rollback(battle, ai_probe=False):
+            expected = ai.reviewed_effect_baseline.__wrapped__(battle, actor, units)
+        unit_ids = tuple(unit.unit_id for unit in units)
+        with ProcessPoolExecutor(max_workers=2, mp_context=multiprocessing.get_context("spawn"),
+                                 initializer=acceleration._worker_init) as pool:
+            futures = [pool.submit(acceleration._effect_baseline_batch,
+                                   (key, actor.unit_id, chunk, False, ids))
+                       for chunk in (unit_ids[:4], unit_ids[4:])]
+            rows = [future.result(timeout=45) for future in futures]
+        self.assertTrue(all(row is not None for row in rows), rows)
+        self.assertEqual(dict(item for row in rows for item in row), expected)
+        self.assertEqual((acceleration._snapshot(battle), acceleration._id_state()), (key, ids))
+
+    def test_worker_shutdown_terminates_running_processes_before_discarding_pool(self):
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        pool, process = mock.Mock(), mock.Mock()
+        pool.terminate_workers = None
+        pool._processes = {1: process}
+        with mock.patch.object(acceleration, "_pool", pool):
+            acceleration.shutdown_workers(terminate=True)
+            process.terminate.assert_called_once()
+            pool.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+            self.assertIsNone(acceleration._pool)
+
+    def test_worker_deadline_is_cancelled_on_success_failure_and_version_mismatch(self):
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        for failure in (False, True, "version"):
+            with mock.patch.object(acceleration, "_in_worker", True), \
+                    mock.patch.object(acceleration, "Timer") as timer, \
+                    mock.patch.object(acceleration, "_source_id", return_value="loaded"), \
+                    mock.patch.object(acceleration, "_effect_baseline_batch", side_effect=ValueError("failed") if failure is True else None,
+                                      return_value=3.5) as query:
+                if failure:
+                    with self.assertRaises(ValueError if failure is True else RuntimeError):
+                        acceleration._bounded_worker_job("baseline", (), "other" if failure == "version" else "loaded")
+                else:
+                    self.assertEqual(acceleration._bounded_worker_job("baseline", (), "loaded"), 3.5)
+                timer.return_value.start.assert_called_once()
+                timer.return_value.cancel.assert_called_once()
+                if failure == "version":
+                    query.assert_not_called()
+
+    def test_parallel_id_reservation_checks_both_streams_rng_and_never_rewinds(self):
+        from wujiang.platform.id_sequence import IdSequence, advance_pair_if_unchanged
+        first, second = IdSequence(7), IdSequence(40)
+        rng = random.getstate()
+        for expected, end in (((7, 39), (9, 43)), ((6, 40), (9, 43)), ((7, 40), (6, 43)), ((7, 40), (9, True))):
+            self.assertFalse(advance_pair_if_unchanged(first, second, expected, end, rng))
+            self.assertEqual((first.peek(), second.peek()), (7, 40))
+        alternate = random.Random()
+        alternate.setstate(rng)
+        alternate.random()
+        stale = alternate.getstate()
+        self.assertFalse(advance_pair_if_unchanged(first, second, (7, 40), (9, 43), stale))
+        self.assertTrue(advance_pair_if_unchanged(first, second, (7, 40), (9, 43), rng))
+        self.assertEqual((next(first), next(second)), (9, 43))
+        self.assertEqual(random.getstate(), rng)
+
+    def test_parallel_payload_rebinds_state_strings_literals_and_internal_aliases(self):
+        from wujiang.tactical.rooms import ai_parallel as parallel
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        battle = create_battle("fire_funeral", "ellie")
+        actor = primary_hero(battle, 1)
+        restored = acceleration._restore_worker_battle(acceleration._snapshot(battle))
+        worker_actor = restored.get_unit(actor.unit_id)
+        shared = [worker_actor.unit_id]
+        payload = {"type": "move", "unit_id": worker_actor.unit_id, "first": shared, "second": shared}
+        decoded = parallel._unpack_payload(battle, parallel._pack_payload(restored, payload))
+        self.assertEqual(decoded, payload)
+        self.assertIs(decoded["unit_id"], actor.unit_id)
+        self.assertIs(decoded["first"], decoded["second"])
+        self.assertIs(decoded["first"][0], actor.unit_id)
+        self.assertIs(decoded["type"], "move")
+        self.assertTrue(parallel._payload_is_unshared(restored, payload))
+        restored.payload_alias = shared
+        self.assertFalse(parallel._payload_is_unshared(restored, payload))
+
+    def _parallel_turn_result(self, room, *, reserve=(3, 2)):
+        from wujiang.tactical.rooms import ai_acceleration as acceleration, ai_parallel as parallel
+        battle = room.battle
+        units = battle.current_turn_bundle_units(include_banished=False)
+        before, ids = acceleration._snapshot(battle), acceleration._id_state()
+        present, old = "_army_anchor_cache" in battle.__dict__, battle.__dict__.get("_army_anchor_cache")
+        try:
+            battle._army_anchor_cache = {}
+            committed = acceleration._snapshot(battle)
+            payload = {"type": "end_turn"}
+            data = parallel._pack_payload(battle, payload)
+        finally:
+            if present:
+                battle._army_anchor_cache = old
+            else:
+                battle.__dict__.pop("_army_anchor_cache", None)
+        return dict(before=before, committed=committed, ids=ids,
+                    end_ids=tuple(start + delta for start, delta in zip(ids, reserve)),
+                    difficulty=room.default_ai_difficulty, units=tuple(unit.unit_id for unit in units),
+                    payload_data=data, actor=units[0].unit_id, anchor=(), statistics={})
+
+    def test_parallel_ready_plan_preserves_actor_and_reserves_exact_ids_once(self):
+        from concurrent.futures import Future
+        from wujiang.tactical.rooms import ai_acceleration as acceleration, ai_parallel as parallel
+        from wujiang.tools.ai_equivalence import isolated_id_stream
+        room = self._damage_recovery_room()
+        units = room.battle.current_turn_bundle_units(include_banished=False)
+        with isolated_id_stream():
+            result = self._parallel_turn_result(room)
+            future = Future()
+            future.set_result(result)
+            coordinator = parallel._Coordinator()
+            token = parallel._current_job.set((coordinator, future, parallel._config(room), room, 0.0))
+            try:
+                selected = parallel.take_turn_result(room.battle, units, room.default_ai_difficulty)
+                self.assertEqual(selected[0], {"type": "end_turn"})
+                self.assertIs(selected[1], units[0])
+                self.assertEqual(acceleration._id_state(), result["end_ids"])
+                self.assertIsNone(parallel.take_turn_result(room.battle, units, room.default_ai_difficulty))
+                self.assertEqual(acceleration._id_state(), result["end_ids"])
+            finally:
+                parallel._current_job.reset(token)
+        self.assertEqual(coordinator.statistics["hits"], 1)
+
+    def test_parallel_stale_or_unready_plan_does_not_change_battle_rng_or_ids(self):
+        from concurrent.futures import Future
+        from wujiang.tactical.rooms import ai_acceleration as acceleration, ai_parallel as parallel
+        from wujiang.tools.ai_equivalence import isolated_id_stream, reference_rollback
+        room = self._damage_recovery_room()
+        battle = room.battle
+        units = battle.current_turn_bundle_units(include_banished=False)
+        for mode in ("unready", "state", "rng", "ids", "config", "order", "failed"):
+            with self.subTest(mode=mode), isolated_id_stream(), reference_rollback(battle, ai_probe=False):
+                result = self._parallel_turn_result(room)
+                future = Future()
+                if mode != "unready":
+                    future.set_result(None if mode == "failed" else result)
+                config = parallel._config(room)
+                if mode == "state":
+                    units[0].current_hp -= 0.25
+                elif mode == "rng":
+                    random.random()
+                elif mode == "ids":
+                    from wujiang.tactical.engine import core
+                    next(core._id_counter)
+                elif mode == "config":
+                    config = ("other", config[1])
+                ordered = list(reversed(units)) if mode == "order" else units
+                if mode == "order" and len(units) == 1:
+                    result["units"] = ("different actor",)
+                before = acceleration._snapshot(battle), acceleration._id_state()
+                coordinator = parallel._Coordinator()
+                token = parallel._current_job.set((coordinator, future, config, room, 0.0))
+                try:
+                    self.assertIsNone(parallel.take_turn_result(battle, ordered, room.default_ai_difficulty))
+                    self.assertEqual((acceleration._snapshot(battle), acceleration._id_state()), before)
+                finally:
+                    parallel._current_job.reset(token)
+
+    def test_four_board_wave_submits_only_other_boards_and_preserves_tournament_bytes(self):
+        import pickle
+        from concurrent.futures import Future
+        from wujiang.tactical.rooms import ai_acceleration as acceleration, ai_parallel as parallel
+        from wujiang.tools.ai_equivalence import create_late_chess_fixture, isolated_id_stream
+        with isolated_id_stream():
+            chess = create_late_chess_fixture(17)
+            before = pickle.dumps(chess), acceleration._id_state(), random.getstate()
+            executor = mock.Mock()
+            executor.submit.side_effect = lambda *args: Future()
+            coordinator = parallel._Coordinator()
+            with mock.patch.object(acceleration, "_executor", return_value=executor):
+                parallel._submit_wave(chess, chess.matches[0], coordinator)
+            self.assertEqual(executor.submit.call_count, 3)
+            self.assertEqual(set(coordinator.entries), {id(item.runner) for item in chess.matches[1:]})
+            self.assertEqual((pickle.dumps(chess), acceleration._id_state(), random.getstate()), before)
+
+    def test_spawned_full_turn_plan_and_parent_commit_match_original_state_rng_ids(self):
+        import multiprocessing
+        from concurrent.futures import Future, ProcessPoolExecutor
+        from wujiang.tactical.rooms import ai, ai_router, ai_acceleration as acceleration, ai_parallel as parallel
+        from wujiang.tools.ai_equivalence import isolated_id_stream, reference_rollback
+        room = self._damage_recovery_room()
+        battle = room.battle
+        battle.width = 40
+        battle.fast_ai_simulation = True
+        for index, unit in enumerate(battle.all_units()):
+            unit.position = Position(0 if unit.player_id == 1 else 39, index)
+        key, ids = acceleration._snapshot(battle), acceleration._id_state()
+        with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"),
+                                 initializer=acceleration._worker_init) as pool:
+            result = pool.submit(parallel._turn_job, (key, parallel._config(room), ids)).result(timeout=45)
+        self.assertIsNotNone(result)
+        self.assertNotIn("rejected", result, result)
+        self.assertEqual((acceleration._snapshot(battle), acceleration._id_state()), (key, ids))
+        outcomes = []
+        for prepared in (False, True):
+            with isolated_id_stream(), reference_rollback(battle, ai_probe=False), \
+                    mock.patch.object(ai_router, "_picker", return_value=ai):
+                self.assertIsNone(room._choose_ai_dragon_return_payload())
+                self.assertIsNone(room._choose_ai_instant_payload())
+                units = battle.current_turn_bundle_units(include_banished=False)
+                seat = room._current_prompt_seat()
+                difficulty = seat.ai_difficulty_override or room.default_ai_difficulty
+                coordinator = parallel._Coordinator()
+                future = Future()
+                future.set_result(result)
+                token = parallel._current_job.set((coordinator, future, parallel._config(room), room, 0.0) if prepared else None)
+                try:
+                    payload, actor = ai_router.choose_turn_bundle_action(battle, units, difficulty)
+                    battle.perform_action(payload)
+                    outcomes.append((payload, actor.unit_id if actor else None,
+                                     acceleration._snapshot(battle), acceleration._id_state()))
+                finally:
+                    parallel._current_job.reset(token)
+                if prepared:
+                    self.assertEqual(coordinator.statistics["hits"], 1)
+        self.assertEqual(outcomes[0], outcomes[1])
+
+    def test_board_scope_kills_expired_work_without_waiting_and_leaves_original_step_available(self):
+        import weakref
+        from concurrent.futures import Future
+        from types import SimpleNamespace
+        from wujiang.tactical.rooms import ai, ai_router, ai_acceleration as acceleration, ai_parallel as parallel
+        room = self._damage_recovery_room()
+        match = SimpleNamespace(runner=room, result=None)
+        class Tournament:
+            matches = [match]
+        chess = Tournament()
+        future = Future()
+        future.set_running_or_notify_cancel()
+        coordinator = parallel._Coordinator()
+        coordinator.running = [(future, 0.0)]
+        coordinator.entries[id(room)] = (future, parallel._config(room), weakref.ref(room), 0.0)
+        with mock.patch.object(parallel, "_BOARDS_ENABLED", True), \
+                mock.patch.object(acceleration, "_worker_disabled", False), \
+                mock.patch.object(acceleration, "_worker_count", return_value=4), \
+                mock.patch.object(ai_router, "_picker", return_value=ai), \
+                mock.patch.object(parallel, "_coordinators", weakref.WeakKeyDictionary({chess: coordinator})), \
+                mock.patch.object(parallel, "monotonic", return_value=10.0), \
+                mock.patch.object(acceleration, "shutdown_workers") as shutdown:
+            with parallel.board_step(chess, match):
+                self.assertIsNone(parallel._current_job.get())
+                self.assertTrue(acceleration._worker_disabled)
+            shutdown.assert_called_once_with(terminate=True)
+        self.assertEqual(parallel.last_statistics()["timeouts"], 1)
+
+    def test_parallel_unsupported_cache_alias_is_rejected_before_reserving_ids(self):
+        from concurrent.futures import Future
+        from wujiang.tactical.rooms import ai_acceleration as acceleration, ai_parallel as parallel
+        from wujiang.tools.ai_equivalence import isolated_id_stream
+        room = self._damage_recovery_room()
+        battle = room.battle
+        units = battle.current_turn_bundle_units(include_banished=False)
+        with isolated_id_stream():
+            result = self._parallel_turn_result(room)
+            # A worker cache position also aliases a live unit's position in
+            # its promised committed state. A standalone transferred position
+            # cannot claim that graph, even with exactly equal coordinates.
+            previous = battle.__dict__.get("_army_anchor_cache")
+            present = "_army_anchor_cache" in battle.__dict__
+            try:
+                battle._army_anchor_cache = {1: (units[0].position, (0, 0))}
+                result["committed"] = acceleration._snapshot(battle)
+                result["anchor"] = ((1, (Position(units[0].position.x, units[0].position.y), (0, 0))),)
+            finally:
+                if present:
+                    battle._army_anchor_cache = previous
+                else:
+                    battle.__dict__.pop("_army_anchor_cache", None)
+            before = acceleration._snapshot(battle), acceleration._id_state()
+            future = Future()
+            future.set_result(result)
+            coordinator = parallel._Coordinator()
+            token = parallel._current_job.set((coordinator, future, parallel._config(room), room, 0.0))
+            try:
+                self.assertIsNone(parallel.take_turn_result(battle, units, room.default_ai_difficulty))
+                self.assertEqual((acceleration._snapshot(battle), acceleration._id_state()), before)
+            finally:
+                parallel._current_job.reset(token)
+        self.assertEqual(coordinator.statistics["rejected"], 1)
+
+    def test_single_board_and_occupied_pool_do_not_queue_speculative_board_work(self):
+        from types import SimpleNamespace
+        from wujiang.tactical.rooms import ai_acceleration as acceleration, ai_parallel as parallel
+        room = self._damage_recovery_room()
+        match = SimpleNamespace(runner=room, result=None)
+        chess = SimpleNamespace(matches=[match])
+        executor = mock.Mock()
+        executor._pending_work_items = {}
+        with mock.patch.object(acceleration, "_executor", return_value=executor):
+            parallel._submit_wave(chess, match, parallel._Coordinator())
+            executor.submit.assert_not_called()
+            executor._pending_work_items = {1: object()}
+            chess.matches.append(SimpleNamespace(runner=self._damage_recovery_room(), result=None))
+            parallel._submit_wave(chess, match, parallel._Coordinator())
+            executor.submit.assert_not_called()
+
+    def test_server_reports_loaded_architecture_flags_without_running_game_queries(self):
+        from run import server_ai_build_info
+        from wujiang.platform import ai_build
+        from wujiang.tactical.engine import core
+        from wujiang.tactical.rooms import ai_acceleration as acceleration, ai_parallel as parallel
+        before = random.getstate(), acceleration._id_state()
+        with mock.patch.object(ai_build, "build_info", return_value={"id": "fixture", "features": {}}), \
+                mock.patch.object(acceleration, "_BASELINE_BATCHES_ENABLED", False), \
+                mock.patch.object(acceleration, "_PARALLEL_BASELINES_ENABLED", False), \
+                mock.patch.object(parallel, "_BOARDS_ENABLED", False), \
+                mock.patch.object(core, "_NATIVE_CHECKPOINT_ENABLED", True), \
+                mock.patch.object(core, "_ROLLBACK_NATIVE_ENABLED", True), \
+                mock.patch.object(core, "_NATIVE_ROLLBACK_COPY", None):
+            features = server_ai_build_info()["features"]
+            self.assertFalse(features["baseline_batches"])
+            self.assertFalse(features["parallel_baselines"])
+            self.assertFalse(features["parallel_boards"])
+            self.assertFalse(features["native_checkpoint_active"])
+        self.assertEqual((random.getstate(), acceleration._id_state()), before)
+
+    def test_architecture_ablation_does_not_claim_gain_when_parallel_path_unused(self):
+        from wujiang.tools.ai_validation import _ablation
+        row = dict(reference_kind="no-parallel-boards", reference_seconds=2.0, optimized_seconds=1.0,
+                   latency={"reference": {"step_max": 1.0}, "optimized": {"step_max": 0.5}},
+                   steps={"optimized": [[{"parallel_boards": {"submitted": 3, "hits": 0}}]]})
+        self.assertEqual(_ablation([row])["verdict"], "not_exercised")
+        row["steps"]["optimized"][0][0]["parallel_boards"]["hits"] = 1
+        self.assertEqual(_ablation([row])["verdict"], "measured_gain")
+
+    def test_baseline_rejection_labels_preserve_original_guard_order_and_short_circuit_reads(self):
+        from types import SimpleNamespace
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        for case in ("result", "ids", "snapshot_unavailable", "graph", "rng", "bindings", "fields", "unit_order", "unit_identity", "pure"):
+            observations = []
+            for old in (True, False):
+                events = []
+                class UnitRead:
+                    @property
+                    def unit_id(self):
+                        events.append("unit_id")
+                        return "other" if case == "unit_order" else "unit"
+                unit = UnitRead()
+                units = [unit]
+                battle = SimpleNamespace(units={"unit": object() if case == "unit_identity" else unit})
+                key = b"before", (1,), (("unit", True),), ("units",)
+                after = list(key)
+                for name, index, value in (("graph", 0, b"after"), ("rng", 1, (2,)),
+                                           ("bindings", 2, (("unit", False),)), ("fields", 3, ("new",))):
+                    if case == name:
+                        after[index] = value
+                snapshot = None if case == "snapshot_unavailable" else tuple(after)
+                frozen = None if case == "result" else ()
+                def ids():
+                    events.append("ids")
+                    return (2, 2) if case == "ids" else (1, 2)
+                def capture(battle):
+                    events.append("snapshot")
+                    return snapshot
+                with mock.patch.object(acceleration, "_id_state", side_effect=ids), \
+                        mock.patch.object(acceleration, "_snapshot", side_effect=capture):
+                    if old:
+                        rejected = (frozen is None or acceleration._id_state() != (1, 2)
+                                    or acceleration._snapshot(battle) != key
+                                    or tuple(item.unit_id for item in units) != ("unit",)
+                                    or any(battle.units.get(item.unit_id) is not item for item in units))
+                    else:
+                        reason, _, _ = acceleration._effect_baseline_rejection(battle, units, ("unit",), key, (1, 2), frozen)
+                        rejected = reason is not None
+                        self.assertEqual(reason, None if case == "pure" else case)
+                observations.append((bool(rejected), events))
+            with self.subTest(case=case):
+                self.assertEqual(observations[0], observations[1])
+
+    def test_baseline_diagnostics_observe_first_failure_without_changing_values_state_rng_or_ids(self):
+        from wujiang.tactical.engine import core
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        from wujiang.tools.ai_equivalence import isolated_id_stream, reference_rollback
+        battle, actor, _ = self._damage_probe_fixture()
+        units = battle.all_units()
+        for mode in ("result", "ids", "rng", "graph"):
+            captured, results = [], []
+            @acceleration.cached_effect_baseline
+            def query(battle, actor, units, *, include_pending=False):
+                if mode == "ids": next(core._id_counter)
+                if mode == "rng": random.random()
+                if mode == "graph": actor.diagnostic_marker = 1
+                return {unit.unit_id: (unit.current_hp, unit.current_mana, unit.total_shields(), unit.dodge_charges,
+                                      unit.alive, unit.position, float("nan") if mode == "result" else 2.0) for unit in units}
+            def fail(event):
+                raise ValueError("observer failure")
+            for sink in (None, captured.append, fail):
+                with self.subTest(mode=mode, sink=sink is not None), isolated_id_stream(), \
+                        reference_rollback(battle, ai_probe=False), \
+                        mock.patch.object(acceleration, "_PARALLEL_BASELINES_ENABLED", False), \
+                        acceleration.decision_memo_scope(), acceleration.baseline_diagnostic_scope(sink):
+                    result = query(battle, actor, units)
+                    # NaN values do not compare equal; compare the same original
+                    # output shape and finite fields instead of changing it.
+                    values = tuple((key, row[:-1], "nan" if mode == "result" else row[-1]) for key, row in result.items())
+                    results.append((values, acceleration._snapshot(battle), acceleration._id_state(), random.getstate()))
+                stats = acceleration.last_statistics()
+                self.assertEqual(stats["baseline_impure"], 1)
+                self.assertEqual(stats["baseline_impure_" + mode], 1)
+                self.assertEqual(stats.get("baseline_diagnostic_errors", 0), int(sink is fail))
+            self.assertEqual(results[0], results[1])
+            self.assertEqual(results[0], results[2])
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(captured[0]["reason"], mode)
+            if mode in ("result", "ids"):
+                self.assertIsNone(captured[0]["after"])
+            else:
+                self.assertIsNotNone(captured[0]["after"])
+        self.assertIsNone(acceleration._baseline_diagnostic_sink.get())
+
+    def test_pure_baseline_cache_hits_emit_no_rejection_samples(self):
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        battle, actor, _ = self._damage_probe_fixture()
+        calls, events = [], []
+        @acceleration.cached_effect_baseline
+        def query(battle, actor, units, *, include_pending=False):
+            calls.append(1)
+            return {unit.unit_id: (unit.current_hp, unit.current_mana, unit.total_shields(), unit.dodge_charges,
+                                  unit.alive, unit.position, 2.0) for unit in units}
+        with mock.patch.object(acceleration, "_PARALLEL_BASELINES_ENABLED", False), \
+                acceleration.decision_memo_scope(), acceleration.baseline_diagnostic_scope(events.append):
+            expected = query(battle, actor, battle.all_units())
+            actual = query(battle, actor, battle.all_units())
+        self.assertEqual(actual, expected)
+        self.assertIsNot(actual, expected)
+        self.assertEqual((calls, events), ([1], []))
+        self.assertEqual(acceleration.last_statistics()["baseline_hits"], 1)
+
+    def test_offline_baseline_collector_is_bounded_and_never_reloads_or_queries_game_state(self):
+        import pickle
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        from wujiang.tools.ai_diagnostics import BaselineDiagnostics
+        before = (pickle.dumps({"value": [1]}), random.getstate(), (("unit", True),), ("units",))
+        after = (pickle.dumps({"value": [2]}), before[1], before[2], before[3])
+        event = dict(reason="graph", actor_id="unit", unit_ids=("unit",), include_pending=False,
+                     ids_before=(1, 2), ids_after=(1, 2), before=before, after=after)
+        info = dict(step=1, board=2, actor="fixture", unit_count=24)
+        rng, ids = random.getstate(), acceleration._id_state()
+        with tempfile.TemporaryDirectory() as directory:
+            collector = BaselineDiagnostics(directory, (1,), max_samples=1)
+            with mock.patch.object(pickle, "loads", side_effect=AssertionError("must not unpickle")), \
+                    mock.patch.object(acceleration, "_snapshot", side_effect=AssertionError("must not query")), \
+                    mock.patch.object(acceleration, "_id_state", side_effect=AssertionError("must not read IDs")):
+                with collector.step(info):
+                    collector.record(event)
+                    collector.record(event)
+                    collector.record({**event, "reason": "rng"})
+                collector.flush_step(info)
+            report = collector.report()
+            self.assertTrue(report["truncated"])
+            self.assertEqual(report["missing_profile_steps"], [])
+            self.assertEqual(len(report["samples"]), 1)
+            sample = report["samples"][0]
+            self.assertEqual(Path(sample["before"]["path"]).read_bytes(), before[0])
+            self.assertEqual(Path(sample["after"]["path"]).read_bytes(), after[0])
+            self.assertIsNotNone(sample["first_pickle_difference"]["opcode_index"])
+            self.assertTrue(Path(report["profiles"][0]["path"]).is_file())
+            self.assertTrue((Path(directory) / "index.json").is_file())
+            self.assertEqual(report["captured_bytes"], len(before[0]) + len(after[0]))
+            small = BaselineDiagnostics(Path(directory) / "small", (1,), max_bytes=1)
+            with small.step(info):
+                small.record(event)
+            small.flush_step(info)
+            self.assertTrue(small.report()["truncated"])
+            self.assertEqual(small.report()["samples"], [])
+            with self.assertRaisesRegex(ValueError, "scope"), small.step(info):
+                raise ValueError("scope")
+        self.assertIsNone(acceleration._baseline_diagnostic_sink.get())
+        self.assertEqual(random.getstate(), rng)
+        self.assertEqual(acceleration._id_state(), ids)
+
+    def test_pickle_diagnostic_compares_float_bits_without_executing_pickle(self):
+        import pickle
+        from wujiang.tools.ai_diagnostics import pickle_difference
+        data = pickle.dumps({"x": float("nan")})
+        self.assertTrue(pickle_difference(data, data)["same_non_frame_operations"])
+        difference = pickle_difference(pickle.dumps({"x": -0.0}), pickle.dumps({"x": 0.0}))
+        self.assertEqual(difference["before"]["opcode"], "BINFLOAT")
+        self.assertEqual(difference["after"]["opcode"], "BINFLOAT")
+        self.assertNotEqual(difference["before"]["argument"], difference["after"]["argument"])
+        self.assertIn("error", pickle_difference(b"broken", b"broken"))
+
+    def test_native_flat_copy_creates_ordered_independent_containers_and_keeps_scalar_identity(self):
+        from wujiang.platform.ai_native import load_flat_copy_statistics
+        from wujiang.tactical.engine import core
+        self._require_native_copy()
+        flat = core._NATIVE_FLAT_COPY
+        self.assertIsNotNone(flat)
+        scalars = [None, True, False, 2 ** 100, -0.0, float("inf"), float("nan"), "text", b"bytes"]
+        dictionary = {f"key-{index}": item for index, item in enumerate(scalars)}
+        sequence = tuple(scalars)
+        source = {"left": scalars, "right": scalars, "dict": dictionary, "tuple": sequence,
+                  "same-tuple": sequence, "empty-list": [], "empty-dict": {}, "empty-tuple": ()}
+        counter = load_flat_copy_statistics()
+        before = counter()
+        result = flat(source, core._rollback_copy_value, core._ROLLBACK_SCALAR_TYPES)
+        after = counter()
+        for name in ("dicts", "lists", "tuples"):
+            self.assertGreater(after[name], before[name])
+        self.assertEqual(tuple(result), tuple(source))
+        self.assertEqual(tuple(result["dict"]), tuple(dictionary))
+        for key in ("left", "right", "tuple", "same-tuple"):
+            self.assertIsNot(result[key], source[key])
+            for original, copied in zip(scalars, result[key]):
+                self.assertIs(original, copied)
+        for original, copied in zip(dictionary.values(), result["dict"].values()):
+            self.assertIs(original, copied)
+        self.assertIsNot(result["left"], result["right"])
+        self.assertIsNot(result["tuple"], result["same-tuple"])
+        self.assertIsNot(result["empty-list"], source["empty-list"])
+        self.assertIsNot(result["empty-dict"], source["empty-dict"])
+        self.assertEqual(result["empty-tuple"], ())
+        scalars.append(9)
+        dictionary["later"] = 9
+        self.assertEqual(len(result["left"]), 9)
+        self.assertNotIn("later", result["dict"])
+
+    def test_native_flat_copy_preserves_all_custom_protocol_and_live_mutation_cases(self):
+        from wujiang.tactical.engine import core
+        self._require_native_copy()
+        self.assertIsNotNone(core._NATIVE_FLAT_COPY)
+        with mock.patch.object(core, "_NATIVE_ROLLBACK_COPY", core._NATIVE_FLAT_COPY):
+            self.test_native_copy_keeps_scalar_objects_container_order_and_alias_splitting()
+            self.test_native_copy_preserves_custom_container_and_virtual_class_callbacks()
+            self.test_native_copy_keeps_metaclass_hash_equality_checks_and_key_hashes()
+            self.test_native_copy_keeps_live_iteration_and_original_size_change_failure()
+            self.test_native_copy_propagates_copy_errors_and_bounds_deep_cyclic_inputs()
+
+    def test_native_flat_copy_keeps_real_damage_probes_slots_nested_rollback_and_rng(self):
+        from wujiang.tactical.engine import core
+        self._require_native_copy()
+        self.assertIsNotNone(core._NATIVE_FLAT_COPY)
+        with mock.patch.object(core, "_ROLLBACK_NATIVE_ENABLED", True), \
+                mock.patch.object(core, "_ROLLBACK_TYPE_PLANS_ENABLED", True), \
+                mock.patch.object(core, "_NATIVE_CHECKPOINT_ENABLED", False), \
+                mock.patch.object(core, "_NATIVE_FLAT_COPY_ENABLED", True):
+            self.test_native_real_damage_probes_match_python_state_rng_and_both_id_streams()
+            self.test_rollback_plans_restore_slots_runtime_children_nested_failures_and_rng()
+            self.test_rollback_plans_reread_a_replaced_instance_dictionary_during_restore()
+            self.test_rollback_plans_keep_custom_items_key_hashes_and_live_read_order()
+
+    def test_flat_copy_reference_restores_flags_and_rejects_a_missing_native_branch(self):
+        from wujiang.tactical.engine import core
+        from wujiang.tools.ai_equivalence import package_reference, compare_late_chess
+        with mock.patch.object(core, "_NATIVE_FLAT_COPY_ENABLED", True):
+            for fail in (False, True):
+                try:
+                    with package_reference("no-flat-copy"):
+                        self.assertFalse(core._NATIVE_FLAT_COPY_ENABLED)
+                        if fail:
+                            raise ValueError("expected")
+                except ValueError:
+                    self.assertTrue(fail)
+                self.assertTrue(core._NATIVE_FLAT_COPY_ENABLED)
+        with mock.patch.object(core, "_NATIVE_FLAT_COPY", None), \
+                self.assertRaisesRegex(RuntimeError, "current compiled module"):
+            compare_late_chess(baseline="no-flat-copy", sweeps=1)
+
+    def test_dense_profile_replay_is_equivalent_and_excluded_from_timing_samples(self):
+        from wujiang.tactical.engine import core
+        from wujiang.tactical.heroes import base
+        from wujiang.tactical.rooms.autochess import AutoChessState
+        from wujiang.tools.ai_equivalence import compare_late_chess
+        from wujiang.tools.ai_validation import check_flat_copy_ablation
+        self._require_native_copy()
+        original_flag = core._NATIVE_FLAT_COPY_ENABLED
+        original_environment = os.environ.get("WUJIANG_AI_NATIVE_FLAT_COPY")
+        def advance(chess, match):
+            # Deterministic stand-in isolates reporting from AI speed. The
+            # actual five dense ablations still use the original room method.
+            match.runner.battle.profile_marker = (random.random(), next(core._id_counter), next(base._unit_counter))
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(AutoChessState, "_advance_match", advance):
+            result = compare_late_chess(sweeps=1, repeats=1, baseline="no-flat-copy", profile_dir=directory)
+            self.assertTrue(result["equal"], result["mismatches"])
+            self.assertTrue(result["profile_replays_equivalent"])
+            for mode in ("reference", "optimized"):
+                self.assertEqual(len(result["timing_samples"][mode]), 1)
+                self.assertEqual(len(result["steps"][mode]), 1)
+                self.assertEqual(len(result["profiles"][mode]["steps"]), 4)
+                self.assertEqual(len(result["profiles"][mode]["slowest"]), 3)
+            check_flat_copy_ablation(result, require_profile=True)
+            with self.assertRaisesRegex(ValueError, "equivalent separate"):
+                check_flat_copy_ablation({**result, "profile_replays_equivalent": False}, require_profile=True)
+            with self.assertRaisesRegex(ValueError, "separate from timed"):
+                check_flat_copy_ablation({**result, "repeats": 2}, require_profile=True)
+            Path(result["profiles"]["optimized"]["path"]).unlink()
+            with self.assertRaisesRegex(ValueError, "four-board dense"):
+                check_flat_copy_ablation(result, require_profile=True)
+        self.assertEqual(core._NATIVE_FLAT_COPY_ENABLED, original_flag)
+        self.assertEqual(os.environ.get("WUJIANG_AI_NATIVE_FLAT_COPY"), original_environment)
+
+    def test_flat_copy_ablation_requires_active_distinct_paths_and_real_branch_activity(self):
+        from wujiang.tools.ai_validation import check_flat_copy_ablation, _ablation
+        row = dict(reference_kind="no-flat-copy", reference_native_flat_copy=False, optimized_native_flat_copy=True,
+                   optimized_native_rollback=True, optimized_parallel_boards=False, optimized_native_checkpoint=False,
+                   reference_seconds=2.0, optimized_seconds=1.0,
+                   latency={"reference": {"step_max": 1.0}, "optimized": {"step_max": 0.5}},
+                   steps={"optimized": [[{"native_flat_copy": {"dicts": 0, "lists": 0, "tuples": 0}}]]})
+        check_flat_copy_ablation(row)
+        self.assertEqual(_ablation([row])["verdict"], "not_exercised")
+        row["steps"]["optimized"][0][0]["native_flat_copy"]["lists"] = 2
+        self.assertEqual(_ablation([row])["verdict"], "measured_gain")
+        for name in ("reference_native_flat_copy", "optimized_native_flat_copy", "optimized_native_rollback",
+                     "optimized_parallel_boards", "optimized_native_checkpoint"):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "isolate"):
+                check_flat_copy_ablation({**row, name: not row[name]})
+
+    def test_native_copy_keeps_scalar_objects_container_order_and_alias_splitting(self):
+        from collections import deque
+        from wujiang.tactical.engine import core
+        native = self._require_native_copy()
+        opaque, shared = object(), [1]
+        scalars = [None, True, 2 ** 100, -0.0, float("nan"), "text", b"bytes"]
+        source = {"scalar": scalars, "left": shared, "right": shared,
+                  "tuple": (shared, shared), "set": {opaque}, "opaque": opaque,
+                  "deque": deque([{"list": shared}], maxlen=5)}
+        result = native(source, core._rollback_copy_value, core._ROLLBACK_SCALAR_TYPES)
+        self.assertEqual(tuple(result), tuple(source))
+        for old, new in zip(scalars, result["scalar"]):
+            self.assertIs(old, new)
+        self.assertIsNot(result["left"], result["right"])
+        self.assertIsNot(result["tuple"][0], result["tuple"][1])
+        self.assertIs(next(iter(result["set"])), opaque)
+        self.assertIs(result["opaque"], opaque)
+        self.assertIsNone(result["deque"].maxlen)
+        shared.append(9)
+        self.assertEqual(result["left"], [1])
+        self.assertEqual(result["deque"][0]["list"], [1])
+
+    def test_native_copy_preserves_custom_container_and_virtual_class_callbacks(self):
+        from wujiang.tactical.engine import core
+        native = self._require_native_copy()
+        results = []
+        for copier in (core._rollback_copy_dict, lambda value: native(value, core._rollback_copy_value, core._ROLLBACK_SCALAR_TYPES)):
+            events = []
+            class VirtualList:
+                @property
+                def __class__(self):
+                    events.append("class")
+                    return list
+                def __iter__(self):
+                    events.append("virtual-iter")
+                    return iter([{"value": [1]}])
+            class ListHook(list):
+                def __iter__(self):
+                    events.append("list-iter")
+                    return super().__iter__()
+            class DictHook(dict):
+                def items(self):
+                    events.append("items")
+                    return super().items()
+            result = copier({"virtual": VirtualList(), "list": ListHook([2]), "dict": DictHook(nested=[3])})
+            results.append((result, events))
+        self.assertEqual(results[0], results[1])
+
+    def test_native_copy_keeps_metaclass_hash_equality_checks_and_key_hashes(self):
+        from wujiang.tactical.engine import core
+        native = self._require_native_copy()
+        results = []
+        for copier in (core._rollback_copy_dict, lambda value: native(value, core._rollback_copy_value, core._ROLLBACK_SCALAR_TYPES)):
+            events = []
+            class Meta(type):
+                def __hash__(cls):
+                    events.append("class-hash")
+                    return type.__hash__(cls)
+            class Value(metaclass=Meta):
+                pass
+            class Key:
+                def __hash__(self):
+                    events.append("key-hash")
+                    return 7
+            key, value = Key(), Value()
+            source = {key: [value]}
+            events.clear()
+            copied = copier(source)
+            self.assertIs(copied[key][0], value)
+            results.append(events)
+        self.assertEqual(results[0], results[1])
+
+        # Membership can claim an otherwise opaque value has a scalar class.
+        # The native type fast check must still respect the original hash/eq.
+        results = []
+        for copier in (core._rollback_copy_dict, lambda value: native(value, core._rollback_copy_value, core._ROLLBACK_SCALAR_TYPES)):
+            events = []
+            class ScalarMeta(type):
+                def __hash__(cls):
+                    events.append("scalar-hash")
+                    return hash(int)
+                def __eq__(cls, other):
+                    events.append("scalar-eq")
+                    return other is int
+            class PretendScalar(metaclass=ScalarMeta):
+                pass
+            value = PretendScalar()
+            self.assertIs(copier({"value": value})["value"], value)
+            results.append(events)
+        self.assertEqual(results[0], results[1])
+
+    def test_native_copy_keeps_live_iteration_and_original_size_change_failure(self):
+        from wujiang.tactical.engine import core
+        native = self._require_native_copy()
+        for copier in (core._rollback_copy_dict, lambda value: native(value, core._rollback_copy_value, core._ROLLBACK_SCALAR_TYPES)):
+            source = {}
+            class Mutating(dict):
+                def items(self):
+                    source["late"].append(8)
+                    return super().items()
+            source.update(early=[0], trigger=Mutating(value=1), late=[2])
+            result = copier(source)
+            self.assertEqual(result["early"], [0])
+            self.assertEqual(result["late"], [2, 8])
+            class Growing(dict):
+                def items(self):
+                    source["new-key"] = 1
+                    return super().items()
+            source["trigger"] = Growing()
+            with self.assertRaisesRegex(RuntimeError, "dictionary changed size during iteration"):
+                copier(source)
+
+    def test_native_copy_propagates_copy_errors_and_bounds_deep_cyclic_inputs(self):
+        from wujiang.tactical.engine import core
+        native = self._require_native_copy()
+        class Broken(dict):
+            def items(self):
+                raise ValueError("copy failed")
+        with self.assertRaisesRegex(ValueError, "copy failed"):
+            native({"bad": Broken()}, core._rollback_copy_value, core._ROLLBACK_SCALAR_TYPES)
+        deep = [1]
+        for _ in range(40):
+            deep = [deep]
+        self.assertEqual(native(deep, core._rollback_copy_value, core._ROLLBACK_SCALAR_TYPES), core._rollback_copy_value(deep))
+        cyclic = []
+        cyclic.append(cyclic)
+        with self.assertRaises(RecursionError):
+            native(cyclic, core._rollback_copy_value, core._ROLLBACK_SCALAR_TYPES)
+
+    def test_native_checkpoint_uses_original_custom_namespace_entry_protocol(self):
+        from wujiang.tactical.engine import core
+        self._require_native_copy()
+        results = []
+        for enabled in (False, True):
+            events = []
+            battle = create_battle("fire_funeral", "ellie")
+            actor = primary_hero(battle, 1)
+            class Namespace(dict):
+                def items(self):
+                    events.append("namespace-items")
+                    return super().items()
+            actor.__dict__ = Namespace(actor.__dict__)
+            actor.probe_values = [1]
+            with mock.patch.object(core, "_ROLLBACK_NATIVE_ENABLED", enabled), \
+                    mock.patch.object(core, "_NATIVE_CHECKPOINT_ENABLED", True), core.battle_state_rollback(battle):
+                actor.probe_values.append(9)
+            self.assertEqual(actor.probe_values, [1])
+            self.assertIs(type(actor.__dict__), Namespace)
+            results.append(events)
+        self.assertEqual(results[0], results[1])
+
+    def test_native_checkpoint_preserves_nested_slots_children_failures_and_rng(self):
+        from wujiang.tactical.engine import core
+        self._require_native_copy()
+        # Reuse the semantic scenarios (they compare with frozen pre-optimization
+        # code) under an explicitly active native backend, even outside the runner.
+        with mock.patch.object(core, "_ROLLBACK_NATIVE_ENABLED", True), \
+                mock.patch.object(core, "_ROLLBACK_TYPE_PLANS_ENABLED", True), \
+                mock.patch.object(core, "_NATIVE_CHECKPOINT_ENABLED", True):
+            self.test_rollback_plans_restore_slots_runtime_children_nested_failures_and_rng()
+            self.test_rollback_plans_reread_a_replaced_instance_dictionary_during_restore()
+            self.test_rollback_plans_keep_custom_items_key_hashes_and_live_read_order()
+
+    def test_native_real_damage_probes_match_python_state_rng_and_both_id_streams(self):
+        from wujiang.tactical.engine import core
+        from wujiang.tactical.rooms import ai
+        from wujiang.tactical.rooms.ai_acceleration import _id_state, _snapshot, acceleration_disabled
+        from wujiang.tools.ai_equivalence import isolated_id_stream, reference_rollback
+        self._require_native_copy()
+        battle, actor, target = self._damage_probe_fixture()
+        actor.position, target.position = Position(2, 2), Position(3, 2)
+        skill = actor.get_skill("pierce")
+        payload = {"type": "skill", "unit_id": actor.unit_id, "skill_code": skill.code,
+                   "target_unit_id": target.unit_id, "x": 3, "y": 2}
+        results = []
+        for enabled in (False, True):
+            with isolated_id_stream(), reference_rollback(battle, ai_probe=False), acceleration_disabled(), \
+                    mock.patch.object(core, "_ROLLBACK_NATIVE_ENABLED", enabled), \
+                    mock.patch.object(core, "_ROLLBACK_TYPE_PLANS_ENABLED", True):
+                values = [ai.probe_attack_damage_impact(battle, actor, target, {}, attack_power=2),
+                          ai.probe_skill_damage_impact(battle, actor, skill, payload, target, 2,
+                                                      cells=[Position(3, 2)], ignore_shield=False, half_ignore_shield=False),
+                          ai.probe_skill_raw_damage_impact(battle, actor, skill, target, raw_damage=0.125, ignore_shield=False)]
+                results.append((values, _snapshot(battle), _id_state(), random.getstate()))
+        self.assertEqual(results[0], results[1])
+
+    def test_native_comparison_rejects_missing_backend_instead_of_comparing_python_twice(self):
+        from wujiang.platform import ai_native
+        from wujiang.tactical.engine import core
+        from wujiang.tools.ai_equivalence import compare_late_chess
+        with mock.patch.object(core, "_NATIVE_ROLLBACK_COPY", None), \
+                self.assertRaisesRegex(RuntimeError, "compiled, loadable"):
+            compare_late_chess(baseline="no-native", sweeps=1)
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            # Start from the full runtime schema so the negative case reaches
+            # source/checksum validation instead of failing on a missing field.
+            spec = {**ai_native.artifact_spec(), "source_id": "expected",
+                    "directory": directory, "binary": directory / "kernel.pyd"}
+            spec["binary"].write_bytes(b"bad-binary")
+            manifest = {"source_id": "stale", "abi": spec["abi"], "sha256": "wrong", "compiler": ["fixture"]}
+            try:
+                with mock.patch.object(ai_native, "artifact_spec", return_value=spec):
+                    for identity, reason in (("stale", "ABI/source mismatch"), ("expected", "checksum mismatch")):
+                        manifest["source_id"] = identity
+                        (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+                        ai_native.native_status.cache_clear()
+                        status = ai_native.native_status()
+                        self.assertFalse(status["available"])
+                        self.assertIn(reason, status["reason"])
+            finally:
+                ai_native.native_status.cache_clear()
+
+    def test_server_reports_loaded_native_backend_and_keeps_diagnostics_read_only(self):
+        from run import server_ai_build_info
+        from wujiang.platform import ai_build
+        from wujiang.tactical.engine import core
+        from wujiang.tactical.rooms import ai_acceleration
+        from wujiang.tactical.rooms.ai_acceleration import _id_state
+
+        original_rng, original_ids = random.getstate(), _id_state()
+        copier = mock.Mock()
+        for enabled, plans, loaded, active in ((True, True, False, False), (True, False, True, False),
+                                               (False, True, True, False), (True, True, True, True)):
+            # An artifact may exist even when disabled or not loadable. The log
+            # must report the backend bound by this process, not just its file.
+            metadata = {"id": "fixture", "features": {"native_rollback_artifact": {"available": True}}}
+            with self.subTest(enabled=enabled, plans=plans, loaded=loaded), \
+                    mock.patch.object(ai_build, "build_info", return_value=metadata), \
+                    mock.patch.object(core, "_ROLLBACK_NATIVE_ENABLED", enabled), \
+                    mock.patch.object(core, "_ROLLBACK_TYPE_PLANS_ENABLED", plans), \
+                    mock.patch.object(core, "_NATIVE_ROLLBACK_COPY", copier if loaded else None), \
+                    mock.patch.object(core, "_AI_TARGET_IDS_ENABLED", True), \
+                    mock.patch.object(ai_acceleration, "_MOVE_BATCHES_ENABLED", True), \
+                    mock.patch.object(ai_acceleration, "_SMALL_BASELINES_ENABLED", plans):
+                features = server_ai_build_info()["features"]
+                self.assertEqual(features["native_rollback_active"], active)
+                self.assertEqual(features["native_rollback_loaded"], loaded)
+                self.assertEqual(features["native_rollback_requested"], enabled)
+                self.assertTrue(features["attack_ids"] and features["move_batches"])
+                self.assertEqual(features["small_baselines"], plans)
+        copier.assert_not_called()
+        self.assertEqual(random.getstate(), original_rng)
+        self.assertEqual(_id_state(), original_ids)
+
+    def _damage_recovery_room(self):
+        room = GameRoom("REPAIR", seat_count=2)
+        room.battle = create_battle(["elite_soldier", "elite_soldier"],
+                                    ["elite_soldier", "elite_soldier"])
+        room.status = "battle"
+        room.replay_forced = "off"
+        for seat in room.seats.values():
+            seat.set_ai()
+        # Standalone create_battle() does not attach room ownership. Match the
+        # authoritative room/autochess construction before testing AI prompts.
+        for unit in room.battle.all_units():
+            unit.owner_seat_id = unit.player_id
+        return room
+
+    def _damage_recovery_prompt(self, battle, *, kind="stat", options=()):
+        prompt = {"prompt_id": "recovery-choice", "unit_id": battle.current_turn_unit().unit_id,
+                  "kind": kind, "action_name": "回归场地伤害", "damage": 1.0,
+                  "event_index": 0, "stats": ["attack"], "options": list(options),
+                  "action_payload": {"type": "end_turn"}, "decisions": []}
+        battle.pending_damage_choice = prompt
+        return prompt
+
+    def _damage_recovery_death_field(self, battle):
+        from wujiang.tactical.engine.core import BattleFieldEffect
+        actor = battle.current_turn_unit()
+
+        class DeathPulse(BattleFieldEffect):
+            def __init__(self):
+                super().__init__("回归死亡场地")
+                self.calls = 0
+
+            def on_any_turn_end(self, current, ended_player_id):
+                self.calls += 1
+                random.random()
+                actor.current_hp = 0
+                actor.alive = False
+                current.cleanup_dead_units()
+
+        field = DeathPulse()
+        battle.field_effects.append(field)
+        return actor, field
+
+    def test_damage_choice_formal_failure_restores_death_rng_prompt_and_replay_before_retry(self):
+        from wujiang.tactical.rooms.replay import ReplayRecorder
+        room = self._damage_recovery_room()
+        battle = room.battle
+        actor, field = self._damage_recovery_death_field(battle)
+        prompt = self._damage_recovery_prompt(battle)
+        battle.fast_ai_simulation = True
+        room.replay = ReplayRecorder(room.room_id, "classic")
+        before = (actor.current_hp, list(battle.logs), battle.turn_number,
+                  battle.completed_turns, random.getstate(), room.last_action_id)
+
+        def fail_checkpoint(reason):
+            room.replay.append_step(reason=reason, omniscient_battle={}, spectator_battle={}, seat_views={})
+            battle.pending_followup_actions.append(object())
+            raise RuntimeError("formal checkpoint failed after actor death")
+
+        battle.on_replay_checkpoint = fail_checkpoint
+        payload = {"type": "damage_choice", "unit_id": actor.unit_id, "stat_name": "decline"}
+        with self.assertRaisesRegex(RuntimeError, "after actor death"):
+            room._perform_battle_action(payload, reason="ai_damage_choice")
+        self.assertIs(battle.pending_damage_choice, prompt)
+        self.assertIs(battle.units[actor.unit_id], actor)
+        self.assertTrue(actor.alive)
+        self.assertNotIn(actor, battle.destroyed_units)
+        self.assertFalse(battle.pending_followup_actions)
+        self.assertEqual((actor.current_hp, battle.logs, battle.turn_number,
+                          battle.completed_turns, random.getstate(), room.last_action_id), before)
+        self.assertEqual(field.calls, 0)
+        self.assertEqual(room.replay.steps, [])
+
+        # The identical choice now settles once, including death and turn end.
+        checkpoints = []
+        battle.on_replay_checkpoint = checkpoints.append
+        room._perform_battle_action(payload, reason="ai_damage_choice")
+        self.assertIsNone(battle.pending_damage_choice)
+        self.assertNotIn(actor.unit_id, battle.units)
+        self.assertEqual(sum(body is actor for body in battle.destroyed_units), 1)
+        self.assertEqual(field.calls, 1)
+        self.assertEqual(battle.completed_turns, before[3] + 1)
+        self.assertEqual(checkpoints, ["turn_end"])
+        self.assertEqual(room.last_action_id, before[5] + 1)
+
+    def test_damage_choice_formal_new_prompt_restores_before_image_before_pausing(self):
+        from wujiang.tactical.engine.core import DamageChoiceRequired
+        room = self._damage_recovery_room()
+        battle = room.battle
+        actor, field = self._damage_recovery_death_field(battle)
+        prompt = self._damage_recovery_prompt(battle)
+        battle.fast_ai_simulation = True
+        before_hp, before_rng = actor.current_hp, random.getstate()
+
+        def new_choice(reason):
+            raise DamageChoiceRequired(unit_id=actor.unit_id, action_name="下一次选择",
+                                       damage=1.0, event_index=1, stats=["defense"])
+
+        battle.on_replay_checkpoint = new_choice
+        battle.perform_action({"type": "damage_choice", "unit_id": actor.unit_id, "stat_name": "decline"})
+        self.assertEqual(battle.pending_damage_choice["event_index"], 1)
+        self.assertEqual(battle.pending_damage_choice["decisions"], ["decline"])
+        self.assertEqual(battle.pending_damage_choice["action_payload"], prompt["action_payload"])
+        self.assertTrue(actor.alive)
+        self.assertEqual(actor.current_hp, before_hp)
+        self.assertEqual((field.calls, battle.completed_turns), (0, 0))
+        self.assertEqual(random.getstate(), before_rng)
+
+    def test_damage_choice_evaluator_failure_resolves_legal_fallback_and_actor_death_once(self):
+        from wujiang.tactical.rooms import multiplayer
+        room = self._damage_recovery_room()
+        battle = room.battle
+        actor, field = self._damage_recovery_death_field(battle)
+        self._damage_recovery_prompt(battle)
+        with mock.patch.object(multiplayer, "choose_damage_choice_action", side_effect=RuntimeError("picker failed")), \
+                self.assertLogs(multiplayer._LOGGER, level="ERROR") as captured:
+            self.assertEqual(room.resolve_ai_until_human_input(max_steps=1), 1)
+        self.assertIsNone(battle.pending_damage_choice)
+        self.assertEqual(battle.completed_turns, 1)
+        self.assertEqual(field.calls, 1)
+        self.assertNotEqual(battle.current_turn_slot_unit_id(), actor.unit_id)
+        self.assertEqual(room.last_action_meta["reason"], "ai_damage_fallback")
+        self.assertIn("RuntimeError: picker failed", "\n".join(captured.output))
+        self.assertIn("room=REPAIR", "\n".join(captured.output))
+
+    def test_damage_choice_fallback_keeps_mandatory_first_option_and_optional_decline(self):
+        from wujiang.tactical.rooms import multiplayer
+        room = self._damage_recovery_room()
+        for kind in ("attack_swap", "formation", "rotation", "optional_swap", "end_dash", "stat"):
+            with self.subTest(kind=kind):
+                prompt = self._damage_recovery_prompt(room.battle, kind=kind, options=("z-first", "a-second"))
+                with mock.patch.object(multiplayer, "choose_damage_choice_action", side_effect=ValueError("picker failed")), \
+                        mock.patch.object(multiplayer._LOGGER, "exception"), \
+                        mock.patch.object(room, "_perform_battle_action") as perform:
+                    room._perform_ai_damage_choice()
+                payload = perform.call_args.args[0]
+                expected = "z-first" if kind in {"attack_swap", "formation"} else "decline"
+                self.assertEqual(payload["target_unit_id"], expected)
+                self.assertEqual(payload["unit_id"], prompt["unit_id"])
+                self.assertIs(room.battle.pending_damage_choice, prompt)
+        self._damage_recovery_prompt(room.battle, kind="formation", options=())
+        with self.assertRaisesRegex(ActionError, "没有合法选项"):
+            room._damage_choice_fallback_payload()
+
+    def test_damage_choice_unrecoverable_action_keeps_prompt_and_raises_without_empty_loop(self):
+        from wujiang.tactical.rooms import multiplayer
+        room = self._damage_recovery_room()
+        prompt = self._damage_recovery_prompt(room.battle)
+        selected = {"type": "damage_choice", "unit_id": prompt["unit_id"], "stat_name": "attack"}
+        before_rng = random.getstate()
+        with mock.patch.object(multiplayer, "choose_damage_choice_action", return_value=selected), \
+                mock.patch.object(type(room.battle), "_perform_action_steps", side_effect=ActionError("broken resolution")) as execute, \
+                mock.patch.object(multiplayer._LOGGER, "exception") as diagnostic:
+            with self.assertRaisesRegex(ActionError, "broken resolution"):
+                room.resolve_ai_until_human_input(max_steps=1)
+        self.assertEqual(execute.call_count, 2)  # Selected choice, then one fallback.
+        self.assertEqual(diagnostic.call_count, 2)
+        self.assertIs(room.battle.pending_damage_choice, prompt)
+        self.assertEqual((room.last_action_id, room.battle.completed_turns), (0, 0))
+        self.assertEqual(random.getstate(), before_rng)
+
+    def test_damage_choice_healthy_selection_uses_exact_original_payload_without_fallback(self):
+        from wujiang.tactical.rooms import multiplayer
+        room = self._damage_recovery_room()
+        prompt = self._damage_recovery_prompt(room.battle)
+        selected = {"type": "damage_choice", "unit_id": prompt["unit_id"], "stat_name": "attack"}
+        perform = room._perform_battle_action
+        with mock.patch.object(multiplayer, "choose_damage_choice_action", return_value=selected), \
+                mock.patch.object(room, "_perform_battle_action", wraps=perform) as execute, \
+                mock.patch.object(multiplayer._LOGGER, "exception") as diagnostic:
+            self.assertEqual(room.resolve_ai_until_human_input(max_steps=1), 1)
+        execute.assert_called_once_with(selected, reason="ai_damage_choice")
+        diagnostic.assert_not_called()
+        self.assertEqual(room.battle.completed_turns, 1)
+
+    def test_damage_choice_post_commit_stale_notice_does_not_answer_next_prompt(self):
+        from wujiang.tactical.rooms import multiplayer
+        room = self._damage_recovery_room()
+        prompt = self._damage_recovery_prompt(room.battle)
+
+        def committed(payload, *, reason):
+            room.last_action_id += 1
+            room.battle.pending_damage_choice = {**prompt, "prompt_id": "next-choice", "event_index": 1}
+            raise ActionError("AI action actor is no longer present.")
+
+        with mock.patch.object(multiplayer, "choose_damage_choice_action", return_value={}), \
+                mock.patch.object(room, "_perform_battle_action", side_effect=committed) as perform, \
+                mock.patch.object(multiplayer._LOGGER, "exception"):
+            self.assertEqual(room.resolve_ai_until_human_input(max_steps=1), 1)
+        self.assertEqual(perform.call_count, 1)
+        self.assertEqual(room.battle.pending_damage_choice["prompt_id"], "next-choice")
+
+    def test_dead_active_slot_resumes_normal_turn_end_once_without_an_ai_actor(self):
+        from wujiang.tactical.engine.core import BattleFieldEffect
+        room = self._damage_recovery_room()
+        battle = room.battle
+        actor = battle.current_turn_unit()
+        next_id = battle.turn_order_unit_ids[1]
+
+        class TurnCounter(BattleFieldEffect):
+            def __init__(self):
+                super().__init__("回归回合计数")
+                self.ends, self.starts = [], []
+            def on_any_turn_end(self, current, ended_player_id):
+                self.ends.append(ended_player_id)
+            def on_turn_start(self, current, hero):
+                self.starts.append(hero.unit_id)
+
+        field = TurnCounter()
+        battle.field_effects.append(field)
+        actor.current_hp, actor.alive = 0, False
+        battle.cleanup_dead_units()
+        self.assertIsNone(room._current_prompt_seat())
+        self.assertEqual(room.resolve_ai_until_human_input(max_steps=1), 1)
+        self.assertEqual(battle.current_turn_slot_unit_id(), next_id)
+        self.assertEqual((field.ends, field.starts), ([actor.player_id], [next_id]))
+        self.assertEqual(battle.completed_turns, 1)
+        self.assertEqual(room.last_action_meta["reason"], "ai_destroyed_turn")
+        self.assertFalse(battle.destroyed_active_turn_is_idle())
+
+    def test_dead_slot_recovery_waits_for_all_pending_resolution_boundaries(self):
+        battle = self._damage_recovery_room().battle
+        actor = battle.current_turn_unit()
+        actor.current_hp, actor.alive = 0, False
+        battle.cleanup_dead_units()
+        self.assertTrue(battle.destroyed_active_turn_is_idle())
+        blockers = {"pending_damage_choice": {}, "pending_chain": object(),
+                    "pending_followup_actions": [object()], "pending_respawn_unit_ids": ["waiting"],
+                    "resolving_action": object(), "_pending_end_turn_after_followups": True,
+                    "_pending_turn_end_after_effects_player_id": 1,
+                    "_resolving_turn_end_player_id": 1, "_pending_turn_advance_after_hell_rebirth": True,
+                    "winner": 2}
+        for name, value in blockers.items():
+            with self.subTest(boundary=name), mock.patch.object(battle, name, value, create=True):
+                battle.finish_destroyed_active_turn_if_idle()
+                self.assertFalse(battle.destroyed_active_turn_is_idle())
+                self.assertEqual(battle.completed_turns, 0)
+                self.assertEqual(battle.current_turn_slot_unit_id(), actor.unit_id)
+        living_id = next(iter(battle.units))
+        with mock.patch.object(battle, "_exclusive_turn_unit_id", living_id, create=True):
+            self.assertFalse(battle.destroyed_active_turn_is_idle())
+        from wujiang.tactical.engine.army import army_slot_id
+        with mock.patch.object(battle, "turn_order_unit_ids", [army_slot_id(1)]):
+            self.assertFalse(battle.destroyed_active_turn_is_idle())
+
+    def test_autochess_dead_slot_recovery_publishes_progress_instead_of_zero_step_sweeps(self):
+        from wujiang.tactical.rooms.autochess import AutoChessState, ChessMatch
+        chess = AutoChessState(8, seed=17)
+        chess.phase = "battle"
+        room = self._damage_recovery_room()
+        match = ChessMatch(1, 2, runner=room)
+        chess.matches = [match]
+        actor = room.battle.current_turn_unit()
+        actor.current_hp, actor.alive = 0, False
+        room.battle.cleanup_dead_units()
+        before_version = chess.version
+        self.assertTrue(chess._advance_match(match))
+        self.assertEqual(chess.version, before_version + 1)
+        self.assertEqual(room.battle.completed_turns, 1)
+        self.assertNotEqual(room.battle.current_turn_slot_unit_id(), actor.unit_id)
+        self.assertIsNone(match.result)
+
+    def test_dead_slot_recovery_does_not_skip_a_human_choice(self):
+        room = self._damage_recovery_room()
+        battle = room.battle
+        actor = battle.current_turn_unit()
+        actor.current_hp, actor.alive = 0, False
+        battle.cleanup_dead_units()
+        chooser = next(unit for unit in battle.all_units() if unit.player_id != actor.player_id)
+        room.seats[chooser.player_id].controller_type = "human"
+        prompt = {"prompt_id": "human-choice", "unit_id": chooser.unit_id}
+        battle.pending_damage_choice = prompt
+        self.assertEqual(room.resolve_ai_until_human_input(max_steps=1), 0)
+        self.assertIs(battle.pending_damage_choice, prompt)
+        self.assertEqual(battle.completed_turns, 0)
+
+    def test_dead_slot_keeps_surviving_preserved_bundle_in_the_original_ai_picker(self):
+        from wujiang.tactical.rooms import multiplayer
+        room = self._damage_recovery_room()
+        battle = room.battle
+        actor = battle.current_turn_unit()
+        survivor = next(unit for unit in battle.all_units()
+                        if unit.player_id == actor.player_id and unit is not actor)
+        survivor.preserved_turn_slot_id = actor.unit_id
+        survivor.turn_ready = True
+        actor.current_hp, actor.alive = 0, False
+        battle.cleanup_dead_units()
+        self.assertFalse(battle.destroyed_active_turn_is_idle())
+        with mock.patch.object(multiplayer, "choose_turn_bundle_action",
+                               return_value=({"type": "end_turn"}, survivor)) as choose:
+            self.assertEqual(room.resolve_ai_until_human_input(max_steps=1), 1)
+        self.assertEqual(choose.call_args.args[1], [survivor])
+        self.assertEqual(room.last_action_meta["reason"], "ai_turn")
+        self.assertEqual(battle.completed_turns, 1)
+
+    def test_dead_slot_hands_off_control_before_finishing_under_original_slot_side(self):
+        from wujiang.tactical.engine.core import BattleFieldEffect
+        from wujiang.tactical.rooms import multiplayer
+        room = self._damage_recovery_room()
+        battle = room.battle
+        actor = battle.current_turn_unit()
+        controlled = next(unit for unit in battle.all_units() if unit.player_id != actor.player_id)
+        controlled.preserved_turn_slot_id = actor.unit_id
+        controlled.turn_ready = True
+
+        class EndCounter(BattleFieldEffect):
+            def __init__(self):
+                super().__init__("回归控制交接")
+                self.ended_sides = []
+            def on_any_turn_end(self, current, ended_player_id):
+                self.ended_sides.append(ended_player_id)
+
+        field = EndCounter()
+        battle.field_effects.append(field)
+        actor.current_hp, actor.alive = 0, False
+        battle.cleanup_dead_units()
+        self.assertEqual(room.resolve_ai_until_human_input(max_steps=1), 1)
+        self.assertEqual(battle.active_player, controlled.player_id)
+        self.assertEqual(battle.current_turn_slot_unit_id(), actor.unit_id)
+        self.assertEqual((battle.completed_turns, field.ended_sides), (0, []))
+        with mock.patch.object(multiplayer, "choose_turn_bundle_action",
+                               return_value=({"type": "end_turn"}, controlled)) as choose:
+            self.assertEqual(room.resolve_ai_until_human_input(max_steps=1), 1)
+        self.assertEqual(choose.call_args.args[1], [controlled])
+        self.assertEqual((battle.completed_turns, field.ended_sides), (1, [actor.player_id]))
+
+    def test_choice_success_matches_original_two_pass_state_rng_and_both_id_streams(self):
+        import copy
+        from wujiang.tactical.engine import core
+        from wujiang.tactical.heroes import base as hero_base
+        from wujiang.tactical.rooms.ai_acceleration import _id_state, _snapshot
+        from wujiang.tools.ai_equivalence import isolated_id_stream, reference_rollback
+        battle = self._damage_recovery_room().battle
+        original_steps = type(battle)._perform_action_steps
+
+        def consuming_steps(current, payload):
+            original_steps(current, payload)
+            current.log(f"checkpoint IDs {next(core._id_counter)} {next(hero_base._unit_counter)}")
+            random.random()
+
+        results = []
+        for legacy in (True, False):
+            with isolated_id_stream(), reference_rollback(battle, ai_probe=False), \
+                    mock.patch.object(type(battle), "_perform_action_steps", new=consuming_steps):
+                payload = {"type": "end_turn"}
+                if legacy:
+                    # Original successful two-pass path, frozen before this fix.
+                    with core.battle_state_rollback(battle, ai_probe=False):
+                        battle._damage_choice_active = True
+                        battle._damage_choice_decisions = []
+                        battle._damage_choice_event_index = 0
+                        battle._perform_action_steps(copy.deepcopy(payload))
+                    battle._damage_choice_active = True
+                    battle._damage_choice_decisions = []
+                    battle._damage_choice_event_index = 0
+                    try:
+                        battle._perform_action_steps(copy.deepcopy(payload))
+                    finally:
+                        battle._damage_choice_active = False
+                        battle._damage_choice_decisions = []
+                        battle._damage_choice_event_index = 0
+                else:
+                    battle._perform_action_with_damage_choices(payload, [])
+                snapshot = _snapshot(battle)
+                self.assertIsNotNone(snapshot)
+                results.append((snapshot, random.getstate(), _id_state()))
+        self.assertEqual(results[0], results[1])
+
+    def test_attack_id_query_preserves_validation_hooks_ids_rng_and_parent_state(self):
+        import copy
+        from wujiang.tactical.engine import core
+        from wujiang.tactical.rooms.ai_acceleration import _id_state, _snapshot
+        from wujiang.tools.ai_equivalence import reference_basic_attack_preview_for_payload, isolated_id_stream, reference_rollback
+
+        battle = create_battle("fire_funeral", "ellie")
+        actor, target = primary_hero(battle, 1), primary_hero(battle, 2)
+        actor.position, target.position = Position(2, 2), Position(3, 2)
+        before, results = _snapshot(battle), []
+        original_allowed = battle.attack_target_allowed
+        for optimized in (False, True):
+            events = []
+            def allowed(actor, target, **kwargs):
+                events.append((target.unit_id, copy.deepcopy(kwargs)))
+                next(core._id_counter)
+                return original_allowed(actor, target, **kwargs)
+            with isolated_id_stream(), reference_rollback(battle, ai_probe=False), \
+                    mock.patch.object(core, "_AI_TARGET_IDS_ENABLED", True), \
+                    mock.patch.object(battle, "attack_target_allowed", side_effect=allowed):
+                ids = (battle.basic_attack_target_ids_for_payload(actor, {}) if optimized else
+                       reference_basic_attack_preview_for_payload(battle, actor, {}).get("target_unit_ids", []))
+                results.append((ids, events, _id_state(), random.getstate()))
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(_snapshot(battle), before)
+
+    def test_attack_id_query_preserves_custom_preview_and_position_callbacks(self):
+        from wujiang.tactical.engine import core
+        from wujiang.tactical.rooms.ai_acceleration import _id_state
+        from wujiang.tools.ai_equivalence import isolated_id_stream, reference_rollback, reference_basic_attack_preview_for_payload
+
+        battle = create_battle("fire_funeral", "ellie")
+        actor, target = primary_hero(battle, 1), primary_hero(battle, 2)
+        actor.position, target.position = Position(2, 2), Position(3, 2)
+        with mock.patch.object(battle, "basic_attack_preview_for_payload", return_value={"target_unit_ids": ["custom"]}) as preview:
+            self.assertEqual(battle.basic_attack_target_ids_for_payload(actor, {}), ["custom"])
+            preview.assert_called_once_with(actor, {})
+        to_dict, results = Position.to_dict, []
+        for optimized in (False, True):
+            events = []
+            def convert(cell):
+                events.append((cell.x, cell.y))
+                next(core._id_counter)
+                return to_dict(cell)
+            with isolated_id_stream(), reference_rollback(battle, ai_probe=False), \
+                    mock.patch.object(core, "_AI_TARGET_IDS_ENABLED", True), mock.patch.object(Position, "to_dict", convert):
+                ids = (battle.basic_attack_target_ids_for_payload(actor, {}) if optimized else
+                       reference_basic_attack_preview_for_payload(battle, actor, {}).get("target_unit_ids", []))
+                results.append((ids, list(events), _id_state()))
+        self.assertEqual(results[0], results[1])
+
+    def test_move_batch_reuses_ordered_reduction_with_only_one_joint_check_per_hit(self):
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+
+        battle, actor, _ = self._damage_probe_fixture()
+        cells = [Position(x, 2) for x in range(4)]
+        profile = ai.difficulty_profile("full")
+        calls = []
+        @acceleration.cached_move_score
+        def scalar(battle, actor, destination, role, profile):
+            calls.append(destination.x)
+            return float(destination.x)
+        @acceleration.cached_move_batch
+        def reduce(battle, actor, cells, profile, *, subtract=None):
+            return max((scalar(battle, actor, cell, "support", profile) - subtract for cell in cells), default=0.0)
+        with mock.patch.object(acceleration, "_MOVE_BATCHES_ENABLED", True), acceleration.decision_memo_scope():
+            self.assertEqual(reduce(battle, actor, cells, profile, subtract=1.0), 2.0)
+            self.assertEqual(calls, [0, 1, 2, 3])
+            self.assertEqual(reduce(battle, actor, cells, profile, subtract=1.0), 2.0)
+            self.assertEqual(calls, [0, 1, 2, 3])
+        stats = acceleration.last_statistics()
+        self.assertEqual((stats["move_batch_misses"], stats["move_batch_hits"], stats["snapshots"]), (1, 1, 3))
+        self.assertEqual(stats["move_misses"], 0)
+
+    def test_move_batch_key_keeps_state_request_order_parameters_and_cross_graph_aliases(self):
+        import copy
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+
+        battle, actor, target = self._damage_probe_fixture()
+        cells = [Position(x, 2) for x in range(4)]
+        profile = ai.difficulty_profile("full")
+        actor.probe_profile = profile
+        actor.probe_cells = cells
+        calls = []
+        @acceleration.cached_move_batch
+        def query(battle, actor, cells, profile, *, subtract=None):
+            calls.append(1)
+            return float((10 if profile is actor.probe_profile else 0) + (1 if cells is actor.probe_cells else 0))
+        with mock.patch.object(acceleration, "_MOVE_BATCHES_ENABLED", True), acceleration.decision_memo_scope():
+            self.assertEqual(query(battle, actor, cells, profile), 11.0)
+            self.assertEqual(query(battle, actor, list(cells), profile), 10.0)
+            self.assertEqual(query(battle, actor, cells, copy.copy(profile)), 1.0)
+            self.assertEqual(query(battle, actor, cells, profile), 11.0)
+            self.assertEqual(len(calls), 3)
+            for mutate in (lambda: cells.reverse(), lambda: setattr(profile, "support_bonus", profile.support_bonus + 1),
+                           lambda: setattr(target, "current_hp", target.current_hp - 0.25), lambda: random.random()):
+                previous = len(calls)
+                mutate()
+                query(battle, actor, cells, profile)
+                self.assertEqual(len(calls), previous + 1)
+            query(battle, actor, cells, profile, subtract=2.0)
+            self.assertEqual(len(calls), 8)
+
+    def test_move_batch_rejects_side_effects_and_restores_nested_cache_context_on_error(self):
+        from wujiang.tactical.engine import core
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        from wujiang.tools.ai_equivalence import isolated_id_stream, reference_rollback
+
+        battle, actor, target = self._damage_probe_fixture()
+        profile = ai.difficulty_profile("full")
+        for mode in ("ids", "rng", "state", "request", "nonfinite"):
+            calls = []
+            @acceleration.cached_move_batch
+            def query(battle, actor, cells, profile, *, subtract=None):
+                calls.append(mode)
+                if mode == "ids": next(core._id_counter)
+                if mode == "rng": random.random()
+                if mode == "state": target.current_hp -= 0.25
+                if mode == "request": cells.reverse()
+                return float("nan") if mode == "nonfinite" else 1.0
+            cells = [Position(x, 2) for x in range(4)]
+            with self.subTest(mode=mode), isolated_id_stream(), reference_rollback(battle, ai_probe=False), \
+                    mock.patch.object(acceleration, "_MOVE_BATCHES_ENABLED", True), acceleration.decision_memo_scope():
+                rng, hp = random.getstate(), target.current_hp
+                query(battle, actor, cells, profile)
+                random.setstate(rng)
+                target.current_hp = hp
+                cells[:] = [Position(x, 2) for x in range(4)]
+                query(battle, actor, cells, profile)
+                self.assertEqual(len(calls), 2)
+            self.assertEqual(acceleration.last_statistics()["move_batch_hits"], 0)
+        @acceleration.cached_move_batch
+        def fail(battle, actor, cells, profile, *, subtract=None):
+            raise ValueError("batch")
+        with mock.patch.object(acceleration, "_MOVE_BATCHES_ENABLED", True), acceleration.decision_memo_scope():
+            with self.assertRaisesRegex(ValueError, "batch"):
+                fail(battle, actor, cells, profile)
+            self.assertFalse(acceleration._move_batch_active.get())
+
+    def test_batch_reduction_keeps_role_reads_and_subtraction_in_original_order(self):
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+
+        battle, actor, _ = self._damage_probe_fixture()
+        cells = [Position(x, 2) for x in range(4)]
+        profile, events = ai.difficulty_profile("full"), []
+        def role(unit):
+            events.append("role")
+            return "support"
+        def score(battle, actor, cell, role, profile):
+            events.append(cell.x)
+            return float(cell.x)
+        with mock.patch.object(ai, "hero_style", side_effect=role), mock.patch.object(ai, "score_move_destination", side_effect=score), \
+                acceleration.acceleration_disabled():
+            self.assertEqual(ai.best_move_destination_score(battle, actor, cells, profile, subtract=0.25), 2.75)
+        self.assertEqual(events, ["role", 0, "role", 1, "role", 2, "role", 3])
+
+    def test_chess_committed_cache_returns_without_waiting_and_isolates_viewers_urls_and_mutation(self):
+        from wujiang.tactical.rooms.multiplayer import GameRoom
+
+        room = GameRoom("CACHE81", mode="autochess")
+        frame = {"room": {"viewer_player_id": 1}, "frame": [1]}
+        key = ("viewer", "https://first.example")
+        room._chess_state_cache = {key: frame}
+        lock = mock.Mock()
+        lock.acquire.return_value = False
+        room._lock = lock
+        first = room.serialize_state("viewer", base_url="https://first.example")
+        lock.acquire.assert_called_once_with(blocking=False)
+        first["frame"].append(2)
+        self.assertEqual(frame["frame"], [1])
+        lock.acquire.return_value = True
+        with mock.patch.object(room, "_autochess_serialize", return_value={"room": {"viewer_player_id": 2}}) as serialize:
+            result = room.serialize_state("another", base_url="https://second.example")
+            self.assertEqual(result["room"]["viewer_player_id"], 2)
+            serialize.assert_called_once_with("another", base_url="https://second.example", advance=True)
+        self.assertEqual(lock.acquire.call_args, mock.call(timeout=0.25))
+
+    def test_chess_committed_cache_is_bounded_and_not_persisted(self):
+        from wujiang.tactical.rooms.multiplayer import GameRoom
+
+        room = GameRoom("CACHE82", mode="autochess")
+        with mock.patch.object(room, "_autochess_serialize", return_value={"room": {}}):
+            for index in range(40):
+                room.serialize_state(str(index), advance_chess=False)
+        self.assertEqual(len(room._chess_state_cache), 32)
+        self.assertNotIn("_chess_state_cache", room.__getstate__())
+        self.assertNotIn("_chess_state_cache_at", room.__getstate__())
+
+    def test_older_chess_frames_keep_a_bounded_refresh_attempt(self):
+        from wujiang.tactical.rooms.multiplayer import GameRoom
+
+        room = GameRoom("CACHE83", mode="autochess")
+        key = ("viewer", "")
+        room._chess_state_cache = {key: {"room": {"version": 1}}}
+        room._chess_state_cache_at = {key: 1.0}
+        lock = mock.Mock()
+        lock.acquire.return_value = False
+        room._lock = lock
+        with mock.patch("wujiang.tactical.rooms.multiplayer.time.monotonic", return_value=2.0):
+            self.assertEqual(room.serialize_state("viewer")["room"]["version"], 1)
+        lock.acquire.assert_called_once_with(timeout=0.25)
+
+    def test_extended_late_fixtures_cover_equipment_and_extra_summons(self):
+        from wujiang.tools.ai_equivalence import create_late_chess_fixture, isolated_id_stream
+
+        for variant in ("equipped", "summons"):
+            with self.subTest(variant=variant), isolated_id_stream():
+                chess = create_late_chess_fixture(31, variant=variant)
+                self.assertEqual(len(chess.matches), 4)
+                for match in chess.matches:
+                    units = match.runner.battle.all_units()
+                    self.assertGreaterEqual(len(units), 24)
+                    if variant == "equipped":
+                        self.assertTrue(any(status.name.startswith("装备·") for unit in units for status in unit.statuses))
+                    else:
+                        self.assertGreaterEqual(sum(unit.is_summon for unit in units), 8)
+
+    def test_series_majority_fixtures_keep_four_dense_real_boards_with_valid_bodies_and_equipment(self):
+        from wujiang.tactical.heroes.registry import IMPLEMENTED_EXCEL_HERO_CODES
+        from wujiang.tactical.rooms import ai_acceleration as acceleration
+        from wujiang.tools.ai_equivalence import create_late_chess_fixture, isolated_id_stream, late_chess_composition
+        from wujiang.tools.ai_scenarios import SERIES_CHESS_FIXTURES
+        from wujiang.tools.ai_validation import check_series_composition
+
+        for variant, definition in SERIES_CHESS_FIXTURES.items():
+            with self.subTest(variant=variant), isolated_id_stream():
+                self.assertLessEqual(set(definition["members"]), IMPLEMENTED_EXCEL_HERO_CODES)
+                chess = create_late_chess_fixture(definition["seed"], variant=variant)
+                self.assertEqual(len(chess.matches), 4)
+                counts = [len(match.runner.battle.units) for match in chess.matches]
+                before = [acceleration._snapshot(match.runner.battle) for match in chess.matches], acceleration._id_state()
+                composition = late_chess_composition(chess, variant)
+                check_series_composition(variant, counts, composition)
+                self.assertEqual(([acceleration._snapshot(match.runner.battle) for match in chess.matches],
+                                  acceleration._id_state()), before)
+                for index, match in enumerate(chess.matches):
+                    battle = match.runner.battle
+                    self.assertEqual((battle.width, battle.height), (10, 10))
+                    self.assertEqual(battle.current_turn_unit().hero_code, definition["focus"][index])
+                    self.assertTrue(battle.fast_ai_simulation)
+                    self.assertTrue(all(seat.is_ai for seat in match.runner.seats.values()))
+                    occupied = set()
+                    for unit in battle.all_units():
+                        cells = {(cell.x, cell.y) for cell in battle.unit_cells(unit)}
+                        self.assertTrue(cells)
+                        self.assertTrue(occupied.isdisjoint(cells))
+                        occupied.update(cells)
+                        self.assertEqual(unit.owner_seat_id, unit.player_id)
+                    for side in (1, 2):
+                        units = [unit for unit in battle.all_units() if unit.player_id == side]
+                        self.assertGreaterEqual(len(units), 12)
+                        self.assertGreaterEqual(sum(unit.hero_code in definition["members"] for unit in units), 10)
+                        self.assertTrue(any(status.name.startswith("装备·") for unit in units for status in unit.statuses))
+                self.assertNotIn("excel_r241", definition["members"])
+
+    def test_series_majority_report_rejects_missing_minority_single_type_and_wrong_side_composition(self):
+        from copy import deepcopy
+        from wujiang.tools.ai_scenarios import SERIES_CHESS_FIXTURES
+        from wujiang.tools.ai_validation import check_equivalence_report
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "series.json"
+            for variant, definition in SERIES_CHESS_FIXTURES.items():
+                roster = list(definition["roster"])
+                row = dict(equal=True, initial_equal=True, workload="sequential_live_chess_actions",
+                           fixture_variant=variant, fixture_series=definition["label"], board_count=4,
+                           initial_unit_counts=[24] * 4, initial_rosters_by_side=[[list(roster), list(roster)] for _ in range(4)],
+                           steps={"reference": [[{"actions": []}]], "optimized": [[{"actions": []}]]})
+                path.write_text(json.dumps([row]), encoding="utf-8")
+                self.assertEqual(check_equivalence_report(path), [row])
+                bad = []
+                for field in ("fixture_series", "initial_rosters_by_side"):
+                    missing = deepcopy(row)
+                    missing.pop(field)
+                    bad.append(missing)
+                for side in (["bard"] * 12, [definition["members"][0]] * 12, roster[:11]):
+                    changed = deepcopy(row)
+                    changed["initial_rosters_by_side"][2][1] = side
+                    bad.append(changed)
+                changed = deepcopy(row)
+                changed["initial_rosters_by_side"] = changed["initial_rosters_by_side"][:3]
+                bad.append(changed)
+                changed = deepcopy(row)
+                changed["initial_unit_counts"][0] = 25
+                bad.append(changed)
+                for invalid in bad:
+                    path.write_text(json.dumps([invalid]), encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        check_equivalence_report(path)
+
+    def test_unified_validation_rejects_failed_or_missing_initial_equivalence(self):
+        from wujiang.tools.ai_validation import check_equivalence_report
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "result.json"
+            for data in ([], [{"equal": False}], [{"equal": True}], [{"equal": True, "workload": "sequential_live_chess_actions",
+                                                   "board_count": 4, "initial_unit_counts": [26] * 4}]):
+                path.write_text(json.dumps(data), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    check_equivalence_report(path)
+
+    def test_unified_validation_does_not_accept_zero_or_entirely_skipped_behavior_tests(self):
+        from wujiang.tools.ai_validation import check_behavior_log
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "behavior.log"
+            for content in ("Ran 0 tests in 0.0s\nOK", "Ran 2 tests in 0.0s\nOK (skipped=2)", ""):
+                path.write_text(content, encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    check_behavior_log(path)
+
+    def test_unified_validation_keeps_failed_behavior_counts_and_requires_a_finished_success(self):
+        from wujiang.tools.ai_validation import behavior_log_summary, check_behavior_log
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "behavior.log"
+            path.write_text("Ran 116 tests in 31.604s\n\nFAILED (failures=8, errors=1)\n", encoding="utf-8")
+            self.assertEqual(behavior_log_summary(path), dict(
+                ran=116, passed=107, failures=8, errors=1, skipped=0, result="failed"))
+            with self.assertRaisesRegex(ValueError, "successful run"):
+                check_behavior_log(path)
+            path.write_text("Ran 4 tests in 0.01s\nOK (skipped=1)\n", encoding="utf-8")
+            result = check_behavior_log(path)
+            self.assertEqual((result["passed"], result["skipped"], result["result"]), (3, 1, "passed"))
+            path.write_text("Ran 4 tests in 0.01s\n", encoding="utf-8")
+            self.assertEqual(behavior_log_summary(path)["result"], "incomplete")
+            self.assertIsNone(behavior_log_summary(path)["passed"])
+            with self.assertRaisesRegex(ValueError, "successful run"):
+                check_behavior_log(path)
+
+    def test_unified_validation_counts_a_parent_with_multiple_subtest_failures_once(self):
+        from wujiang.tools.ai_validation import behavior_log_summary, check_behavior_log
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "behavior.log"
+            path.write_text(
+                "ERROR: test_guard (test_behavior.FullAIEquivalenceBehaviorTests.test_guard) (name='__code__')\n"
+                "FAIL: test_guard (test_behavior.FullAIEquivalenceBehaviorTests.test_guard)\n"
+                "FAIL: test_worker (test_behavior.FullAIEquivalenceBehaviorTests.test_worker)\n"
+                "Ran 5 tests in 0.01s\nFAILED (failures=2, errors=1)\n", encoding="utf-8")
+            self.assertEqual(behavior_log_summary(path), dict(
+                ran=5, passed=3, failures=2, errors=1, skipped=0, result="failed"))
+            with self.assertRaisesRegex(ValueError, "successful run"):
+                check_behavior_log(path)
+            # Incomplete failure details cannot establish how many distinct
+            # parent tests failed, even with a final unittest summary.
+            path.write_text(
+                "ERROR: test_guard (test_behavior.FullAIEquivalenceBehaviorTests.test_guard) (name='__code__')\n"
+                "Ran 5 tests in 0.01s\nFAILED (failures=2, errors=1)\n", encoding="utf-8")
+            self.assertIsNone(behavior_log_summary(path)["passed"])
 
     def test_rectangle_templates_keep_every_clipped_pattern_and_cell_order(self):
         from wujiang.tactical.heroes.next_five import remote_rectangle_patterns
@@ -494,6 +3953,235 @@ class FullAIEquivalenceBehaviorTests(unittest.TestCase):
         self.assertEqual(last_statistics()["unsupported"], 1)
         self.assertEqual(last_statistics()["baseline_hits"], 0)
 
+    def _small_baseline_battle(self, live=8, destroyed=21):
+        from wujiang.tactical.engine.core import Battle
+        from wujiang.tools.ai_equivalence import add_attrition_history
+        battle = Battle(width=12, height=8)
+        for index in range(live):
+            unit = create_hero("elite_soldier", index % 2 + 1)
+            battle.add_unit(unit, Position(index // 2, 1 if index % 2 == 0 else 6),
+                            trigger_enter_effects=False)
+        battle.start_battle()
+        add_attrition_history(battle, destroyed)
+        return battle, battle.current_turn_unit(), battle.all_units()
+
+    def test_small_tail_baseline_reuses_ordered_rows_with_one_snapshot_per_hit(self):
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        from wujiang.tools.ai_equivalence import reference_effect_baseline
+        battle, actor, units = self._small_baseline_battle()
+        with mock.patch.object(acceleration, "_SMALL_BASELINES_ENABLED", True), \
+                mock.patch.object(ai, "reviewed_r17_position_value", return_value=12.5) as query:
+            expected = reference_effect_baseline(battle, actor, units)
+            query.reset_mock()
+            with acceleration.decision_memo_scope():
+                first = ai.reviewed_effect_baseline(battle, actor, units)
+                second = ai.reviewed_effect_baseline(battle, actor, units)
+                self.assertEqual((first, second), (expected, expected))
+                self.assertIsNot(first, second)
+                first.clear()
+                third = ai.reviewed_effect_baseline(battle, actor, units)
+                self.assertEqual(third, expected)
+                self.assertEqual(tuple(third), tuple(unit.unit_id for unit in units))
+                self.assertEqual(query.call_count, 8)
+        stats = acceleration.last_statistics()
+        self.assertEqual((stats["baseline_misses"], stats["baseline_hits"],
+                          stats["baseline_units_reused"], stats["snapshots"]), (1, 2, 16, 4))
+
+    def test_small_baseline_gate_keeps_light_openings_and_existing_large_batches(self):
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        for live, dead, enabled, batch in ((8, 0, True, False), (8, 3, True, False),
+                                           (8, 4, True, True), (2, 10, True, True),
+                                           (11, 1, True, True), (8, 21, False, False),
+                                           (12, 0, False, True)):
+            with self.subTest(live=live, dead=dead, enabled=enabled):
+                battle, actor, units = self._small_baseline_battle(live, dead)
+                with mock.patch.object(acceleration, "_SMALL_BASELINES_ENABLED", enabled), \
+                        mock.patch.object(ai, "reviewed_r17_position_value", return_value=1.25) as query, \
+                        acceleration.decision_memo_scope():
+                    first = ai.reviewed_effect_baseline(battle, actor, units)
+                    second = ai.reviewed_effect_baseline(battle, actor, units)
+                    self.assertEqual(first, second)
+                    self.assertEqual(query.call_count, live if batch else live * 2)
+                self.assertEqual(acceleration.last_statistics()["baseline_hits"], int(batch))
+        battle, actor, units = self._small_baseline_battle()
+        for subset in ([], [actor]):
+            with mock.patch.object(acceleration, "_SMALL_BASELINES_ENABLED", True), \
+                    mock.patch.object(ai, "reviewed_r17_position_value", return_value=1.25) as query, \
+                    acceleration.decision_memo_scope():
+                ai.reviewed_effect_baseline(battle, actor, subset)
+                ai.reviewed_effect_baseline(battle, actor, subset)
+                self.assertEqual(query.call_count, len(subset) * 2)
+            self.assertEqual(acceleration.last_statistics()["snapshots"], 0)
+        events = []
+        class CustomBatch(list):
+            def __len__(self):
+                events.append("len")
+                return super().__len__()
+        custom = CustomBatch(units)
+        with mock.patch.object(acceleration, "_SMALL_BASELINES_ENABLED", True), \
+                mock.patch.object(ai, "reviewed_r17_position_value", return_value=1.25) as query, \
+                acceleration.decision_memo_scope():
+            ai.reviewed_effect_baseline(battle, actor, custom)
+            ai.reviewed_effect_baseline(battle, actor, custom)
+            self.assertEqual(query.call_count, 16)
+        self.assertEqual(events, ["len", "len"])
+        self.assertEqual(acceleration.last_statistics()["snapshots"], 0)
+
+    def test_small_baseline_invalidates_dead_components_history_rng_order_and_scope(self):
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        battle, actor, units = self._small_baseline_battle()
+        dead = battle.destroyed_units[0]
+        with mock.patch.object(acceleration, "_SMALL_BASELINES_ENABLED", True), \
+                mock.patch.object(ai, "reviewed_r17_position_value", return_value=2.5) as query:
+            with acceleration.decision_memo_scope():
+                ai.reviewed_effect_baseline(battle, actor, units)
+                for mutate in (
+                    lambda: setattr(dead.base_stats, "attack", dead.base_stats.attack + 1),
+                    lambda: setattr(dead, "current_mana", dead.current_mana + 0.5),
+                    lambda: battle.log("尾局历史改变"),
+                    lambda: battle.summary_events.append({"kind": "baseline-fixture"}),
+                    lambda: battle.blocked_cells.add((11, 7)),
+                    lambda: random.random(),
+                ):
+                    before = query.call_count
+                    mutate()
+                    ai.reviewed_effect_baseline(battle, actor, units)
+                    ai.reviewed_effect_baseline(battle, actor, units)
+                    self.assertEqual(query.call_count, before + len(units))
+                for order, pending in ((list(reversed(units)), False), (units, True)):
+                    before = query.call_count
+                    result = ai.reviewed_effect_baseline(battle, actor, order, include_pending=pending)
+                    self.assertEqual(query.call_count, before + len(units))
+                    self.assertEqual(tuple(result), tuple(unit.unit_id for unit in order))
+                    self.assertTrue(all(len(row) == (8 if pending else 7) for row in result.values()))
+            before = query.call_count
+            with acceleration.decision_memo_scope():
+                ai.reviewed_effect_baseline(battle, actor, units)
+            self.assertEqual(query.call_count, before + len(units))
+
+    def test_small_baseline_keeps_ids_rng_state_mutable_results_and_exceptions_observable(self):
+        from wujiang.tactical.engine import core
+        from wujiang.tactical.heroes import base
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        from wujiang.tools.ai_equivalence import isolated_id_stream, reference_rollback
+        battle, actor, units = self._small_baseline_battle()
+        for mode in ("component_ids", "unit_ids", "rng", "state", "nonfinite", "mutable", "position", "error"):
+            calls = mock.Mock()
+            @acceleration.cached_effect_baseline
+            def query(current, who, batch, *, include_pending=False):
+                calls()
+                if mode == "component_ids":
+                    next(core._id_counter)
+                elif mode == "unit_ids":
+                    next(base._unit_counter)
+                elif mode == "rng":
+                    random.random()
+                elif mode == "state":
+                    current.destroyed_units[0].current_hp -= 0.5
+                elif mode == "error":
+                    raise RuntimeError("tail query failed")
+                result = ai.reviewed_effect_baseline.__wrapped__(current, who, batch, include_pending=include_pending)
+                row = result[who.unit_id]
+                if mode == "nonfinite":
+                    result[who.unit_id] = (*row[:6], float("nan"))
+                elif mode == "mutable":
+                    result[who.unit_id] = list(row)
+                elif mode == "position":
+                    result[who.unit_id] = (*row[:5], Position([], 0), row[6])
+                return result
+            with self.subTest(mode=mode), isolated_id_stream(), reference_rollback(battle, ai_probe=False), \
+                    mock.patch.object(acceleration, "_SMALL_BASELINES_ENABLED", True), \
+                    mock.patch.object(ai, "reviewed_r17_position_value", return_value=2.5), \
+                    acceleration.decision_memo_scope():
+                rng, hp = random.getstate(), battle.destroyed_units[0].current_hp
+                for _ in range(2):
+                    random.setstate(rng)
+                    battle.destroyed_units[0].current_hp = hp
+                    if mode == "error":
+                        with self.assertRaisesRegex(RuntimeError, "tail query failed"):
+                            query(battle, actor, units)
+                    else:
+                        query(battle, actor, units)
+                self.assertEqual(calls.call_count, 2)
+            self.assertEqual(acceleration.last_statistics()["baseline_hits"], 0)
+
+    def test_small_baseline_unsupported_binding_and_disabled_paths_keep_original_queries(self):
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        battle, actor, units = self._small_baseline_battle()
+        for mode in ("unsupported", "foreign_actor", "foreign_unit", "disabled"):
+            with self.subTest(mode=mode), \
+                    mock.patch.object(acceleration, "_SMALL_BASELINES_ENABLED", True), \
+                    mock.patch.object(ai, "reviewed_r17_position_value", return_value=2.5) as query:
+                current_actor, current_units = actor, units
+                with mock.patch.object(battle, "on_replay_checkpoint", (lambda *args: None) if mode == "unsupported" else None):
+                    if mode in {"foreign_actor", "foreign_unit"}:
+                        foreign = create_hero("elite_soldier", actor.player_id)
+                        foreign.unit_id = actor.unit_id
+                        if mode == "foreign_actor":
+                            current_actor = foreign
+                        else:
+                            current_units = [foreign if unit is actor else unit for unit in units]
+                    with acceleration.decision_memo_scope():
+                        if mode == "disabled":
+                            with acceleration.acceleration_disabled():
+                                ai.reviewed_effect_baseline(battle, current_actor, current_units)
+                                ai.reviewed_effect_baseline(battle, current_actor, current_units)
+                        else:
+                            ai.reviewed_effect_baseline(battle, current_actor, current_units)
+                            ai.reviewed_effect_baseline(battle, current_actor, current_units)
+                    self.assertEqual(query.call_count, 2 * len(current_units))
+                self.assertEqual(acceleration.last_statistics()["baseline_hits"], 0)
+
+    def test_small_baseline_real_rows_parent_bytes_rng_and_both_id_streams_match(self):
+        from wujiang.tactical.rooms import ai, ai_acceleration as acceleration
+        from wujiang.tools.ai_equivalence import isolated_id_stream, reference_rollback
+        battle, actor, units = self._small_baseline_battle()
+        outcomes = []
+        for enabled in (False, True):
+            with isolated_id_stream(), reference_rollback(battle, ai_probe=False), \
+                    mock.patch.object(acceleration, "_SMALL_BASELINES_ENABLED", enabled), \
+                    acceleration.decision_memo_scope():
+                rows = [ai.reviewed_effect_baseline(battle, actor, units) for _ in range(2)]
+                snapshot = acceleration._snapshot(battle)
+                self.assertIsNotNone(snapshot)
+                outcomes.append((rows, snapshot, random.getstate(), acceleration._id_state()))
+        self.assertEqual(outcomes[0], outcomes[1])
+
+    def test_attrition_chess_fixture_retains_eight_units_and_twenty_one_dead_per_board(self):
+        from wujiang.tools.ai_equivalence import (create_late_chess_fixture, isolated_id_stream,
+                                                  ATTRITION_CHESS_FOCUS, package_reference)
+        from wujiang.tactical.rooms import ai_acceleration
+        with isolated_id_stream():
+            chess = create_late_chess_fixture(71, variant="attrition")
+            self.assertEqual(len(chess.matches), 4)
+            for index, match in enumerate(chess.matches):
+                battle = match.runner.battle
+                self.assertEqual((len(battle.units), len(battle.destroyed_units)), (8, 21))
+                self.assertTrue(battle.fast_ai_simulation)
+                self.assertEqual(battle.current_turn_unit().hero_code, ATTRITION_CHESS_FOCUS[index])
+                self.assertTrue(all(not unit.alive and unit.position is None for unit in battle.destroyed_units))
+                self.assertEqual(len({unit.unit_id for unit in [*battle.all_units(), *battle.destroyed_units]}), 29)
+        with mock.patch.object(ai_acceleration, "_SMALL_BASELINES_ENABLED", True):
+            with package_reference("no-small-baselines"):
+                self.assertFalse(ai_acceleration._SMALL_BASELINES_ENABLED)
+            self.assertTrue(ai_acceleration._SMALL_BASELINES_ENABLED)
+
+    def test_unified_validation_keeps_dense_gate_and_checks_attrition_history(self):
+        from wujiang.tools.ai_validation import check_equivalence_report
+        row = {"equal": True, "initial_equal": True, "workload": "sequential_live_chess_actions",
+               "fixture_variant": "attrition", "board_count": 4, "initial_unit_counts": [8] * 4,
+               "initial_destroyed_counts": [21] * 4,
+               "steps": {"reference": [[{"actions": []}]], "optimized": [[{"actions": []}]]}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "attrition.json"
+            path.write_text(json.dumps([row]), encoding="utf-8")
+            self.assertEqual(check_equivalence_report(path), [row])
+            for change in ({"initial_destroyed_counts": [0] * 4}, {"initial_unit_counts": [7] * 4},
+                           {"fixture_variant": "standard"}, {"board_count": 1}):
+                path.write_text(json.dumps([{**row, **change}]), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    check_equivalence_report(path)
+
     def test_move_memo_uses_full_state_parameters_and_decision_lifetime(self):
         from wujiang.tactical.rooms import ai
         from wujiang.tactical.rooms.ai_acceleration import cached_move_score, decision_memo_scope, last_statistics
@@ -835,12 +4523,69 @@ class FullAIEquivalenceBehaviorTests(unittest.TestCase):
         # field so this also catches accidental repeated-board advancement.
         for index, match in enumerate(matches):
             match.index = index
-        with mock.patch.object(multiplayer.time, "sleep", side_effect=pause):
+        with mock.patch.object(multiplayer.time, "sleep", side_effect=pause), \
+                mock.patch.object(multiplayer.time, "monotonic", return_value=0.0):
             multiplayer._autochess_battle_worker(room)
         self.assertEqual(calls, [0, 1, 2, 3])
         self.assertAlmostEqual(sum(delays), 0.9)
         self.assertAlmostEqual(multiplayer._autochess_step_delay(1, 1), 0.9)
-        self.assertGreaterEqual(multiplayer._autochess_step_delay(99, 4), 0.05)
+        self.assertAlmostEqual(multiplayer._autochess_step_delay(16, 4), 0.9 / 16 / 4)
+        self.assertAlmostEqual(multiplayer._autochess_step_delay(16, 2), 0.9 / 16 / 2)
+
+    def test_chess_pacing_counts_compute_and_publication_and_yields_when_overdue(self):
+        from types import SimpleNamespace
+        from wujiang.tactical.rooms import multiplayer
+
+        for boards, speed in ((2, 16.0), (4, 16.0), (4, 1.0)):
+            with self.subTest(boards=boards, speed=speed):
+                clock, calls, delays = [0.0], [], []
+                interval = 0.9 / speed / boards
+                costs = (interval / 2, interval * 3, interval, 0.0)
+                matches = [SimpleNamespace(result=None, index=i) for i in range(boards)]
+                chess = SimpleNamespace(phase="battle", matches=matches, next_match_cursor=0)
+                def advance(match):
+                    calls.append(match.index)
+                    clock[0] += costs[len(calls) - 1]
+                    return True
+                def publish(*args):
+                    clock[0] += 0.001
+                def pause(seconds):
+                    delays.append(seconds)
+                    clock[0] += seconds
+                    if len(delays) == len(costs):
+                        chess.phase = "preparation"
+                chess._advance_match = advance
+                room = SimpleNamespace(_lock=threading.RLock(), _closed=False, autochess=chess,
+                                       room_id="PACE24", chess_battle_speed=speed)
+                with mock.patch.object(multiplayer.time, "monotonic", side_effect=lambda: clock[0]), \
+                        mock.patch.object(multiplayer.time, "sleep", side_effect=pause), \
+                        mock.patch("wujiang.tactical.rooms.autochess_frames.publish_match", side_effect=publish):
+                    multiplayer._autochess_battle_worker(room)
+                self.assertEqual(calls, [i % boards for i in range(len(costs))])
+                for cost, delay in zip(costs, delays):
+                    self.assertAlmostEqual(delay, max(0.0, interval - cost - 0.001))
+                self.assertEqual(delays[1:3], [0.0, 0.0])
+
+    def test_fast_chess_pacing_keeps_final_frame_hold_before_round_settlement(self):
+        from types import SimpleNamespace
+        from wujiang.tactical.rooms import multiplayer
+        clock, settlements, touches = [0.0], [], []
+        chess = SimpleNamespace(phase="battle", matches=[SimpleNamespace(result="finished")])
+        def finish():
+            self.assertGreaterEqual(clock[0], 1.6)
+            settlements.append(clock[0])
+            chess.phase = "preparation"
+        chess._finish_round = finish
+        room = SimpleNamespace(_lock=threading.RLock(), _closed=False, autochess=chess,
+                               room_id="HOLD24", chess_battle_speed=16.0,
+                               touch=lambda **kwargs: touches.append(kwargs))
+        with mock.patch.object(multiplayer.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(multiplayer.time, "sleep", side_effect=lambda delay: clock.__setitem__(0, clock[0] + delay)), \
+                mock.patch.object(multiplayer, "_autochess_final_frame_elapsed", side_effect=lambda *args: clock[0] >= 1.6):
+            multiplayer._autochess_battle_worker(room)
+        self.assertEqual(len(settlements), 1)
+        self.assertEqual(touches, [{"persist_chess": True}])
+        self.assertEqual(room.status, "preparation")
 
     def test_late_chess_fixture_runs_four_dense_boards_through_the_real_room_path(self):
         from wujiang.tools.ai_equivalence import create_late_chess_fixture, compare_late_chess, isolated_id_stream, LATE_CHESS_FOCUS
@@ -1451,6 +5196,266 @@ class FullAIEquivalenceBehaviorTests(unittest.TestCase):
             JSON.stringify({kept, updated, controlUpdated: panel.resets === 3, effectsPainted});
         """)
         self.assertEqual(json.loads(result), {"kept": True, "updated": True, "controlUpdated": True, "effectsPainted": 4})
+
+
+class AutoChessPublicationBehaviorTests(unittest.TestCase):
+    def fixture(self, variant="standard"):
+        from wujiang.tools.ai_equivalence import create_late_chess_fixture
+        from wujiang.tactical.rooms.multiplayer import GameRoom
+        room = GameRoom("FRAME81", mode="autochess", seat_count=8)
+        room.autochess = create_late_chess_fixture(31, variant=variant)
+        room.status = "battle"
+        for index, seat in room.seats.items():
+            seat.set_ai()
+            if index in (1, 2):
+                seat.controller_type = "human"
+            seat.token = f"viewer-{index}"
+        room.serialize_state("viewer-1", base_url="https://one.example", advance_chess=False)
+        room.serialize_state("viewer-2", base_url="https://two.example", advance_chess=False)
+        return room
+
+    def test_four_dense_saved_electronic_hell_and_equipped_boards_publish_without_state_rng_or_id_changes(self):
+        import gzip
+        import pickle
+        from wujiang.tactical.rooms.autochess_frames import publish_match
+        from wujiang.tactical.rooms.ai_acceleration import _id_state
+        for variant in ("electronic-heavy", "hell-heavy", "equipped"):
+            with self.subTest(variant=variant):
+                # Reuse recorded slow states; preparing the series' legal turn
+                # order can itself run AI and does not belong in a short test.
+                folder = ROOT / "reports/full-ai-baseline-20261022-105851-793032" / variant
+                if not (folder / "checkpoints.json").exists():
+                    self.skipTest("saved dense states unavailable")
+                request = {"electronic-heavy": 189, "hell-heavy": 114, "equipped": 2}[variant]
+                record = next(row for row in json.loads((folder / "checkpoints.json").read_text(encoding="utf-8"))
+                              if row["request"] == request)
+                raw = gzip.decompress((folder / record["checkpoint"]).read_bytes())
+                room = self.fixture()
+                chess = room.autochess
+                self.assertEqual(len(chess.matches), 4)
+                for match in chess.matches:
+                    match.runner.battle = pickle.loads(raw)[0]
+                room._chess_state_cache.clear()
+                room.serialize_state("viewer-1", base_url="https://one.example", advance_chess=False)
+                room.serialize_state("viewer-2", base_url="https://two.example", advance_chess=False)
+                battles = [match.runner.battle for match in chess.matches]
+                self.assertTrue(all(len(battle.all_units()) >= 20 for battle in battles))
+                before = [pickle.dumps(battle) for battle in battles], random.getstate(), \
+                         [battle.chess_rng.getstate() for battle in battles], _id_state()
+                for match in chess.matches:
+                    publish_match(room, chess, match)
+                self.assertEqual(([pickle.dumps(battle) for battle in battles], random.getstate(),
+                                  [battle.chess_rng.getstate() for battle in battles], _id_state()), before)
+
+    def test_new_summon_preview_is_published_without_consuming_real_ids(self):
+        from wujiang.tactical.rooms import autochess
+        from wujiang.tactical.rooms.autochess_frames import publish_match
+        from wujiang.tactical.rooms.ai_acceleration import _id_state
+        from wujiang.tactical.engine import core
+        room = self.fixture()
+        chess, match = room.autochess, room.autochess.matches[0]
+        battle = match.runner.battle
+        actor = create_hero("excel_r127", 1)
+        destination = next(core.Position(x, y) for y in range(battle.height) for x in range(battle.width)
+                           if battle.can_place_unit(actor, core.Position(x, y), mover=actor))
+        battle.add_unit(actor, destination, trigger_enter_effects=False)
+        before = _id_state()
+        def companion(code):
+            next(core._id_counter)
+            return "preview"
+        with mock.patch.object(autochess, "_entry_companion", side_effect=companion):
+            publish_match(room, chess, match)
+        self.assertEqual(_id_state(), before)
+        frame = room._chess_state_cache[("viewer-1", "https://one.example")]
+        self.assertEqual(frame["room"]["autochess"]["hero_previews"][actor.hero_code]["entry_companion"], "preview")
+
+    def test_reading_published_frames_keeps_human_heartbeat_and_recovers_publication_failure(self):
+        room = self.fixture()
+        room.seats[1].last_seen_at = 1
+        room.serialize_state("viewer-1", base_url="https://one.example", advance_chess=False)
+        self.assertGreater(room.seats[1].last_seen_at, 1)
+        room._chess_frame_publish_failed = True
+        with mock.patch.object(room, "_autochess_serialize", wraps=room._autochess_serialize) as serialize:
+            room.serialize_state("viewer-1", base_url="https://one.example", advance_chess=False)
+        serialize.assert_called_once()
+        self.assertFalse(room._chess_frame_publish_failed)
+        self.assertNotIn("_chess_frame_publish_failed", room.__getstate__())
+
+    def test_step_publishes_detached_frame_and_preserves_private_viewers_and_battle_state(self):
+        import pickle
+        from wujiang.tactical.rooms.autochess_frames import publish_match
+        from wujiang.tactical.rooms import ai_acceleration
+        room = self.fixture()
+        chess, key = room.autochess, ("viewer-1", "https://one.example")
+        match = chess.matches[0]
+        battle = match.runner.battle
+        actor = battle.all_units()[0]
+        old = room._chess_state_cache[key]
+        actor.current_hp -= .125
+        chess._change()
+        before = pickle.dumps(battle), random.getstate(), battle.chess_rng.getstate(), ai_acceleration._id_state()
+        publish_match(room, chess, match)
+        self.assertEqual((pickle.dumps(battle), random.getstate(), battle.chess_rng.getstate(), ai_acceleration._id_state()), before)
+        frame = room.serialize_state("viewer-1", base_url="https://one.example", advance_chess=False)
+        self.assertEqual(frame["room"]["autochess"]["version"], chess.version)
+        self.assertEqual(frame["room"]["autochess"]["matches"][0]["battle"]["units"][0]["hp"], actor.current_hp)
+        self.assertNotEqual(old["room"]["autochess"]["matches"][0]["battle"]["units"][0]["hp"], actor.current_hp)
+        self.assertEqual(frame["room"]["invite_url"], "https://one.example/?room=FRAME81")
+        own = next(player for player in frame["room"]["autochess"]["players"] if player["seat_id"] == 1)
+        other = next(player for player in frame["room"]["autochess"]["players"] if player["seat_id"] == 2)
+        self.assertIn("pieces", own)
+        self.assertNotIn("pieces", other)
+        second = room.serialize_state("viewer-2", base_url="https://two.example", advance_chess=False)
+        self.assertEqual(second["room"]["viewer_player_id"], 2)
+        self.assertEqual(second["room"]["invite_url"], "https://two.example/?room=FRAME81")
+        frame["room"]["autochess"]["matches"][0]["battle"]["units"].clear()
+        self.assertTrue(room._chess_state_cache[key]["room"]["autochess"]["matches"][0]["battle"]["units"])
+
+    def test_committed_frame_remains_readable_while_next_trial_holds_room_lock(self):
+        from wujiang.tactical.rooms.autochess_frames import publish_match
+        room = self.fixture()
+        chess, match = room.autochess, room.autochess.matches[0]
+        actor = match.runner.battle.all_units()[0]
+        committed = actor.current_hp
+        chess._change()
+        publish_match(room, chess, match)
+        entered, release = threading.Event(), threading.Event()
+        def trial():
+            with room._lock:
+                actor.current_hp = .0001
+                entered.set()
+                release.wait(2)
+                actor.current_hp = committed
+        worker = threading.Thread(target=trial)
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(1))
+            with mock.patch.object(room, "_autochess_serialize", side_effect=AssertionError("read live trial")):
+                frame = room.serialize_state("viewer-1", base_url="https://one.example", advance_chess=False)
+            self.assertEqual(frame["room"]["autochess"]["matches"][0]["battle"]["units"][0]["hp"], committed)
+        finally:
+            release.set()
+            worker.join(2)
+        self.assertFalse(worker.is_alive())
+
+    def test_published_frame_is_invalidated_by_economy_round_or_phase_change(self):
+        from wujiang.tactical.rooms.autochess_frames import current_frame, publish_match
+        room = self.fixture()
+        chess, key = room.autochess, ("viewer-1", "https://one.example")
+        original = room._chess_state_cache[key]
+        self.assertTrue(current_frame(room, original))
+        room.version += 1
+        self.assertFalse(current_frame(room, original))
+        publish_match(room, chess, chess.matches[0])
+        self.assertIs(room._chess_state_cache[key], original)
+        room.version -= 1
+        chess.round_number += 1
+        self.assertFalse(current_frame(room, original))
+        chess.round_number -= 1
+        chess.phase = "preparation"
+        self.assertFalse(current_frame(room, original))
+
+    def test_worker_publishes_completed_step_before_starting_next_board(self):
+        from types import SimpleNamespace
+        from wujiang.tactical.rooms import multiplayer
+        matches = [SimpleNamespace(result=None, index=index) for index in range(4)]
+        events = []
+        chess = SimpleNamespace(phase="battle", matches=matches, next_match_cursor=0)
+        def advance(match):
+            events.append(("compute", match.index))
+            return True
+        chess._advance_match = advance
+        room = SimpleNamespace(_lock=threading.RLock(), _closed=False, autochess=chess,
+                               room_id="FRAME82", chess_battle_speed=8)
+        def pause(seconds):
+            if len(events) == 8:
+                chess.phase = "preparation"
+        with mock.patch.object(multiplayer.time, "sleep", side_effect=pause), \
+                mock.patch("wujiang.tactical.rooms.autochess_frames.publish_match",
+                           side_effect=lambda room, chess, match: events.append(("publish", match.index))):
+            multiplayer._autochess_battle_worker(room)
+        self.assertEqual(events, [(kind, index) for index in range(4) for kind in ("compute", "publish")])
+
+    @unittest.skipIf(quickjs is None, "JavaScript evaluator unavailable")
+    def test_unwatched_board_actions_keep_dom_key_but_selected_board_and_record_changes_do_not(self):
+        context = quickjs.Context()
+        context.eval("""
+            const chess={phase:'battle',version:1,viewer_id:1,players:[{seat_id:1},{seat_id:3}],
+              matches:[{index:0,left:1,right:2,battle:{hp:1}}, {index:1,left:3,right:4,battle:{hp:1}}]};
+            const state={room:{mode:'autochess',autochess:chess}};
+        """)
+        context.eval(strip_module_syntax(frontend_module("autochess-ui.js")))
+        result = json.loads(context.eval("""
+            const first=chessPanelRenderKey(chess);
+            chess.version++;
+            chess.matches[1].battle.hp=.5;
+            const otherKept=chessPanelRenderKey(chess)===first;
+            chess.matches[0].battle.hp=.75;
+            const watchedChanged=chessPanelRenderKey(chess)!==first;
+            chessDock='log'; logMatchKey='3:4:1';
+            const logged=chessPanelRenderKey(chess);
+            chess.matches[1].battle.hp=.25;
+            const recordChanged=chessPanelRenderKey(chess)!==logged;
+            JSON.stringify({otherKept,watchedChanged,recordChanged});
+        """))
+        self.assertEqual(result, {"otherKept": True, "watchedChanged": True, "recordChanged": True})
+
+    @unittest.skipIf(quickjs is None, "JavaScript evaluator unavailable")
+    def test_spectator_cadence_tracks_speed_and_keeps_background_and_failure_backoff(self):
+        context = quickjs.Context()
+        context.eval(strip_module_syntax(frontend_module("spectator-timing.js")))
+        result = json.loads(context.eval("""
+            const room = {mode:'autochess', status:'battle', chess_battle_speed:8, autochess:{phase:'battle'}};
+            const fast = roomPollDelay(room);
+            const hidden = roomPollDelay(room, true);
+            const failed = roomPollDelay(room, false, 8000);
+            room.chess_battle_speed = 1;
+            const normal = roomPollDelay(room);
+            room.autochess.phase = 'preparation';
+            const prep = roomPollDelay(room);
+            const regular = roomPollDelay({status:'battle'});
+            const one = chessEffectTiming(1), eight = chessEffectTiming(8), reduced = chessEffectTiming(16, true);
+            JSON.stringify({fast,hidden,failed,normal,prep,regular,one,eight,reduced});
+        """))
+        self.assertEqual([result[key] for key in ("fast", "hidden", "failed", "normal", "prep", "regular")],
+                         [200, 1500, 8000, 400, 800, 800])
+        self.assertLess(result["eight"]["duration"], result["one"]["duration"])
+        self.assertLess(result["eight"]["spacing"] * 5, result["fast"])
+        self.assertEqual(result["reduced"]["spacing"], 0)
+
+    @unittest.skipIf(quickjs is None, "JavaScript evaluator unavailable")
+    def test_new_committed_actions_cancel_old_visual_queue(self):
+        context = quickjs.Context()
+        context.eval("""
+            const state={room:{chess_battle_speed:8}};
+            let timerId=0, painted=[];
+            const pending=new Map();
+            const window={setTimeout(callback,delay){const id=++timerId;
+                            pending.set(id,{callback(){pending.delete(id);callback();},delay});return id;},
+                          clearTimeout(id){pending.delete(id);}};
+            const layer={resets:0,replaceChildren(){this.resets++;}};
+            const screen={getBoundingClientRect(){return {width:100};},querySelector(){return {};}};
+            const document={visibilityState:'visible',getElementById(id){return id==='autochess-screen'?screen:layer;}};
+        """)
+        context.eval(strip_module_syntax(frontend_module("spectator-timing.js")))
+        context.eval(strip_module_syntax(frontend_module("autochess-ui.js")))
+        result = json.loads(context.eval("""
+            drawChessEffect=(stage,screen,battle,event)=>painted.push(event.id);
+            playChessEffects({}, {visual_events:[{id:1},{id:2},{id:3}]}, 'board', 1);
+            const oldIds=[...pending.keys()];
+            playChessEffects({}, {visual_events:[{id:4},{id:5},{id:6},{id:7},{id:8},{id:9}]}, 'board', 1);
+            const cancelled=oldIds.every(id=>!pending.has(id));
+            const maxDelay=Math.max(...[...pending.values()].map(item=>item.delay));
+            for(const item of [...pending.values()]) item.callback();
+            playChessEffects({}, {visual_events:[{id:10}]}, 'board', 1);
+            document.visibilityState='hidden';
+            playChessEffects({}, {visual_events:[{id:10}]}, 'board', 1);
+            JSON.stringify({cancelled,maxDelay,painted,hiddenCleared:pending.size===0});
+        """))
+        self.assertTrue(result["cancelled"])
+        self.assertLess(result["maxDelay"], 200)
+        self.assertEqual(result["painted"], [4, 5, 6, 7, 8, 9])
+        self.assertTrue(result["hiddenCleared"])
 
 
 class AIDecisionBehaviorTests(unittest.TestCase):
@@ -2960,8 +6965,31 @@ class HeroBatchH12AIDecisionTests(unittest.TestCase):
         cat.position = Position(0, 0)
         skill_by_code(cat, "cat_taunt_roar").execute(battle, cat, queued.payload)
 
-        self.assertLess(bard.current_hp, before_hp)
+        self.assertEqual(bard.current_hp, before_hp)
         self.assertTrue(bard.has_status("嘲讽之吼"))
+
+    def test_cat_roar_pierces_shield_without_damage_and_dodge_prevents_taunt(self) -> None:
+        battle = create_battle("excel_r142", "bard")
+        cat, bard = primary_hero(battle, 1), primary_hero(battle, 2)
+        cat.position, bard.position = Position(4, 4), Position(5, 4)
+        bard.max_health = bard.current_hp = 10
+        bard.shields = 1
+        bard.dodge_charges = 1
+        roar = skill_by_code(cat, "cat_taunt_roar")
+
+        roar.execute(battle, cat, {})
+
+        self.assertEqual(bard.current_hp, 10)
+        self.assertEqual(bard.shields, 0)
+        self.assertEqual(bard.dodge_charges, 0)
+        self.assertFalse(bard.has_status("嘲讽之吼"))
+
+        bard.magic_immunity = True
+        bard.shields = 1
+        roar.execute(battle, cat, {})
+        self.assertEqual(bard.current_hp, 10)
+        self.assertEqual(bard.shields, 1)
+        self.assertFalse(bard.has_status("嘲讽之吼"))
 
     def test_solar_judgment_keeps_declared_area_after_caster_is_moved(self) -> None:
         battle = create_battle("excel_r126", "bard")
@@ -3086,7 +7114,7 @@ class HeroBatchH12AIDecisionTests(unittest.TestCase):
         self.assertEqual(action["type"], "attack")
         self.assertEqual(action["target_unit_id"], cat.unit_id)
 
-    def test_cat_ai_rejects_roar_when_friendly_damage_and_forced_attacks_outweigh_enemy_value(self) -> None:
+    def test_cat_ai_rejects_roar_when_friendly_control_outweighs_enemy_value(self) -> None:
         battle = create_battle(["excel_r142", "fire_funeral", "excel_r126"], "bard")
         cat = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r142")
         allies = [unit for unit in battle.hero_units(1) if unit.unit_id != cat.unit_id]
@@ -3101,6 +7129,22 @@ class HeroBatchH12AIDecisionTests(unittest.TestCase):
         action = choose_turn_action(battle, cat, "standard")
 
         self.assertNotEqual(action.get("skill_code"), "cat_taunt_roar")
+
+    def test_cat_roar_ai_values_control_without_estimated_damage(self) -> None:
+        from wujiang.tactical.rooms.ai import skill_payload_has_effective_enemy_impact, taunt_control_score
+
+        battle = create_battle("excel_r142", "bard")
+        cat, bard = primary_hero(battle, 1), primary_hero(battle, 2)
+        cat.position, bard.position = Position(4, 4), Position(5, 4)
+        skill = skill_by_code(cat, "cat_taunt_roar")
+        payload = {"type": "skill", "unit_id": cat.unit_id, "skill_code": skill.code}
+        action = {"code": skill.code}
+        with mock.patch("wujiang.tactical.rooms.ai.estimate_skill_damage", side_effect=AssertionError("roar has no damage")):
+            score = taunt_control_score(battle, cat, skill, payload, skill.code, [bard], difficulty_profile("standard"))
+        self.assertIsInstance(score, float)
+        self.assertTrue(skill_payload_has_effective_enemy_impact(battle, cat, action, payload))
+        bard.magic_immunity = True
+        self.assertFalse(skill_payload_has_effective_enemy_impact(battle, cat, action, payload))
 
     def test_general_ai_prices_cat_retaliation_and_prefers_an_exposed_alternative_target(self) -> None:
         battle = create_battle(["excel_r142", "fire_funeral"], "bard")
@@ -9568,6 +13612,25 @@ class CombatBehaviorTests(unittest.TestCase):
         self.assertEqual(battle.current_turn_unit().hero_code, "dark_human")
         self.assertEqual(battle.active_player, 1)
 
+    def test_scenario_uneven_rosters_finish_surplus_slots_at_round_end_in_classic_and_random(self) -> None:
+        red = ["bard"]
+        blue = ["ellie", "dark_human", "fire_funeral", "jade", "doomlight_dragon"]
+        for mode in ("classic", "random"):
+            with self.subTest(mode=mode):
+                battle = create_battle(red, blue, mode=mode)
+                order = list(battle.turn_order_unit_ids)
+                sides = [battle.units[unit_id].player_id for unit_id in order]
+                self.assertEqual(len(set(order)), 6)
+                self.assertEqual(sides.count(1), 1)
+                self.assertEqual(sides.count(2), 5)
+                self.assertEqual(sides[-4:], [2] * 4)
+                visited = []
+                for _ in range(6):
+                    visited.append(battle.current_turn_slot_unit_id())
+                    battle.advance_turn_slot_index()
+                self.assertEqual(visited, order)
+                self.assertEqual(battle.round_number, 2)
+
     def test_scenario_timeout_rule_uses_fixed_hero_turn_limit(self) -> None:
         # Given a four-hero battle with no damage or kills happening
         battle = create_battle(["bard", "ellie"], ["dark_human", "elite_soldier"])
@@ -15966,10 +20029,38 @@ class DevelopedHeroReviewR03BehaviorTests(unittest.TestCase):
         target.position, target.banished = None, True
         self.assertFalse(lock.can_attack_target(battle, lina, other)[0])
         lina.attacks_used = 2
+        mana_before = lina.current_mana
         battle.resolve_damage(DamageContext(source=lina, target=other, attack_power=0, raw_damage=1,
                                            is_skill=True, from_field_effect=True, action_name="天气击破", tags={"skill"}))
         self.assertEqual(lina.attacks_used, 2)
-        self.assertFalse(next(trait for trait in lina.traits if trait.name == "击破重置").used_this_turn)
+        self.assertEqual(lina.current_mana, mana_before)
+
+    def test_lina_ai_still_values_second_eligible_kill_without_a_movement_reset(self) -> None:
+        from wujiang.tactical.rooms.ai import reviewed_attack_synergy
+
+        battle = create_battle("undead_king_lina", ["bard", "ellie", "fire_funeral"])
+        lina = primary_hero(battle, 1)
+        bard = next(unit for unit in battle.hero_units(2) if unit.hero_code == "bard")
+        ellie = next(unit for unit in battle.hero_units(2) if unit.hero_code == "ellie")
+        funeral = next(unit for unit in battle.hero_units(2) if unit.hero_code == "fire_funeral")
+        lina.position = Position(1, 4)
+        bard.position, ellie.position, funeral.position = Position(4, 4), Position(4, 5), Position(4, 6)
+        bard.current_hp = ellie.current_hp = 0.25
+        bard.current_mana = ellie.current_mana = 1
+        lina.current_mana = 0
+        lina.move_used = True
+        lina.attacks_used = 1
+        first_value = reviewed_attack_synergy(battle, lina, bard, 1)
+
+        battle.resolve_damage(DamageContext(source=lina, target=bard, attack_power=0, raw_damage=1,
+                                           is_skill=False, action_name="首个击破", tags={"attack"}))
+        self.assertTrue(lina.move_used)
+        lina.current_mana = 0
+        lina.attacks_used = 1
+        second_value = reviewed_attack_synergy(battle, lina, ellie, 1)
+
+        self.assertGreater(first_value, 0)
+        self.assertAlmostEqual(second_value, first_value)
 
     def test_crazy_sand_ai_payload_matches_fixed_line_and_blocked_landing(self) -> None:
         from wujiang.tactical.rooms.ai import skill_payloads_for_action, score_skill_payload
@@ -28181,6 +32272,25 @@ class BPSpecialModeBehaviorTests(unittest.TestCase):
         self.assertEqual(restored.special_mode_codes, ("double_down", "fast", "no_recovery"))
         self.assertEqual(restored.hero_units(1)[0].stat("speed"), 10)
 
+    def test_fast_uneven_rosters_still_leave_surplus_heroes_at_round_end(self):
+        from wujiang.tactical.heroes.registry import RoomBattleEntry, create_room_battle
+
+        red = [RoomBattleEntry("bard", 1, 1)]
+        blue = [RoomBattleEntry(code, 2, 2) for code in (
+            "ellie", "dark_human", "fire_funeral", "jade", "doomlight_dragon",
+        )]
+        normal = create_room_battle(red, blue, mode="bp")
+        fast = create_room_battle(red, blue, mode="bp", special_mode_codes=("fast",))
+        fast_teams = [fast.units[unit_id].player_id for unit_id in fast.turn_order_unit_ids]
+        self.assertEqual(fast_teams[-4:], [2] * 4)
+        self.assertEqual((fast_teams.count(1), fast_teams.count(2)), (1, 5))
+        for team in (1, 2):
+            normal_levels = [normal.units[unit_id].level for unit_id in normal.turn_order_unit_ids
+                             if normal.units[unit_id].player_id == team]
+            fast_levels = [fast.units[unit_id].level for unit_id in fast.turn_order_unit_ids
+                           if fast.units[unit_id].player_id == team]
+            self.assertEqual(fast_levels, list(reversed(normal_levels)))
+
     def test_recovery_damage_sudden_death_and_soft_persimmon(self):
         from wujiang.tactical.engine.core import DamageContext, HealContext
 
@@ -28387,14 +32497,16 @@ class BPSpecialModeBehaviorTests(unittest.TestCase):
         )
         attacker = next(hero for hero in battle.hero_units(1) if hero.hero_code == "undead_king_lina")
         victim = next(hero for hero in battle.hero_units(2) if hero.hero_code == "fire_funeral")
-        reward = next(trait for trait in attacker.traits if trait.name == "击破重置")
         attacker.move_used = True
+        attacker.normal_move_actions_used = 1
+        attacker.normal_move_steps_used = 2
         attacker.attacks_used = 1
         battle.resolve_damage(DamageContext(source=attacker, target=victim, attack_power=0,
                                             is_skill=False, action_name="击破测试", raw_damage=2,
                                             tags={"attack"}))
-        self.assertTrue(reward.used_this_turn)
-        self.assertFalse(attacker.move_used)
+        self.assertTrue(attacker.move_used)
+        self.assertEqual(attacker.normal_move_actions_used, 1)
+        self.assertEqual(attacker.normal_move_steps_used, 2)
         self.assertEqual(attacker.attacks_used, 0)
         self.assertTrue(victim.alive)
 
@@ -28714,6 +32826,60 @@ class BPSpecialModeBehaviorTests(unittest.TestCase):
 
 
 class BPRoomBehaviorTests(unittest.TestCase):
+    def test_bp_default_board_and_landscape_spawn_spacing(self):
+        from itertools import combinations
+        from types import SimpleNamespace
+
+        from wujiang.tactical.heroes.registry import (
+            RoomBattleEntry, bp_spawn_positions, create_room_battle, spawn_cells_for_anchor,
+        )
+        from wujiang.tactical.rooms.multiplayer import GameRoom
+
+        room = GameRoom("BPBOARD", mode="bp")
+        _, host_token = room.create_host("Red")
+        self.assertEqual((room.board_width, room.board_height), (16, 11))
+        self.assertEqual((room.serialize_state(host_token)["room"]["board_width"],
+                          room.serialize_state(host_token)["room"]["board_height"]), (16, 11))
+        room.set_mode(host_token, "classic")
+        self.assertEqual((room.board_width, room.board_height), (10, 10))
+        room.set_mode(host_token, "bp")
+        self.assertEqual((room.board_width, room.board_height), (16, 11))
+        room.set_board_size(host_token, 18, 12)
+        room.set_mode(host_token, "classic")
+        self.assertEqual((room.board_width, room.board_height), (18, 12))
+
+        for count, expected_left in (
+            (3, {(2, 2), (2, 5), (2, 8)}),
+            (4, {(0, 1), (4, 2), (0, 8), (4, 9)}),
+            (5, {(0, 1), (4, 2), (2, 5), (0, 8), (4, 9)}),
+        ):
+            with self.subTest(team_size=count):
+                red = [RoomBattleEntry("ellie", 1, 1) for _ in range(count)]
+                blue = [RoomBattleEntry("ellie", 2, 2) for _ in range(count)]
+                battle = create_room_battle(red, blue, mode="bp", board_width=16, board_height=11)
+                self.assertEqual((battle.width, battle.height), (16, 11))
+                for team, expected in ((1, expected_left),
+                                       (2, {(x + 11, y) for x, y in expected_left})):
+                    positions = {(unit.position.x, unit.position.y)
+                                 for unit in battle.all_units() if unit.player_id == team and not unit.is_summon}
+                    self.assertEqual(positions, expected)
+                    for first, second in combinations(positions, 2):
+                        self.assertGreaterEqual(max(abs(first[0] - second[0]),
+                                                    abs(first[1] - second[1])), 3)
+                red_by_row = {y: x for x, y in expected_left}
+                blue_by_row = {y: x for x, y in {(x + 11, y) for x, y in expected_left}}
+                self.assertEqual(len(red_by_row), count)
+                self.assertEqual(len(blue_by_row), count)
+                self.assertEqual(set(red_by_row), set(blue_by_row))
+                self.assertTrue(all(blue_by_row[y] - red_by_row[y] == 11 for y in red_by_row))
+
+        mixed = [SimpleNamespace(entry_footprint_width=2, entry_footprint_height=2)]
+        mixed.extend(SimpleNamespace() for _ in range(4))
+        positions = bp_spawn_positions(mixed, 16, 11, player_id=1)
+        occupied = [spawn_cells_for_anchor(unit, positions[id(unit)]) for unit in mixed]
+        self.assertTrue(all(not first & second for first, second in combinations(occupied, 2)))
+        self.assertTrue(all(0 <= x < 8 and 0 <= y < 11 for cells in occupied for x, y in cells))
+
     def test_new_bp_room_defaults_to_standard_tier_and_keeps_legacy_formats(self):
         from wujiang.tactical.rooms.multiplayer import GameRoom, normalize_bp_format
 
@@ -30802,7 +34968,7 @@ class AutoChessBehaviorTests(unittest.TestCase):
         chess.matches = [ChessMatch(1, 2, result={"winner": 1, "damage": 2, "hero_kills": 1}),
                          ChessMatch(3, 4, result={"winner": 3, "damage": 1, "hero_kills": 0})]
         chess._finish_round()
-        self.assertEqual(chess.players[1].gold, 50 + 1 + 1 + 1 + 5 + 5)
+        self.assertEqual(chess.players[1].gold, 50 + 1 + 2 + 1 + 5 + 3)
         self.assertEqual(chess.players[2].health, 28)
         self.assertEqual(chess.players[2].loss_streak, 1)
         chess.matches = [ChessMatch(1, 2, result={"winner": 1, "damage": 1, "hero_kills": 0}),
@@ -30811,9 +34977,62 @@ class AutoChessBehaviorTests(unittest.TestCase):
         old_gold = chess.players[3].gold
         chess._finish_round()
         self.assertEqual(chess.players[1].health, 28)
-        self.assertEqual(chess.players[3].gold - old_gold, 1 + 0 + 2 + 5 + min(5, (old_gold + 3) // 10))
+        self.assertEqual(chess.history[-1]["matches"][2]["actual_health_loss"], 2)
+        self.assertEqual(chess.players[3].gold - old_gold,
+                         1 + 1 + 2 + 5 + min(3, (old_gold + 4) // 10))
 
-    def test_timeout_uses_living_bodies_health_damage_then_seeded_coin(self):
+    def test_interest_uses_ten_gold_steps_from_previous_balance_and_caps_at_three(self):
+        from wujiang.tactical.rooms.autochess import AutoChessState
+
+        chess = AutoChessState(8, seed=23)
+        chess.start()
+        self.assertEqual([chess.players[seat].gold for seat in range(1, 7)], [10] * 6)
+        self.assertEqual((chess.config.interest_step, chess.config.interest_cap), (10, 3))
+        for seat, balance in enumerate((9, 10, 29, 30, 40, 50), start=1):
+            chess.players[seat].gold = balance
+        chess._begin_round()
+        self.assertEqual([chess.players[seat].gold for seat in range(1, 7)],
+                         [14, 16, 36, 38, 48, 58])
+
+    def test_gold_uses_actual_opponent_health_loss_and_caps_both_streaks(self):
+        from wujiang.tactical.rooms.autochess import AutoChessState, ChessMatch
+
+        chess = AutoChessState(4, seed=21)
+        chess.start()
+        chess.players[1].win_streak = 4
+        chess.players[2].loss_streak = 4
+        chess.players[2].health = 2
+        chess.matches = [ChessMatch(1, 2, result={"winner": 1, "damage": 7, "hero_kills": 9}),
+                         ChessMatch(3, 4, result={"winner": 1, "damage": 7, "hero_kills": 0})]
+        chess._finish_round()
+        settled = chess.history[-1]["players"]
+        self.assertEqual((settled[1]["victory_gold"], settled[1]["streak_gold"],
+                          settled[1]["health_damage_gold"], settled[1]["gold_gain"]),
+                         (1, 3, 2, 6))
+        self.assertEqual((settled[2]["streak_gold"], settled[2]["health_loss"],
+                          settled[2]["health"]), (3, 2, 0))
+        self.assertTrue(chess.players[2].eliminated)
+        self.assertEqual(chess.history[-1]["matches"][0]["actual_health_loss"], 2)
+        self.assertEqual((settled[3]["health_damage_gold"], settled[3]["gold_gain"]), (3, 5))
+        self.assertEqual(settled[4]["health_loss"], 7)
+
+    def test_winning_against_mirror_keeps_normal_gold_without_deducting_real_health(self):
+        from wujiang.tactical.rooms.autochess import AutoChessState, ChessMatch
+
+        chess = AutoChessState(4, seed=22)
+        chess.start()
+        chess.players[4].eliminated = True
+        chess.matches = [ChessMatch(1, 2, result={"winner": 1, "damage": 1}),
+                         ChessMatch(3, 1, mirror=True, result={"winner": 1, "damage": 7})]
+        before_mirror_health = chess.players[1].health
+        chess._finish_round()
+        settled = chess.history[-1]["players"]
+        self.assertEqual((settled[3]["victory_gold"], settled[3]["streak_gold"],
+                          settled[3]["health_damage_gold"]), (1, 1, 3))
+        self.assertEqual(chess.history[-1]["matches"][1]["actual_health_loss"], 0)
+        self.assertEqual(chess.players[1].health, before_mirror_health)
+
+    def test_timeout_uses_only_living_unit_count_then_seeded_draw(self):
         from wujiang.tactical.engine.core import Battle, Position
         from wujiang.tactical.heroes.registry import create_hero
         from wujiang.tactical.rooms.autochess import chess_timeout_result
@@ -30822,19 +35041,126 @@ class AutoChessBehaviorTests(unittest.TestCase):
         battle.add_unit(left, Position(1, 2))
         battle.add_unit(right, Position(8, 2))
         battle.chess_tie_winner = 2
-        self.assertEqual(chess_timeout_result(battle)["criterion"], "seeded_coin")
-        self.assertEqual(chess_timeout_result(battle)["winner"], 2)
+        self.assertEqual((chess_timeout_result(battle)["criterion"],
+                          chess_timeout_result(battle)["winner"],
+                          chess_timeout_result(battle)["damage"]), ("seeded_coin", 2, 1))
         right.current_hp = right.max_health / 2
-        self.assertEqual(chess_timeout_result(battle)["criterion"], "health_ratio")
-        right.current_hp = right.max_health
+        self.assertEqual((chess_timeout_result(battle)["criterion"],
+                          chess_timeout_result(battle)["winner"]), ("seeded_coin", 2))
         battle.summary_events.append({"kind": "damage", "actor_player_id": 1,
                                       "target_player_id": 2, "amount": 0.25})
-        self.assertEqual(chess_timeout_result(battle)["criterion"], "enemy_damage")
-        clone = create_hero("ellie", 1)
-        clone.is_clone = True
-        battle.add_unit(clone, Position(2, 2))
-        self.assertEqual(chess_timeout_result(battle)["damage"], 1)
-        self.assertEqual(chess_timeout_result(battle)["criterion"], "units")
+        self.assertEqual((chess_timeout_result(battle)["criterion"],
+                          chess_timeout_result(battle)["winner"]), ("seeded_coin", 2))
+        for x in (2, 3, 4):
+            clone = create_hero("ellie", 1)
+            clone.is_clone = True
+            battle.add_unit(clone, Position(x, 2))
+        self.assertEqual((chess_timeout_result(battle)["criterion"],
+                          chess_timeout_result(battle)["winner"],
+                          chess_timeout_result(battle)["damage"]), ("units", 1, 3))
+
+    def test_simultaneous_zero_health_eliminates_everyone_without_rescue(self):
+        from wujiang.tactical.rooms.autochess import AutoChessState, ChessMatch
+
+        chess = AutoChessState(4, seed=24)
+        chess.start()
+        for player in chess.players.values():
+            player.health = 1
+        chess.matches = [ChessMatch(1, 2, result={"winner": 1, "damage": 1}),
+                         ChessMatch(2, 3, result={"winner": 1, "damage": 1}),
+                         ChessMatch(3, 4, result={"winner": 1, "damage": 1}),
+                         ChessMatch(4, 1, result={"winner": 1, "damage": 1})]
+        chess._finish_round()
+        self.assertEqual(chess.phase, "finished")
+        self.assertIsNone(chess.champion)
+        self.assertTrue(all(player.eliminated and player.health == 0
+                            for player in chess.players.values()))
+
+    def test_uneven_survivors_act_once_each_per_complete_autochess_round(self):
+        from wujiang.tactical.rooms.autochess import AutoChessState, ChessMatch, ChessPiece
+
+        chess = AutoChessState(4, seed=82)
+        chess.start()
+        for seat_id in (1, 2):
+            for index in range(5):
+                chess.players[seat_id].pieces.append(
+                    ChessPiece(f"turn-{seat_id}-{index}", "ellie", x=0, y=2 * index))
+        runner = chess._create_match_battle(ChessMatch(1, 2))
+        battle = runner.battle
+        self.assertEqual((len(battle.turn_order_unit_ids), battle.chess_round_cap), (10, 30))
+
+        # Complete the opening 5v5 round, then leave one blue hero alive.
+        opening = []
+        for _ in range(10):
+            opening.append(battle.current_turn_unit().unit_id)
+            battle.perform_action({"type": "end_turn"})
+        self.assertEqual(len(set(opening)), 10)
+        self.assertEqual(battle.round_number, 2)
+        blue = [unit for unit in battle.hero_units(1) if unit.alive]
+        active = battle.current_turn_unit()
+        sole_blue = active if active.player_id == 1 else blue[0]
+        for unit in blue:
+            if unit is sole_blue:
+                continue
+            unit.current_hp = 0
+            unit.alive = False
+        battle.cleanup_dead_units()
+        self.assertEqual(len(battle.turn_order_unit_ids), 10)
+
+        # The four dead slots are skipped; red does not get five replies from blue.
+        survivors = []
+        for _ in range(6):
+            actor = battle.current_turn_unit()
+            survivors.append((actor.unit_id, actor.player_id))
+            self.assertEqual(battle.round_number, 2)
+            battle.perform_action({"type": "end_turn"})
+        self.assertEqual(len({unit_id for unit_id, _ in survivors}), 6)
+        self.assertEqual([side for _, side in survivors].count(1), 1)
+        self.assertEqual([side for _, side in survivors].count(2), 5)
+        self.assertEqual((battle.round_number, battle.chess_round_cap), (3, 30))
+
+    def test_every_roster_has_thirty_round_cap_and_last_round_times_out(self):
+        from wujiang.tactical.rooms.autochess import (
+            AutoChessState, ChessMatch, ChessPiece, battle_observer_snapshot, chess_round_limit,
+        )
+
+        self.assertEqual({count: chess_round_limit(count) for count in (0, 2, 4, 6, 10, 20, 24)},
+                         {count: 30 for count in (0, 2, 4, 6, 10, 20, 24)})
+        chess = AutoChessState(4, seed=81)
+        chess.start()
+        for seat_id in (1, 2):
+            for index in range(3):
+                chess.players[seat_id].pieces.append(
+                    ChessPiece(f"round-{seat_id}-{index}", "ellie", x=0, y=2 * index))
+        runner = chess._create_match_battle(ChessMatch(1, 2))
+        battle = runner.battle
+        self.assertEqual((battle.chess_starting_hero_count, battle.chess_round_cap), (6, 30))
+        first = battle_observer_snapshot(battle)
+        self.assertEqual((first["round_number"], first["round_limit"], first["rounds_remaining"]),
+                         (1, 30, 30))
+        # The live counter counts the current round and reaches zero only after it.
+        battle.round_number = 30
+        self.assertEqual(battle_observer_snapshot(battle)["rounds_remaining"], 1)
+        battle.round_number = 31
+        battle.start_current_turn()
+        self.assertEqual(battle.win_reason_code, "chess_timeout")
+        self.assertIn(battle.winner, (1, 2))
+        self.assertEqual(battle_observer_snapshot(battle)["rounds_remaining"], 0)
+
+    @unittest.skipIf(quickjs is None, "JavaScript evaluator unavailable")
+    def test_battlefield_round_badge_includes_current_and_remaining_rounds(self):
+        context = quickjs.Context()
+        context.eval(strip_module_syntax(frontend_module("autochess-ui.js")))
+        labels = json.loads(context.eval("""
+            JSON.stringify([
+              chessRoundStatus({round_number:1, round_limit:30, rounds_remaining:30}),
+              chessRoundStatus({round_number:30, round_limit:30, rounds_remaining:1}),
+              chessRoundStatus({round_number:31, round_limit:30, rounds_remaining:0, winner:1})
+            ])
+        """))
+        self.assertEqual(labels, ["第 1/30 轮 · 剩余 30 轮",
+                                  "第 30/30 轮 · 剩余 1 轮",
+                                  "战斗结束 · 第 30/30 轮"])
 
     def test_finished_chain_skip_can_still_answer_damage_choice(self):
         from wujiang.tactical.engine.core import Battle
@@ -30874,9 +35200,11 @@ class AutoChessBehaviorTests(unittest.TestCase):
             ChessMatch(1, 2, runner=runner),
             ChessMatch(3, 4, result={"winner": 1, "damage": 1, "hero_kills": 0}),
         ]
+        chess.players[2].health = 1
         before = chess.players[2].health
         chess.force_finish_open_matches()
         self.assertEqual(chess.players[2].health, before - 1)
+        self.assertTrue(chess.players[2].eliminated)
         self.assertEqual(chess.phase, "preparation")
         with self.assertRaises(RoomError):
             chess.force_finish_open_matches()
@@ -30981,6 +35309,62 @@ class AutoChessBehaviorTests(unittest.TestCase):
             Battle(), ctx)
         self.assertEqual(ctx.attack_power, unit.stat("attack") + 1)
 
+    def test_updated_equipment_round_text_and_owner_turn_boundaries(self):
+        from wujiang.tactical.engine.core import Battle, DamageContext, Position
+        from wujiang.tactical.heroes.registry import create_hero
+        from wujiang.tactical.rooms.equipment import load_equipment_catalog
+        from wujiang.tactical.rooms.equipment_effects import EquipmentStatus
+
+        catalog = load_equipment_catalog()
+        expected = {"布手套": "2轮一次", "裁决大剑": "5轮一次",
+                    "贪魔之卵": "5轮一次", "流浪贵族杖": "5轮一次",
+                    "机械头盔": "5轮一次"}
+        for name, phrase in expected.items():
+            with self.subTest(item=name):
+                self.assertIn(phrase, catalog[name]["effect"])
+                self.assertNotIn("10回合一次", catalog[name]["effect"])
+                self.assertNotIn("4回合一次", catalog[name]["effect"])
+
+        def fixture(code):
+            battle = Battle(width=10, height=10)
+            owner, enemy = create_hero("ellie", 1), create_hero("bard", 2)
+            battle.add_unit(owner, Position(1, 1))
+            battle.add_unit(enemy, Position(2, 1))
+            status = EquipmentStatus(code, catalog[code]["attributes"], catalog[code]["effect"])
+            owner.add_status(status)
+            return battle, owner, enemy, status
+
+        battle, owner, _, glove = fixture("布手套")
+        for turn in range(1, 7):
+            glove.on_owner_turn_start(battle)
+            self.assertEqual(glove.owner_turns, turn)
+            self.assertEqual(glove.modify_attack_actions_per_turn(1), 2 if turn % 2 == 0 else 1)
+
+        for previous, activates in ((0, True), (1, False), (4, False), (5, True)):
+            for code in ("裁决大剑", "贪魔之卵", "机械头盔"):
+                with self.subTest(item=code, previous_owner_turns=previous):
+                    battle, owner, enemy, status = fixture(code)
+                    status.owner_turns = previous
+                    owner.base_stats.mana += 10
+                    owner.current_mana = 0
+                    status.on_owner_turn_start(battle)
+                    self.assertEqual(status.owner_turns, previous + 1)
+                    if code == "裁决大剑":
+                        actual = any(effect.name == "裁决大剑·魔免" for effect in owner.statuses)
+                    elif code == "贪魔之卵":
+                        actual = owner.current_mana == owner.max_mana()
+                    else:
+                        actual = any(effect.name == "机械头盔·禁足" for effect in enemy.statuses)
+                    self.assertEqual(actual, activates)
+
+        battle, owner, enemy, wand = fixture("流浪贵族杖")
+        for turn in (1, 2, 5, 6, 10, 11):
+            wand.owner_turns = turn
+            damage = DamageContext(source=owner, target=enemy, attack_power=1,
+                                   is_skill=True, action_name="装备周期验证")
+            wand.on_before_damage(battle, damage)
+            self.assertEqual(damage.ignore_magic_immunity, turn in (1, 6, 11))
+
     def test_frontend_has_preparation_and_observer_controls(self):
         source = frontend_module("autochess-ui.js")
         self.assertIn("/api/rooms/autochess/action", source)
@@ -30989,11 +35373,21 @@ class AutoChessBehaviorTests(unittest.TestCase):
         self.assertIn("场上羁绊", source)
         self.assertIn("本轮已抽装备", source)
         self.assertIn("autochess-countdown", source)
+        self.assertIn("当前存款预计下轮利息", source)
         self.assertIn("renderSelectedHero", source)
         self.assertIn("autochess-battle-board board", source)
         self.assertIn("全员确认或倒计时结束后自动开战", source)
         self.assertIn("autochess-board-pieces board-pieces", source)
         self.assertIn("强化成功，请在武将卡片中选择一项能力", source)
+        self.assertIn("bindEquipmentHover(chip, item", source)
+        self.assertIn("bindEquipmentHover(entry, item", source)
+        self.assertIn("const gear = button(item?.name || code,", source)
+        self.assertIn("entry.tabIndex = gear.disabled ? 0 : -1", source)
+        self.assertIn("node('p', '', item?.effect || '暂无效果说明')", source)
+        self.assertIn('`实际扣血 ${loss}`', source)
+        self.assertIn('`结算伤害 ${match.result.damage}`', source)
+        self.assertNotIn("${item?.attributes || ''} · ${item?.effect || ''} → 所选武将", source)
+        self.assertIn("overflow-y: auto;", (STATIC_ROOT / "styles.css").read_text(encoding="utf-8").split(".chess-equipment-tip {")[1].split("}")[0])
         self.assertIn('id="autochess-screen"', (STATIC_ROOT / "index.html").read_text(encoding="utf-8"))
         self.assertIn('setScreen(state.room?.mode === "autochess" ? "autochess"',
                       frontend_module("events.js"))
@@ -31085,7 +35479,9 @@ class AutoChessBehaviorTests(unittest.TestCase):
         self.assertEqual(snapshot["actions"][0]["actor_name"], actor.name)
         self.assertEqual(snapshot["actions"][0]["target_names"], [actor.name])
         self.assertEqual(snapshot["actions"][0]["target_cells"], [{"x": 1, "y": 2}])
-        self.assertEqual(set(snapshot), {"board", "round_number", "winner", "units", "logs", "actions", "field_effects", "visual_events"})
+        self.assertEqual(set(snapshot), {"board", "round_number", "round_limit", "rounds_remaining",
+                                         "initial_hero_count", "winner", "units", "logs", "actions",
+                                         "field_effects", "visual_events"})
 
     def test_fast_autochess_emits_real_attack_and_skill_cues_without_probe_noise(self):
         from wujiang.tactical.engine.core import Battle, Position, QueuedAction
@@ -34848,7 +39244,11 @@ class NewBatch322323FlameWyvernBehaviorTests(unittest.TestCase):
         self.assertEqual((codes.count("excel_r322"), codes.count("excel_r323")), (1, 1))
 
     def test_chimera_free_then_paid_and_frontend_legal_cells(self):
+        from wujiang.tactical.heroes.flame_manager import elemental_hero_family
+
         battle, manager, _, _, _ = self.flame_fixture()
+        self.assertEqual(manager.attribute, "火")
+        self.assertTrue(elemental_hero_family(battle, manager, "炎"))
         skill = manager.get_skill("chimera")
         self.assertEqual(skill.mana_cost_for_payload(battle, manager, {}), 0)
         cell = skill.available_cells(battle, manager)[0]
@@ -34859,7 +39259,17 @@ class NewBatch322323FlameWyvernBehaviorTests(unittest.TestCase):
         skill.execute(battle, manager, {"x": cell.x, "y": cell.y})
         chimera = next(unit for unit in battle.player_units(1) if unit.hero_code == "flame_chimera")
         self.assertFalse(chimera.turn_ready)
+        self.assertEqual(chimera.attribute, "火")
+        self.assertTrue(elemental_hero_family(battle, chimera, "炎"))
         self.assertEqual(skill.mana_cost_for_payload(battle, manager, {}), 1)
+        before_mana = manager.current_mana
+        next_cell = skill.available_cells(battle, manager)[0]
+        second_payload = {"x": next_cell.x, "y": next_cell.y}
+        skill.prepay_resources(battle, manager, second_payload)
+        skill.execute(battle, manager, second_payload)
+        self.assertEqual(manager.current_mana, before_mana - 1)
+        self.assertEqual(len([unit for unit in battle.player_units(1)
+                              if unit.hero_code == "flame_chimera"]), 2)
 
     def test_chimera_aura_is_dynamic_stacking_and_water_floor(self):
         from wujiang.tactical.heroes.flame_manager import ChimeraSummon
@@ -34941,6 +39351,7 @@ class NewBatch322323FlameWyvernBehaviorTests(unittest.TestCase):
 
     def test_backstep_can_chain_wyvern_crossing_skill_effect(self):
         battle, rider, mount, target = self.wyvern_fixture("elite_soldier")
+        target.shields = 1
         battle.perform_action({"type": "move", "unit_id": mount.unit_id, "x": 4, "y": 2,
                                "path": [{"x": 3, "y": 2}, {"x": 4, "y": 2}]})
         self.assertEqual((mount.position, rider.position), (Position(4, 2), Position(4, 2)))
@@ -34948,6 +39359,8 @@ class NewBatch322323FlameWyvernBehaviorTests(unittest.TestCase):
         pending = battle.pending_chain.queued_action
         self.assertEqual((pending.action_type, pending.payload["effect_code"]),
                          ("skill_effect", "wyvern_crossing"))
+        self.assertTrue(pending.payload["ignore_shield"])
+        self.assertEqual(target.shields, 1)
         self.assertIn(target.unit_id, pending.target_unit_ids)
         self.assertIn("backstep_shot", [option.action_code for option in
                                        battle.pending_chain.options_by_unit[target.unit_id]])
@@ -34984,3 +39397,742 @@ class NewBatch322323FlameWyvernBehaviorTests(unittest.TestCase):
         safe_route = [Position(2, 2), Position(1, 2), Position(0, 2)]
         self.assertGreater(wyvern_move_score(battle, mount, attack_route),
                            wyvern_move_score(battle, mount, safe_route))
+
+
+class NewBatch325GentlemanBehaviorTests(unittest.TestCase):
+    """R325 source-locked movement, clone, protection and AI choice scenarios."""
+
+    def fixture(self, *, enemy_first=False):
+        battle = create_battle("excel_r325", "elite_soldier")
+        gentleman = primary_hero(battle, 1)
+        enemy = primary_hero(battle, 2)
+        gentleman.position, enemy.position = Position(2, 2), Position(3, 2)
+        battle.configure_turn_order([enemy.unit_id, gentleman.unit_id] if enemy_first else
+                                    [gentleman.unit_id, enemy.unit_id])
+        battle.start_current_turn()
+        return battle, gentleman, enemy
+
+    def test_public_kit_attack_count_and_preview_route(self):
+        from wujiang.tactical.heroes.registry import list_heroes
+
+        battle, gentleman, _ = self.fixture()
+        self.assertEqual({"evasion", "surprise_step", "gentleman_duel"}, set(gentleman.skill_map()))
+        self.assertEqual(gentleman.attack_actions_per_turn(), 2)
+        self.assertTrue(gentleman.ignore_units_while_moving)
+        self.assertEqual([item["code"] for item in list_heroes()].count("excel_r325"), 1)
+        step = gentleman.get_skill("surprise_step")
+        self.assertEqual((step.mana_cost, step.max_uses_per_turn), (0, 3))
+        route = step.route(battle, gentleman, {"x": 3, "y": 0})
+        self.assertEqual(route, [Position(2, 2), Position(3, 2), Position(3, 1), Position(3, 0)])
+        entry = next(item for item in step.preview(battle, gentleman)["pattern_destinations"]
+                     if item["pattern"] == [{"x": 3, "y": 0}])
+        self.assertEqual(entry["clone_cells"], [{"x": 2, "y": 2}])
+
+    def test_surprise_step_has_no_invented_paid_fourth_use_or_arbitrary_turn(self):
+        battle, gentleman, _ = self.fixture()
+        step = gentleman.get_skill("surprise_step")
+        with self.assertRaises(ActionError):
+            step.route(battle, gentleman, {"x": 4, "y": 2})
+        step.sync_turn_scope(battle)
+        step.uses_this_turn = 3
+        self.assertFalse(step.can_use(battle, gentleman)[0])
+        self.assertEqual(step.mana_cost_for_payload(battle, gentleman, {}), 0)
+
+    def test_actual_crossing_places_one_fixed_clone_without_random_swap(self):
+        from wujiang.tactical.heroes.gentleman import GentlemanCloneGuardTrait
+
+        battle, gentleman, enemy = self.fixture()
+        before_id = gentleman.unit_id
+        gentleman.get_skill("surprise_step").execute(battle, gentleman, {"x": 3, "y": 0})
+        clones = [unit for unit in battle.player_units(1) if unit.is_clone and unit.summoner_id == before_id]
+        self.assertEqual(len(clones), 1)
+        self.assertEqual((gentleman.position, clones[0].position), (Position(3, 0), Position(2, 2)))
+        self.assertEqual(enemy.position, Position(3, 2))
+        self.assertTrue(any(isinstance(trait, GentlemanCloneGuardTrait) for trait in clones[0].traits))
+        self.assertFalse(clones[0].turn_ready)
+
+    def test_normal_move_can_cross_two_enemies_and_multicell_body_once(self):
+        battle = create_battle("excel_r325", ["elite_soldier", "bard"])
+        gentleman = primary_hero(battle, 1)
+        enemies = battle.hero_units(2)
+        gentleman.position = Position(2, 2)
+        enemies[0].position, enemies[1].position = Position(3, 2), Position(5, 2)
+        battle.configure_turn_order([gentleman.unit_id, enemies[0].unit_id, enemies[1].unit_id])
+        battle.start_current_turn()
+        battle.move_unit(gentleman, Position(6, 2),
+                         path=[Position(x, 2) for x in range(3, 7)])
+        self.assertEqual({unit.position for unit in battle.player_units(1) if unit.is_clone},
+                         {Position(2, 2), Position(4, 2)})
+
+        battle = create_battle("excel_r325", "excel_r252")
+        gentleman, giant = primary_hero(battle, 1), primary_hero(battle, 2)
+        gentleman.position, giant.position = Position(2, 2), Position(3, 2)
+        battle.configure_turn_order([gentleman.unit_id, giant.unit_id])
+        battle.start_current_turn()
+        battle.move_unit(gentleman, Position(5, 2),
+                         path=[Position(3, 2), Position(4, 2), Position(5, 2)])
+        self.assertEqual([unit.position for unit in battle.player_units(1) if unit.is_clone],
+                         [Position(2, 2)])
+
+    def test_far_damage_only_cancels_life_loss(self):
+        battle, gentleman, enemy = self.fixture(enemy_first=True)
+        enemy.position = Position(7, 7)
+        before_hp = gentleman.current_hp
+        ctx = battle.resolve_damage(DamageContext(source=enemy, target=gentleman,
+                                                  attack_power=9, is_skill=True,
+                                                  action_name="远程伤害"))
+        self.assertTrue(ctx.cancelled)
+        self.assertTrue(ctx.preserve_followup_effects)
+        self.assertEqual(gentleman.current_hp, before_hp)
+        self.assertEqual(next(trait for trait in gentleman.traits if trait.name == "绅士防身").remaining(battle), 2)
+
+    def test_two_protected_clone_hits_share_enemy_turn_budget(self):
+        battle, gentleman, enemy = self.fixture(enemy_first=True)
+        gentleman.get_skill("surprise_step").execute(battle, gentleman, {"x": 3, "y": 0})
+        clone = next(unit for unit in battle.player_units(1) if unit.is_clone)
+        guard = next(trait for trait in gentleman.traits if trait.name == "绅士防身")
+        battle._damage_choice_active = True
+        battle._damage_choice_decisions = ["protect", "protect"]
+        battle._damage_choice_event_index = 0
+        try:
+            for expected_remaining in (1, 0):
+                ctx = battle.resolve_damage(DamageContext(source=enemy, target=clone,
+                                                          attack_power=5, is_skill=False,
+                                                          action_name="近身探击"))
+                self.assertTrue(ctx.cancelled)
+                self.assertTrue(clone.alive)
+                self.assertEqual(guard.remaining(battle), expected_remaining)
+            self.assertFalse(guard.requires_damage_choice)
+            battle.resolve_damage(DamageContext(source=enemy, target=clone,
+                                                attack_power=5, is_skill=False,
+                                                action_name="第三次近身探击"))
+            self.assertFalse(clone.alive)
+        finally:
+            battle._damage_choice_active = False
+            battle._damage_choice_decisions = []
+            battle._damage_choice_event_index = 0
+
+    def test_duel_breaks_one_shield_and_lands_next_to_target(self):
+        battle, gentleman, enemy = self.fixture()
+        enemy.position = Position(5, 2)
+        enemy.shields = 1
+        skill = gentleman.get_skill("gentleman_duel")
+        options = skill.preview(battle, gentleman)["destinations_by_target"][enemy.unit_id]
+        self.assertIn({"x": 4, "y": 2}, options)
+        self.assertEqual((skill.mana_cost, skill.cooldown_turns), (0, 2))
+        skill.execute(battle, gentleman, {"target_unit_id": enemy.unit_id, "dest_x": 4, "dest_y": 2})
+        self.assertEqual(gentleman.position, Position(4, 2))
+        self.assertEqual(enemy.total_shields(), 0)
+        self.assertEqual(enemy.current_hp, enemy.max_health)
+
+    def test_duel_does_not_move_through_magic_immunity(self):
+        battle, gentleman, enemy = self.fixture()
+        enemy.position = Position(5, 2)
+        enemy.magic_immunity = True
+        before = gentleman.position
+        gentleman.get_skill("gentleman_duel").execute(
+            battle, gentleman, {"target_unit_id": enemy.unit_id, "dest_x": 4, "dest_y": 2})
+        self.assertEqual(gentleman.position, before)
+
+    def test_ai_and_frontend_expose_shared_guard_choice(self):
+        from wujiang.tactical.rooms.ai import choose_damage_choice_action, skill_payloads_for_action
+
+        battle, gentleman, enemy = self.fixture(enemy_first=True)
+        battle.pending_damage_choice = {"unit_id": gentleman.unit_id, "kind": "gentleman_guard",
+                                        "protected_unit_id": gentleman.unit_id,
+                                        "damage": gentleman.current_hp, "stats": [], "options": ["protect"]}
+        self.assertEqual(choose_damage_choice_action(battle)["target_unit_id"], "protect")
+        battle.pending_damage_choice = None
+        duel = gentleman.get_skill("gentleman_duel")
+        preview = duel.preview(battle, gentleman)
+        payloads = skill_payloads_for_action(battle, gentleman,
+                                             {"code": duel.code, "target_mode": "unit", "preview": preview})
+        self.assertTrue(any(payload.get("target_unit_id") == enemy.unit_id
+                            and payload.get("dest_x") is not None for payload in payloads))
+        self.assertIn("gentleman_guard", frontend_module("vfx.js"))
+        self.assertIn("gentleman_guard", frontend_module("battle-ui.js"))
+
+    def test_guard_prompt_keeps_clone_identity_private_to_opponent(self):
+        from wujiang.tactical.rooms.multiplayer import battle_state_for_viewer
+
+        battle, gentleman, enemy = self.fixture(enemy_first=True)
+        gentleman.get_skill("surprise_step").execute(battle, gentleman, {"x": 3, "y": 0})
+        clone = next(unit for unit in battle.player_units(1) if unit.is_clone)
+        battle.pending_damage_choice = {
+            "unit_id": gentleman.unit_id, "kind": "gentleman_guard",
+            "protected_unit_id": clone.unit_id, "action_name": "绅士防身：矮小绅士",
+            "damage": 1, "event_index": 0, "stats": [], "options": ["protect"],
+            "prompt_id": "test-gentleman-choice", "decisions": [], "action_payload": {},
+        }
+        own = battle_state_for_viewer(battle, 1)["pending_damage_choice"]
+        enemy_view = battle_state_for_viewer(battle, 2)["pending_damage_choice"]
+        self.assertEqual(own["protected_unit_id"], clone.unit_id)
+        self.assertIsNone(enemy_view["unit_id"])
+        self.assertIsNone(enemy_view["protected_unit_id"])
+        self.assertEqual(enemy_view["options"], [])
+
+
+class NewBatch324SuperCrowBehaviorTests(unittest.TestCase):
+    """R324 source-locked summon economy, formation order, status and UI/AI contract."""
+
+    def fixture(self, count=0):
+        from wujiang.tactical.heroes.super_crow import SuperMessengerCrow
+
+        battle = create_battle("excel_r324", "elite_soldier")
+        actor, enemy = primary_hero(battle, 1), primary_hero(battle, 2)
+        actor.position, enemy.position = Position(2, 2), Position(6, 6)
+        battle.configure_turn_order([actor.unit_id, enemy.unit_id])
+        battle.start_current_turn()
+        ring = [Position(5, 5), Position(6, 5), Position(7, 5), Position(5, 6),
+                Position(7, 6), Position(5, 7), Position(6, 7), Position(7, 7)]
+        for cell in ring[:count]:
+            battle.summon_unit(SuperMessengerCrow(actor.player_id), cell, summoner=actor)
+        return battle, actor, enemy
+
+    def payload(self, skill, actor, enemy, crows):
+        return {"type": "skill", "unit_id": actor.unit_id, "skill_code": skill.code,
+                "target_unit_id": enemy.unit_id, "x": enemy.position.x, "y": enemy.position.y,
+                "raven_ids": [crow.unit_id for crow in crows[:skill.crow_count]]}
+
+    def drain_queued(self, battle):
+        while battle.pending_followup_actions:
+            battle.resolve_queued_action(battle.pending_followup_actions.popleft())
+
+    def test_wyvern_piercing_crossing_keeps_post_move_chain_with_shield(self):
+        battle = create_battle("excel_r323", "elite_soldier")
+        rider, enemy = primary_hero(battle, 1), primary_hero(battle, 2)
+        mount = battle.mounted_unit_for(rider)
+        mount.position = rider.position = Position(2, 2)
+        enemy.position, enemy.shields = Position(3, 2), 1
+        battle.configure_turn_order([rider.unit_id, enemy.unit_id])
+        battle.start_current_turn()
+        battle.perform_action({"type": "move", "unit_id": mount.unit_id, "x": 4, "y": 2,
+                               "path": [{"x": 3, "y": 2}, {"x": 4, "y": 2}]})
+        self.assertIsNotNone(battle.pending_chain)
+        pending = battle.pending_chain.queued_action
+        self.assertEqual(pending.payload["effect_code"], "wyvern_crossing")
+        self.assertTrue(pending.payload["ignore_shield"])
+        self.assertIn("backstep_shot", [option.action_code for option in
+            battle.pending_chain.options_by_unit[enemy.unit_id]])
+        self.assertEqual(enemy.shields, 1)
+
+    def test_ancient_cursed_rust_piercing_followup_can_be_chained_with_shield(self):
+        battle = create_battle("excel_r253", "elite_soldier")
+        knight, enemy = primary_hero(battle, 1), primary_hero(battle, 2)
+        mount = battle.mounted_unit_for(knight)
+        knight.position = mount.position = Position(2, 2)
+        enemy.position, enemy.shields = Position(4, 2), 1
+        battle.configure_turn_order([knight.unit_id, enemy.unit_id])
+        battle.start_current_turn()
+        rust = knight.get_skill("ancient_cursed_rust")
+        payload = {"type": "skill", "unit_id": knight.unit_id, "skill_code": rust.code}
+        declaration = battle.build_queued_action(payload)
+        self.assertTrue(declaration.payload["ignore_shield"])
+        self.assertIn(enemy.unit_id, battle.create_reaction_window(declaration).options_by_unit)
+        rust.execute(battle, knight, payload)
+        battle.present_reaction_window_or_resolve(battle.pending_followup_actions.popleft())
+        self.assertIsNotNone(battle.pending_chain)
+        self.assertEqual(battle.pending_chain.queued_action.payload["effect_code"], "ancient_cursed_rust")
+        self.assertIn("backstep_shot", [option.action_code for option in
+            battle.pending_chain.options_by_unit[enemy.unit_id]])
+        self.assertEqual(enemy.shields, 1)
+
+    def test_public_kit_source_and_no_template_ban_skill(self):
+        from wujiang.tactical.heroes.registry import list_heroes
+
+        _, actor, _ = self.fixture()
+        self.assertEqual(set(actor.skill_map()), {"light_wall", "super_messenger_crow",
+            "triangle_crow_array", "square_crow_array", "hexagram_crow_array", "eight_dragon_crow_array"})
+        self.assertEqual((actor.level, actor.base_stats.attack, actor.base_stats.defense,
+                          actor.base_stats.speed, actor.base_stats.attack_range, actor.base_stats.mana),
+                         (5, 1, 3, 5, 1, 5))
+        self.assertEqual([entry["code"] for entry in list_heroes()].count("excel_r324"), 1)
+        self.assertFalse(any("指定禁" in skill.name for skill in actor.skills))
+
+    def test_manual_summon_first_three_free_then_half_mana(self):
+        battle, actor, _ = self.fixture()
+        skill = actor.get_skill("super_messenger_crow")
+        self.assertEqual(skill.mana_cost_for_payload(battle, actor, {}), 0)
+        skill.uses_this_turn = 3
+        self.assertEqual(skill.mana_cost_for_payload(battle, actor, {}), 0.5)
+        self.assertEqual(skill.preview(battle, actor)["free_uses_remaining"], 0)
+        self.assertEqual(len(battle.pending_followup_actions), 0)
+
+    def test_each_super_crow_aura_stacks_and_blocks_actual_free_cost(self):
+        from wujiang.tactical.engine.core import Stats
+        from wujiang.tactical.heroes.super_crow import SuperCrowAura
+
+        battle, actor, enemy = self.fixture(2)
+        enemy.base_stats = Stats(attack=3, defense=2, speed=5, attack_range=14, mana=3)
+        crows = [unit for unit in battle.player_units(1) if unit.summoner_id == actor.unit_id]
+        self.assertEqual(enemy.stat("speed"), max(1.0, enemy.base_stats.speed - 2))
+        free = enemy.get_skill(next(skill.code for skill in enemy.skills if skill.timing == "active" and skill.mana_cost == 0))
+        aura = next(effect for effect in battle.field_effects if isinstance(effect, SuperCrowAura) and effect.covers(battle, enemy))
+        self.assertTrue(aura.blocks_skill_payload(battle, enemy, free, {})[0])
+        self.assertFalse(aura.blocks_skill_payload(battle, enemy, enemy.get_skill("shensu"), {})[0])
+        crows[0].alive = False
+        battle.cleanup_dead_units()
+        self.assertEqual(enemy.stat("speed"), max(1.0, enemy.base_stats.speed - 1))
+
+    def test_formation_requires_real_adjacent_crows_and_explicit_subset(self):
+        battle, actor, enemy = self.fixture(4)
+        skill = actor.get_skill("triangle_crow_array")
+        crows = [unit for unit in battle.player_units(1) if unit.summoner_id == actor.unit_id]
+        self.assertIn(enemy.unit_id, skill.preview(battle, actor)["target_unit_ids"])
+        self.assertFalse(skill.can_use(battle, actor, {"target_unit_id": enemy.unit_id})[0])
+        payload = self.payload(skill, actor, enemy, crows)
+        self.assertTrue(skill.can_use(battle, actor, payload)[0])
+        skill.execute(battle, actor, payload)
+        self.assertEqual(len([crow for crow in crows if crow.alive]), 1)
+        self.assertEqual(len(battle.pending_followup_actions), 5)
+
+    def test_three_segments_have_independent_damage_resolution_and_late_dice(self):
+        battle, actor, enemy = self.fixture(3)
+        enemy.current_hp = 10.0
+        skill = actor.get_skill("triangle_crow_array")
+        crows = [unit for unit in battle.player_units(1) if unit.summoner_id == actor.unit_id]
+        skill.execute(battle, actor, self.payload(skill, actor, enemy, crows))
+        self.assertEqual([item.payload["effect_code"] for item in battle.pending_followup_actions],
+                         ["crow_formation_damage"] * 3 + ["crow_formation_control", "super_crow_replenish"])
+        with mock.patch.object(battle, "resolve_damage", wraps=battle.resolve_damage) as damage, \
+             mock.patch("wujiang.tactical.heroes.super_crow.random.randint", return_value=1):
+            self.drain_queued(battle)
+        self.assertEqual(damage.call_count, 3)
+        self.assertEqual(len([unit for unit in battle.player_units(1)
+                              if unit.hero_code == "super_messenger_crow" and unit.alive]), 1)
+
+    def test_magic_immunity_does_not_stop_free_formation_control_and_drain(self):
+        battle, actor, enemy = self.fixture(4)
+        enemy.current_hp = 10.0
+        enemy.current_mana = 3.0
+        enemy.magic_immunity = True
+        enemy.shields = 1
+        skill = actor.get_skill("square_crow_array")
+        crows = [unit for unit in battle.player_units(1) if unit.summoner_id == actor.unit_id]
+        skill.execute(battle, actor, self.payload(skill, actor, enemy, crows))
+        with mock.patch("wujiang.tactical.heroes.super_crow.random.randint", return_value=1):
+            self.drain_queued(battle)
+        self.assertTrue(enemy.has_status("四方飞鸦阵禁攻施技"))
+        self.assertTrue(enemy.cannot_attack)
+        self.assertLess(enemy.current_mana, 3.0)
+
+    def test_piercing_formation_effect_opens_own_chain_through_remaining_shields(self):
+        battle, actor, enemy = self.fixture(3)
+        enemy.shields = 5
+        skill = actor.get_skill("triangle_crow_array")
+        crows = [unit for unit in battle.player_units(1) if unit.summoner_id == actor.unit_id]
+        payload = self.payload(skill, actor, enemy, crows)
+        declaration = battle.build_queued_action(payload)
+        self.assertFalse(declaration.payload["ignore_shield"])
+        self.assertTrue(declaration.payload["piercing_followup"])
+        self.assertIn(enemy.unit_id, battle.create_reaction_window(declaration).options_by_unit)
+        skill.execute(battle, actor, payload)
+        self.assertFalse(battle.pending_followup_actions[0].payload.get("ignore_shield", False))
+        self.assertIsNone(battle.create_reaction_window(battle.pending_followup_actions[0]))
+        for _ in range(3):
+            battle.resolve_queued_action(battle.pending_followup_actions.popleft())
+        self.assertEqual(enemy.shields, 2)
+        battle.present_reaction_window_or_resolve(battle.pending_followup_actions.popleft())
+        self.assertIsNotNone(battle.pending_chain)
+        pending = battle.pending_chain.queued_action
+        self.assertEqual(pending.payload["effect_code"], "crow_formation_control")
+        self.assertTrue(pending.payload["ignore_shield"])
+        self.assertTrue(pending.payload["ignore_magic_immunity"])
+        self.assertIn("backstep_shot", [option.action_code for option in
+            battle.pending_chain.options_by_unit[enemy.unit_id]])
+        self.assertEqual(enemy.shields, 2)
+        self.assertFalse(enemy.has_status("三角飞鸦阵减速禁位移"))
+
+    def test_formation_does_not_offer_late_chain_after_target_leaves_declared_cell(self):
+        battle, actor, enemy = self.fixture(3)
+        skill = actor.get_skill("triangle_crow_array")
+        crows = [unit for unit in battle.player_units(1) if unit.summoner_id == actor.unit_id]
+        skill.execute(battle, actor, self.payload(skill, actor, enemy, crows))
+        enemy.position = Position(9, 9)
+        with mock.patch("wujiang.tactical.heroes.super_crow.random.randint", return_value=1):
+            battle.advance_followup_actions()
+        self.assertIsNone(battle.pending_chain)
+        self.assertFalse(enemy.has_status("三角飞鸦阵减速禁位移"))
+
+    def test_eight_dragon_status_disables_move_attack_skill_and_trait(self):
+        battle, actor, enemy = self.fixture(8)
+        enemy.current_hp = 10.0
+        skill = actor.get_skill("eight_dragon_crow_array")
+        crows = [unit for unit in battle.player_units(1) if unit.summoner_id == actor.unit_id]
+        skill.execute(battle, actor, self.payload(skill, actor, enemy, crows))
+        with mock.patch("wujiang.tactical.heroes.super_crow.random.randint", return_value=1):
+            self.drain_queued(battle)
+        status = next(item for item in enemy.statuses if item.name == "八龙封印")
+        self.assertEqual(status.duration, 4)
+        self.assertTrue(enemy.cannot_move and enemy.cannot_attack and enemy.cannot_use_skills)
+        self.assertTrue(enemy.innate_traits_suppressed())
+        self.assertTrue(status.suppresses_projected_traits)
+
+    def test_manual_summon_does_not_roll_and_attack_does(self):
+        from wujiang.tactical.heroes.super_crow import queue_crow_replenishment
+
+        battle, actor, _ = self.fixture()
+        skill = actor.get_skill("super_messenger_crow")
+        cell = skill.preview(battle, actor)["cells"][0]
+        skill.execute(battle, actor, cell)
+        self.assertEqual(len(battle.pending_followup_actions), 0)
+        queue_crow_replenishment(battle, actor, trigger="普攻")
+        with mock.patch("wujiang.tactical.heroes.super_crow.random.randint", return_value=6):
+            self.drain_queued(battle)
+        self.assertLessEqual(len([unit for unit in battle.player_units(1)
+                                  if unit.hero_code == "super_messenger_crow"]), 7)
+
+    def test_ai_payload_and_frontend_choose_target_then_crows(self):
+        from wujiang.tactical.rooms.ai import skill_payloads_for_action
+
+        battle, actor, enemy = self.fixture(4)
+        skill = actor.get_skill("triangle_crow_array")
+        preview = skill.preview(battle, actor)
+        payloads = skill_payloads_for_action(battle, actor,
+            {"code": skill.code, "target_mode": "unit", "preview": preview})
+        self.assertTrue(any(payload.get("target_unit_id") == enemy.unit_id
+                            and len(payload.get("raven_ids", [])) == 3 for payload in payloads))
+        self.assertIn("crow_formation", frontend_module("targeting.js"))
+        self.assertIn("raven_ids", frontend_module("events.js"))
+
+
+class NewBatch328329FlyingShipBehaviorTests(unittest.TestCase):
+    """Source-locked captain/adviser rules and shared multi-rider ship contract."""
+
+    def fixture(self, enemy_code="elite_soldier"):
+        battle = create_battle(["excel_r328", "excel_r329"], [enemy_code])
+        captain = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r328")
+        adviser = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r329")
+        enemy = primary_hero(battle, 2)
+        captain.position, adviser.position, enemy.position = Position(1, 2), Position(1, 4), Position(9, 9)
+        battle.configure_turn_order([captain.unit_id, enemy.unit_id, adviser.unit_id])
+        battle.start_current_turn()
+        return battle, captain, adviser, enemy
+
+    def ship_fixture(self, *, board_both=True, enemy_code="elite_soldier"):
+        from wujiang.tactical.heroes.flying_dragon_ship import allied_ship
+        battle, captain, adviser, enemy = self.fixture(enemy_code)
+        self.assertIsNone(allied_ship(battle, 1))
+        summon = captain.get_skill("flying_dragon_ship")
+        self.assertIn({"x": 2, "y": 2}, summon.preview(battle, captain)["cells"])
+        summon.execute(battle, captain, {"x": 2, "y": 2})
+        ship = allied_ship(battle, 1)
+        self.assertIsNotNone(ship)
+        if board_both:
+            battle.move_unit(captain, Position(2, 2), via_skill=True, forced=True, max_distance=1)
+            battle.move_unit(adviser, Position(2, 4), via_skill=True, forced=True, max_distance=1)
+        return battle, captain, adviser, ship, enemy
+
+    def test_public_kit_and_same_team_single_ship(self):
+        from wujiang.tactical.heroes.registry import list_heroes
+        battle, captain, adviser, ship, _ = self.ship_fixture(board_both=False)
+        self.assertEqual((ship.stat("attack"), ship.stat("defense"), ship.stat("speed"),
+                          ship.targeting_range(), ship.footprint_width, ship.footprint_height),
+                         (3, 5, 4, 3, 2, 3))
+        self.assertEqual({"flying_dragon_ship", "dragon_breath", "chain_pull", "protection",
+                          "departure_signal"}, set(captain.skill_map()))
+        self.assertEqual({"flying_dragon_ship", "add_mana", "add_health", "defense_one",
+                          "light_wall", "silver_signal_flare"}, set(adviser.skill_map()))
+        self.assertFalse(adviser.get_skill("flying_dragon_ship").can_use(battle, adviser)[0])
+        codes = [item["code"] for item in list_heroes()]
+        self.assertEqual((codes.count("excel_r328"), codes.count("excel_r329")), (1, 1))
+
+    def test_multiple_boarding_recipient_and_all_riders_follow_ship(self):
+        battle, captain, adviser, ship, _ = self.ship_fixture()
+        self.assertEqual({rider.unit_id for rider in battle.riders_for(ship)},
+                         {captain.unit_id, adviser.unit_id})
+        self.assertEqual(battle.effect_recipient(captain), ship)
+        self.assertEqual(battle.effect_recipient(adviser), ship)
+        self.assertEqual(ship.attack_actions_per_turn(), 2)
+        self.assertEqual(set(ship.to_public_dict(battle)["ridden_by_unit_ids"]),
+                         {captain.unit_id, adviser.unit_id})
+        self.assertTrue(ship.to_public_dict(battle)["allows_multiple_riders"])
+        battle.move_unit(ship, Position(3, 2), via_skill=True, max_distance=1)
+        self.assertEqual((captain.position, adviser.position), (Position(3, 2), Position(3, 4)))
+        battle.move_unit(adviser, Position(4, 5), via_skill=True, forced=True, max_distance=1)
+        self.assertIsNone(adviser.mounted_on_unit_id)
+        self.assertEqual(ship.attack_actions_per_turn(), 1)
+        battle.banish_unit(ship, 1)
+        self.assertIsNone(captain.mounted_on_unit_id)
+
+    def test_borrowed_paid_skill_is_free_extra_once_per_rider(self):
+        battle, captain, adviser, ship, _ = self.ship_fixture()
+        ship.turn_ready = True
+        original = captain.get_skill("dragon_breath")
+        borrowed = ship.get_skill(f"ship_borrow__{captain.unit_id}__dragon_breath")
+        self.assertTrue(borrowed.can_use(battle, ship)[0])
+        original_uses, original_mana = original.uses_this_turn, captain.current_mana
+        borrowed.prepay_resources(battle, ship, {})
+        self.assertEqual((original.uses_this_turn, captain.current_mana),
+                         (original_uses, original_mana))
+        self.assertEqual(ship.current_mana, 0)
+        self.assertFalse(borrowed.can_use(battle, ship)[0])
+        adviser_borrowed = ship.get_skill(f"ship_borrow__{adviser.unit_id}__add_health")
+        self.assertTrue(adviser_borrowed.can_use(battle, ship)[0])
+
+    def test_only_one_passive_rider_can_support_ship_per_actual_turn(self):
+        battle, captain, adviser, ship, enemy = self.ship_fixture()
+        queued = QueuedAction(action_type="attack", actor_id=enemy.unit_id,
+                              display_name="普攻", speed=1, payload={"type": "attack"},
+                              target_unit_ids=[ship.unit_id], target_cells=battle.unit_cells(ship),
+                              source_player_id=2, hostile=True)
+        protection = captain.get_skill("protection")
+        self.assertTrue(protection.can_react_with_payload(
+            battle, captain, queued, {"target_unit_id": ship.unit_id})[0])
+        self.assertIs(battle.passive_support_ship(
+            captain, protection, queued, {"target_unit_id": captain.unit_id}), ship)
+        cell_only = QueuedAction(action_type="skill_effect", actor_id=enemy.unit_id,
+                                 display_name="位移后效", speed=1, payload={"refresh_cell_targets": True},
+                                 target_cells=[Position(3, 3)], source_player_id=2, hostile=True)
+        self.assertEqual(battle.reaction_proxy_target(captain, cell_only), ship)
+        ship.ship_passive_claim_turn = battle.turn_number
+        ship.ship_passive_claim_rider_id = captain.unit_id
+        self.assertFalse(adviser.get_skill("light_wall").can_react_with_payload(
+            battle, adviser, queued, {"target_unit_id": ship.unit_id})[0])
+        self.assertTrue(protection.can_react_with_payload(
+            battle, captain, queued, {"target_unit_id": ship.unit_id})[0])
+
+    def test_departure_moves_full_body_five_and_immunity_expires_on_captain_turn(self):
+        battle, captain, adviser, ship, _ = self.ship_fixture()
+        departure = captain.get_skill("departure_signal")
+        self.assertIn({"x": 7, "y": 2}, departure.preview(battle, captain)["cells"])
+        departure.execute(battle, captain, {"x": 7, "y": 2})
+        self.assertEqual(ship.position, Position(7, 2))
+        self.assertEqual((captain.position, adviser.position), (Position(7, 2), Position(7, 4)))
+        self.assertTrue(ship.magic_immunity)
+        immunity = next(status for status in ship.statuses if "启航号" in status.name)
+        immunity.on_any_turn_end(battle, 1)
+        self.assertTrue(ship.magic_immunity)
+        battle.turn_number += 2
+        immunity.on_any_turn_end(battle, 1)
+        self.assertFalse(ship.magic_immunity)
+
+    def test_adviser_supply_signal_name_family_and_defense_lifecycle(self):
+        from wujiang.tactical.rooms.ai import difficulty_profile, score_skill_payload
+
+        battle, captain, adviser, ship, _ = self.ship_fixture(board_both=False)
+        clone = create_hero("excel_r328", 1)
+        clone.is_clone = True
+        clone.name = "骷髅飞盗团的团长分身"
+        battle.add_unit(clone, Position(0, 3))
+        flare = adviser.get_skill("silver_signal_flare")
+        self.assertIn(clone.unit_id, flare.preview(battle, adviser)["target_unit_ids"])
+        action = {"code": "silver_signal_flare", "target_mode": "self"}
+        payload = {"type": "skill", "unit_id": adviser.unit_id,
+                   "skill_code": "silver_signal_flare"}
+        risky = score_skill_payload(battle, adviser, action, payload,
+                                    difficulty_profile("standard"), instant_only=False)
+        clone.position = None
+        safe = score_skill_payload(battle, adviser, action, payload,
+                                   difficulty_profile("standard"), instant_only=False)
+        clone.position = Position(0, 3)
+        self.assertLess(risky, safe)
+        flare.execute(battle, adviser, {})
+        self.assertTrue(captain.has_status("银制信号弹攻势"))
+        self.assertFalse(clone.alive)
+        self.assertFalse(clone.has_status("银制信号弹攻势"))
+        self.assertTrue(any(clone.name in entry and "分身受到" in entry for entry in battle.logs))
+        self.assertFalse(any(clone.name in entry and "收到银制的信号弹，攻+1" in entry
+                             for entry in battle.logs))
+        self.assertFalse(ship.has_status("银制信号弹攻势"))
+        first_attack = captain.stat("attack")
+        flare.execute(battle, adviser, {})
+        self.assertEqual(captain.stat("attack"), first_attack)
+        guard = adviser.get_skill("defense_one")
+        guard.execute(battle, adviser, {"target_unit_id": ship.unit_id})
+        self.assertEqual(ship.stat("defense"), 6)
+        status = ship.get_status("守+1")
+        battle.turn_number += 1
+        status.on_owner_turn_end(battle)
+        self.assertEqual(ship.stat("defense"), 6)
+        battle.turn_number += 1
+        status.on_owner_turn_end(battle)
+        self.assertEqual(ship.stat("defense"), 5)
+
+    def test_adviser_bare_supply_names_follow_locked_recovery_values(self):
+        battle, captain, adviser, _ = self.fixture()
+        captain.current_mana = 1
+        adviser.get_skill("add_mana").execute(battle, adviser, {"target_unit_id": captain.unit_id})
+        self.assertEqual(captain.current_mana, 2)
+        captain.current_hp = 0.5
+        adviser.get_skill("add_health").execute(battle, adviser, {"target_unit_id": captain.unit_id})
+        self.assertEqual(captain.current_hp, 0.75)
+        captain.attribute = "暗"
+        adviser.get_skill("add_health").execute(battle, adviser, {"target_unit_id": captain.unit_id})
+        self.assertLess(captain.current_hp, 0.75)
+
+    def test_adviser_actual_hit_locks_displacement_skill_only(self):
+        battle, _, adviser, _, enemy = self.ship_fixture(board_both=False, enemy_code="excel_r302")
+        trait = next(trait for trait in adviser.traits if trait.name == "鲁托普攻禁位移")
+        trait.on_basic_attack_finished(battle, adviser, {},
+            [DamageContext(source=adviser, target=enemy, attack_power=1, is_skill=False,
+                           action_name="普攻", tags={"attack"})], False)
+        lock = enemy.get_status("鲁托封位移")
+        self.assertIsNotNone(lock)
+        self.assertTrue(lock.blocks_skill_use(battle, enemy, enemy.get_skill("zero_dash"))[0])
+        self.assertFalse(enemy.cannot_move)
+        lock.on_owner_turn_end(battle)
+        self.assertIsNotNone(enemy.get_status("鲁托封位移"))
+        battle.turn_number += 1
+        lock.on_owner_turn_end(battle)
+        self.assertIsNone(enemy.get_status("鲁托封位移"))
+
+    def test_all_three_ai_payload_paths_and_browser_ship_footprint(self):
+        from wujiang.tactical.rooms.ai import skill_payloads_for_action
+        from wujiang.tactical.rooms.simple_ai import _skill_from_preview
+        from wujiang.tactical.rooms.tendency.decide import _skill_payload
+
+        battle, captain, adviser, _ = self.fixture()
+        skill = captain.get_skill("flying_dragon_ship")
+        action = {"code": skill.code, "kind": "skill", "target_mode": "cell",
+                  "timing": "active", "preview": skill.preview(battle, captain)}
+        self.assertTrue(skill_payloads_for_action(battle, captain, action))
+        self.assertIsNotNone(_skill_from_preview(battle, captain, action))
+        self.assertIsNotNone(_skill_payload(battle, captain, action))
+        self.assertIn("ship_footprint", frontend_module("battle-ui.js"))
+        self.assertIn("allows_multiple_riders", frontend_module("net.js"))
+
+
+class NewBatch373InfinityBehaviorTests(unittest.TestCase):
+    """R373's source-locked costs, current-mana stats, shared quota and AI/UI choices."""
+
+    def fixture(self, *, enemy_turn=False):
+        battle = create_battle("excel_r373", "elite_soldier")
+        hero, enemy = primary_hero(battle, 1), primary_hero(battle, 2)
+        hero.position, enemy.position = Position(2, 2), Position(4, 2)
+        order = [enemy.unit_id, hero.unit_id] if enemy_turn else [hero.unit_id, enemy.unit_id]
+        battle.configure_turn_order(order)
+        battle.start_current_turn()
+        return battle, hero, enemy
+
+    def test_identity_public_modes_and_immediate_zero_mana_stats(self):
+        from wujiang.tactical.heroes.registry import list_heroes
+        battle, hero, _ = self.fixture()
+        self.assertEqual((hero.level, hero.attribute, hero.race), (7, "光", "机甲"))
+        self.assertEqual((hero.stat("attack"), hero.stat("defense"), hero.stat("speed"),
+                          hero.targeting_range(), hero.current_mana), (3, 3, 3, 3, 1))
+        self.assertEqual({"shensu", "light_wall", "machine_gun", "missile", "ion_shield"},
+                         {code for code in hero.skill_map() if not code.startswith("infinity_instant__")})
+        self.assertEqual(len([item for item in list_heroes() if item["code"] == "excel_r373"]), 1)
+        self.assertNotEqual(hero.hero_code, "excel_r221")
+        self.assertNotEqual(hero.hero_code, "excel_r305")
+        hero.spend_mana(1)
+        self.assertEqual(tuple(hero.stat(key) for key in ("attack", "defense", "speed")), (5, 5, 5))
+        self.assertEqual(hero.targeting_range(), 3)
+        hero.gain_mana(1)
+        self.assertEqual(tuple(hero.stat(key) for key in ("attack", "defense", "speed")), (3, 3, 3))
+
+    def test_conversion_adds_original_cost_and_shares_original_limit(self):
+        battle, hero, enemy = self.fixture()
+        self.assertFalse(hero.get_skill("infinity_instant__shensu").can_use(battle, hero)[0])
+        self.assertFalse(hero.get_skill("infinity_instant__light_wall").can_use(battle, hero)[0])
+        base = hero.get_skill("machine_gun")
+        instant = hero.get_skill("infinity_instant__machine_gun")
+        pattern = next(cells for cells in base.patterns(battle, hero) if enemy.position in cells)
+        payload = {"cells": [cell.to_dict() for cell in pattern]}
+        self.assertTrue(instant.can_use(battle, hero, payload)[0])
+        self.assertEqual(instant.mana_cost_for_payload(battle, hero, payload), 1)
+        instant.prepay_resources(battle, hero, payload)
+        self.assertEqual((hero.current_mana, hero.stat("attack")), (0, 5))
+        self.assertEqual(base.uses_this_turn, 1)
+        self.assertFalse(base.can_use(battle, hero)[0])
+        self.assertFalse(instant.can_use(battle, hero, payload)[0])
+        instant.execute(battle, hero, payload)
+        self.assertLess(enemy.current_hp, enemy.max_health)
+
+    def test_missile_conversion_obeys_original_cooldown(self):
+        battle, hero, _ = self.fixture()
+        base = hero.get_skill("missile")
+        instant = hero.get_skill("infinity_instant__missile")
+        self.assertTrue(instant.can_use(battle, hero)[0])
+        instant.prepay_resources(battle, hero, {})
+        self.assertEqual(base.cooldown_remaining, 2)
+        self.assertFalse(base.can_use(battle, hero)[0])
+        self.assertFalse(instant.can_use(battle, hero)[0])
+
+    def test_instant_ion_shield_keeps_threat_rule_and_pays_before_reaction(self):
+        battle, hero, enemy = self.fixture(enemy_turn=True)
+        queued = QueuedAction(action_type="attack", actor_id=enemy.unit_id,
+                              display_name="普攻", speed=1, payload={"type": "attack"},
+                              target_unit_ids=[hero.unit_id], target_cells=[hero.position],
+                              source_player_id=2, hostile=True)
+        regular = hero.get_skill("ion_shield")
+        instant = hero.get_skill("infinity_instant__ion_shield")
+        payload = {"target_unit_ids": [hero.unit_id]}
+        self.assertEqual((regular.chain_speed, instant.chain_speed), (2, 3))
+        self.assertTrue(instant.can_react_with_payload(battle, hero, queued, payload)[0])
+        instant.prepay_resources(battle, hero, payload)
+        self.assertEqual((hero.current_mana, hero.stat("defense"), regular.uses_this_turn), (0, 5, 1))
+        instant.react(battle, hero, payload, queued)
+        self.assertEqual(hero.temporary_shields, 1)
+        self.assertEqual(regular.uses_this_turn, 1)
+
+    def test_enemy_turn_instant_mode_and_three_ai_pattern_payloads(self):
+        from wujiang.tactical.rooms.ai import skill_payloads_for_action
+        from wujiang.tactical.rooms.simple_ai import _skill_from_preview
+        from wujiang.tactical.rooms.tendency.decide import _skill_payload
+        battle, hero, _ = self.fixture(enemy_turn=True)
+        instant = hero.get_skill("infinity_instant__machine_gun")
+        self.assertTrue(instant.can_use(battle, hero)[0])
+        action = {"code": instant.code, "kind": "skill", "target_mode": "cell",
+                  "timing": "instant", "preview": instant.preview(battle, hero)}
+        candidates = skill_payloads_for_action(battle, hero, action)
+        self.assertTrue(any(len(payload.get("cells", [])) >= 1 for payload in candidates))
+        self.assertIn("cells", _skill_from_preview(battle, hero, action))
+        self.assertIn("cells", _skill_payload(battle, hero, action))
+
+    def test_browser_shows_ordinary_and_instant_choice_with_correct_label(self):
+        self.assertIn('action.timing === "instant"', frontend_module("vfx.js"))
+        self.assertIn("随时技能", frontend_module("targeting.js"))
+
+    def test_temporarily_granted_skill_gains_and_loses_conversion(self):
+        from wujiang.tactical.engine.core import Skill
+
+        class GrantedSkill(Skill):
+            def __init__(self):
+                super().__init__("granted_probe", "临时获技", "测试临时授技。")
+
+            def execute(self, battle, actor, payload):
+                pass
+
+        class GrantStatus(StatusEffect):
+            def __init__(self):
+                super().__init__("测试授技", duration=1)
+                self.granted = GrantedSkill()
+
+            def provided_components(self):
+                return [self.granted]
+
+        battle, hero, _ = self.fixture()
+        status = GrantStatus()
+        hero.add_status(status)
+        codes = {skill.code for skill in hero.action_skills()}
+        self.assertIn("infinity_instant__granted_probe", codes)
+        self.assertIsNotNone(hero.get_skill("infinity_instant__granted_probe"))
+        hero.remove_status(status, battle)
+        self.assertNotIn("infinity_instant__granted_probe", {skill.code for skill in hero.action_skills()})
+        with self.assertRaises(ActionError):
+            hero.get_skill("infinity_instant__granted_probe")
+
+    def test_trait_suppression_disables_conversion_and_zero_mana_bonus(self):
+        class TraitSeal(StatusEffect):
+            suppresses_innate_traits = True
+
+            def __init__(self):
+                super().__init__("测试封锁固有特性", duration=1)
+
+        battle, hero, enemy = self.fixture()
+        instant = hero.get_skill("infinity_instant__machine_gun")
+        pattern = next(cells for cells in instant.source.patterns(battle, hero) if enemy.position in cells)
+        payload = {"cells": [cell.to_dict() for cell in pattern]}
+        self.assertTrue(instant.can_use(battle, hero, payload)[0])
+        seal = TraitSeal()
+        hero.add_status(seal)
+        self.assertFalse(instant.can_use(battle, hero, payload)[0])
+        hero.spend_mana(1)
+        self.assertEqual(tuple(hero.stat(key) for key in ("attack", "defense", "speed")), (3, 3, 3))
+        hero.remove_status(seal, battle)
+        self.assertEqual(tuple(hero.stat(key) for key in ("attack", "defense", "speed")), (5, 5, 5))
+        hero.traits.clear()
+        self.assertFalse(instant.can_use(battle, hero, payload)[0])
+        self.assertEqual(tuple(hero.stat(key) for key in ("attack", "defense", "speed")), (3, 3, 3))

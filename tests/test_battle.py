@@ -5481,14 +5481,18 @@ class BattleSmokeTests(unittest.TestCase):
         with self.assertRaises(ActionError):
             battle.perform_action({"type": "attack", "unit_id": lina.unit_id, "target_unit_id": ellie.unit_id})
 
-    def test_lina_destroy_reward_resets_move_and_attacks_once_per_turn(self) -> None:
-        battle = create_battle("undead_king_lina", "bard")
+    def test_lina_destroy_reward_repeats_attack_reset_without_resetting_movement(self) -> None:
+        battle = create_battle("undead_king_lina", ["bard", "ellie"])
         lina = battle.player_units(1)[0]
-        bard = battle.player_units(2)[0]
+        bard = next(unit for unit in battle.player_units(2) if unit.hero_code == "bard")
+        ellie = next(unit for unit in battle.player_units(2) if unit.hero_code == "ellie")
         lina.move_used = True
+        lina.normal_move_actions_used = 1
+        lina.normal_move_steps_used = 2
         lina.attacks_used = 2
-        lina.current_mana = 3
+        lina.current_mana = 2
         bard.current_mana = 1.5
+        ellie.current_mana = 1
 
         battle.resolve_damage(
             DamageContext(
@@ -5501,7 +5505,20 @@ class BattleSmokeTests(unittest.TestCase):
             )
         )
 
-        self.assertFalse(lina.move_used)
+        self.assertTrue(lina.move_used)
+        self.assertEqual(lina.normal_move_actions_used, 1)
+        self.assertEqual(lina.normal_move_steps_used, 2)
+        self.assertEqual(lina.attacks_used, 0)
+        self.assertAlmostEqual(lina.current_mana, 3.5)
+
+        lina.attacks_used = 2
+        battle.resolve_damage(
+            DamageContext(source=lina, target=ellie, attack_power=10, is_skill=True,
+                          action_name="再次击破", tags={"skill"})
+        )
+        self.assertTrue(lina.move_used)
+        self.assertEqual(lina.normal_move_actions_used, 1)
+        self.assertEqual(lina.normal_move_steps_used, 2)
         self.assertEqual(lina.attacks_used, 0)
         self.assertAlmostEqual(lina.current_mana, 4.5)
 
@@ -7760,8 +7777,8 @@ class HeroBatchH12Tests(unittest.TestCase):
         self.assertIsNotNone(taunt)
         self.assertIsNotNone(ally.get_status("嘲讽之吼"))
         self.assertEqual(bard.shields, 0)
-        self.assertLess(bard.current_hp, 10)
-        self.assertLess(ally.current_hp, 10)
+        self.assertEqual(bard.current_hp, 10)
+        self.assertEqual(ally.current_hp, 10)
         taunt.on_owner_turn_start(battle)
         self.assertFalse(battle.attack_target_allowed(bard, ally)[0])
         self.assertTrue(battle.attack_target_allowed(bard, cat)[0])

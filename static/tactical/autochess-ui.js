@@ -6,6 +6,7 @@ import { state } from '../core/state.js';
 import { setScreen } from '../core/ui.js';
 import { bindHeroHover, hideHeroHover, renderHeroDetails } from './hero-hover.js';
 import { applyRoomPayload, setRoomChessBattleSpeed } from './room-api.js';
+import { chessEffectTiming } from './spectator-timing.js';
 
 let selectedPieceId = '';
 let selectedHeroCode = '';
@@ -19,10 +20,24 @@ let lastServerTimestamp = 0;
 let lastChessPanelKey = '';
 
 function chessPanelRenderKey(chess) {
-  // Poll timestamps change while the battle frame stays the same. Include all
-  // room data and local controls so only truly unchanged battle panels reuse DOM.
+  // Receiving another board's action should not rebuild the watched board.
+  // Keep pairing/results for all boards and the full selected record, plus
+  // every economy/local-control field that can change the visible panel.
+  let visible = chess;
+  if (chess.phase === 'battle') {
+    const me = chess.players.find((player) => player.seat_id === chess.viewer_id);
+    const focus = chess.players.find((player) => player.seat_id === watchSeatId) || me;
+    const matches = chess.matches || [];
+    const watched = matches.find((match) => match.left === focus?.seat_id || match.right === focus?.seat_id) || matches[0];
+    const mine = matches.find((match) => match.left === me?.seat_id || match.right === me?.seat_id);
+    const record = chessDock === 'log' && rightDockOpen
+      ? matches.find((match) => `${match.left}:${match.right}:${match.index ?? 0}` === logMatchKey) || mine || matches[0]
+      : null;
+    visible = {...chess, version: 0,
+      matches: matches.map((match) => match === watched || match === record ? match : {...match, battle: null})};
+  }
   return JSON.stringify([
-    {...state.room, autochess: {...chess, server_time: 0}},
+    {...state.room, autochess: {...visible, server_time: 0}},
     selectedPieceId, selectedHeroCode, selectedMatchIndex, watchSeatId,
     actionMessage, actionError, messageRound, chessDock, logMatchKey,
     leftDockOpen, rightDockOpen, pieceView,
@@ -166,6 +181,65 @@ function shopButton(label, action, icon, tone, disabled) {
 
 let synergyTip = null;
 let actionTip = null;
+let equipmentTip = null;
+let equipmentTipHideTimer = null;
+
+function hideEquipmentTip() {
+  if (equipmentTipHideTimer) clearTimeout(equipmentTipHideTimer);
+  equipmentTipHideTimer = null;
+  equipmentTip?.remove();
+  equipmentTip = null;
+}
+
+function scheduleHideEquipmentTip() {
+  if (equipmentTipHideTimer) clearTimeout(equipmentTipHideTimer);
+  equipmentTipHideTimer = setTimeout(hideEquipmentTip, 120);
+}
+
+function showEquipmentTip(anchor, item) {
+  if (!anchor?.isConnected) return;
+  hideEquipmentTip();
+  hideHeroHover();
+  const card = node('aside', 'chess-equipment-tip');
+  card.tabIndex = 0;
+  card.setAttribute('role', 'tooltip');
+  card.append(node('strong', '', item?.name || item?.code || '装备'));
+  if (item?.attributes) card.append(node('p', 'chess-equipment-tip__attributes', item.attributes));
+  card.append(node('p', '', item?.effect || '暂无效果说明'));
+  document.body.append(card);
+  equipmentTip = card;
+  card.addEventListener('mouseenter', () => {
+    if (equipmentTipHideTimer) clearTimeout(equipmentTipHideTimer);
+    equipmentTipHideTimer = null;
+  });
+  card.addEventListener('mouseleave', hideEquipmentTip);
+  card.addEventListener('focusout', hideEquipmentTip);
+  const anchorRect = anchor.getBoundingClientRect();
+  const cardRect = card.getBoundingClientRect();
+  const margin = 8;
+  const gap = 10;
+  const roomRight = window.innerWidth - anchorRect.right - gap;
+  const fitsRight = roomRight >= cardRect.width + margin;
+  const fitsLeft = anchorRect.left - gap >= cardRect.width + margin;
+  const x = fitsRight ? anchorRect.right + gap : fitsLeft
+    ? anchorRect.left - cardRect.width - gap
+    : Math.max(margin, Math.min(anchorRect.left, window.innerWidth - cardRect.width - margin));
+  const targetY = fitsRight || fitsLeft ? anchorRect.top
+    : window.innerHeight - anchorRect.bottom >= cardRect.height + gap + margin
+      ? anchorRect.bottom + gap : anchorRect.top - cardRect.height - gap;
+  const y = Math.max(margin, Math.min(targetY, window.innerHeight - cardRect.height - margin));
+  card.style.left = `${x}px`;
+  card.style.top = `${y}px`;
+}
+
+function bindEquipmentHover(anchor, item) {
+  anchor.addEventListener('mouseenter', () => showEquipmentTip(anchor, item));
+  anchor.addEventListener('mouseleave', scheduleHideEquipmentTip);
+  anchor.addEventListener('focusin', () => showEquipmentTip(anchor, item));
+  anchor.addEventListener('focusout', (event) => {
+    if (!anchor.contains(event.relatedTarget) && event.relatedTarget !== equipmentTip) hideEquipmentTip();
+  });
+}
 
 function hideActionTip() {
   actionTip?.remove();
@@ -199,7 +273,12 @@ function renderStatus(chess, me) {
     preparing ? '准备阶段' : fighting ? '交战阶段' : chess.phase === 'finished' ? '结束' : '等待');
   rowA.append(phase);
   if (me && chess.phase !== 'lobby') {
-    rowA.append(statPill('gold', me.gold));
+    const gold = statPill('gold', me.gold);
+    const interestStep = Number(chess.config?.interest_step || 10);
+    const interestCap = Number(chess.config?.interest_cap ?? 3);
+    const interest = Math.min(interestCap, Math.floor(Math.max(0, Number(me.gold || 0)) / interestStep));
+    gold.title = `金币 ${me.gold} · 当前存款预计下轮利息 +${interest}（每 ${interestStep} 金 +1，最多 +${interestCap}）`;
+    rowA.append(gold);
     rowA.append(statPill('health', me.health));
     const field = node('span', 'chess-status__field');
     field.innerHTML = `当前上场 <b>${me.budget_used}</b><span>/</span><b>${me.budget}</b>`;
@@ -357,7 +436,9 @@ function renderPieces(chess, me, locked) {
       for (const code of piece.equipment || []) {
         const item = equipment.get(code);
         const chip = node('span', 'chess-gear-chip', item?.name || code);
-        chip.title = [item?.attributes, item?.effect].filter(Boolean).join(' · ');
+        chip.tabIndex = 0;
+        chip.setAttribute('aria-label', [item?.name || code, item?.attributes, item?.effect].filter(Boolean).join('，'));
+        bindEquipmentHover(chip, item || {code});
         const remove = button('卸下', 'unequip', {pieceId: piece.id, code}, pieceLocked);
         gear.append(chip, remove);
       }
@@ -375,9 +456,14 @@ function renderPieces(chess, me, locked) {
     const selected = (me.pieces || []).find((piece) => piece.id === selectedPieceId);
     for (const code of me.equipment_inventory) {
       const item = equipment.get(code);
-      const gear = button(`${item?.name || code} · ${item?.attributes || ''} · ${item?.effect || ''} → 所选武将`,
+      const entry = node('span', 'chess-equipment-entry');
+      const gear = button(item?.name || code,
         'equip', {code}, locked || !selected || (selected.equipment?.length || 0) >= chess.config.equipment_slots);
-      inventory.append(gear);
+      entry.tabIndex = gear.disabled ? 0 : -1;
+      gear.setAttribute('aria-label', `${[item?.name || code, item?.attributes, item?.effect].filter(Boolean).join('，')}，穿戴给所选武将`);
+      bindEquipmentHover(entry, item || {code});
+      entry.append(gear);
+      inventory.append(entry);
     }
     section.append(inventory);
   }
@@ -705,6 +791,14 @@ function renderMatchPreview(chess, match) {
   return renderBattleBoard({board: {width, height}, units}, chess.hero_previews);
 }
 
+function chessRoundStatus(battle) {
+  const limit = Math.max(0, Number(battle?.round_limit || 0));
+  if (!limit) return '';
+  const current = Math.min(limit, Math.max(1, Number(battle.round_number || 1)));
+  if (battle.winner) return `战斗结束 · 第 ${current}/${limit} 轮`;
+  return `第 ${current}/${limit} 轮 · 剩余 ${Math.max(0, Number(battle.rounds_remaining || 0))} 轮`;
+}
+
 function renderMatches(chess, {includeBoard = true} = {}) {
   const section = node('section', 'autochess-matches');
   section.append(node('h3', '', '本轮配对与观战'));
@@ -718,9 +812,19 @@ function renderMatches(chess, {includeBoard = true} = {}) {
   });
   section.append(buttons);
   const match = chess.matches[selectedMatchIndex] || chess.matches[0];
-  if (match.result) section.append(node('p', '', `胜方：${match.result.winner === 1 ? '左方' : '右方'} · 扣血 ${match.result.damage} · 判定 ${match.result.criterion}`));
+  if (match.result) {
+    const loss = match.result.actual_health_loss;
+    const lossLabel = loss === undefined ? `结算伤害 ${match.result.damage}` : `实际扣血 ${loss}`;
+    const counts = match.result.scores;
+    const reason = match.result.criterion === 'units'
+      ? `存活单位数 ${counts?.[1]?.[0] ?? '?'}:${counts?.[2]?.[0] ?? '?'}`
+      : match.result.criterion === 'seeded_coin'
+        ? '存活单位数相同，随机判定'
+        : match.result.criterion === 'empty_board' ? '空阵容判定' : '正常胜利';
+    section.append(node('p', '', `胜方：${match.result.winner === 1 ? '左方' : '右方'} · ${lossLabel} · ${reason}`));
+  }
   if (match.battle && includeBoard) {
-    section.append(node('p', '', `战斗轮 ${Math.min(match.battle.round_number, chess.config.battle_round_limit)}/${chess.config.battle_round_limit} · ${match.battle.winner ? '已结束' : '自动交战中'}`));
+    section.append(node('p', '', chessRoundStatus(match.battle)));
     section.append(renderBattleBoard(match.battle, chess.hero_previews));
     const log = node('div', 'autochess-battle-log');
     for (const line of (match.battle.logs || []).slice(-10)) log.append(node('p', '', line));
@@ -800,21 +904,25 @@ export function renderAutoChessPanel() {
   if (!chess) {
     lastChessPanelKey = '';
     hideHeroHover();
+    hideEquipmentTip();
     return;
   }
   if (Number(chess.server_time) && Number(chess.server_time) !== lastServerTimestamp) {
     lastServerTimestamp = Number(chess.server_time);
     serverClockOffset = Date.now() / 1000 - lastServerTimestamp;
   }
-  if (chess.phase === 'battle' && panel.firstElementChild && chessPanelRenderKey(chess) === lastChessPanelKey) {
+  if (panel.firstElementChild && chessPanelRenderKey(chess) === lastChessPanelKey) {
     updateCountdown();
-    paintChessCamera();
-    paintChessBattleEffects(chess);
+    if (chess.phase === 'battle') {
+      paintChessCamera();
+      paintChessBattleEffects(chess);
+    }
     return;
   }
   hideHeroHover();
   hideSynergyTip();
   hideActionTip();
+  hideEquipmentTip();
   const dockScroll = panel.querySelector(".chess-dock--right .chess-dock__scroll");
   const keptScroll = dockScroll ? {
     top: dockScroll.scrollTop,
@@ -838,6 +946,12 @@ export function renderAutoChessPanel() {
     const match = (chess.matches || []).find((item) => item.left === focus?.seat_id || item.right === focus?.seat_id) || chess.matches?.[0];
     if (match?.battle) {
       stageHost.append(renderBattleBoard(match.battle, chess.hero_previews, match.right === focus?.seat_id ? 2 : 1));
+      const roundLabel = chessRoundStatus(match.battle);
+      if (roundLabel) {
+        const counter = node('div', 'chess-round-counter', roundLabel);
+        counter.title = `按开战时双方 ${match.battle.initial_hero_count || 0} 名原生武将确定上限；剩余轮数包含本轮`;
+        stageHost.append(counter);
+      }
       const latest = (match.battle.actions || []).at(-1);
       if (latest) stageHost.append(node('div', 'chess-live-action', chessActionText(latest)));
     }
@@ -895,7 +1009,7 @@ export function renderAutoChessPanel() {
     scroll.append(renderSynergies(me));
   } else if (chess.phase === 'finished') {
     const winner = chess.players.find((player) => player.seat_id === chess.champion);
-    scroll.append(node('p', '', `冠军：${winner?.name || chess.champion}`));
+    scroll.append(node('p', '', winner ? `冠军：${winner.name}` : '全员淘汰，本局无冠军'));
     scroll.append(renderStandings(chess));
   } else {
     scroll.append(renderStandings(chess));
@@ -920,7 +1034,7 @@ export function renderAutoChessPanel() {
   updateCountdown();
   paintChessCamera();
   paintChessBattleEffects(chess);
-  lastChessPanelKey = chess.phase === 'battle' ? chessPanelRenderKey(chess) : '';
+  lastChessPanelKey = chessPanelRenderKey(chess);
 }
 
 function paintChessBattleEffects(chess) {
@@ -969,7 +1083,7 @@ function chessVfxTheme(event) {
   return 'arcane';
 }
 
-function drawChessEffect(stage, screen, battle, event, viewerSide) {
+function drawChessEffect(stage, screen, battle, event, viewerSide, timing) {
   if (!stage?.isConnected || !screen?.isConnected) return;
   const layer = document.getElementById('chess-battle-vfx');
   if (!layer) return;
@@ -993,7 +1107,7 @@ function drawChessEffect(stage, screen, battle, event, viewerSide) {
   if (!targets.length && sourceCell) targets.push(sourceCell);
   const theme = chessVfxTheme(event);
   const reduced = Boolean(globalThis.WujiangBattleFeedback?.reducedMotion());
-  const duration = reduced ? 180 : 850;
+  const {duration, targetGap, linger} = timing;
   const spawn = (className, location, delay = 0) => {
     if (!location) return;
     const effect = node('div', `${className} theme-${theme}`);
@@ -1005,13 +1119,13 @@ function drawChessEffect(stage, screen, battle, event, viewerSide) {
       effect.style.animationFillMode = 'both';
     }
     layer.append(effect);
-    scheduleChessVfx(() => effect.remove(), duration + delay + 80);
+    scheduleChessVfx(() => effect.remove(), duration + delay + linger);
   };
   spawn('battle-vfx-source', source);
   targets.forEach((cell, index) => {
     const target = point(cell);
     if (!target) return;
-    const delay = reduced ? 0 : Math.min(index, 5) * 45;
+    const delay = Math.min(index, 5) * targetGap;
     if (!reduced && source && event.kind !== 'defense' && Math.hypot(target.x - source.x, target.y - source.y) > 12) {
       const dx = target.x - source.x;
       const dy = target.y - source.y;
@@ -1021,7 +1135,7 @@ function drawChessEffect(stage, screen, battle, event, viewerSide) {
       trail.style.width = `${Math.hypot(dx, dy)}px`;
       trail.style.rotate = `${Math.atan2(dy, dx)}rad`;
       layer.append(trail);
-      scheduleChessVfx(() => trail.remove(), duration + 80);
+      scheduleChessVfx(() => trail.remove(), duration + linger);
     }
     const kind = event.kind === 'defense' ? 'battle-vfx-shield'
       : event.kind === 'attack' ? 'battle-vfx-impact' : 'battle-vfx-burst';
@@ -1031,7 +1145,12 @@ function drawChessEffect(stage, screen, battle, event, viewerSide) {
 
 function playChessEffects(stage, battle, key, viewerSide) {
   const screen = document.getElementById('autochess-screen');
-  if (!screen || !screen.getBoundingClientRect().width || document.visibilityState === 'hidden') return;
+  if (!screen || !screen.getBoundingClientRect().width || document.visibilityState === 'hidden') {
+    chessVfxTimers.forEach(window.clearTimeout);
+    chessVfxTimers.clear();
+    document.getElementById('chess-battle-vfx')?.replaceChildren();
+    return;
+  }
   let layer = document.getElementById('chess-battle-vfx');
   if (!layer) {
     layer = document.createElement('div');
@@ -1046,16 +1165,23 @@ function playChessEffects(stage, battle, key, viewerSide) {
     chessVfxTimers.clear();
     layer.replaceChildren();
     chessVfxKey = key;
-    chessVfxSeen = Math.max(0, Number(events.at(-3)?.id || events[0]?.id || 1) - 1);
+    chessVfxSeen = Math.max(0, Number(events[events.length - 3]?.id || events[0]?.id || 1) - 1);
   }
   const fresh = events.filter((event) => Number(event.id || 0) > chessVfxSeen).slice(-6);
   chessVfxSeen = Math.max(chessVfxSeen, newest);
   if (!fresh.length) return;
+  // New committed actions supersede old cues. Never keep delayed effects
+  // from an older frame attached to a newer board, even at high speed.
+  chessVfxTimers.forEach(window.clearTimeout);
+  chessVfxTimers.clear();
+  layer.replaceChildren();
+  const timing = chessEffectTiming(state.room?.chess_battle_speed,
+    Boolean(globalThis.WujiangBattleFeedback?.reducedMotion()));
   fresh.forEach((event, index) => {
     scheduleChessVfx(() => {
       if (key !== chessVfxKey) return;
-      drawChessEffect(screen.querySelector('.autochess-board-stage'), screen, battle, event, viewerSide);
-    }, index * 180);
+      drawChessEffect(screen.querySelector('.autochess-board-stage'), screen, battle, event, viewerSide, timing);
+    }, index * timing.spacing);
   });
 }
 

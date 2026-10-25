@@ -206,7 +206,7 @@ def main() -> int:
             ".menu-entry": "主菜单条目",
         })
         text = page.evaluate("document.querySelector('.menu-layout').textContent") or ""
-        for label in ("战役", "房间大厅", "战绩与回放", "设置"):
+        for label in ("战役", "房间大厅", "数据库", "设置"):
             if label not in text:
                 problems.append(f"主菜单缺少「{label}」")
         for label in ("继续战役", "新手教学"):
@@ -519,6 +519,12 @@ def main() -> int:
         ):
             return fail(page, "BATTLE FAILED: 打不开自动配置弹窗")
         page.evaluate("document.getElementById('auto-configure-confirm').click()")
+        if not page.wait_for(
+            "!document.getElementById('toggle-ready').disabled",
+            timeout=25,
+        ):
+            return fail(page, "BATTLE FAILED: 自动配置后真人席位无法确认准备")
+        page.evaluate("document.getElementById('toggle-ready').click()")
         if not page.wait_for(
             "!document.getElementById('start-room').disabled",
             timeout=25,

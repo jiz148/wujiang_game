@@ -95,6 +95,12 @@ def choose_turn_bundle_action(
     rng = random.Random()
     for unit in ordered:
         snapshot = battle.action_snapshot_for(unit)
+        if unit.hero_code == "excel_r373" and unit.current_mana > 0:
+            overclock = _first_skill(battle, unit, snapshot,
+                                     ("infinity_instant__machine_gun", "infinity_instant__missile"),
+                                     timing="instant", modes={"cell"})
+            if overclock is not None:
+                return overclock, unit
         situation = build_situation(battle, unit, snapshot)
         weights = weights_for(situation)
         intent, sampled = pick_intent(weights, rng)
@@ -119,8 +125,16 @@ def choose_turn_bundle_action(
 
 def choose_instant_action(battle: Battle, units: Iterable[Unit], difficulty: str) -> Optional[dict[str, Any]]:
     del difficulty
-    for unit in list(units)[:4]:
+    ordered = list(units)
+    ordered.sort(key=lambda unit: unit.hero_code != "excel_r373")
+    for unit in ordered[:4]:
         snapshot = battle.action_snapshot_for(unit)
+        if unit.hero_code == "excel_r373":
+            payload = _first_skill(battle, unit, snapshot,
+                                   ("infinity_instant__machine_gun", "infinity_instant__missile"),
+                                   timing="instant", modes={"cell"})
+            if payload is not None:
+                return payload
         payload = _first_skill(battle, unit, snapshot, ("survive",), timing="instant")
         if payload is not None:
             return payload
@@ -148,7 +162,8 @@ def choose_chain_reaction(
             continue
         code = str(option.get("action_code") or "")
         score = _reaction_score(queued, code, threatened)
-        if score <= 0 and not threatened and ("shield" in code or code in {"protection", "block"}):
+        source_code = code.rsplit("__", 1)[-1]
+        if score <= 0 and not threatened and ("shield" in source_code or source_code in {"protection", "block", "light_wall"}):
             score = 45
         if score > 0:
             ranked.append((score, payload))
@@ -170,6 +185,7 @@ def _incoming_hits(battle: Battle, reactor: Unit, queued: Any) -> bool:
 
 
 def _reaction_score(queued: Any, code: str, threatened: bool) -> int:
+    code = code.rsplit("__", 1)[-1]
     if not threatened:
         return 0
     payload = getattr(queued, "payload", None) or {}
@@ -195,13 +211,37 @@ def _reaction_payload(
     threatened: bool,
 ) -> Optional[dict[str, Any]]:
     code = str(option.get("action_code") or "")
+    source_code = code.rsplit("__", 1)[-1]
     preview = option.get("preview") or {}
+    if reactor.hero_code == "excel_r373" and source_code in {"machine_gun", "missile"}:
+        patterns = _selection_patterns(preview)
+        if not patterns:
+            return None
+        ranked: list[tuple[float, list[Position]]] = []
+        for pattern in patterns:
+            cells = _positions(pattern)
+            net = sum((1.0 if target.player_id != reactor.player_id else -1.6)
+                      * max(1, battle.unit_hit_count_for_cells(target, cells))
+                      for target in battle.effect_units_at_cells(cells)
+                      if not target.magic_immunity)
+            if net > 0:
+                ranked.append((net, cells))
+        if not ranked:
+            return None
+        chosen = max(ranked, key=lambda entry: entry[0])[1]
+        payload = {"type": "chain_react", "unit_id": reactor.unit_id,
+                   "action_code": code, "cells": [{"x": cell.x, "y": cell.y} for cell in chosen]}
+        return payload if _reaction_payload_legal(battle, reactor, queued, payload) else None
     listed = [str(unit_id) for unit_id in (preview.get("target_unit_ids") or [])]
-    covers_ally = any(unit_id in {str(item) for item in (getattr(queued, "target_unit_ids", None) or [])} for unit_id in listed)
+    affected_ids = {str(item) for item in (getattr(queued, "target_unit_ids", None) or [])}
+    mounted = battle.mounted_unit_for(reactor)
+    if reactor.hero_code == "flying_dragon_ship_atlanta" or (mounted is not None and mounted.allows_multiple_riders):
+        affected_ids.update(unit.unit_id for unit in battle.effect_units_at_cells(getattr(queued, "target_cells", None) or []))
+    covers_ally = any(unit_id in affected_ids for unit_id in listed)
     if not code or not (threatened or covers_ally):
         return None
     base = {"type": "chain_react", "unit_id": reactor.unit_id, "action_code": code}
-    escape = code in {"evasion", "ghost_step", "backstep_shot"}
+    escape = source_code in {"evasion", "ghost_step", "backstep_shot"}
     if escape:
         cell = _retreat_cell(battle, reactor, queued, _positions(preview.get("cells")))
         if cell is None:
@@ -211,7 +251,7 @@ def _reaction_payload(
     elif listed:
         own = str(getattr(reactor, "unit_id", ""))
         base["target_unit_id"] = own if own in listed else listed[0]
-        if code in {"protection", "block"} or "shield" in code:
+        if source_code in {"protection", "block"} or "shield" in source_code:
             base["target_unit_ids"] = [base["target_unit_id"]]
     if not _reaction_payload_legal(battle, reactor, queued, base):
         return None
@@ -299,6 +339,12 @@ def choose_damage_choice_action(battle: Battle) -> dict[str, Any]:
     unit_id = str(prompt.get("unit_id") or "")
     kind = str(prompt.get("kind") or "")
     options = [str(item) for item in (prompt.get("options") or [])]
+    if kind == "gentleman_guard":
+        protected = battle.units.get(str(prompt.get("protected_unit_id") or ""))
+        damage = float(prompt.get("damage") or 0)
+        use = protected is not None and not protected.is_clone and damage >= protected.current_hp
+        return {"type": "damage_choice", "unit_id": unit_id,
+                "target_unit_id": "protect" if use else "decline"}
     if kind == "hell_death_strike" and options:
         owner = battle.units.get(unit_id)
         if owner is None:
@@ -374,8 +420,19 @@ def _first_skill(
         if action.get("kind") == "skill" and action.get("available") and str(action.get("timing") or "") == timing
     ]
     ordered = sorted(actions, key=lambda action: _skill_rank(action, preferred))
+    if actor.hero_code == "excel_r324":
+        crow_priority = {"eight_dragon_crow_array": 0, "square_crow_array": 1,
+                         "hexagram_crow_array": 2, "triangle_crow_array": 3,
+                         "super_messenger_crow": 4}
+        ordered.sort(key=lambda action: crow_priority.get(str(action.get("code") or ""), 5))
     for action in ordered:
         code = str(action.get("code") or "")
+        if actor.hero_code == "excel_r324" and code in {
+            "eight_dragon_crow_array", "square_crow_array", "hexagram_crow_array",
+            "triangle_crow_array"} and sum(item.startswith("skill:") and
+            item.removeprefix("skill:") in {"eight_dragon_crow_array", "square_crow_array",
+            "hexagram_crow_array", "triangle_crow_array"} for item in actor.actions_taken_this_turn) >= 3:
+            continue
         preview = action.get("preview") or {}
         if code in UNSAFE_SKILLS and not _selection_patterns(preview):
             continue
@@ -417,16 +474,61 @@ def _skill_payload(battle: Battle, actor: Unit, action: dict[str, Any]) -> Optio
 
     mode = str(action.get("target_mode") or "none")
     code = str(action.get("code") or "")
+    if actor.hero_code == "excel_r373" and code.startswith("infinity_instant__"):
+        if code.rsplit("__", 1)[-1] not in {"machine_gun", "missile"}:
+            return None
+        patterns = _selection_patterns(preview)
+        ranked: list[tuple[float, list[Position]]] = []
+        for pattern in patterns:
+            cells = _positions(pattern)
+            targets = [target for target in battle.effect_units_at_cells(cells)
+                       if not target.magic_immunity]
+            net = sum((1.0 if target.player_id != actor.player_id else -1.6)
+                      * max(1, battle.unit_hit_count_for_cells(target, cells)) for target in targets)
+            if actor.player_id == battle.active_player:
+                premium = sum((1.0 if target.player_id != actor.player_id else -1.6)
+                              * (battle.damage_rule.calculate_damage(actor.stat("attack") + 2, target.stat("defense"))
+                                 - battle.damage_rule.calculate_damage(actor.stat("attack"), target.stat("defense")))
+                              for target in targets)
+                if premium <= 0:
+                    continue
+            if net > 0:
+                ranked.append((net, cells))
+        if not ranked:
+            return None
+        chosen = max(ranked, key=lambda entry: entry[0])[1]
+        return {"type": "skill", "unit_id": actor.unit_id, "skill_code": code,
+                "cells": [{"x": cell.x, "y": cell.y} for cell in chosen]}
+    if code.rsplit("__", 1)[-1] == "silver_signal_flare":
+        signal = actor.get_skill(code)
+        signal = getattr(signal, "inner", signal)
+        targets = [unit for unit in signal.beneficiaries(battle, actor)
+                   if not unit.has_status("银制信号弹攻势")]
+        if any(unit.is_clone and not unit.direct_effects_blocked() for unit in targets):
+            return None
+        if not any(not unit.is_clone and battle.unit_belongs_to_current_turn(unit)
+                   and unit.attacks_used < unit.attack_actions_per_turn()
+                   for unit in targets):
+            return None
     listed = [str(item) for item in (preview.get("target_unit_ids") or [])]
     if mode in {"enemy", "unit"}:
-        if code == "recover_mana":
+        source_code = code.rsplit("__", 1)[-1]
+        if source_code in {"recover_mana", "add_mana"}:
             payload = finish(_recover_mana_payload(battle, actor, code, listed))
             return payload if _payload_matters(battle, actor, payload) else None
+        if source_code == "defense_one":
+            allies = [unit for unit in _listed_units(battle, actor, listed, allies=True)
+                      if not any(status.name == "守+1" and getattr(status, "source_id", None) == actor.unit_id
+                                 for status in unit.statuses)]
+            return finish(_at_unit(actor, code, allies[0])) if allies else None
         allies_ok = mode == "unit"
         for target in _listed_units(battle, actor, listed, allies=False) or (
             _listed_units(battle, actor, listed, allies=True) if allies_ok else []
         ):
             payload = finish(_at_unit(actor, code, target))
+            if payload is not None and preview.get("selection", {}).get("mode") == "crow_formation":
+                ravens = preview.get("raven_ids_by_target", {}).get(target.unit_id, [])
+                payload["raven_ids"] = ravens[:int(preview.get("raven_count") or 0)]
             if _payload_matters(battle, actor, payload):
                 return payload
         return None
@@ -808,6 +910,14 @@ def _move(battle: Battle, actor: Unit, snapshot: dict[str, Any], *, away: bool) 
             break
     if not cells:
         return None
+    if actor.hero_code in {"excel_r328", "excel_r329"} and battle.mounted_unit_for(actor) is None:
+        from wujiang.tactical.heroes.flying_dragon_ship import allied_ship
+        ship = allied_ship(battle, actor.player_id)
+        if ship is not None:
+            boarding = [cell for cell in cells if cell in battle.unit_cells(ship)]
+            if boarding:
+                chosen = boarding[0]
+                return {"type": "move", "unit_id": actor.unit_id, "x": chosen.x, "y": chosen.y}
     if len(cells) > 12:
         cells = cells[:: max(1, len(cells) // 12)][:12]
     enemies = _focus_enemies(battle, actor)

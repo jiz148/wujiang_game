@@ -1,6 +1,6 @@
 ﻿from __future__ import annotations
 
-import random
+from wujiang.tactical.prediction import random, direct_scoring
 from typing import Any
 
 from wujiang.tactical.engine.core import (
@@ -384,6 +384,10 @@ class FateKickSkill(Skill):
             return
         target = battle.unit_at(impact)
         if target is None or target.player_id == actor.player_id:
+            return
+        if direct_scoring():
+            actor._ai_expected_banish_probability = .5
+            target._ai_expected_banish_probability = .5
             return
         if random.random() < 0.5:
             battle.banish_unit(actor, 2)

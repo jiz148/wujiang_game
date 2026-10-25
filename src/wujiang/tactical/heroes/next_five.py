@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-import random
+from wujiang.tactical.prediction import random, direct_scoring
 from typing import Any, Callable, Iterable, Optional
 
 from wujiang.tactical.engine.core import (
@@ -1027,30 +1027,22 @@ class AttackLockTrait(Trait):
 
 class LinaDestroyRewardTrait(Trait):
     def __init__(self) -> None:
-        super().__init__("击破重置", "每回合最多 1 次；自己的普攻或技能破坏武将或守 4 以上单位时，移动和攻击重置，并获得目标剩余魔。")
-        self.used_this_turn = False
-
-    def on_owner_turn_start(self, battle: Battle) -> None:
-        self.used_this_turn = False
+        super().__init__("击破重置", "自己的普攻或技能每破坏一个武将或守 4 以上单位，攻击重置，并获得该目标剩余魔；次数不限，不重置移动。")
 
     def _eligible_target(self, target: HeroUnit) -> bool:
         return (not target.is_summon and not target.is_clone) or target.stat("defense") >= 4
 
     def on_after_damage(self, battle: Battle, ctx: DamageContext) -> None:
         owner = self.owner
-        if owner is None or self.used_this_turn or ctx.source is None or ctx.source.unit_id != owner.unit_id:
+        if owner is None or ctx.source is None or ctx.source.unit_id != owner.unit_id:
             return
         if ctx.target.alive or ctx.from_field_effect or not ((ctx.is_skill and "skill" in ctx.tags) or "attack" in ctx.tags):
             return
         if not self._eligible_target(ctx.target):  # type: ignore[arg-type]
             return
         gained = owner.gain_mana(ctx.target.current_mana)
-        owner.move_used = False
-        owner.normal_move_actions_used = 0
-        owner.normal_move_steps_used = 0
         owner.attacks_used = 0
-        self.used_this_turn = True
-        battle.log(f"{owner.name} 击破目标，移动和攻击已重置，并获得 {gained} 点魔。")
+        battle.log(f"{owner.name} 击破目标，攻击已重置，并获得 {gained} 点魔。")
 
 
 class NoEnemyHealAuraTrait(Trait):
@@ -2024,7 +2016,7 @@ class UndeadKingLina(AbstractHero):
     footprint_width = 2
     footprint_height = 2
     raw_skill_text = "隐身 变硬 ￥撕裂 风沙（每回合一次；远程2*4或4*2；当前攻伤害，有单位则全场沙尘至自己下次回合开始） 震开 狂沙（2己方轮一次；锁定直线5格伤害，瞬移到第6格；完整身体落点受阻时不移动）"
-    raw_trait_text = "攻击两次；攻击半破魔；在攻击对象死之前无法攻击其他单位；占4格；每破坏一个武将或守在4以上的单位移动，攻击重置，并且魔+那个单位剩余的魔，此效果每回合最多发动一次；此单位周围7*7的对方单位不能回复；在沙尘天气并且非隐身时自然回复"
+    raw_trait_text = "攻击两次；攻击半破魔；在攻击对象死之前无法攻击其他单位；占4格；每破坏一个武将或守在4以上的单位，攻击重置，并且魔+那个单位剩余的魔；此单位周围7*7的对方单位不能回复；在沙尘天气并且非隐身时中自然回复"
 
     def build_skills(self) -> list[Skill]:
         return [
@@ -3392,8 +3384,11 @@ class SplitSkill(Skill):
                 raise ActionError("分身位置已被占用。")
             battle.summon_unit(clone, destination, summoner=actor)
             clones.append(clone)
-        swap_clone = random.choice(clones)
-        actor.position, swap_clone.position = swap_clone.position, original_position
+        if direct_scoring():
+            actor._ai_expected_positions = tuple((clone.position, 1 / len(clones)) for clone in clones)
+        else:
+            swap_clone = random.choice(clones)
+            actor.position, swap_clone.position = swap_clone.position, original_position
         actor.turn_ready = False
         battle.log(f"{actor.name} 使用分身制造了 {self.clone_count} 个分身，并与其中一个新分身交换了位置。")
 

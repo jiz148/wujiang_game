@@ -7,6 +7,8 @@ in place, and a change applies without restarting the match.
 from __future__ import annotations
 
 from typing import Any, Iterable, Optional
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from wujiang.platform.app_settings import ai_decision_mode
 from wujiang.tactical.engine.core import Battle, Position, Unit
@@ -15,8 +17,21 @@ from wujiang.tactical.rooms import model_ai
 from wujiang.tactical.rooms import simple_ai
 from wujiang.tactical.rooms import tendency
 
+_detailed_picker = ContextVar("ai_isolated_detailed_picker", default=False)
+
+
+@contextmanager
+def detailed_picker_scope():
+    token = _detailed_picker.set(True)
+    try:
+        yield
+    finally:
+        _detailed_picker.reset(token)
+
 
 def _picker():
+    if _detailed_picker.get():
+        return detailed
     mode = ai_decision_mode()
     if mode == "model":
         return model_ai
@@ -32,7 +47,14 @@ def choose_turn_bundle_action(
     units: Iterable[Unit],
     difficulty: str,
 ) -> tuple[dict[str, Any], Optional[Unit]]:
-    return _picker().choose_turn_bundle_action(battle, units, difficulty)
+    picker = _picker()
+    if picker is detailed:
+        from wujiang.tactical.rooms.ai_parallel import take_turn_result
+        units = list(units)
+        prepared = take_turn_result(battle, units, difficulty)
+        if prepared is not None:
+            return prepared
+    return picker.choose_turn_bundle_action(battle, units, difficulty)
 
 
 def choose_instant_action(

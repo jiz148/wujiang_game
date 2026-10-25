@@ -15,7 +15,7 @@ import { renderBpPanel } from '../tactical/bp-ui.js';
 import { bindAutoChessEvents, renderAutoChessPanel } from '../tactical/autochess-ui.js';
 import { applyRoomPayload, canReclaimSeatByName, claimRoomSeat, closeModePicker, controlSimulation, copyInviteLink, createRoom, deleteRoom, exitTutorial, fillEmptySeatsWithAi, isRandomRoomMode, joinRoom, leaveFinishedBattle, leaveReplayMode, leaveRoom, loadReplayStep, openModePicker, performAction, removeRoomSeat, renderTutorialGuide, restartFromGameOver, resumeStoredSeat, resumeTutorialBattle, retryTutorialStep, roomModeMeta, selectRoomHero, setAiStyles, setRoomSeatController, setRoomSeatCount, setRoomSeatTeam, setSeatArmyComposition, setSeatRandomQuota, shouldShowLobbyPanel, startRoomBattle, startTutorialBattle, surrenderBattle, toggleAiTakeover, toggleRoomReady } from '../tactical/room-api.js';
 import { clearActionSelection, loadStoredIdentity } from '../tactical/session.js';
-import { bodyDirectionSelection, canCompleteTargetSelection, choicePatternSelection, controllerTypeLabel, currentRoomSeat, hasCancelableTargetSelection, isBoardTargetSelectionActive, movePathSelection, multiUnitSelection, patternSelection, randomRoomRosterSize, reviveUnitCellSelection, roomSummaries, sanitizeRandomRosterSizeInput, seatHeroSummary, setStagedAttackVariant, setStagedBodyDirection, setStagedPatternChoice, setStagedReviveUnitId, setStagedStatName, setStagedUnitDirection, stagedAttackActionPayload, stagedBodyCells, stagedBodyDirection, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, stagedUnitDirection, stagedUnitDirectionTargetId, statCellSelection, unitDirectionSelection } from '../tactical/targeting.js';
+import { bodyDirectionSelection, canCompleteTargetSelection, choicePatternSelection, controllerTypeLabel, crowFormationSelection, currentRoomSeat, hasCancelableTargetSelection, isBoardTargetSelectionActive, movePathSelection, multiUnitSelection, patternSelection, randomRoomRosterSize, reviveUnitCellSelection, roomSummaries, sanitizeRandomRosterSizeInput, seatHeroSummary, setStagedAttackVariant, setStagedBodyDirection, setStagedPatternChoice, setStagedReviveUnitId, setStagedStatName, setStagedUnitDirection, stagedAttackActionPayload, stagedBodyCells, stagedBodyDirection, stagedCrowFormationRavenIds, stagedCrowFormationTargetId, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, stagedUnitDirection, stagedUnitDirectionTargetId, statCellSelection, unitDirectionSelection } from '../tactical/targeting.js';
 import { clearBattleVfx, selectedAction, tutorialState } from '../tactical/vfx.js';
 import { createMenu } from './components.js';
 import { $ } from './dom.js';
@@ -552,6 +552,9 @@ export function bindEvents() {
       }
     } else if (multiUnitSelection(action)) {
       payload.target_unit_ids = stagedMultiTargetIds(action);
+    } else if (crowFormationSelection(action)) {
+      payload.target_unit_id = stagedCrowFormationTargetId(action);
+      payload.raven_ids = stagedCrowFormationRavenIds(action);
     } else if (unitDirectionSelection(action)) {
       payload.target_unit_id = stagedUnitDirectionTargetId(action);
       payload.direction = stagedUnitDirection(action);

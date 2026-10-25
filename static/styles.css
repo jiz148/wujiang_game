@@ -10077,7 +10077,30 @@ button.chess-icon-btn.is-sell { background: #8d3f3a; color: #ffe8e4; }
 }
 .autochess-board-piece.is-selectable { pointer-events: auto; cursor: pointer; }
 .autochess-board-piece.is-picked .piece-ring { box-shadow: 0 0 0 2px #e4c36a; }
-.chess-gear-chip { color: var(--text-2); font-size: var(--fs-sm); }
+.chess-gear-chip { color: var(--text-2); font-size: var(--fs-sm); cursor: help; overflow-wrap: anywhere; }
+.chess-gear-chip:focus-visible,
+.chess-equipment-entry:focus-visible { outline: 2px solid #ffe08a; outline-offset: 2px; }
+.chess-equipment-entry { display: inline-flex; min-width: 0; max-width: 100%; }
+.chess-equipment-entry button { max-width: 100%; overflow-wrap: anywhere; white-space: normal; text-align: left; }
+.chess-equipment-tip {
+  position: fixed;
+  z-index: 270;
+  box-sizing: border-box;
+  width: min(380px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: rgba(16, 20, 28, 0.97);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.12);
+  color: var(--text-1);
+  pointer-events: auto;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.chess-equipment-tip strong { display: block; margin-bottom: 7px; }
+.chess-equipment-tip p { margin: 5px 0 0; font-size: 13px; line-height: 1.5; }
+.chess-equipment-tip__attributes { color: #ffe08a; }
 .chess-dock .chess-piece-actions button,
 .chess-dock .chess-piece-gear button {
   height: auto;
@@ -10367,6 +10390,26 @@ body.battle-mode .chess-log__select {
   border-radius: .55rem; background: rgba(17, 25, 36, .92);
   color: #fff0ca; text-align: center; font-weight: 700;
   pointer-events: none; box-shadow: 0 4px 16px rgba(0, 0, 0, .35);
+}
+.chess-round-counter {
+  position: absolute;
+  z-index: 8;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: .45rem .75rem;
+  border: 1px solid rgba(142, 200, 255, .55);
+  border-radius: .55rem;
+  background: rgba(17, 25, 36, .9);
+  color: #e5f3ff;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: auto;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .35);
+}
+@media (max-width: 900px) {
+  .chess-round-counter { top: 78px; }
 }
 .chess-action-list { display: flex; flex-direction: column; gap: .35rem; }
 .chess-action-entry { padding: .4rem .55rem; border-left: 3px solid #d4a74f; background: rgba(212, 167, 79, .1); }

@@ -8,6 +8,7 @@ from wujiang.tactical.engine.core import (
 )
 from wujiang.tactical.heroes.base import AbstractHero
 from wujiang.tactical.heroes.common import LightWallSkill, payload_position, payload_target_unit, positions_to_dict
+from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_hero_kit
 from wujiang.tactical.heroes.next_five import square_around_cells
 
 
@@ -21,7 +22,9 @@ def elemental_hero_family(battle: Battle, unit: Unit, attribute: str) -> bool:
         if parent is None:
             return False
         current = parent
-    return not current.is_summon and not current.is_clone and current.attribute == attribute
+    requested = "火" if attribute == "炎" else attribute
+    actual = "火" if current.attribute == "炎" else current.attribute
+    return not current.is_summon and not current.is_clone and actual == requested
 
 
 class FireWallSkill(LightWallSkill):
@@ -77,7 +80,7 @@ class ChimeraSummon(AbstractHero):
     hero_code = "flame_chimera"
     hero_name = "奇美拉"
     role = "召唤物"
-    attribute = "炎"
+    attribute = "火"
     race = "兽"
     level = 1
     base_stats = Stats(attack=1, defense=1, speed=3, attack_range=2, mana=0)
@@ -246,3 +249,10 @@ class FlamePasswordSkill(Skill):
     def get_target_units_for_payload(self, battle: Battle, actor: Unit,
                                      payload: dict[str, Any]) -> list[Unit]:
         return [payload_target_unit(battle, payload)]
+
+
+FLAME_MANAGER_KIT = register_hero_kit(FragmentMappedHeroKit(
+    "excel_r322",
+    skills={"火墙": FireWallSkill, "奇美拉": ChimeraSkill, "火焰密码": FlamePasswordSkill},
+    traits={"每个进攻回合开始时当回合攻击次数增加周围7*7“炎”属性的武将和其召唤物的数量": FlameManagerAttackCountTrait},
+))

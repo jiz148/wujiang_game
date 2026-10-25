@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import replace
+from typing import Any, Mapping
 
 from wujiang.tactical.engine.core import (
     ActionError, ActionMiss, Battle, BattleFieldEffect, DamageContext, MoveContext,
-    Position, Skill, StatusEffect, Trait, Unit,
+    Position, Skill, Stats, StatusEffect, Trait, Unit,
 )
+from wujiang.tactical.heroes.hero_kit import HeroKit, register_hero_kit
 from wujiang.tactical.heroes.common import (
     match_payload_pattern, pattern_selection_preview, payload_position,
     payload_target_unit, positions_to_dict,
@@ -430,3 +432,30 @@ class LightningChainSkill(Skill):
     def get_target_units_for_payload(self, battle: Battle, actor: Unit,
                                      payload: dict[str, Any]) -> list[Unit]:
         return [payload_target_unit(battle, payload)]
+
+
+class StormSpiritKit(HeroKit):
+    """Own R306's source fragments and locked initial mana ruling."""
+
+    code = "excel_r306"
+
+    def special_skill(self, fragment: Mapping[str, Any]) -> Skill | None:
+        name = fragment.get("name")
+        if name == "电子风暴":
+            return ElectronicStormSkill()
+        if name == "残影":
+            return AfterimageSkill()
+        if name == "雷电锁链":
+            return LightningChainSkill()
+        return None
+
+    def special_trait(self, fragment: Mapping[str, Any]) -> Trait | None:
+        if fragment.get("fragment") == "魔上限15":
+            return StormSpiritTrait()
+        return None
+
+    def base_stats(self, source_stats: Stats) -> Stats:
+        return replace(source_stats, mana=15.0)
+
+
+STORM_SPIRIT_KIT = register_hero_kit(StormSpiritKit())

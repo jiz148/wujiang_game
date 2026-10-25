@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import secrets
+from wujiang.tactical.prediction import secrets
 from typing import Sequence
 
 from wujiang.tactical.engine.core import ActionError, Battle, BattleFieldEffect, DamageContext, HealContext, HeroUnit, Position, Skill, Unit

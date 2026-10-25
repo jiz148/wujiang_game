@@ -6,6 +6,7 @@ workbook remains the source of names, printed stats, and descriptions.
 from __future__ import annotations
 
 import random
+from wujiang.tactical.prediction import equipment_random, direct_scoring
 
 from wujiang.tactical.engine.core import Battle, DamageContext, HealContext, StatusEffect
 from wujiang.tactical.heroes.common import (
@@ -15,7 +16,7 @@ from wujiang.tactical.heroes.next_five import ArcAttackTrait
 
 
 def _rng(battle: Battle) -> random.Random:
-    return getattr(battle, "chess_rng", None) or random
+    return equipment_random(battle)
 
 
 class EquipmentStatus(StatusEffect):
@@ -78,7 +79,7 @@ class EquipmentStatus(StatusEffect):
             return value + 1
         if self.code == "风力弓" and self.wind_bonus:
             return value + 1
-        if self.code == "布手套" and self.owner_turns % 4 == 0 and self.owner_turns > 0:
+        if self.code == "布手套" and self.owner_turns % 2 == 0 and self.owner_turns > 0:
             return value + 1
         return value
 
@@ -116,18 +117,18 @@ class EquipmentStatus(StatusEffect):
             owner.gain_mana(mana_gain)
         if self.code == "鬼符" and owner.attribute == "暗":
             owner.take_damage_fraction(0.125)
-        if self.code == "贪魔之卵" and self.owner_turns % 10 == 1:
+        if self.code == "贪魔之卵" and self.owner_turns % 5 == 1:
             owner.current_mana = owner.max_mana()
         if self.code == "天使之剑":
             owner.has_flying = owner.current_hp >= owner.max_health or any(
                 isinstance(trait, FlyingTrait) for trait in owner.traits)
             owner.ignore_units_while_moving = owner.has_flying
-        if self.code == "裁决大剑" and self.owner_turns % 10 == 1:
+        if self.code == "裁决大剑" and self.owner_turns % 5 == 1:
             owner.add_status(FlagStatus("裁决大剑·魔免", "magic_immunity",
                                         duration=1, tick_scope="owner_turn_end"))
         if self.code == "幽灵盾" and self.owner_turns == 1:
             owner.add_status(InvincibleUntilActionStatus())
-        if self.code == "机械头盔" and self.owner_turns % 10 == 1 and owner.position is not None:
+        if self.code == "机械头盔" and self.owner_turns % 5 == 1 and owner.position is not None:
             for target in list(battle.all_units()):
                 if target.player_id == owner.player_id or target.position is None or not target.alive:
                     continue
@@ -168,7 +169,10 @@ class EquipmentStatus(StatusEffect):
         if owner is None or ctx.cancelled:
             return
         if ctx.source is owner:
-            if self.code == "重爪" and not ctx.is_skill and _rng(battle).random() < 0.5:
+            if self.code == "重爪" and not ctx.is_skill and direct_scoring():
+                from wujiang.tactical.direct_expectation import damage_chance
+                damage_chance(ctx, .5)
+            elif self.code == "重爪" and not ctx.is_skill and _rng(battle).random() < 0.5:
                 ctx.cancelled = True
                 ctx.reason = f"{owner.name} 的重爪攻击落空。"
                 return
@@ -182,7 +186,7 @@ class EquipmentStatus(StatusEffect):
                 ctx.attack_power += 3
             if self.code == "流浪贵族杖" and ctx.is_skill:
                 ctx.attack_power += 2
-                if self.owner_turns % 10 == 1:
+                if self.owner_turns % 5 == 1:
                     ctx.ignore_magic_immunity = True
             if self.code == "光子斩击斧" and not ctx.is_skill and owner.attacks_used == 0:
                 ctx.half_ignore_shield = True
@@ -191,7 +195,10 @@ class EquipmentStatus(StatusEffect):
                 if ctx.source is not None and ctx.source.position is not None and owner.position is not None:
                     distance = max(abs(ctx.source.position.x - owner.position.x),
                                    abs(ctx.source.position.y - owner.position.y))
-                    if distance > 1 or _rng(battle).random() < 0.5:
+                    if distance <= 1 and direct_scoring():
+                        from wujiang.tactical.direct_expectation import attack_change
+                        attack_change(ctx, -1, .5)
+                    elif distance > 1 or _rng(battle).random() < 0.5:
                         ctx.attack_power -= 1
             if self.code in {"废铁头盔", "机械头盔"}:
                 if ctx.source is not None and ctx.source.position is not None and owner.position is not None:
@@ -203,6 +210,18 @@ class EquipmentStatus(StatusEffect):
             if self.code == "电子原件" and owner.race == "机甲" and ctx.is_skill:
                 ctx.attack_power -= 1
             if self.code == "精灵便帽" and owner.race == "精灵" and not ctx.is_skill:
+                if direct_scoring():
+                    from wujiang.tactical.direct_expectation import damage_chance
+                    turn = battle.completed_turns
+                    available = (getattr(self, "_ai_cap_available", 1.0)
+                                 if getattr(self, "_ai_cap_turn", None) == turn else 1.0)
+                    if getattr(self, "last_cap_dodge_turn", -1) == turn:
+                        available = 0.0
+                    incoming_probability = ctx.forecast_hit_probability
+                    damage_chance(ctx, 1 - available * .5)
+                    self._ai_cap_turn = turn
+                    self._ai_cap_available = available * (1 - .5 * incoming_probability)
+                    return
                 if getattr(self, "last_cap_dodge_turn", -1) != battle.completed_turns and _rng(battle).random() < 0.5:
                     self.last_cap_dodge_turn = battle.completed_turns
                     ctx.cancelled = True
@@ -219,7 +238,7 @@ class EquipmentStatus(StatusEffect):
                 battle.heal(HealContext(source=owner, target=owner,
                     amount=ctx.actual_damage * rate, action_name=self.name))
             if self.code == "腰带":
-                self.bonus_defense += 1
+                self.bonus_defense += ctx.forecast_hit_probability if direct_scoring() else 1
         if ctx.target is owner and self.code == "天使之剑":
             owner.has_flying = owner.current_hp >= owner.max_health or any(
                 isinstance(trait, FlyingTrait) for trait in owner.traits)
@@ -229,10 +248,11 @@ class EquipmentStatus(StatusEffect):
                 and owner.position is not None and "equipment_counter" not in ctx.tags
                 and max(abs(ctx.source.position.x - owner.position.x),
                         abs(ctx.source.position.y - owner.position.y)) <= 1
-                and _rng(battle).random() < 0.5):
+                and (direct_scoring() or _rng(battle).random() < 0.5)):
             battle.resolve_damage(DamageContext(source=owner, target=ctx.source,
                 attack_power=owner.stat("attack"), is_skill=False,
-                action_name="德古拉之爪反击", tags={"equipment_counter"}))
+                action_name="德古拉之爪反击", tags={"equipment_counter"},
+                forecast_hit_probability=.5 * ctx.forecast_hit_probability if direct_scoring() else 1.0))
 
     def on_damage_cancelled(self, battle: Battle, ctx: DamageContext) -> None:
         if (self.code == "风力弓" and ctx.source is self.owner and not ctx.is_skill
@@ -250,6 +270,10 @@ class EquipmentStatus(StatusEffect):
         if self.code == "气息之刃" and self.owner.current_hp >= self.owner.max_health:
             self.survival_used = self.no_more_healing = True
             return 0.0625
+        if self.code == "命运纽带" and direct_scoring():
+            self.survival_used = self.no_more_healing = True
+            ctx.forecast_kill_probability *= 5 / 6
+            return .0625 / 6
         if self.code == "命运纽带" and _rng(battle).random() < 1 / 6:
             self.survival_used = self.no_more_healing = True
             return 0.0625

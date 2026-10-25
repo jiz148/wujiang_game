@@ -4,16 +4,19 @@ from abc import ABC, ABCMeta, abstractmethod
 from collections import deque
 from copy import deepcopy
 from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 import heapq
+import os
 from itertools import count
 from functools import lru_cache
-import random
+from wujiang.tactical.prediction import random, forecasting_active, direct_scoring, note as prediction_note
 import weakref
 from types import GetSetDescriptorType
 from typing import Any, Callable, Iterable, Literal, Optional
 
 from wujiang.platform.id_sequence import IdSequence
+from wujiang.platform.ai_native import load_checkpoint, load_copy, load_flat_copy, load_component_scan
 from wujiang.tactical.engine.geometry import body_coordinates, neighbor_coordinates, range_coordinates
 
 from wujiang.tactical.engine.army import (
@@ -36,6 +39,39 @@ def _rollback_slot_names(cls: type) -> tuple[str, ...]:
 
 
 _ROLLBACK_SCALAR_TYPES = frozenset((type(None), bool, int, float, str, bytes))
+_ROLLBACK_TYPE_PLANS_ENABLED = os.environ.get("WUJIANG_AI_ROLLBACK_PLANS", "1") != "0"
+_AI_TARGET_IDS_ENABLED = os.environ.get("WUJIANG_AI_ATTACK_IDS", "1") != "0"
+_ROLLBACK_NATIVE_ENABLED = os.environ.get("WUJIANG_AI_NATIVE_ROLLBACK", "0") != "0"
+_NATIVE_ROLLBACK_COPY = load_copy()
+_NATIVE_FLAT_COPY = load_flat_copy()
+# Experimental until dense four-board ablations demonstrate a benefit.
+_NATIVE_FLAT_COPY_ENABLED = os.environ.get("WUJIANG_AI_NATIVE_FLAT_COPY", "0") != "0"
+_NATIVE_CHECKPOINT = load_checkpoint()
+# The 2026-10-20 full run measured this loop 6.16% slower. Keep the
+# original Python capture/restore loops and the independent native copier.
+_NATIVE_CHECKPOINT_ENABLED = os.environ.get("WUJIANG_AI_NATIVE_CHECKPOINT", "0") != "0"
+_NATIVE_COMPONENT_SCAN_ENABLED = os.environ.get("WUJIANG_AI_NATIVE_COMPONENT_SCAN", "0") != "0"
+_NATIVE_COMPONENT_SCAN = load_component_scan()
+if os.environ.get("WUJIANG_AI_REQUIRE_NATIVE", "0") == "1" and (
+        _NATIVE_ROLLBACK_COPY is None or not _ROLLBACK_NATIVE_ENABLED):
+    raise ImportError("Native rollback required by validation but unavailable/disabled; check native-build.log")
+
+
+def _rollback_legacy_copy(value):
+    if type(value) in _ROLLBACK_SCALAR_TYPES:
+        return value
+    if isinstance(value, dict):
+        return {key: item if type(item) in _ROLLBACK_SCALAR_TYPES else _rollback_legacy_copy(item)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [item if type(item) in _ROLLBACK_SCALAR_TYPES else _rollback_legacy_copy(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(item if type(item) in _ROLLBACK_SCALAR_TYPES else _rollback_legacy_copy(item) for item in value)
+    if isinstance(value, set):
+        return set(value)
+    if isinstance(value, deque):
+        return deque(item if type(item) in _ROLLBACK_SCALAR_TYPES else _rollback_legacy_copy(item) for item in value)
+    return value
 
 
 def _rollback_copy_dict(value):
@@ -112,19 +148,49 @@ def _rollback_copy_value(value):
     return value if copier is None else copier(value)
 
 
+def _rollback_namespace_eligible(obj):
+    cls = type(obj)
+    return (_ROLLBACK_TYPE_PLANS_ENABLED and (type(cls) is type or type(cls) is ABCMeta)
+            and _rollback_type_plan(cls)[1])
+
+
+def _rollback_restore_special(obj, snapshot):
+    if hasattr(obj, "__dict__"):
+        obj.__dict__.clear()
+        obj.__dict__.update(snapshot)
+    else:
+        for name, value in snapshot.items():
+            setattr(obj, name, value)
+
+
 @contextmanager
-def battle_state_rollback(battle: "Battle", *, ai_probe: bool = True) -> Iterable[None]:
-    """Reuse the same reversible calculation boundary for AI and reaction causality."""
+def battle_state_rollback(battle: "Battle", *, ai_probe: bool = True,
+                          commit_on_success: bool = False) -> Iterable[None]:
+    """Restore probes always; an actual choice commits only after successful resolution."""
+    # Discovery and RNG retain their original order. Native capture/restore
+    # uses the same namespace plan and falls back for special protocols.
+    native_copy = _NATIVE_ROLLBACK_COPY if _ROLLBACK_NATIVE_ENABLED else None
+    if native_copy is not None and _NATIVE_FLAT_COPY_ENABLED and _NATIVE_FLAT_COPY is not None:
+        native_copy = _NATIVE_FLAT_COPY
+    native_checkpoint = (_NATIVE_CHECKPOINT if native_copy is not None and _NATIVE_CHECKPOINT_ENABLED else None)
+    def copy_dict(value):
+        # A custom instance namespace starts at items(), without the nested
+        # value dispatch. Preserve that entry protocol with the original code.
+        return (native_copy(value, _rollback_copy_value, _ROLLBACK_SCALAR_TYPES) if type(value) is dict
+                else _rollback_copy_dict(value))
+    copy_namespace = copy_dict if native_copy is not None else _rollback_copy_dict
     def state(obj: Any) -> dict[str, Any]:
         cls = type(obj)
-        if (type(cls) is type or type(cls) is ABCMeta) and _rollback_type_plan(cls)[1]:
-            return _rollback_copy_dict(obj.__dict__)
+        if _ROLLBACK_TYPE_PLANS_ENABLED and (type(cls) is type or type(cls) is ABCMeta) and _rollback_type_plan(cls)[1]:
+            return copy_namespace(obj.__dict__)
         if hasattr(obj, "__dict__"):
-            return _rollback_copy_dict(obj.__dict__)
+            return (copy_namespace(obj.__dict__) if _ROLLBACK_TYPE_PLANS_ENABLED
+                    else _rollback_legacy_copy(obj.__dict__))
         snapshot = {}
         for name in _rollback_slot_names(type(obj)):
             value = getattr(obj, name)
-            snapshot[name] = value if type(value) in _ROLLBACK_SCALAR_TYPES else _rollback_copy_value(value)
+            snapshot[name] = value if type(value) in _ROLLBACK_SCALAR_TYPES else (
+                _rollback_copy_value(value) if _ROLLBACK_TYPE_PLANS_ENABLED else _rollback_legacy_copy(value))
         return snapshot
 
     units = list({unit.unit_id: unit for unit in [*battle.all_units(), *battle.destroyed_units]}.values())
@@ -145,32 +211,35 @@ def battle_state_rollback(battle: "Battle", *, ai_probe: bool = True) -> Iterabl
         objects.append(unit.base_stats)
     # QueuedAction, ReactionWindow and ReactionOption use slots. Their mutable
     # payloads and reactor lists must roll back with units, including nested probes.
-    saved = [(obj, state(obj)) for obj in {id(obj): obj for obj in objects}.values()
-             if hasattr(obj, "__dict__") or (is_dataclass(obj) and not obj.__dataclass_params__.frozen)]
+    # Keep the filter interleaved with capture, as in the original comprehension.
+    eligible = (obj for obj in {id(obj): obj for obj in objects}.values()
+                if hasattr(obj, "__dict__") or (is_dataclass(obj) and not obj.__dataclass_params__.frozen))
+    saved = (native_checkpoint[0](eligible, _rollback_namespace_eligible, state,
+                                 _rollback_copy_value, _ROLLBACK_SCALAR_TYPES, _rollback_copy_dict)
+             if native_checkpoint is not None else [(obj, state(obj)) for obj in eligible])
     # base_stats is already in objects and saved above, including every slot.
     rng = random.getstate()
+    restore = True
     try:
-        if ai_probe:
-            battle._ai_probe_active = True
-        else:
-            battle.on_replay_checkpoint = None
-        yield
-    finally:
-        for obj, snapshot in reversed(saved):
-            cls = type(obj)
-            if (type(cls) is type or type(cls) is ABCMeta) and _rollback_type_plan(cls)[1]:
-                # Re-read after clear, as before: a custom namespace clear or
-                # a released value's finalizer can replace the dictionary.
-                obj.__dict__.clear()
-                obj.__dict__.update(snapshot)
-                continue
-            if hasattr(obj, "__dict__"):
-                obj.__dict__.clear()
-                obj.__dict__.update(snapshot)
+        if not commit_on_success:
+            if ai_probe:
+                battle._ai_probe_active = True
             else:
-                for name, value in snapshot.items():
-                    setattr(obj, name, value)
-        random.setstate(rng)
+                battle.on_replay_checkpoint = None
+        yield
+        restore = not commit_on_success
+    finally:
+        if restore:
+            if native_checkpoint is not None:
+                native_checkpoint[1](saved, _rollback_namespace_eligible, _rollback_restore_special)
+            else:
+                for obj, snapshot in reversed(saved):
+                    if _rollback_namespace_eligible(obj):
+                        obj.__dict__.clear()
+                        obj.__dict__.update(snapshot)
+                    else:
+                        _rollback_restore_special(obj, snapshot)
+            random.setstate(rng)
 
 
 DEFAULT_HERO_TURN_LIMIT = 200
@@ -180,6 +249,25 @@ ENCOUNTER_HERO_TURN_LIMIT = 50
 
 
 _id_counter = IdSequence(1)
+
+# A dependency witness, not an RNG replacement. In particular, probes retain
+# the historical consumption of each battle's independent random stream.
+_battle_rng_readers = ContextVar("battle_rng_readers", default=())
+
+
+def _note_battle_rng_access():
+    for witness in _battle_rng_readers.get():
+        witness[0] = True
+
+
+@contextmanager
+def battle_rng_dependencies():
+    witness = [False]
+    token = _battle_rng_readers.set((*_battle_rng_readers.get(), witness))
+    try:
+        yield witness
+    finally:
+        _battle_rng_readers.reset(token)
 
 
 class ActionError(RuntimeError):
@@ -193,7 +281,8 @@ class ActionMiss(ActionError):
 class DamageChoiceRequired(Exception):
     def __init__(self, *, unit_id: str, action_name: str, damage: float,
                  event_index: int, stats: list[str] | None = None,
-                 kind: str = "stat", options: list[str] | None = None) -> None:
+                 kind: str = "stat", options: list[str] | None = None,
+                 protected_unit_id: str | None = None) -> None:
         self.unit_id = unit_id
         self.action_name = action_name
         self.damage = damage
@@ -201,6 +290,7 @@ class DamageChoiceRequired(Exception):
         self.stats = stats or []
         self.kind = kind
         self.options = options or []
+        self.protected_unit_id = protected_unit_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +306,9 @@ class Position:
 
     def to_dict(self) -> dict[str, int]:
         return {"x": self.x, "y": self.y}
+
+
+_CANONICAL_POSITION_TO_DICT = Position.to_dict
 
 
 @dataclass(slots=True)
@@ -962,6 +1055,10 @@ class Skill(BattleComponent, ABC):
                     return False, reason
         if actor.current_mana + 1e-9 < self.mana_cost_for_payload(battle, actor, payload):
             return False, "魔力不足。"
+        ship = battle.passive_support_ship(actor, self, queued_action, payload)
+        if (ship is not None and ship.ship_passive_claim_turn == battle.turn_number
+                and ship.ship_passive_claim_rider_id != actor.unit_id):
+            return False, "这艘船本回合已有另一名乘员对船使用被动技能。"
         return True, ""
 
     def react(
@@ -1057,7 +1154,10 @@ class Skill(BattleComponent, ABC):
     def ignores_magic_immunity_for_payload(
         self, battle: "Battle", actor: "Unit", payload: dict[str, Any]
     ) -> bool:
-        return False
+        return self.mana_cost_for_payload(battle, actor, payload) <= 0 and any(
+            getattr(component, "free_skills_ignore_magic_immunity", False)
+            for component in actor.iter_components() if component is not self
+        )
 
     def cannot_evade_for_payload(
         self,
@@ -1173,6 +1273,11 @@ class DamageContext:
     defense_override: Optional[float] = None
     complete_block_chance: float = 0.0
     complete_block_label: str = ""
+    forecast_hit_probability: float = 1.0
+    forecast_attack_changes: Optional[tuple] = None
+    forecast_damage_rows: Optional[tuple] = None
+    forecast_kill_probability: float = 0.0
+    forecast_shield_pierce_probability: float = 0.0
 
     @property
     def damage(self) -> float:
@@ -1452,6 +1557,7 @@ class Unit(ABC):
         self.mount_owner_id: Optional[str] = None
         self.mounted_on_unit_id: Optional[str] = None
         self.ridden_by_unit_id: Optional[str] = None
+        self.allows_multiple_riders = False
         self.can_act_on_entry_turn = False
         self.turn_ready = True
         self.move_used = False
@@ -1480,6 +1586,8 @@ class Unit(ABC):
     def projected_traits(self) -> Iterable[Trait]:
         battle_ref = getattr(self, "_battle_ref", None)
         battle = battle_ref() if battle_ref is not None else None
+        if any(getattr(status, "suppresses_projected_traits", False) for status in getattr(self, "statuses", ())):
+            return
         if battle is None or not (self.is_summon or self.is_clone) or not self.alive or self.banished or self.position is None:
             return
         seen: set[str] = set()
@@ -1946,9 +2054,15 @@ class Unit(ABC):
             "is_army_soldier": is_army_soldier(self),
             "is_clone": self.is_clone,
             "is_mount": self.is_mount,
+            "allows_multiple_riders": self.allows_multiple_riders,
             "mount_owner_id": self.mount_owner_id,
             "mounted_on_unit_id": self.mounted_on_unit_id,
             "ridden_by_unit_id": self.ridden_by_unit_id,
+            "ridden_by_unit_ids": (
+                [rider.unit_id for rider in battle.riders_for(self)]
+                if self.allows_multiple_riders else
+                ([self.ridden_by_unit_id] if self.ridden_by_unit_id else [])
+            ),
             "turn_ready": self.turn_ready,
             "position": self.position.to_dict() if self.position else None,
             "last_position": (
@@ -2033,7 +2147,58 @@ class HeroUnit(Unit, ABC):
     pass
 
 
+_PYTHON_INNATE_TRAITS_SUPPRESSED = Unit.innate_traits_suppressed
+_PYTHON_INNATE_TRAITS_SUPPRESSED_CODE = _PYTHON_INNATE_TRAITS_SUPPRESSED.__code__
+_COMPONENT_SCAN_ANY = _PYTHON_INNATE_TRAITS_SUPPRESSED.__builtins__["any"]
+_COMPONENT_SCAN_GLOBALS = _PYTHON_INNATE_TRAITS_SUPPRESSED.__globals__
+_COMPONENT_SCAN_BUILTINS = _PYTHON_INNATE_TRAITS_SUPPRESSED.__builtins__
+_COMPONENT_SCAN_NAMES = ("statuses", "suppresses_innate_traits", "getattr")
+
+
+def _native_innate_traits_suppressed(self) -> bool:
+    original = _PYTHON_INNATE_TRAITS_SUPPRESSED
+    if (_NATIVE_COMPONENT_SCAN is not None and original.__code__ is _PYTHON_INNATE_TRAITS_SUPPRESSED_CODE
+            and any is _COMPONENT_SCAN_ANY):
+        return _NATIVE_COMPONENT_SCAN[0](self, _COMPONENT_SCAN_GLOBALS, _COMPONENT_SCAN_BUILTINS, _COMPONENT_SCAN_NAMES)
+    return original(self)
+
+
+# Bound callbacks serialize by the method name. Preserve the original lookup
+# and keyword signature even when a callback is retained in a battle graph.
+_native_innate_traits_suppressed.__name__ = _PYTHON_INNATE_TRAITS_SUPPRESSED.__name__
+_native_innate_traits_suppressed.__qualname__ = _PYTHON_INNATE_TRAITS_SUPPRESSED.__qualname__
+
+
+# The default retains the exact old function, without a per-call flag check.
+# Offline ablation patches this binding together with its spawn environment.
+if _NATIVE_COMPONENT_SCAN_ENABLED and _NATIVE_COMPONENT_SCAN is not None:
+    Unit.innate_traits_suppressed = _native_innate_traits_suppressed
+
+
 class Battle:
+    @property
+    def chess_rng(self):
+        # Keep the original instance-dictionary field and pickle layout. Even
+        # a read followed by setstate(old_state) makes a query RNG-dependent.
+        _note_battle_rng_access()
+        try:
+            return self.__dict__["chess_rng"]
+        except KeyError:
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute 'chess_rng'") from None
+
+    @chess_rng.setter
+    def chess_rng(self, value):
+        _note_battle_rng_access()
+        self.__dict__["chess_rng"] = value
+
+    @chess_rng.deleter
+    def chess_rng(self):
+        _note_battle_rng_access()
+        try:
+            del self.__dict__["chess_rng"]
+        except KeyError:
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute 'chess_rng'") from None
+
     def __setstate__(self, state: dict[str, Any]) -> None:
         self.__dict__.update(state)
         self.__dict__.setdefault("resolving_action", None)
@@ -2555,11 +2720,9 @@ class Battle:
     def _remove_unit(self, unit: Unit) -> None:
         for component in list(unit.iter_components()):
             component.on_owner_removed(self)
-        if unit.ridden_by_unit_id:
-            rider = self.units.get(unit.ridden_by_unit_id)
-            if rider is not None:
-                self.clear_mounted_state(rider)
-        elif unit.mounted_on_unit_id:
+        for rider in self.riders_for(unit):
+            self.clear_mounted_state(rider)
+        if unit.mounted_on_unit_id:
             self.clear_mounted_state(unit)
         if unit.unit_id in self.units:
             del self.units[unit.unit_id]
@@ -2854,8 +3017,7 @@ class Battle:
         if unit.player_id == controller.player_id:
             return
         unit.preserved_turn_slot_id = self.unit_turn_slot_id(unit)
-        rider = self.rider_for(unit)
-        if rider is not None:
+        for rider in self.riders_for(unit):
             self.clear_mounted_state(rider)
         unit.player_id = controller.player_id
         unit.controller_hero_id = self.controlling_hero_id(controller)
@@ -2980,7 +3142,11 @@ class Battle:
                 self.chess_timeout_result = result
                 self.winner = int(result["winner"])
                 self.win_reason_code = "chess_timeout"
-                self.win_reason_text = f"自走棋进行 {chess_cap} 个完整战斗轮后，按{result['criterion']}判定玩家 {self.winner} 获胜。"
+                timeout_reason = ("存活单位数" if result["criterion"] == "units"
+                                  else "单位数相同后的随机结果")
+                self.win_reason_text = (f"自走棋进行 {chess_cap} 个完整战斗轮后，"
+                                        f"按{timeout_reason}判定玩家 {self.winner} 获胜，"
+                                        f"败方应扣 {result['damage']} 血。")
                 self.log(self.win_reason_text)
                 self._append_summary_event("match_end", actor_unit_id=None, actor_name="系统",
                                            actor_player_id=self.winner, target_name="",
@@ -3069,6 +3235,11 @@ class Battle:
         # The shared global end still belongs to the original slot's side.
         if hero is not None:
             ending_player = hero.player_id
+        else:
+            destroyed_hero = next((unit for unit in self.destroyed_units
+                                   if unit.unit_id == self.current_turn_slot_unit_id()), None)
+            if destroyed_hero is not None:
+                ending_player = destroyed_hero.player_id
         self._resolving_turn_end_player_id = ending_player
         if hero is not None and not auto_started:
             self.log(f"{hero.name} 结束了自己的回合。")
@@ -3137,11 +3308,23 @@ class Battle:
     def all_units(self) -> list[Unit]:
         return list(self.units.values())
 
+    def components_for(self, unit: Unit) -> list[BattleComponent]:
+        if direct_scoring():
+            from wujiang.tactical.direct_queries import component_snapshot
+            result = component_snapshot(self, unit)
+            if result is not None:
+                return result
+        return list(unit.iter_components())
+
     def sync_linked_units(self) -> None:
         if getattr(self, "_syncing_linked_units", False):
             return
         self._syncing_linked_units = True
         try:
+            if direct_scoring():
+                from wujiang.tactical.direct_queries import empty_hook_pass
+                if empty_hook_pass(self, "sync_linked_state"):
+                    return
             for unit in self.all_units():
                 for component in list(unit.iter_components()):
                     component.sync_linked_state(self)
@@ -3190,22 +3373,36 @@ class Battle:
         return mount
 
     def rider_for(self, mount: Unit | None) -> Optional[Unit]:
-        if mount is None or not mount.ridden_by_unit_id:
-            return None
-        rider = self.units.get(mount.ridden_by_unit_id)
-        if rider is None or not rider.alive or rider.banished or rider.position is None:
-            return None
-        return rider
+        riders = self.riders_for(mount)
+        return riders[0] if riders else None
+
+    def riders_for(self, mount: Unit | None) -> list[Unit]:
+        if mount is None:
+            return []
+        return [rider for rider in self.units.values()
+                if rider.mounted_on_unit_id == mount.unit_id and rider.alive
+                and not rider.banished and rider.position is not None]
 
     def set_mounted_state(self, rider: Unit, mount: Unit) -> None:
         current_mount = self.mounted_unit_for(rider)
         if current_mount is not None and current_mount.unit_id != mount.unit_id:
             self.clear_mounted_state(rider)
-        current_rider = self.rider_for(mount)
-        if current_rider is not None and current_rider.unit_id != rider.unit_id:
-            self.clear_mounted_state(current_rider)
+        if mount.allows_multiple_riders:
+            if rider.player_id != mount.player_id or rider.position not in self.unit_cells(mount):
+                raise ActionError("只能在己方船体内登船。")
+            if any(other.unit_id != rider.unit_id and other.position == rider.position
+                   for other in self.riders_for(mount)):
+                raise ActionError("此船位已有骑手。")
+        else:
+            current_rider = self.rider_for(mount)
+            if current_rider is not None and current_rider.unit_id != rider.unit_id:
+                self.clear_mounted_state(current_rider)
         rider.mounted_on_unit_id = mount.unit_id
-        mount.ridden_by_unit_id = rider.unit_id
+        if not mount.ridden_by_unit_id or not mount.allows_multiple_riders:
+            mount.ridden_by_unit_id = rider.unit_id
+        rider_changed = getattr(mount, "on_rider_changed", None)
+        if callable(rider_changed):
+            rider_changed(self)
 
     def clear_mounted_state(self, rider: Unit | None) -> None:
         if rider is None:
@@ -3213,7 +3410,13 @@ class Battle:
         mount = self.units.get(rider.mounted_on_unit_id) if rider.mounted_on_unit_id else None
         rider.mounted_on_unit_id = None
         if mount is not None and mount.ridden_by_unit_id == rider.unit_id:
-            mount.ridden_by_unit_id = None
+            mount.ridden_by_unit_id = next(
+                (other.unit_id for other in self.riders_for(mount)), None
+            )
+        if mount is not None:
+            rider_changed = getattr(mount, "on_rider_changed", None)
+            if callable(rider_changed):
+                rider_changed(self)
 
     def units_can_overlap(self, left: Unit, right: Unit) -> bool:
         return (
@@ -3257,7 +3460,54 @@ class Battle:
         mount = self.mounted_unit_for(unit)
         if mount is not None and mount.unit_id in queued_action.target_unit_ids:
             return mount
+        if (mount is not None and mount.allows_multiple_riders
+                and any(target.unit_id == mount.unit_id
+                        for target in self.effect_units_at_cells(queued_action.target_cells))):
+            return mount
         return None
+
+    def passive_support_ship(self, rider: Unit, skill: Skill, queued_action: QueuedAction,
+                             payload: Optional[dict[str, Any]] = None) -> Optional[Unit]:
+        if skill.timing != "passive":
+            return None
+        ship = self.mounted_unit_for(rider)
+        if ship is None or not ship.allows_multiple_riders:
+            return None
+        selected_ids = {str(unit_id) for unit_id in self.payload_target_unit_ids(payload or {})}
+        if selected_ids:
+            return ship if any(
+                target_id in self.units and self.effect_recipient(self.units[target_id]).unit_id == ship.unit_id
+                for target_id in selected_ids
+            ) else None
+        declared_ids = set(queued_action.target_unit_ids)
+        if ship.unit_id in declared_ids:
+            return ship
+        if any(ship.unit_id == unit.unit_id for unit in self.effect_units_at_cells(queued_action.target_cells)):
+            return ship
+        return None
+
+    def refresh_ship_passive_reaction_options(self, ship: Unit) -> None:
+        window = self.pending_chain
+        if window is None:
+            return
+        ship_cells = {(cell.x, cell.y) for cell in self.unit_cells(ship)}
+        for rider in self.riders_for(ship):
+            if rider.unit_id == getattr(ship, "ship_passive_claim_rider_id", None):
+                continue
+            filtered: list[ReactionOption] = []
+            for option in window.options_by_unit.get(rider.unit_id, []):
+                skill = rider.skill_map().get(option.action_code) if option.action_type == "skill" else None
+                if skill is None or skill.timing != "passive" or ship.unit_id not in option.preview.get("target_unit_ids", []):
+                    filtered.append(option)
+                    continue
+                remaining = [unit_id for unit_id in option.preview.get("target_unit_ids", [])
+                             if unit_id != ship.unit_id]
+                if remaining:
+                    option.preview = dict(option.preview, target_unit_ids=remaining,
+                                          cells=[cell for cell in option.preview.get("cells", [])
+                                                 if (int(cell["x"]), int(cell["y"])) not in ship_cells])
+                    filtered.append(option)
+            window.options_by_unit[rider.unit_id] = filtered
 
     def unit_can_use_block_counter(self, unit: Unit) -> bool:
         components = list(unit.iter_components())
@@ -3439,6 +3689,10 @@ class Battle:
     ) -> bool:
         if getattr(occupant, "attached_to_unit_id", None):
             return False
+        if (mover is not None and occupant.allows_multiple_riders
+                and mover.player_id == occupant.player_id and not mover.is_mount
+                and len(mover.footprint_offsets) == 1):
+            return False  # An allied unit may board an empty ship cell.
         if mover is not None and getattr(occupant, "standable_terrain", False) and not getattr(mover, "standable_terrain", False):
             return False
         if mover is not None and self.units_can_overlap(occupant, mover):
@@ -4192,8 +4446,7 @@ class Battle:
             raise ActionError(f"{unit.name} 不受技能位移效果影响。")
         if via_skill and getattr(unit, "standable_terrain", False):
             raise ActionError("地形单位不受技能位移效果影响。")
-        carried_rider = self.rider_for(unit)
-        carried_rider_start = carried_rider.position if carried_rider is not None else None
+        carried_riders = [(rider, rider.position) for rider in self.riders_for(unit)]
         mounted_on = self.mounted_unit_for(unit)
         if destination == unit.position and path is None:
             raise ActionError("目标位置不能与当前位置相同。")
@@ -4267,13 +4520,19 @@ class Battle:
         unit.position = destination
         if hasattr(unit, "_resolution_actual_position"):
             unit._resolution_actual_position = destination
-        if carried_rider is not None and carried_rider_start is not None:
+        if carried_riders:
             delta_x = destination.x - ctx.start.x
             delta_y = destination.y - ctx.start.y
-            carried_rider.position = carried_rider_start.offset(delta_x, delta_y)
-            carried_rider.moved_this_turn = True
+            for carried_rider, start in carried_riders:
+                carried_rider.position = start.offset(delta_x, delta_y)
+                carried_rider.moved_this_turn = True
         if mounted_on is not None and unit.position not in self.unit_cells(mounted_on):
             self.clear_mounted_state(unit)
+        if unit.mounted_on_unit_id is None and not unit.is_mount and len(self.unit_cells(unit)) == 1:
+            for ship in self.units_at(unit.position, ignore=unit):
+                if ship.allows_multiple_riders and ship.player_id == unit.player_id:
+                    self.set_mounted_state(unit, ship)
+                    break
         unit.moved_this_turn = unit.moved_this_turn or len(path) > 1
         if not triggered_by_reaction:
             if not via_skill and not forced:
@@ -4336,11 +4595,11 @@ class Battle:
             ctx.cancelled = True
             ctx.reason = f"{target.name} 当前无法被选中。"
             return ctx
-        for component in list(actor.iter_components()):
+        for component in self.components_for(actor):
             component.on_targeted(self, ctx)
         for effect in list(self.field_effects):
             effect.on_targeted(self, ctx)
-        for component in list(target.iter_components()):
+        for component in self.components_for(target):
             component.on_targeted(self, ctx)
         for effect in list(self.field_effects):
             effect.on_after_target_modifiers(self, ctx)
@@ -4421,6 +4680,11 @@ class Battle:
             self._skill_effect_receipts.setdefault(token, set()).add(target.unit_id)
 
     def resolve_damage(self, ctx: DamageContext) -> DamageContext:
+        if direct_scoring() and not hasattr(ctx, "forecast_hit_probability"):
+            # Saved reaction checkpoints may predate these scoring-only slots.
+            ctx.forecast_hit_probability = 1.0
+            ctx.forecast_attack_changes = ctx.forecast_damage_rows = None
+            ctx.forecast_kill_probability = ctx.forecast_shield_pierce_probability = 0.0
         ctx.target = self.effect_recipient(ctx.target)
         if ctx.declared_source_attack is None and ctx.source is not None:
             queued = self.resolving_action
@@ -4437,16 +4701,16 @@ class Battle:
                 for effect in list(self.field_effects):
                     effect.on_damage_cancelled(self, ctx)
                 if ctx.source is not None:
-                    for component in list(ctx.source.iter_components()):
+                    for component in self.components_for(ctx.source):
                         component.on_damage_cancelled(self, ctx)
-                for component in list(ctx.target.iter_components()):
+                for component in self.components_for(ctx.target):
                     component.on_damage_cancelled(self, ctx)
 
             def notify_confirmed_destruction() -> None:
                 if ctx.target.alive or ctx.source is None:
                     return
                 ctx.target._destroying_source_unit_id = ctx.source.unit_id
-                for component in list(ctx.source.iter_components()):
+                for component in self.components_for(ctx.source):
                     hook = getattr(component, "on_confirmed_damage_destruction", None)
                     if callable(hook):
                         hook(self, ctx)
@@ -4454,9 +4718,9 @@ class Battle:
             for effect in list(self.field_effects):
                 effect.on_before_damage(self, ctx)
             if ctx.source is not None:
-                for component in list(ctx.source.iter_components()):
+                for component in self.components_for(ctx.source):
                     component.on_before_damage(self, ctx)
-            for component in list(ctx.target.iter_components()):
+            for component in self.components_for(ctx.target):
                 component.on_before_damage(self, ctx)
             if not ctx.cancelled and ctx.raw_damage is None and ctx.area_cell_hits > 1:
                 ctx.attack_power += max(0, int(ctx.area_cell_hits) - 1)
@@ -4501,6 +4765,15 @@ class Battle:
                 self.log_public_event(ctx.reason, source=ctx.source, target=ctx.target)
                 notify_cancelled()
                 return ctx
+            if (direct_scoring() and ctx.target.total_shields() > 0
+                    and not ctx.ignore_shield and ctx.forecast_shield_pierce_probability > 0):
+                from wujiang.tactical.direct_expectation import damage_chance, attack_change
+                if ctx.half_ignore_shield:
+                    if ctx.raw_damage is None:
+                        attack_change(ctx, -1, 1 - ctx.forecast_shield_pierce_probability)
+                else:
+                    damage_chance(ctx, ctx.forecast_shield_pierce_probability)
+                ctx.ignore_shield = True
             if ctx.target.total_shields() > 0:
                 if ctx.ignore_shield:
                     protection_before = ctx.target.protection_shields
@@ -4567,7 +4840,7 @@ class Battle:
                 self.log_public_event(ctx.reason, source=ctx.source, target=ctx.target)
                 notify_cancelled()
                 return ctx
-            for component in list(ctx.target.iter_components()):
+            for component in self.components_for(ctx.target):
                 component.on_final_damage(self, ctx)
             if ctx.cancelled:
                 if ctx.reason:
@@ -4588,27 +4861,38 @@ class Battle:
                 for effect in list(self.field_effects):
                     effect.on_after_damage(self, ctx)
                 if ctx.source is not None:
-                    for component in list(ctx.source.iter_components()):
+                    for component in self.components_for(ctx.source):
                         component.on_after_damage(self, ctx)
                 for effect in list(self.field_effects):
                     hook = getattr(effect, "on_after_source_damage", None)
                     if callable(hook):
                         hook(self, ctx)
-                for component in list(ctx.target.iter_components()):
+                for component in self.components_for(ctx.target):
                     component.on_after_damage(self, ctx)
                 notify_confirmed_destruction()
                 self.cleanup_dead_units()
                 return ctx
             defense = ctx.defense_override if ctx.defense_override is not None else ctx.target.stat("defense")
-            damage_amount = self.damage_rule.calculate_damage(ctx.attack_power, defense)
+            if direct_scoring():
+                from wujiang.tactical.direct_expectation import damage_amount as expected_damage_amount
+                damage_amount = expected_damage_amount(self, ctx, defense)
+            else:
+                damage_amount = self.damage_rule.calculate_damage(ctx.attack_power, defense)
             if ctx.raw_damage is not None:
                 damage_amount = ctx.raw_damage
             ctx.raw_damage = ctx.target.damage_fraction_after_limits(damage_amount)
             if ctx.raw_damage > 0:
-                for component in list(ctx.target.iter_components()):
+                for component in self.components_for(ctx.target):
                     component.on_before_hp_loss(self, ctx)
-            if ctx.raw_damage > 0 and ctx.complete_block_chance > 0:
-                if getattr(self, "_ai_probe_active", False):
+            if direct_scoring():
+                from wujiang.tactical.direct_expectation import apply_damage_expectation
+                apply_damage_expectation(ctx)
+            elif ctx.raw_damage > 0 and ctx.complete_block_chance > 0:
+                if forecasting_active():
+                    if random.random() < ctx.complete_block_chance:
+                        ctx.raw_damage = 0.0
+                        ctx.modifier_receipts.add("complete_block")
+                elif getattr(self, "_ai_probe_active", False):
                     # Forecast an independent random guard by expectation; do not
                     # let AI inspect the next live random result through rollback.
                     ctx.raw_damage = round(ctx.raw_damage * (1 - ctx.complete_block_chance), 4)
@@ -4623,18 +4907,33 @@ class Battle:
                         ctx.modifier_receipts.add("complete_block")
             old_hp = ctx.target.current_hp
             if ctx.raw_damage >= old_hp and old_hp > 0:
-                retained = [value for component in list(ctx.target.iter_components())
-                            if (value := component.lethal_damage_remaining_hp(self, ctx)) is not None]
+                if direct_scoring():
+                    retained = []
+                    certain_survival = False
+                    for component in self.components_for(ctx.target):
+                        previous_probability = ctx.forecast_kill_probability
+                        value = component.lethal_damage_remaining_hp(self, ctx)
+                        if value is not None:
+                            retained.append(value)
+                            certain_survival |= ctx.forecast_kill_probability == previous_probability
+                    if certain_survival:
+                        ctx.forecast_kill_probability = 0.0
+                else:
+                    retained = [value for component in self.components_for(ctx.target)
+                                if (value := component.lethal_damage_remaining_hp(self, ctx)) is not None]
                 if retained:
                     remaining_hp = min(old_hp, max(0.0, max(retained)))
                     ctx.raw_damage = max(0.0, old_hp - remaining_hp)
             ctx.target.take_damage_fraction(ctx.raw_damage)
             actual_damage = round(max(0.0, old_hp - ctx.target.current_hp), 4)
             ctx.actual_damage = actual_damage
+            if direct_scoring():
+                from wujiang.tactical.direct_expectation import record_death_probability
+                record_death_probability(ctx)
             if actual_damage > 0:
                 for observer in list(self.all_units()):
                     if observer.alive and observer.position is not None and not observer.banished:
-                        for component in list(observer.iter_components()):
+                        for component in self.components_for(observer):
                             component.on_battle_damage(self, ctx)
             self.record_damage_summary(ctx, actual_damage)
             self.log_public_event(
@@ -4645,14 +4944,14 @@ class Battle:
             for effect in list(self.field_effects):
                 effect.on_after_damage(self, ctx)
             if ctx.source is not None:
-                for component in list(ctx.source.iter_components()):
+                for component in self.components_for(ctx.source):
                     component.on_after_damage(self, ctx)
             for effect in list(self.field_effects):
                 hook = getattr(effect, "on_after_source_damage", None)
                 if callable(hook):
                     hook(self, ctx)
             if "bp_soft_persimmon" not in ctx.tags:
-                for component in list(ctx.target.iter_components()):
+                for component in self.components_for(ctx.target):
                     component.on_after_damage(self, ctx)
             if ctx.is_skill and not ctx.cancelled and ctx.actual_damage > 0 and ctx.target.alive:
                 self.record_skill_effect(ctx.target)
@@ -4661,6 +4960,9 @@ class Battle:
                 self.record_defeat_summary(ctx.source, ctx.target, ctx.action_name)
             notify_confirmed_destruction()
             self.cleanup_dead_units()
+            if direct_scoring():
+                from wujiang.tactical.direct_expectation import finish_damage_expectation
+                finish_damage_expectation(ctx)
             return ctx
 
     def expire_chain_temporary_statuses(self) -> None:
@@ -4885,7 +5187,7 @@ class Battle:
             is_hostile=True,
             tags={"attack"},
         )
-        for component in list(actor.iter_components()):
+        for component in self.components_for(actor):
             component.on_targeted(self, ctx)
         for effect in list(self.field_effects):
             effect.on_targeted(self, ctx)
@@ -5389,6 +5691,7 @@ class Battle:
         self,
         actor: Unit,
         payload: Optional[dict[str, Any]] = None,
+        *, _target_ids_only: bool = False,
     ) -> dict[str, Any]:
         resolved_payload = self.resolved_basic_attack_payload(actor, payload)
         if not self.basic_attack_resource_allowed(actor, resolved_payload)[0]:
@@ -5421,9 +5724,30 @@ class Battle:
                         valid_cells.append(cell)
                 if not valid_cells:
                     valid_cells = self.unit_cells(target)
-                attack_cells.extend(cell.to_dict() for cell in valid_cells)
+                if not _target_ids_only:
+                    attack_cells.extend(cell.to_dict() for cell in valid_cells)
+                else:
+                    # All legality/metadata/component hooks above still run in
+                    # their original order. Only exact immutable Position's
+                    # pure dict construction is dispensable for an ID query.
+                    for cell in valid_cells:
+                        if type(cell) is not Position or Position.to_dict is not _CANONICAL_POSITION_TO_DICT:
+                            cell.to_dict()
+        allied_heal_targets = [target_id for target_id in attack_targets
+                              if self.allied_basic_heal_amount(actor, self.get_unit(target_id)) > 0]
+        if _target_ids_only:
+            return {"target_unit_ids": attack_targets}
         return {"cells": attack_cells, "target_unit_ids": attack_targets, "requires_target": True,
-                "allied_heal_target_ids": [target_id for target_id in attack_targets if self.allied_basic_heal_amount(actor, self.get_unit(target_id)) > 0]}
+                "allied_heal_target_ids": allied_heal_targets}
+
+    _canonical_basic_attack_preview = basic_attack_preview_for_payload
+
+    def basic_attack_target_ids_for_payload(self, actor: Unit, payload=None):
+        preview = self.basic_attack_preview_for_payload
+        if (_AI_TARGET_IDS_ENABLED
+                and getattr(preview, "__func__", None) is Battle._canonical_basic_attack_preview):
+            return preview(actor, payload, _target_ids_only=True).get("target_unit_ids", [])
+        return preview(actor, payload).get("target_unit_ids", [])
 
     def forced_basic_attack_target(self, actor: Unit) -> Optional[Unit]:
         for component in actor.iter_components():
@@ -5458,6 +5782,8 @@ class Battle:
         queued_payload.pop("action_failed_by_floating_crane", None)
         queued_payload.pop("separate_attack_segments", None)
         queued_payload.pop("separate_attack_index", None)
+        queued_payload.pop("piercing_followup", None)
+        queued_payload.pop("target_must_occupy_declared_cell", None)
         queued_payload.pop("kings_insight_checked", None)
         queued_payload["queued_resolution"] = True
         actor = self.get_unit(payload["unit_id"])
@@ -5860,6 +6186,8 @@ class Battle:
 
         if payload.get("ignore_shield"):
             parts.append("破魔")
+        if payload.get("piercing_followup"):
+            parts.append("仅后续附效破魔")
         if payload.get("half_ignore_shield"):
             parts.append("半破魔")
         if payload.get("ignore_magic_immunity"):
@@ -5915,6 +6243,18 @@ class Battle:
             ok, _ = skill.can_react_to(self, unit, queued_action)
             if not ok:
                 continue
+            preview = skill.reaction_preview(self, unit, queued_action)
+            ship = self.mounted_unit_for(unit) if skill.timing == "passive" else None
+            if (ship is not None and ship.allows_multiple_riders
+                    and getattr(ship, "ship_passive_claim_turn", -1) == self.turn_number
+                    and getattr(ship, "ship_passive_claim_rider_id", None) != unit.unit_id):
+                available_ids = [unit_id for unit_id in preview.get("target_unit_ids", [])
+                                 if unit_id != ship.unit_id]
+                if not available_ids:
+                    continue
+                preview = dict(preview, target_unit_ids=available_ids,
+                               cells=[cell for cell in preview.get("cells", [])
+                                      if Position(int(cell["x"]), int(cell["y"])) not in self.unit_cells(ship)])
             options.append(
                 ReactionOption(
                     unit_id=unit.unit_id,
@@ -5924,7 +6264,7 @@ class Battle:
                     timing=skill.timing,
                     chain_speed=skill.chain_speed,
                     description=skill.description,
-                    preview=skill.reaction_preview(self, unit, queued_action),
+                    preview=preview,
                 )
             )
         reaction_target = self.reaction_proxy_target(unit, queued_action)
@@ -5984,7 +6324,8 @@ class Battle:
             queued_action.action_type in {"attack", "skill", "skill_effect"}
             and queued_action.speed == 1
             and recipient.total_shields() > 0
-            and (anti_pierce or not (queued_action.payload.get("ignore_shield") or queued_action.payload.get("half_ignore_shield") or piercing_followup))
+            and (anti_pierce or not (queued_action.payload.get("ignore_shield") or queued_action.payload.get("half_ignore_shield")
+                                     or queued_action.payload.get("piercing_followup") or piercing_followup))
         )
 
     def action_ignores_stealth(self, queued_action: QueuedAction) -> bool:
@@ -6055,11 +6396,16 @@ class Battle:
                 options_by_unit[unit.unit_id] = options
         if not candidate_ids:
             return None
+        if forecasting_active():
+            # Full-AI rules score under the public "opponent does not chain"
+            # assumption. Window display order contributes no outcome utility;
+            # avoid drawing live tie priorities for that unexecuted window.
+            prediction_note("neutral_reaction_order_ties", len(candidate_ids))
         candidate_ids.sort(
             key=lambda unit_id: (
                 -float(candidates_by_id[unit_id].stat("speed")),
                 -int(candidates_by_id[unit_id].level),
-                random.random(),
+                0.5 if forecasting_active() else random.random(),
             )
         )
         return ReactionWindow(
@@ -6193,6 +6539,13 @@ class Battle:
             self.check_win_condition()
 
     def present_reaction_window_or_resolve(self, queued_action: QueuedAction) -> None:
+        if queued_action.payload.get("target_must_occupy_declared_cell"):
+            actor = self.units.get(queued_action.actor_id)
+            queued_action.target_unit_ids = [unit_id for unit_id in queued_action.target_unit_ids
+                if (unit := self.units.get(unit_id)) is not None and unit.alive and not unit.banished
+                and any(cell in self.unit_cells(unit) for cell in queued_action.target_cells)]
+            queued_action.hostile = actor is not None and any(
+                self.units[unit_id].player_id != actor.player_id for unit_id in queued_action.target_unit_ids)
         if queued_action.payload.get("refresh_cell_targets"):
             actor = self.units.get(queued_action.actor_id)
             if actor is None and queued_action.payload.get("after_death_effect"):
@@ -6754,6 +7107,10 @@ class Battle:
 
     def notify_destroyed_hero_count_changed(self) -> None:
         count = self.destroyed_hero_count()
+        if direct_scoring():
+            from wujiang.tactical.direct_queries import empty_hook_pass
+            if empty_hook_pass(self, "on_destroyed_hero_count_changed"):
+                return
         for unit in self.all_units():
             for component in list(unit.iter_components()):
                 component.on_destroyed_hero_count_changed(self, count)
@@ -6766,6 +7123,9 @@ class Battle:
                 and not action.payload.get("from_field_effect")
                 and self.destroy_clone_for_skill_effect(unit, source=self.units.get(action.actor_id), action_name=action.display_name)):
             return
+        if unit.allows_multiple_riders:
+            for rider in self.riders_for(unit):
+                self.clear_mounted_state(rider)
         unit.banished = True
         unit.banish_turns_remaining = turns
         unit.banish_return_position = unit.position
@@ -6812,6 +7172,9 @@ class Battle:
                             and not unit.is_summon and not unit.is_clone), None)
             if rescued is not None:
                 alive_players.add(rescued.player_id)
+        if (forecasting_active() and getattr(self, "_ai_has_unseen_enemies", False)
+                and alive_players == {getattr(self, "_ai_view_player_id", None)}):
+            return  # Unseen enemies omitted from scoring are not a public win.
         if len(alive_players) == 1 and self.units:
             self.winner = alive_players.pop()
             losing_player = 2 if self.winner == 1 else 1
@@ -6840,7 +7203,7 @@ class Battle:
         if pending is not None:
             if payload.get("type") != "damage_choice" or payload.get("unit_id") != pending["unit_id"]:
                 raise ActionError("请先完成本次伤害选择。")
-            if pending.get("kind") in {"rotation", "attack_swap", "formation", "optional_swap", "optional_placement", "end_dash", "electronic_teleport", "hell_sacrifice", "hell_death_strike", "hell_rescue", "hell_dragon_first", "hell_dragon_second", "hell_dragon_effect"}:
+            if pending.get("kind") in {"rotation", "attack_swap", "formation", "optional_swap", "optional_placement", "end_dash", "electronic_teleport", "hell_sacrifice", "hell_death_strike", "hell_rescue", "hell_dragon_first", "hell_dragon_second", "hell_dragon_effect", "gentleman_guard"}:
                 choice = str(payload.get("target_unit_id") or "")
                 if (choice == "decline" and pending.get("kind") in {"attack_swap", "formation"}) or (choice != "decline" and choice not in pending["options"]):
                     raise ActionError("请选择当前提示中的合法对象与落点。")
@@ -6891,15 +7254,19 @@ class Battle:
                 "event_index": required.event_index,
                 "stats": required.stats,
                 "options": required.options,
+                "protected_unit_id": required.protected_unit_id,
                 "action_payload": deepcopy(payload),
                 "decisions": list(decisions),
             }
             return
-        self._damage_choice_active = True
-        self._damage_choice_decisions = decisions
-        self._damage_choice_event_index = 0
         try:
-            self._perform_action_steps(deepcopy(payload))
+            # A real replay can fail even after the speculative pass succeeded.
+            # Keep its before-image so the choice can be retried consistently.
+            with battle_state_rollback(self, ai_probe=False, commit_on_success=True):
+                self._damage_choice_active = True
+                self._damage_choice_decisions = decisions
+                self._damage_choice_event_index = 0
+                self._perform_action_steps(deepcopy(payload))
         except DamageChoiceRequired as required:
             self.pending_damage_choice = {
                 "prompt_id": f"damage-{next(_id_counter)}",
@@ -6910,6 +7277,7 @@ class Battle:
                 "event_index": required.event_index,
                 "stats": required.stats,
                 "options": required.options,
+                "protected_unit_id": required.protected_unit_id,
                 "action_payload": deepcopy(payload),
                 "decisions": list(decisions),
             }
@@ -7001,7 +7369,8 @@ class Battle:
         )
 
     def optional_position_choice(self, actor: Unit, options: list[str], *,
-                                 action_name: str, kind: str) -> Optional[str]:
+                                 action_name: str, kind: str, damage: float = 0,
+                                 protected_unit_id: str | None = None) -> Optional[str]:
         if not options:
             return None
         if not getattr(self, "_damage_choice_active", False) or getattr(self, "_ai_probe_active", False):
@@ -7014,22 +7383,36 @@ class Battle:
             return choice if choice in options else None
         if getattr(self, "_damage_choice_probe_default", False):
             return None
-        raise DamageChoiceRequired(unit_id=actor.unit_id, action_name=action_name, damage=0,
-                                   event_index=event_index, kind=kind, options=list(options))
+        raise DamageChoiceRequired(unit_id=actor.unit_id, action_name=action_name, damage=round(float(damage), 4),
+                                   event_index=event_index, kind=kind, options=list(options),
+                                   protected_unit_id=protected_unit_id)
 
-    def finish_destroyed_active_turn_if_idle(self) -> None:
+    def destroyed_active_turn_is_idle(self) -> bool:
         if (
             self.winner is not None
+            or self.pending_damage_choice is not None
             or self.pending_chain is not None
             or self.pending_followup_actions
             or self.pending_respawn_unit_ids
+            or self.resolving_action is not None
+            or self._pending_end_turn_after_followups
+            or self._pending_turn_end_after_effects_player_id is not None
+            or getattr(self, "_resolving_turn_end_player_id", None) is not None
+            or self._pending_turn_advance_after_hell_rebirth
         ):
-            return
+            return False
         active_unit_id = self.current_turn_slot_unit_id()
         if active_unit_id is None or parse_army_slot(active_unit_id) is not None:
-            return
+            return False
         active_unit = self.units.get(active_unit_id)
         if active_unit is not None and active_unit.alive:
+            return False
+        # A surviving unit with a preserved slot can still belong to this
+        # controller's portion of the turn. Let the existing bundle AI act.
+        return not self.current_turn_bundle_units(include_banished=False)
+
+    def finish_destroyed_active_turn_if_idle(self) -> None:
+        if not self.destroyed_active_turn_is_idle():
             return
         self._processed_any_turn_end_choices.clear()
         self.finish_any_turn_end_choices()
@@ -7129,7 +7512,14 @@ class Battle:
                         reactor in self.destroyed_units and not reactor.alive
                         and skill.can_react_after_destroyed(self, reactor, self.pending_chain.queued_action)
                     )
+                    supported_ship = self.passive_support_ship(
+                        reactor, skill, self.pending_chain.queued_action, reaction_payload
+                    )
                     self.prepay_skill_resources(skill, reactor, reaction_payload)
+                    if supported_ship is not None:
+                        supported_ship.ship_passive_claim_turn = self.turn_number
+                        supported_ship.ship_passive_claim_rider_id = reactor.unit_id
+                        self.refresh_ship_passive_reaction_options(supported_ship)
                     reaction_payload["resources_prepaid"] = True
                     if not reactor.alive and not after_death_reaction:
                         skill.finalize_use(self, reactor)
@@ -7433,7 +7823,8 @@ class Battle:
             ],
             "pending_damage_choice": (
                 {**{key: damage_prompt[key] for key in ("unit_id", "action_name", "damage", "event_index", "stats")},
-                 "kind": damage_prompt.get("kind", "stat"), "options": damage_prompt.get("options", [])}
+                 "kind": damage_prompt.get("kind", "stat"), "options": damage_prompt.get("options", []),
+                 "protected_unit_id": damage_prompt.get("protected_unit_id")}
                 if damage_prompt is not None else None
             ),
             "logs": self.logs,
@@ -7441,3 +7832,32 @@ class Battle:
             "is_army_turn": army_turn,
             "army": army_public_state(self),
         }
+
+
+_CANONICAL_CHESS_RNG_DESCRIPTOR = Battle.chess_rng
+
+_DIRECT_COMPONENT_DISCOVERY = (
+    Unit.iter_components, Unit.projected_traits, Unit.innate_traits_suppressed,
+    BattleComponent.provided_components, BattleComponent.projected_trait_for,
+    BattleComponent.sync_linked_state, BattleComponent.on_destroyed_hero_count_changed,
+    Battle.all_units,
+    BattleComponent.runtime_children, Unit.__getstate__, SummaryDamageRule.calculate_damage,
+)
+_DIRECT_COMPONENT_CODES = tuple((method, method.__code__) for method in _DIRECT_COMPONENT_DISCOVERY)
+
+# Original pure placement query implementations. The optional batch rejects
+# runtime method/code/default/closure replacements and all field descriptors.
+_DIRECT_PLACEMENT_QUERIES = (Battle, Unit, Position, body_coordinates, tuple(
+    (owner, name, function, function.__code__, function.__defaults__,
+     tuple((function.__kwdefaults__ or {}).items()),
+     tuple(cell.cell_contents for cell in function.__closure__ or ()))
+    for owner, name, function in (
+        *((Battle, name, getattr(Battle, name)) for name in (
+            "can_place_unit", "unit_cells_at", "in_bounds", "is_occupied", "units_at",
+            "unit_occupies", "blocks_position_for", "units_can_overlap")),
+        (Unit, "footprint_cells_at", Unit.footprint_cells_at),
+        (Unit, "allows_destination_overlap_with", Unit.allows_destination_overlap_with),
+        (Position, "__init__", Position.__init__),
+        (body_coordinates, "__wrapped__", body_coordinates.__wrapped__),
+    )
+))

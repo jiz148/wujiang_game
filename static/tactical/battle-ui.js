@@ -9,7 +9,7 @@ import { effectiveProfileName } from '../platform/auth.js';
 import { currentBattleLaunch, isCampaignBattleLaunch } from '../bridge/battle-launch.js';
 import { isRandomRoomMode, loadReplayStep, onActionClick, roomModeMeta, setArmyOrder, shouldShowLobbyPanel } from '../tactical/room-api.js';
 import { clearActionSelection } from '../tactical/session.js';
-import { actionLabel, actionLimitLabel, actionManaLabel, actionNeedsTarget, actionTierLabel, actionTimingLabel, actionTitle, bodyDirectionSelection, canCompleteTargetSelection, choicePatternSelection, currentPreview, fieldEffectMarker, fieldEffectsByCell, hasCancelableTargetSelection, movePathSelection, multiUnitSelection, normalizedPatternCells, patternSelection, patternSelectionCanComplete, randomRoomFallbackSummary, randomRoomRosterSize, reviveUnitCellSelection, stagedAttackVariantCode, stagedBodyCells, stagedBodyDirection, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, stagedUnitDirection, stagedUnitDirectionTargetId, statCellRequired, statCellSelection, unitDirectionSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
+import { actionLabel, actionLimitLabel, actionManaLabel, actionNeedsTarget, actionTierLabel, actionTimingLabel, actionTitle, bodyDirectionSelection, canCompleteTargetSelection, choicePatternSelection, crowFormationSelection, currentPreview, fieldEffectMarker, fieldEffectsByCell, hasCancelableTargetSelection, movePathSelection, multiUnitSelection, normalizedPatternCells, patternSelection, patternSelectionCanComplete, randomRoomFallbackSummary, randomRoomRosterSize, reviveUnitCellSelection, stagedAttackVariantCode, stagedBodyCells, stagedBodyDirection, stagedCrowFormationRavenIds, stagedCrowFormationTargetId, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, stagedUnitDirection, stagedUnitDirectionTargetId, statCellRequired, statCellSelection, unitDirectionSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
 import { actionByCode, actionWheelLayer, displayActions, fieldEffectDuration, fieldEffects, flushPendingArmyVfx, hoveredAction, hpRatio, manaDisplayClass, manaPipsMarkup, positionKey, positionsToSet, renderBattleVfx, selectedAction, trimNumber, tutorialState, unitBoundsRelativeToStage, unitStatusSummary } from '../tactical/vfx.js';
 
 export function renderScreens() {
@@ -185,6 +185,15 @@ function renderBoardAlert() {
       multiUnitSelection(action).prompt
         || `${chosenIds.length ? `已选择 ${chosenIds.length} 个目标。` : "请点击高亮单位来选择目标。"} 选好后可以点击“完成选择”，再次点击同一目标可取消。`,
     );
+    return;
+  }
+  if (action && crowFormationSelection(action)) {
+    const target = stagedCrowFormationTargetId(action);
+    const chosen = stagedCrowFormationRavenIds(action);
+    const need = Number(crowFormationSelection(action).count);
+    showBoardHint(actionTitle(action), target
+      ? `已选阵法目标；选择其周围 ${need} 只要牺牲的报信乌鸦（已选 ${chosen.length} 只），然后点击“完成选择”。再次点击目标可重选。`
+      : `先点击高亮的阵法目标，再选择其周围 ${need} 只报信乌鸦。`);
     return;
   }
 
@@ -586,6 +595,9 @@ export function renderBoard() {
   const aiPreviewKeys = positionsToSet(aiPreviewCells);
   const aiCurrentKey = aiPreviewCells.length ? positionKey(aiPreviewCells[aiPreviewCells.length - 1]) : "";
   const placementSize = Number(selectedAction()?.preview?.placement_size || 1);
+  const shipFootprint = selectedAction()?.preview?.ship_footprint;
+  const placementWidth = Number(shipFootprint?.width || placementSize);
+  const placementHeight = Number(shipFootprint?.height || placementSize);
   const boardWidth = state.battle.board.width;
   const eternalZone = state.room?.mode === "bp" && state.room?.bp?.special_modes?.some((mode) => mode.code === "eternal");
   const eternalLeft = Math.floor((boardWidth - 5) / 2);
@@ -630,7 +642,9 @@ export function renderBoard() {
       const cellLabels = [`第 ${y + 1} 行，第 ${x + 1} 列`];
       cellLabels.push(occupant ? `${occupant.name}，队伍 ${occupant.player_id}` : "空格");
       if (preview.cellKeys.has(key)) cellLabels.push("可选范围");
-      if (placementSize > 1 && preview.cellKeys.has(key)) cellLabels.push(`落点将占用 ${placementSize}×${placementSize} 格`);
+      if ((placementWidth > 1 || placementHeight > 1) && preview.cellKeys.has(key)) {
+        cellLabels.push(`落点将占用 ${placementWidth}×${placementHeight} 格`);
+      }
       if (occupant && preview.targetIds.has(occupant.id)) cellLabels.push("可选目标");
       if (unitOccupiedCells(selected).some((cellPosition) => cellPosition.x === x && cellPosition.y === y)) cellLabels.push("当前选择");
       if (cellEffects.length) cellLabels.push(`战场状态：${cellEffects.map((effect) => effect.name).join("、")}`);
@@ -669,11 +683,11 @@ export function renderBoard() {
     }
   }
 
-  if (placementSize > 1) {
+  if (placementWidth > 1 || placementHeight > 1) {
     const showPlacement = (anchor) => {
       for (const cell of cellAt) cell.classList.remove("is-footprint-destination");
-      for (let dy = 0; dy < placementSize; dy += 1) {
-        for (let dx = 0; dx < placementSize; dx += 1) {
+      for (let dy = 0; dy < placementHeight; dy += 1) {
+        for (let dx = 0; dx < placementWidth; dx += 1) {
           cellAt[(anchor.y + dy) * boardWidth + anchor.x + dx]?.classList.add("is-footprint-destination");
         }
       }
@@ -1607,6 +1621,8 @@ export function renderChainPanel() {
     const prompt = state.battle.pending_damage_choice;
     if (caption) caption.textContent = prompt.kind === "hell_dragon_first"
       ? "古龙阵亡：选择第一名己方地狱单位，或放弃献祭。"
+      : prompt.kind === "gentleman_guard"
+      ? `矮小绅士可取消【${prompt.action_name}】的 ${prompt.damage} 点伤害；本体与分身共享两次额度。`
       : prompt.kind === "hell_dragon_second"
       ? "古龙阵亡：选择第二名不同的己方地狱单位，或放弃献祭。"
       : prompt.kind === "hell_dragon_effect"

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import random
+from wujiang.tactical.prediction import random, forecasting_active, direct_scoring
 from typing import Any
 
 from wujiang.tactical.engine.army import is_army_soldier
@@ -11,6 +11,7 @@ from wujiang.tactical.engine.core import (
     HeroUnit, Position, Skill, Trait, Unit,
 )
 from wujiang.tactical.heroes.common import InvincibleUntilActionStatus
+from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_hero_kit
 from wujiang.tactical.heroes.next_five import square_around_cells
 
 
@@ -312,7 +313,20 @@ class BlackNightShadowSkill(PointCostSkill):
         return declared if declared else _outer_ring(battle, actor)
 
     def execute(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
-        rolled = 3 if getattr(battle, "_ai_probe_active", False) else random.randint(1, 6)
+        if direct_scoring():
+            cells = self.cells(battle, actor, payload)
+            for target in list(battle.effect_units_at_cells(cells)):
+                if target is actor:
+                    continue
+                blockers = target.total_shields() + target.dodge_charges
+                per_hit = battle.damage_rule.calculate_damage(2, target.stat("defense"))
+                rows = tuple((max(0, count - blockers) * per_hit, 1 / 6) for count in range(1, 7))
+                battle.resolve_damage(DamageContext(source=actor, target=target, attack_power=2,
+                    raw_damage=sum(amount * probability for amount, probability in rows),
+                    is_skill=True, action_name=self.name, ignore_shield=True, cannot_evade=True,
+                    forecast_damage_rows=rows, tags={"skill", self.code}))
+            return
+        rolled = 3 if getattr(battle, "_ai_probe_active", False) and not forecasting_active() else random.randint(1, 6)
         cells = self.cells(battle, actor, payload)
         battle.log_public_event(f"{actor.name} 的【黑夜魔影】掷出 {rolled} 点，结算 {rolled} 段。", source=actor)
         for segment in range(1, rolled + 1):
@@ -347,3 +361,22 @@ class EnterDarknessSkill(Skill):
     def preview(self, battle: Battle, actor: Unit) -> dict[str, Any]:
         return {"cells": [cell.to_dict() for cell in battle.unit_cells(actor)],
                 "target_unit_ids": [actor.unit_id], "secondary_cells": [], "requires_target": False}
+
+
+LEGENDARY_FISHER_KIT = register_hero_kit(FragmentMappedHeroKit(
+    "excel_r320",
+    skills={"神风之戟": GaleHalberdSkill, "潜行": FisherStealthSkill},
+    traits={fragment: FisherGrowthTrait for fragment in (
+        "此单位攻击后有1/2几率本回合攻击次数+1",
+        "每破坏一个武将每回合攻击次数+1",
+        "在“暴雨”或“大海”中每破坏一个对方单位每回合攻击次数+1",
+        "在“大海”中飞跃，回避不费魔",
+    )},
+))
+
+
+GARDEN_DEMON_KIT = register_hero_kit(FragmentMappedHeroKit(
+    "excel_r321",
+    skills={"黑魔化": BlackTransformationSkill, "黑夜魔影": BlackNightShadowSkill, "入魔": EnterDarknessSkill},
+    traits={"周围7*7内每有对方单位使用技能时血+1/4，魔+2，魔力点+1": GardenSkillFeastTrait},
+))

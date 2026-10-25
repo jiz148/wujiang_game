@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import random
+from wujiang.tactical.prediction import random
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
@@ -61,6 +61,7 @@ HERO_REGISTRY.update(EXCEL_HERO_REGISTRY)
 
 CLASSIC_BATTLE_MODE = "classic"
 RANDOM_HERO_BATTLE_MODE = "random"
+BP_BATTLE_MODE = "bp"
 CLASSIC_BOARD_BASE_SIDE = 8
 CLASSIC_SPAWN_GAP = 1
 LEGACY_DUEL_BOARD_SIZE = 8
@@ -501,12 +502,67 @@ def classic_spawn_positions(
     return _classic_column_positions(units, board_side, height, player_id=player_id, column_x=column_x)
 
 
-def interleaved_classic_turn_order(player1_units: Sequence[object], player2_units: Sequence[object]) -> list[object]:
+def bp_spawn_positions(
+    units: Sequence[object],
+    board_width: int,
+    board_height: int,
+    *,
+    player_id: int,
+) -> dict[int, Position]:
+    """Place opposite BP slots 11 columns apart on the default board."""
+    if not units:
+        return {}
+    if len(units) > 5 or board_width != 16 or board_height != 11:
+        raise ValueError("BP formation requires up to five units on the default board.")
+    left_slots = {
+        1: [(2, 5)],
+        2: [(2, 3), (2, 7)],
+        3: [(2, 2), (2, 5), (2, 8)],
+        4: [(0, 1), (4, 2), (0, 8), (4, 9)],
+        5: [(0, 1), (4, 2), (2, 5), (0, 8), (4, 9)],
+    }[len(units)]
+    slots = [(x + (11 if player_id == 2 else 0), y) for x, y in left_slots]
+
+    occupied: set[tuple[int, int]] = set()
+    positions: dict[int, Position] = {}
+    side_min_x, side_max_x = (0, board_width // 2 - 1) if player_id == 1 else (board_width // 2, board_width - 1)
+    for unit, (target_x, target_y) in zip(units, slots):
+        bounds = entry_footprint_bounds(unit)
+        preferred_x = target_x - (bounds["min_dx"] if player_id == 1 else bounds["max_dx"])
+        preferred_y = target_y - bounds["min_dy"]
+        candidates: list[tuple[int, Position, set[tuple[int, int]]]] = []
+        for x in range(side_min_x - bounds["min_dx"], side_max_x - bounds["max_dx"] + 1):
+            for y in range(-bounds["min_dy"], board_height - bounds["max_dy"]):
+                anchor = Position(x, y)
+                cells = spawn_cells_for_anchor(unit, anchor)
+                if cells & occupied:
+                    continue
+                distance = abs(x - preferred_x) + abs(y - preferred_y)
+                candidates.append((distance, anchor, cells))
+        for minimum_distance in (3, 2, 1):
+            spaced = [entry for entry in candidates if all(
+                max(abs(x - other_x), abs(y - other_y)) >= minimum_distance
+                for x, y in entry[2] for other_x, other_y in occupied
+            )]
+            if spaced:
+                _, anchor, cells = min(spaced, key=lambda entry: (entry[0], entry[1].y, entry[1].x))
+                positions[id(unit)] = anchor
+                occupied.update(cells)
+                break
+        else:
+            raise ValueError("当前战场放不下这些武将，请把战场调大后再开局。")
+    return positions
+
+
+def interleaved_classic_turn_order(
+    player1_units: Sequence[object], player2_units: Sequence[object], *, opening_player: int | None = None,
+) -> list[object]:
     if not player1_units and not player2_units:
         return []
-    opening_player = 1
-    if player1_units and player2_units:
-        opening_player = opening_player_for_units(player1_units[0], player2_units[0])
+    if opening_player is None:
+        opening_player = 1
+        if player1_units and player2_units:
+            opening_player = opening_player_for_units(player1_units[0], player2_units[0])
     first = player1_units if opening_player == 1 else player2_units
     second = player2_units if opening_player == 1 else player1_units
     turn_order: list[object] = []
@@ -622,6 +678,19 @@ def create_room_battle(
             width,
             board_height=height,
         )
+    elif normalized_mode == BP_BATTLE_MODE and width == 16 and height == 11 and len(sorted_player1) <= 5 and len(sorted_player2) <= 5:
+        try:
+            player1_positions = bp_spawn_positions(sorted_player1, width, height, player_id=1)
+            player2_positions = bp_spawn_positions(sorted_player2, width, height, player_id=2)
+        except ValueError:
+            player1_positions = packed_spawn_positions(
+                sorted_player1, width, occupied_min_x=0, occupied_max_x=width // 2 - 1,
+                board_height=height,
+            )
+            player2_positions = packed_spawn_positions(
+                sorted_player2, width, occupied_min_x=width // 2, occupied_max_x=width - 1,
+                board_height=height, prefer_high_x=True,
+            )
     elif _column_overflows(sorted_player1, height) or _column_overflows(sorted_player2, height):
         band = max(4, min(8, width // 4))
         player1_positions = packed_spawn_positions(
@@ -654,8 +723,15 @@ def create_room_battle(
         )
     ]
     battle.configure_turn_order(turn_order, starting_index=0)
-    if "fast" in special_mode_codes and "arena" not in special_mode_codes:
-        battle.configure_turn_order(list(reversed(turn_order)), starting_index=0)
+    if "fast" in special_mode_codes and "arena" not in special_mode_codes and turn_order:
+        # Reverse each side and swap the opener, while keeping surplus slots
+        # after the alternating portion of every complete battlefield round.
+        fast_order = interleaved_classic_turn_order(
+            [unit for unit in reversed(sorted_player1) if not is_army_soldier(unit)],
+            [unit for unit in reversed(sorted_player2) if not is_army_soldier(unit)],
+            opening_player=3 - battle.units[turn_order[0]].player_id,
+        )
+        battle.configure_turn_order([unit.unit_id for unit in fast_order], starting_index=0)
     if special_mode_codes:
         from wujiang.tactical.rooms.special_battle import apply_bp_special_modes
 

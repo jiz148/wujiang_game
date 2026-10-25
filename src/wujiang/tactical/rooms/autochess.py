@@ -27,7 +27,9 @@ class AutoChessConfig:
     initial_gold: int = 10
     base_income: int = 5
     interest_step: int = 10
-    interest_cap: int = 5
+    interest_cap: int = 3
+    streak_reward_cap: int = 3
+    health_damage_reward_cap: int = 3
     preparation_seconds: int = 90
     bench_capacity: int = 8
     shop_slots: int = 5
@@ -37,7 +39,8 @@ class AutoChessConfig:
     board_width: int = 10
     board_height: int = 10
     deployment_width: int = 4
-    battle_round_limit: int = 30
+    battle_round_limit: int = 30  # Every auto chess battle has the same full-round limit.
+    battle_round_max: int = 30  # Legacy public config field mirrors the fixed limit.
     level_budgets: tuple[int, ...] = (6, 9, 12, 15, 18, 21, 24, 27)
     level_costs: tuple[int, ...] = (4, 6, 8, 10, 12, 14, 16)
     shop_weights: tuple[tuple[int, ...], ...] = (
@@ -49,6 +52,13 @@ class AutoChessConfig:
 
 
 CONFIG = AutoChessConfig()
+
+
+def chess_round_limit(initial_hero_count: int, config: AutoChessConfig = CONFIG) -> int:
+    """Keep every auto chess battle to the same number of full rounds."""
+    return max(1, int(config.battle_round_limit))
+
+
 STATS = ("attack", "defense", "speed", "attack_range", "mana")
 STAT_LABELS = {"attack": "攻击", "defense": "防御", "speed": "速度", "attack_range": "范围", "mana": "魔法"}
 EQUIPMENT_CATALOG: dict[str, dict[str, Any]] = load_equipment_catalog()
@@ -116,17 +126,10 @@ def battle_score(battle: Battle, side: int) -> tuple[int, float, float]:
 
 
 def chess_timeout_result(battle: Battle) -> dict[str, Any]:
-    """Compare only living, fielded bodies after turn-end cleanup."""
+    """Decide a timeout by living on-board unit count, then the seeded draw."""
     left, right = battle_score(battle, 1), battle_score(battle, 2)
-    if left[0] != right[0]:
-        criterion = "units"
-    elif left[1] != right[1]:
-        criterion = "health_ratio"
-    elif left[2] != right[2]:
-        criterion = "enemy_damage"
-    else:
-        criterion = "seeded_coin"
-    winner = (1 if left > right else 2 if right > left else
+    criterion = "units" if left[0] != right[0] else "seeded_coin"
+    winner = (1 if left[0] > right[0] else 2 if right[0] > left[0] else
               int(getattr(battle, "chess_tie_winner", 1)))
     damage = abs(left[0] - right[0]) if criterion == "units" else 1
     return {"winner": winner, "damage": max(1, damage), "criterion": criterion,
@@ -135,6 +138,9 @@ def chess_timeout_result(battle: Battle) -> dict[str, Any]:
 
 def battle_observer_snapshot(battle: Battle) -> dict[str, Any]:
     """Only the fields used by the read-only chess board; avoid action previews."""
+    round_limit = max(0, int(getattr(battle, "chess_round_cap", 0) or 0))
+    rounds_remaining = (max(0, round_limit - battle.round_number + 1)
+                        if round_limit and battle.winner is None else 0)
     units = []
     known_units = {unit.unit_id: unit for unit in [*battle.all_units(), *battle.destroyed_units]}
     for unit in battle.all_units():
@@ -172,7 +178,10 @@ def battle_observer_snapshot(battle: Battle) -> dict[str, Any]:
                                 if target_id in known_units]
         actions.append(item)
     return {"board": {"width": battle.width, "height": battle.height},
-            "round_number": battle.round_number, "winner": battle.winner,
+            "round_number": battle.round_number, "round_limit": round_limit,
+            "rounds_remaining": rounds_remaining,
+            "initial_hero_count": int(getattr(battle, "chess_starting_hero_count", 0) or 0),
+            "winner": battle.winner,
             "units": units, "logs": battle.logs[-80:], "actions": actions,
             "field_effects": [effect.to_public_dict(battle) for effect in battle.field_effects],
             "visual_events": [event.to_public_dict() for event in battle.visual_events[-24:]]}
@@ -631,10 +640,11 @@ class AutoChessState:
         turn_order = interleaved_classic_turn_order(sorted_left, sorted_right)
         battle.configure_turn_order([unit.unit_id for unit in turn_order])
         battle.chess_tie_winner = self.rng.choice((1, 2))
+        battle.chess_starting_hero_count = len(units_by_side[1]) + len(units_by_side[2])
+        battle.chess_round_cap = chess_round_limit(battle.chess_starting_hero_count, self.config)
         battle.start_battle()
-        # 自走棋一场打到一方全灭为止。武将回合上限和完整战斗轮上限都会中途判胜负。
+        # Use complete battlefield rounds instead of the generic per-hero turn cap.
         battle.turn_timeout_limit = 0
-        battle.chess_round_cap = 0
         runner = GameRoom(f"{match.left}{match.right}{self.round_number:04d}", seat_count=2)
         for seat in runner.seats.values():
             seat.set_ai()
@@ -680,6 +690,11 @@ class AutoChessState:
                     break
 
     def _advance_match(self, match: ChessMatch) -> bool:
+        from wujiang.tactical.rooms.ai_parallel import board_step
+        with board_step(self, match):
+            return self._advance_match_serial(match)
+
+    def _advance_match_serial(self, match: ChessMatch) -> bool:
         if match.runner is None:
             match.runner = self._create_match_battle(match)
             if match.runner is None:
@@ -722,11 +737,7 @@ class AutoChessState:
             runner._finish_replay()
 
     def force_finish_open_matches(self) -> None:
-        """End every unfinished fight in this round using the stall score.
-
-        Damage is the living-body difference. Equal counts fall through the
-        same health, damage, then seeded-coin order and cost 1.
-        """
+        """End unfinished fights by living unit count or a seeded draw."""
         if self.phase != "battle":
             _error("当前没有进行中的战斗。")
         pending = [match for match in self.matches if match.result is None]
@@ -765,50 +776,64 @@ class AutoChessState:
             winner_side = int(result["winner"])
             winner_id = match.left if winner_side == 1 else match.right
             loser_id = match.right if winner_side == 1 else match.left
+            damage = max(0, int(result["damage"]))
+            # A defeated mirror has no player health to deduct. A real player
+            # who loses to a mirror still loses health.
+            dealt_to_player = (min(damage, max(0, self.players[loser_id].health))
+                               if not match.mirror or loser_id == match.left else 0)
+            result["actual_health_loss"] = dealt_to_player
+            # The real player paired against a mirror keeps normal win income.
+            rewarded_damage = damage if match.mirror and loser_id != match.left else dealt_to_player
             if not match.mirror or winner_id == match.left:
-                outcomes[winner_id].append({"win": True, "kills": int(result.get("hero_kills", 0)), "damage": 0})
+                outcomes[winner_id].append({"win": True, "damage_dealt": rewarded_damage,
+                                            "damage": 0})
             if not match.mirror or loser_id == match.left:
-                outcomes[loser_id].append({"win": False, "kills": 0, "damage": int(result["damage"])})
+                outcomes[loser_id].append({"win": False, "damage_dealt": 0,
+                                           "damage": damage})
         round_record = {"round": self.round_number, "matches": [], "players": {}}
         for match in self.matches:
             round_record["matches"].append({"left": match.left, "right": match.right,
                                             "mirror": match.mirror, **(match.result or {})})
-        before_hp = {seat_id: self.players[seat_id].health for seat_id in outcomes}
         for seat_id, player_outcomes in outcomes.items():
             player = self.players[seat_id]
-            primary = player_outcomes[0] if player_outcomes else {"win": True, "kills": 0, "damage": 0}
+            primary = player_outcomes[0] if player_outcomes else {"win": True, "damage_dealt": 0,
+                                                                   "damage": 0}
             if primary["win"]:
                 player.wins += 1
                 player.win_streak += 1
                 player.loss_streak = 0
-                gold_gain = 1 + primary["kills"] + min(3, player.win_streak)
+                victory_gold = 1
+                streak_gold = min(self.config.streak_reward_cap, player.win_streak)
+                health_damage_gold = min(self.config.health_damage_reward_cap,
+                                         primary["damage_dealt"])
             else:
                 player.losses += 1
                 player.loss_streak += 1
                 player.win_streak = 0
-                gold_gain = min(3, player.loss_streak)
+                victory_gold = health_damage_gold = 0
+                streak_gold = min(self.config.streak_reward_cap, player.loss_streak)
             # The workbook uses 100 base coins per shop gold.  Point Gold's
             # die therefore awards 1..player-count auto chess gold per copy.
             item_gold = sum(self.rng.randint(1, self.seat_count)
                             for piece in player.fielded()
                             for code in piece.equipment if code == "点金手")
-            gold_gain += item_gold
+            gold_gain = victory_gold + streak_gold + health_damage_gold + item_gold
             player.gold += gold_gain
-            health_loss = sum(item["damage"] for item in player_outcomes)
+            health_loss = min(max(0, player.health), sum(item["damage"] for item in player_outcomes))
             player.health -= health_loss
-            round_record["players"][seat_id] = {"gold_gain": gold_gain, "item_gold": item_gold,
+            round_record["players"][seat_id] = {"gold_gain": gold_gain,
+                                                "victory_gold": victory_gold,
+                                                "streak_gold": streak_gold,
+                                                "health_damage_gold": health_damage_gold,
+                                                "item_gold": item_gold,
                                                 "health_loss": health_loss,
                                                 "health": max(0, player.health)}
         survivors = [seat_id for seat_id in outcomes if self.players[seat_id].health > 0]
-        if not survivors:
-            survivors = [max(outcomes, key=lambda seat_id: (before_hp[seat_id],
-                         self.players[seat_id].wins, self.rng.random()))]
-            self.players[survivors[0]].health = 1
         for seat_id in outcomes:
             self.players[seat_id].eliminated = seat_id not in survivors
         self.history.append(round_record)
-        if len(survivors) == 1:
-            self.champion = survivors[0]
+        if len(survivors) <= 1:
+            self.champion = survivors[0] if survivors else None
             self.phase = "finished"
         else:
             self._begin_round()
@@ -910,6 +935,9 @@ class AutoChessState:
                 "equipment_catalog": [{"code": code, "name": item["name"], "attributes": item["attributes"],
                                        "effect": item["effect"]} for code, item in EQUIPMENT_CATALOG.items()],
                 "config": {"preparation_seconds": self.config.preparation_seconds,
+                           "base_income": self.config.base_income,
+                           "interest_step": self.config.interest_step,
+                           "interest_cap": self.config.interest_cap,
                            "level_costs": self.config.level_costs,
                            "level_budgets": self.config.level_budgets,
                            "reroll_cost": self.config.reroll_cost,
@@ -919,4 +947,5 @@ class AutoChessState:
                            "board_width": self.config.board_width,
                            "board_height": self.config.board_height,
                            "deployment_width": self.config.deployment_width,
-                           "battle_round_limit": self.config.battle_round_limit}}
+                           "battle_round_limit": self.config.battle_round_limit,
+                           "battle_round_max": self.config.battle_round_max}}

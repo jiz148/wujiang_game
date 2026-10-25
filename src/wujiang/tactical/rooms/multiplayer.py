@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import math
 import os
 import pickle
@@ -59,6 +60,7 @@ from wujiang.tactical.rooms.special_modes import (
 
 
 ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+_LOGGER = logging.getLogger(__name__)
 ROOM_CODE_LENGTH = 6
 DEFAULT_ROOM_MODE = "classic"
 DEFAULT_RANDOM_ROSTER_SIZE = 1
@@ -93,6 +95,8 @@ DEFAULT_TURN_TIMEOUT_SECONDS = 0
 ROOM_TURN_TIMEOUT_SECONDS = float(DEFAULT_TURN_TIMEOUT_SECONDS)
 DEFAULT_BOARD_WIDTH = 10
 DEFAULT_BOARD_HEIGHT = 10
+BP_DEFAULT_BOARD_WIDTH = 16
+BP_DEFAULT_BOARD_HEIGHT = 11
 MIN_BOARD_SIZE = 6
 MAX_BOARD_SIZE = 100
 STALE_QUEUED_ACTOR_LOG_MARKER = "行动者已不在战场"
@@ -656,6 +660,15 @@ def battle_state_for_viewer(
     viewer_seat_id: Optional[int] = None,
 ) -> dict[str, Any]:
     state = battle.to_public_dict()
+    damage_prompt = state.get("pending_damage_choice")
+    if (damage_prompt is not None and damage_prompt.get("kind") == "gentleman_guard"
+            and viewer_player_id != battle.get_unit(damage_prompt["unit_id"]).player_id):
+        # The owner can choose for a clone without exposing the genuine body to
+        # the opponent through the prompt's controller or protected-unit IDs.
+        state["pending_damage_choice"] = {
+            **damage_prompt, "unit_id": None, "protected_unit_id": None,
+            "action_name": "绅士防身", "options": [],
+        }
     state["hell_dragon_returns"] = [
         {**entry, "can_control": bool(battle.winner is None and viewer_player_id == entry["player_id"] and
          (viewer_seat_id is None or battle_unit_owner_seat_id(
@@ -973,10 +986,12 @@ def _ensure_autochess_worker(room: "GameRoom") -> None:
         thread.start()
 
 
-def _autochess_step_delay(speed: float, active_matches: int) -> float:
+def _autochess_step_delay(speed: float, active_matches: int, elapsed: float = 0.0) -> float:
     # A speed setting describes each board's cadence. Do not charge a full
     # board interval after every board in the sequential round-robin loop.
-    return max(0.05, 0.9 / max(speed, 0.1) / max(1, active_matches))
+    # Computation/publication already occupied this interval. At high speed a
+    # fixed sleep floor would cap four boards at five steps per board/second.
+    return max(0.0, 0.9 / max(speed, 0.1) / max(1, active_matches) - max(0.0, elapsed))
 
 
 def _autochess_battle_worker(room: "GameRoom") -> None:
@@ -988,6 +1003,7 @@ def _autochess_battle_worker(room: "GameRoom") -> None:
     """
     try:
         while True:
+            step_started = time.monotonic()
             with room._lock:
                 if getattr(room, "_closed", False):
                     return
@@ -1007,9 +1023,20 @@ def _autochess_battle_worker(room: "GameRoom") -> None:
                     cursor = int(getattr(chess, "next_match_cursor", 0))
                     match = pending[cursor % len(pending)]
                     chess.next_match_cursor = cursor + 1
-                    chess._advance_match(match)
+                    changed = chess._advance_match(match)
+                    if changed:
+                        from wujiang.tactical.rooms.autochess_frames import publish_match
+                        try:
+                            publish_match(room, chess, match)
+                        except Exception:
+                            # A presentation failure must not terminate combat.
+                            # The next normal state serialization can recover.
+                            room._chess_frame_publish_failed = True
+                            _LOGGER.exception("Could not publish committed chess frame for %s", room.room_id)
                 speed = float(getattr(room, "chess_battle_speed", DEFAULT_SIMULATION_SPEED) or DEFAULT_SIMULATION_SPEED)
-            time.sleep(_autochess_step_delay(speed, len(pending)))
+            # sleep(0) still yields after an overdue step, outside the room
+            # lock. Keep round-robin order and the final-frame hold unchanged.
+            time.sleep(_autochess_step_delay(speed, len(pending), time.monotonic() - step_started))
     finally:
         if getattr(room, "_closed", False):
             room.autochess = None
@@ -1057,8 +1084,8 @@ class GameRoom:
         self.autochess = None
         self.chess_prep_seconds = 90
         self.chess_battle_speed = DEFAULT_SIMULATION_SPEED
-        self.board_width = DEFAULT_BOARD_WIDTH
-        self.board_height = DEFAULT_BOARD_HEIGHT
+        self.board_width = BP_DEFAULT_BOARD_WIDTH if self.mode == "bp" else DEFAULT_BOARD_WIDTH
+        self.board_height = BP_DEFAULT_BOARD_HEIGHT if self.mode == "bp" else DEFAULT_BOARD_HEIGHT
         self.turn_timeout_seconds = DEFAULT_TURN_TIMEOUT_SECONDS
         self.hero_turn_limit = SKIRMISH_HERO_TURN_LIMIT
         self.turn_limit_winner = 2
@@ -1098,6 +1125,9 @@ class GameRoom:
         state.pop("_lock", None)
         state.pop("_bp_pair_cache", None)
         state.pop("_bp_legal_cache", None)
+        state.pop("_chess_state_cache", None)
+        state.pop("_chess_state_cache_at", None)
+        state.pop("_chess_frame_publish_failed", None)
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
@@ -1106,9 +1136,9 @@ class GameRoom:
         if not hasattr(self, "turn_timeout_seconds"):
             self.turn_timeout_seconds = DEFAULT_TURN_TIMEOUT_SECONDS
         if not hasattr(self, "board_width"):
-            self.board_width = DEFAULT_BOARD_WIDTH
+            self.board_width = BP_DEFAULT_BOARD_WIDTH if self.mode == "bp" else DEFAULT_BOARD_WIDTH
         if not hasattr(self, "board_height"):
-            self.board_height = DEFAULT_BOARD_HEIGHT
+            self.board_height = BP_DEFAULT_BOARD_HEIGHT if self.mode == "bp" else DEFAULT_BOARD_HEIGHT
         if not hasattr(self, "launch_context"):
             self.launch_context = make_launch_context("skirmish")
         if not hasattr(self, "hero_turn_limit"):
@@ -2386,12 +2416,13 @@ class GameRoom:
             if seat is None or not seat.is_ai_controlled:
                 return None
             current_unit = self.battle.current_turn_unit()
-            if current_unit is None:
+            actors = self.battle.current_turn_bundle_units(include_banished=False)
+            if current_unit is None and not actors:
                 return None
             difficulty = seat.ai_difficulty_override or self.default_ai_difficulty
             payload, actor = choose_turn_bundle_action(
                 self.battle,
-                self.battle.current_turn_bundle_units(include_banished=False),
+                actors,
                 difficulty,
             )
             return payload, "ai_turn", actor or current_unit
@@ -2485,6 +2516,42 @@ class GameRoom:
         self._record_replay_step(f"{reason}_failed")
         self.touch()
 
+    def _damage_choice_fallback_payload(self) -> dict[str, Any]:
+        if self.battle is None or self.battle.pending_damage_choice is None:
+            raise ActionError("当前没有待选择的伤害。")
+        prompt = self.battle.pending_damage_choice
+        mandatory = prompt.get("kind") in {"attack_swap", "formation"}
+        if mandatory and not prompt.get("options"):
+            raise ActionError("当前必选提示没有合法选项，不能跳过结算。")
+        return {"type": "damage_choice", "unit_id": prompt["unit_id"],
+                "stat_name": "decline",
+                "target_unit_id": prompt["options"][0] if mandatory else "decline"}
+
+    def _perform_ai_damage_choice(self) -> None:
+        prompt = self.battle.pending_damage_choice
+        action_id = self.last_action_id
+        try:
+            self._perform_battle_action(choose_damage_choice_action(self.battle), reason="ai_damage_choice")
+        except Exception as error:
+            _LOGGER.exception("AI damage choice failed: room=%s match=%s turn=%s slot=%s kind=%s event=%s",
+                              self.room_id, self.current_match_id, self.battle.turn_number,
+                              self.battle.active_turn_unit_id, prompt.get("kind"),
+                              prompt.get("event_index"))
+            # A post-commit reporting error must not replay an already accepted
+            # action or accidentally answer the next choice with a fallback.
+            if self.last_action_id != action_id:
+                if isinstance(error, ActionError):
+                    return  # The accepted action only reported a stale actor.
+                raise
+            if self.battle.pending_damage_choice is None:
+                raise
+            try:
+                self._perform_battle_action(self._damage_choice_fallback_payload(), reason="ai_damage_fallback")
+            except Exception:
+                _LOGGER.exception("AI damage fallback failed; prompt retained: room=%s match=%s",
+                                  self.room_id, self.current_match_id)
+                raise
+
     def _perform_ai_fallback_after_error(self) -> bool:
         if self.battle is None:
             return False
@@ -2492,10 +2559,7 @@ class GameRoom:
         if self.battle.pending_damage_choice is not None:
             if seat is None or not seat.is_ai_controlled:
                 return False
-            prompt = self.battle.pending_damage_choice
-            self._perform_battle_action({"type": "damage_choice", "unit_id": prompt["unit_id"],
-                                         "stat_name": "decline", "target_unit_id": (prompt["options"][0]
-                                         if prompt.get("kind") in {"attack_swap", "formation"} else "decline")}, reason="ai_damage_fallback")
+            self._perform_battle_action(self._damage_choice_fallback_payload(), reason="ai_damage_fallback")
             return True
         if self.battle.pending_chain is not None:
             if seat is None or not seat.is_ai_controlled:
@@ -2535,8 +2599,7 @@ class GameRoom:
         if self.battle.is_army_turn():
             self._perform_battle_action({"type": "end_turn"}, reason="army_turn")
             return True
-        current_unit = self.battle.current_turn_unit()
-        if current_unit is not None and self.battle.units_can_act_in_current_turn():
+        if self.battle.units_can_act_in_current_turn():
             return False
         self._perform_battle_action({"type": "end_turn"}, reason="ai_turn_fallback")
         return True
@@ -2557,7 +2620,22 @@ class GameRoom:
                 actor = self.battle.get_unit(current_unit_id)
         before_log_count = len(self.battle.logs)
         before_stale_count = int(getattr(self.battle, "stale_queued_action_count", 0))
-        self.battle.perform_action(payload)
+        replay_before = self.replay
+        replay_steps_before = len(replay_before.steps) if replay_before is not None else 0
+        try:
+            self.battle.perform_action(payload)
+        except Exception:
+            if payload.get("type") == "damage_choice":
+                # Engine rollback cannot undo frames appended by the external
+                # replay callback during a failed formal choice resolution.
+                self.replay = replay_before
+                if replay_before is not None:
+                    del replay_before.steps[replay_steps_before:]
+            raise
+        if payload.get("type") == "damage_choice" and self.battle.pending_damage_choice is not None:
+            self.replay = replay_before
+            if replay_before is not None:
+                del replay_before.steps[replay_steps_before:]
         self.battle.record_postgame_action(actor, payload)
         new_logs = self.battle.logs[before_log_count:]
         self.last_action_meta = self._build_last_action_meta(
@@ -2833,6 +2911,13 @@ class GameRoom:
                     raise RoomError("BP 模式固定两个席位。请先请出多出的玩家。")
             previous_mode = self.mode
             self.mode = next_mode
+            previous_default = ((BP_DEFAULT_BOARD_WIDTH, BP_DEFAULT_BOARD_HEIGHT)
+                                if previous_mode == "bp" else (DEFAULT_BOARD_WIDTH, DEFAULT_BOARD_HEIGHT))
+            if (self.board_width, self.board_height) == previous_default:
+                self.board_width, self.board_height = (
+                    (BP_DEFAULT_BOARD_WIDTH, BP_DEFAULT_BOARD_HEIGHT)
+                    if next_mode == "bp" else (DEFAULT_BOARD_WIDTH, DEFAULT_BOARD_HEIGHT)
+                )
             if next_mode == "autochess":
                 for player_id in range(len(self.seats) + 1, AUTOCHESS_SEAT_COUNT + 1):
                     self.seats[player_id] = PlayerSeat(player_id=player_id, team_id=default_team_for_seat(player_id))
@@ -3786,18 +3871,20 @@ class GameRoom:
         while self.battle is not None and self.battle.winner is None and safety < 512:
             if max_steps is not None and steps >= max_steps:
                 break
+            damage_choice_attempted = False
             try:
-                if self.battle.pending_damage_choice is not None:
+                if self.battle.destroyed_active_turn_is_idle():
+                    # No actor remains to own an AI prompt. Finish the existing
+                    # slot through normal hooks rather than returning zero
+                    # forever or directly jumping to another slot.
+                    self._perform_battle_action({"type": "end_turn"}, reason="ai_destroyed_turn")
+                    steps += 1
+                elif self.battle.pending_damage_choice is not None:
                     seat = self._current_prompt_seat()
                     if seat is None or not seat.is_ai:
                         break
-                    try:
-                        self._perform_battle_action(choose_damage_choice_action(self.battle), reason="ai_damage_choice")
-                    except Exception:
-                        if self.battle is None or self.battle.pending_damage_choice is None:
-                            break
-                        self.battle.pending_damage_choice = None
-                        self.battle.log("这次伤害选择无法结算，已跳过。")
+                    damage_choice_attempted = True
+                    self._perform_ai_damage_choice()
                     steps += 1
                 elif self.battle.current_respawn_prompt() is not None:
                     seat = self._current_prompt_seat()
@@ -3847,12 +3934,13 @@ class GameRoom:
                         if seat is None or not seat.is_ai:
                             break
                         current_unit = self.battle.current_turn_unit()
-                        if current_unit is None:
+                        actors = self.battle.current_turn_bundle_units(include_banished=False)
+                        if current_unit is None and not actors:
                             break
                         difficulty = seat.ai_difficulty_override or self.default_ai_difficulty
                         payload, _actor = choose_turn_bundle_action(
                             self.battle,
-                            self.battle.current_turn_bundle_units(include_banished=False),
+                            actors,
                             difficulty,
                         )
                         self._perform_battle_action(
@@ -3865,14 +3953,15 @@ class GameRoom:
                     break
                 steps += 1
             except ActionError:
+                if damage_choice_attempted:
+                    # The choice helper already tried its legal fallback. Do
+                    # not keep retrying the same broken prompt in this loop.
+                    raise
                 seat = self._current_prompt_seat()
                 if seat is None or not seat.is_ai:
                     break
                 if self.battle.pending_damage_choice is not None:
-                    prompt = self.battle.pending_damage_choice
-                    self._perform_battle_action({"type": "damage_choice", "unit_id": prompt["unit_id"],
-                                                  "stat_name": "decline", "target_unit_id": (prompt["options"][0]
-                                                  if prompt.get("kind") in {"attack_swap", "formation"} else "decline")}, reason="ai_damage_fallback")
+                    self._perform_battle_action(self._damage_choice_fallback_payload(), reason="ai_damage_fallback")
                     steps += 1
                 elif self.battle.pending_chain is not None:
                     self._perform_battle_action({"type": "chain_skip"}, reason="ai_chain_fallback")
@@ -4086,11 +4175,26 @@ class GameRoom:
         if self.mode == "autochess" and self.autochess is not None:
             # 战斗线程算一步时会占着锁。人多、召唤物多时这一步能拖很久，
             # 状态请求如果一直等，浏览器就会把它们取消。等不及就交上一帧。
-            acquired = self._lock.acquire(timeout=0.25)
+            cache_key = (str(viewer_token or ""), str(base_url or ""))
+            cached = getattr(self, "_chess_state_cache", {}).get(cache_key)
+            if cached is not None:
+                from wujiang.tactical.rooms.autochess_frames import current_frame
+                if current_frame(self, cached):
+                    self.seat_for_token(viewer_token)
+                    if advance_chess:
+                        _ensure_autochess_worker(self)
+                    return copy.deepcopy(cached)
+            now = time.monotonic()
+            published = getattr(self, "_chess_state_cache_at", {}).get(cache_key, now)
+            # Brief duplicate polls can reuse a fresh frame immediately. Older
+            # frames retain the bounded wait so polling cannot miss every tiny
+            # gap between AI steps and starve committed-frame refreshes.
+            acquired = (self._lock.acquire(blocking=False) if cached is not None and now - published < 0.5
+                        else self._lock.acquire(timeout=0.25))
             if not acquired:
-                cached = getattr(self, "_chess_state_cache", {}).get(str(viewer_token or ""))
+                cached = getattr(self, "_chess_state_cache", {}).get(cache_key)
                 if cached is not None:
-                    return cached
+                    return copy.deepcopy(cached)
                 self._lock.acquire()
             try:
                 payload = self._autochess_serialize(viewer_token, base_url=base_url, advance=advance_chess)
@@ -4098,7 +4202,18 @@ class GameRoom:
                 if not isinstance(cache, dict):
                     cache = {}
                     self._chess_state_cache = cache
-                cache[str(viewer_token or "")] = payload
+                # A detached committed frame cannot change during AI trials.
+                cache[cache_key] = copy.deepcopy(payload)
+                self._chess_frame_publish_failed = False
+                published_at = getattr(self, "_chess_state_cache_at", None)
+                if not isinstance(published_at, dict):
+                    published_at = {}
+                    self._chess_state_cache_at = published_at
+                published_at[cache_key] = time.monotonic()
+                while len(cache) > 32:
+                    oldest = next(iter(cache))
+                    cache.pop(oldest)
+                    published_at.pop(oldest, None)
                 return payload
             finally:
                 self._lock.release()

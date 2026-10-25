@@ -83,7 +83,9 @@ def run_consolidated_regression(run_dir: Path, *, regression_filter: str | None 
     command = [sys.executable, "-m", "unittest", "discover", "-s", "tests",
                "-p", "test_behavior.py" if regression_filter else "test_*.py", "-v"]
     if regression_filter:
-        command.extend(["-k", regression_filter])
+        for pattern in (item.strip() for item in regression_filter.split(",")):
+            if pattern:
+                command.extend(["-k", pattern])
     print(f"[regression] running {'focused behavior scenarios' if regression_filter else 'the complete tests directory'} before hero simulations...", flush=True)
     started = time.perf_counter()
     env = dict(os.environ)
@@ -641,7 +643,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--design", type=Path, default=DEFAULT_DESIGN_PATH)
     parser.add_argument("--review-state", type=Path, default=DEFAULT_REVIEW_STATE_PATH)
     parser.add_argument("--regression-filter", default=None,
-                        help="Run only matching behavior tests (unittest -k) before auditing --targets; failures log fully and skip AI matches.")
+                        help="Run only matching behavior tests before auditing --targets; comma-separated unittest -k patterns are combined. Failures log fully and skip AI matches.")
     parser.add_argument("--resume", action="store_true", help="Reuse completed match folders under --out after interruption.")
     parser.add_argument("--summarize-only", action="store_true", help="Index saved results and current Git changes without running tests or matches.")
     args = parser.parse_args(argv)
@@ -652,6 +654,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         parser.error("--current already selects the current review batch; do not combine it with --limit")
     if args.regression_filter and not args.targets:
         parser.error("--regression-filter requires explicit --targets so the focused run names its complete hero batch")
+    if args.regression_filter and not any(item.strip() for item in args.regression_filter.split(",")):
+        parser.error("--regression-filter needs at least one non-empty pattern")
 
     targets = load_current_hero_codes(args.review_state) if args.current else (
         parse_roster(args.targets) if args.targets else public_hero_codes()
