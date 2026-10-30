@@ -11,6 +11,7 @@ from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.engine.core import Unit
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import BlockCounterTrait
 from wujiang.tactical.heroes.common import DashMoveSkill
 from wujiang.tactical.heroes.common import FlyingTrait
@@ -19,8 +20,8 @@ from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.mechanics.foundation import PermanentMagicImmunityTrait
 from wujiang.tactical.heroes.mechanics.racial_weather import SimpleGlobalWeatherEffect
-from wujiang.tactical.heroes.next_five import DeclaredAreaSkillMixin
-from wujiang.tactical.heroes.next_five import remote_rectangle_patterns
+from wujiang.tactical.heroes.mechanics.declared_area import DeclaredAreaSkillMixin
+from wujiang.tactical.heroes.mechanics.next_five_effects import remote_rectangle_patterns
 from wujiang.tactical.prediction import random
 
 
@@ -69,6 +70,24 @@ class AbsoluteZeroStatus(StatusEffect):
 
 
 class AbsoluteZeroSkill(DeclaredAreaSkillMixin, Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        actor = context.actor
+        score = 0.0
+        for target in context.effect_units(self):
+            if target.magic_immunity or target.skill_non_damage_effects_blocked():
+                continue
+            current = target.get_status("绝对零度")
+            if current is not None and (current.duration or 0) >= 4:
+                continue
+            mobility = max(0.0, target.stat("speed")) * 5.0
+            displacement = sum(context.is_move_skill(skill.code) or skill.code == "chain_pull"
+                               for skill in target.skills) * 10.0
+            value = 24.0 + mobility + displacement + len(target.traits) * 8.0
+            if current is not None:
+                value *= 0.4
+            score += value if target.player_id != actor.player_id else -value * 1.5
+        return score - 12.0 if score > 12.0 else -1000.0
+
     def __init__(self) -> None:
         super().__init__("absolute_zero", "绝对零度", "每本人轮一次；远程2×2无伤冻结双方受体5轮，封移动、位移技能、锁链及固有特性。",
                          max_uses_per_turn=1, target_mode="cell")
@@ -143,6 +162,20 @@ class FloatingCraneCityField(SimpleGlobalWeatherEffect):
 
 
 class FloatingCraneCitySkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        if battle.has_weather("浮鹤城"):
+            return -1000.0
+        score = 0.0
+        for unit in battle.all_units():
+            if not unit.alive or unit.banished or unit.position is None or unit.name.startswith("冰帝。浮鹤"):
+                continue
+            lost_range = min(3.0, max(0.0, unit.targeting_range() - 1.0))
+            active = sum(skill.timing == "active" for skill in unit.skills)
+            value = lost_range * (11.0 if unit.can_take_turn_actions(battle) else 6.0) + active * 8.0
+            score += value if unit.player_id != actor.player_id else -value * 1.55
+        return score - 26.0 if score > 40.0 else -1000.0
+
     def __init__(self) -> None:
         super().__init__("floating_crane_city", "浮鹤城", "大招：一场一次；全场非同名单位范-3至1，主动技能一半概率失败。",
                          max_uses_per_battle=1, target_mode="self")

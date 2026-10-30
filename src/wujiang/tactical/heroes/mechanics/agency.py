@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
+if TYPE_CHECKING:
+    from wujiang.tactical.heroes.ai_policy import AIReactionScoreContext
 
 from wujiang.tactical.engine.core import (
     ActionError, ActionMiss, Battle, DamageContext, HealContext, HeroUnit,
@@ -13,9 +15,8 @@ from wujiang.tactical.heroes.common import (
     StatModifierStatus, is_mana_drain_immune, positions_to_dict,
 )
 from wujiang.tactical.heroes.mechanics.mimic import MimicSkill
-from wujiang.tactical.heroes.next_five import (
-    damage_followup_effect_applies, square_around_cells,
-)
+from wujiang.tactical.heroes.mechanics.next_five_effects import damage_followup_effect_applies
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 class AgencyDefenseStatus(StatModifierStatus):
     def __init__(self) -> None:
@@ -128,6 +129,8 @@ class AgencyAttachedStatus(StatusEffect):
 
 
 class AgencyBorrowedSkill(MimicSkill):
+    ai_reaction_score_phase = "after_hidden_source"
+
     MOVEMENT_SKILL_CODES = {"fly_leap", "fate_kick", "crazy_sand", "plasma_thruster", "zero_dash", "fuma_pursuit",
                            "fantasy_move", "true_blade_air_slash", "mounted_leap", "frey_quick_flash", "teleport",
                            "descent_moment", "earth_walker", "split", "leap", "jirobo_follow_step", "iron_chain_path", "ghost_step"}
@@ -210,6 +213,11 @@ class AgencyBorrowedSkill(MimicSkill):
         code = str(payload.get("agency_skill_code") or "")
         return next((item for item in actor.skills if item.code == code), None) or self.borrowed[code]
 
+    def effective_skill_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> Skill:
+        if payload.get("agency_skill_code"):
+            return self.declared_skill(actor, payload)
+        return self.target_skill(battle, actor, payload)[1]
+
     def prepay_resources(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         if not payload.get("agency_skill_code"):
             payload.update(self.build_wrapped_action(battle, actor, payload).payload)
@@ -287,6 +295,17 @@ class AgencyBorrowedSkill(MimicSkill):
             for entry in target["skills"]:
                 entry["action"].update(available=ok, reason=reason)
         return preview
+
+    def ai_reaction_score(self, context: AIReactionScoreContext) -> float:
+        actor = context.actor
+        try:
+            _, copied, inner = self.target_skill(context.battle, actor, context.payload)
+            with self.copying(actor, copied):
+                context.prepare_copied_skill(copied)
+        except (ActionError, KeyError, TypeError, ValueError):
+            return -1000.0
+        with self.copying(actor, copied):
+            return context.score_as(copied.code, inner)
 
 
 class AgencyContractSkill(Skill):

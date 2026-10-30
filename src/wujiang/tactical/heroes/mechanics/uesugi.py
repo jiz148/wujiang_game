@@ -10,10 +10,11 @@ from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.engine.core import Unit
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import positions_to_dict
-from wujiang.tactical.heroes.next_five import ALL_DIRECTIONS
+from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS
 
 
 def _text(value: Any) -> str:
@@ -21,6 +22,9 @@ def _text(value: Any) -> str:
 
 
 class UesugiFlashSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.bird_skill_score()
+
     def __init__(self) -> None:
         super().__init__("flash_slash", "一闪",
                          "0魔、3轮一次；八方向前5格破魔伤害，随后移到合法第6格。",

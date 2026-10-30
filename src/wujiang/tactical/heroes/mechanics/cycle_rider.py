@@ -9,7 +9,7 @@ from wujiang.tactical.engine.core import (
 )
 from wujiang.tactical.heroes.base import AbstractHero
 from wujiang.tactical.heroes.common import payload_position, positions_to_dict
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 class ExtraMoveAfterAttackTrait(Trait):
     def __init__(self) -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from wujiang.tactical.engine.core import Battle, BattleFieldEffect, DamageContext, HeroUnit, Position, Trait
 from wujiang.tactical.heroes.common import StatModifierStatus
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 
 class RhinoLegacyStatus(StatModifierStatus):

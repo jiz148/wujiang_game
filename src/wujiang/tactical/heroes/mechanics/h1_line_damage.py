@@ -11,7 +11,7 @@ from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.heroes.common import line_patterns
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
-from wujiang.tactical.heroes.next_five import ALL_DIRECTIONS
+from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS
 
 
 class H1LineDamageSkill(Skill):

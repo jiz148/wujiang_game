@@ -8,8 +8,9 @@ from wujiang.tactical.engine.core import (
     ActionError, Battle, DamageContext, Position, Skill, Stats, Trait, Unit,
 )
 from wujiang.tactical.heroes.base import AbstractHero
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import payload_position, positions_to_dict
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 def stone_summon_anchors(battle: Battle, actor: Unit, stone: Unit) -> list[Position]:
     """Every whole-body placement touching the actor's exterior ring."""
@@ -99,6 +100,9 @@ class MediumStoneSummon(AbstractHero):
 
 
 class StoneSummonSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.stone_summon_score(self.code)
+
     def __init__(self, *, small: bool = False) -> None:
         self.small = small
         super().__init__("summon_small_stone" if small else "summon_medium_stone",

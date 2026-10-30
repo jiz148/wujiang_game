@@ -3,20 +3,80 @@
 from __future__ import annotations
 
 from typing import Any
+from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import DamageContext
 from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import Trait
+from wujiang.tactical.engine.core import Unit
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext, HeroAIPolicy
 from wujiang.tactical.heroes.common import StatModifierStatus
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import pattern_signature
 from wujiang.tactical.heroes.mechanics.racial_weather import WeatherUltimateSkill
 from wujiang.tactical.heroes.mechanics.thor import ThorDestroyedLightningStatus
-from wujiang.tactical.heroes.next_five import damage_followup_effect_applies
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_effects import damage_followup_effect_applies
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
+from wujiang.tactical.prediction import expected_numeric
+
+
+@expected_numeric(independent=True)
+def electric_control_opportunities(battle: Battle, unit: Unit) -> float:
+    if not unit.alive or unit.banished or unit.position is None:
+        return 0.0
+    skills = 0
+    if not unit.cannot_use_skills:
+        for skill in unit.skills:
+            if skill.cooldown_remaining > 0 or (skill.max_uses_per_battle is not None and skill.uses_this_battle >= skill.max_uses_per_battle):
+                continue
+            if unit.current_mana < skill.mana_cost or any(component.blocks_skill_use(battle, unit, skill)[0] for component in unit.iter_components()):
+                continue
+            if any(effect.blocks_skill_use(battle, unit, skill)[0] for effect in battle.field_effects):
+                continue
+            skills += 1
+    movement = 0.0 if unit.cannot_move or unit.cannot_normal_move else max(0.0, unit.stat("speed") - 1.0) * 6.0
+    return min(4, skills) * 14.0 + movement
+
+
+@expected_numeric(independent=True)
+def electric_auto_position_value(battle: Battle, actor: Unit, destination: Position | None) -> float:
+    from wujiang.tactical.rooms.ai_probe import ai_probe_rollback
+
+    if destination is None or not actor.alive or actor.banished:
+        return 0.0
+    wind = ElectricWindSkill()
+    if actor.cannot_use_skills or any(component.blocks_skill_use(battle, actor, wind)[0] for component in actor.iter_components()):
+        return 0.0
+    if not actor.direct_effects_blocked() and any(effect.blocks_skill_use(battle, actor, wind)[0] for effect in battle.field_effects):
+        return 0.0
+    with ai_probe_rollback(battle):
+        actor.position = destination
+        units = list(battle.all_units())
+        before = {unit.unit_id: (unit.current_hp, unit.alive, unit.total_shields(), electric_control_opportunities(battle, unit)) for unit in units}
+        cells = square_around_cells(battle, battle.unit_cells(actor), radius=2)
+        wind.apply_to_units(battle, actor, battle.effect_units_at_cells(cells, ignore=battle.effect_recipient(actor)), action_name="自动电风", cells=cells)
+        value = 0.0
+        for unit in units:
+            hp, alive, shields, control = before[unit.unit_id]
+            impact = max(0.0, hp - unit.current_hp) * 100 + max(0, shields - unit.total_shields()) * 20
+            if alive and not unit.alive:
+                impact += 90
+            elif unit.alive and unit.has_status("电风"):
+                impact += max(0.0, control - electric_control_opportunities(battle, unit))
+            value += impact if unit.player_id != actor.player_id else -impact * 1.4
+        return value * 0.6
+
+
+class ElectricWindAIPolicy(HeroAIPolicy):
+    """Compare automatic wind's enemy gains against nearby allied losses."""
+
+    def aura_move_score_bonus(self, battle: Battle, actor: Unit,
+                              destination: Position) -> float:
+        return (electric_auto_position_value(battle, actor, destination)
+                - electric_auto_position_value(battle, actor, actor.position))
 
 
 class ElectricWindStatus(StatModifierStatus):
@@ -63,6 +123,29 @@ def front_rectangle_patterns(battle: Battle, actor: HeroUnit, depth: int, width:
 
 
 class ElectricWindSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r19_effect_score(self)
+
+    def ai_control_effect_score(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> float | None:
+        from wujiang.tactical.rooms.ai_probe import ai_probe_rollback
+
+        with ai_probe_rollback(battle):
+            before = {unit.unit_id: electric_control_opportunities(battle, unit) for unit in battle.all_units()}
+            try:
+                queued = battle.build_queued_action(payload)
+                battle.prepay_skill_resources(self, actor, queued.payload)
+                queued.payload["declared_source_attack"] = actor.stat("attack")
+                battle.resolving_action = queued
+                self.execute(battle, actor, queued.payload)
+            except (ActionError, KeyError, TypeError, ValueError):
+                return None
+            score = 0.0
+            for unit in battle.all_units():
+                if unit.alive and unit.has_status("电风"):
+                    lost = max(0.0, before.get(unit.unit_id, 0.0) - electric_control_opportunities(battle, unit))
+                    score += lost if unit.player_id != actor.player_id else -lost * 1.4
+            return score
+
     def __init__(self) -> None:
         super().__init__(
             "electric_wind",

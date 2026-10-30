@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+if TYPE_CHECKING:
+    from wujiang.tactical.heroes.ai_policy import AIReactionScoreContext
+    from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import DamageContext
@@ -20,14 +23,18 @@ from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import pattern_signature
 from wujiang.tactical.heroes.common import payload_position
 from wujiang.tactical.heroes.common import payload_target_unit
-from wujiang.tactical.heroes.next_five import ALL_DIRECTIONS
-from wujiang.tactical.heroes.next_five import PassThroughMovementTrait
-from wujiang.tactical.heroes.next_five import damage_followup_effect_applies
-from wujiang.tactical.heroes.next_five import remote_rectangle_patterns
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS, square_around_cells
+from wujiang.tactical.heroes.mechanics.soul_wraith import PassThroughMovementTrait
+from wujiang.tactical.heroes.mechanics.next_five_effects import damage_followup_effect_applies
+from wujiang.tactical.heroes.mechanics.next_five_effects import remote_rectangle_patterns
 
 
 class LaoWaveBulletSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        score = context.damage_score(self)
+        cost = self.mana_cost_for_payload(context.battle, context.actor, context.payload)
+        return score - cost * (30.0 if context.actor.current_mana <= 1.0 else 15.0)
+
     def __init__(self) -> None:
         super().__init__(
             "lao_wave_bullet",
@@ -402,6 +409,7 @@ class LaoDamageStatReadyStatus(StatusEffect):
 
 class LaoDamageStatCancelSkill(Skill):
     STAT_NAMES = {"attack": "攻", "defense": "守", "speed": "速", "attack_range": "范"}
+    ai_reaction_score_phase = "after_hidden_source"
 
     def __init__(self) -> None:
         super().__init__("lao_damage_stat_cancel", "能力抵消", "连锁：选择攻/守/速/范之一永久-1，最低1；只在当前动作实际造成伤害时支付并抵消该次伤害。", timing="passive", target_mode="self")
@@ -437,6 +445,21 @@ class LaoDamageStatCancelSkill(Skill):
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         raise ActionError("能力抵消只能在连锁时选择。")
+
+    def ai_reaction_score(self, context: AIReactionScoreContext) -> float:
+        if context.queued_action.action_type == "skill" and not context.queued_skill_damaging():
+            return -1000.0
+        threat = context.threat(context.actor)
+        stat = str(context.payload.get("stat_name") or "")
+        cost = {"attack": 48.0, "defense": 52.0, "speed": 40.0,
+                "attack_range": 44.0}.get(stat)
+        if cost is None or threat <= 0:
+            return -1000.0
+        if context.actor.stat(stat) <= 2:
+            cost += 30.0
+        if context.actor.current_hp <= threat / 100.0:
+            threat += 100.0
+        return threat - cost
 
 
 class LaoDamageStatCancelTrait(Trait):

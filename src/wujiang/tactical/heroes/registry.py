@@ -9,7 +9,19 @@ from wujiang.tactical.engine.core import Battle, Position
 from wujiang.tactical.heroes.excel_roster import EXCEL_HERO_REGISTRY, IMPLEMENTED_EXCEL_HERO_CODES
 from wujiang.tactical.heroes.weather_descriptions import hero_weather_effect_text
 from wujiang.tactical.heroes.first_five import Bard, DarkHuman, EliteSoldier, Ellie, FireFuneral
-from wujiang.tactical.heroes.next_five import BloodEater, Chanter, DoomlightDragon, DragonRider, ElementHunter, ErasureApostle, Jade, Li, Masamune, N, RockGod, SoulWraith, UndeadKingLina
+from wujiang.tactical.heroes.mechanics.doomlight_dragon import DoomlightDragon
+from wujiang.tactical.heroes.mechanics.element_hunter import ElementHunter
+from wujiang.tactical.heroes.mechanics.rock_god import RockGod
+from wujiang.tactical.heroes.mechanics.undead_king_lina import UndeadKingLina
+from wujiang.tactical.heroes.mechanics.blood_eater import BloodEater
+from wujiang.tactical.heroes.mechanics.dragon_rider import DragonRider
+from wujiang.tactical.heroes.mechanics.jade import Jade
+from wujiang.tactical.heroes.mechanics.n import N
+from wujiang.tactical.heroes.mechanics.chanter import Chanter
+from wujiang.tactical.heroes.mechanics.li import Li
+from wujiang.tactical.heroes.mechanics.soul_wraith import SoulWraith
+from wujiang.tactical.heroes.mechanics.erasure_apostle import ErasureApostle
+from wujiang.tactical.heroes.mechanics.masamune import Masamune
 from wujiang.tactical.heroes.strategy_soldiers import (
     StrategyArcher,
     StrategyCavalry,

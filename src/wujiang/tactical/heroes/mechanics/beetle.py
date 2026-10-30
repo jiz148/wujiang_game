@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+from copy import deepcopy
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any
+if TYPE_CHECKING:
+    from wujiang.tactical.heroes.ai_policy import AIReactionScoreContext
+from wujiang.tactical.rooms.ai_probe import ai_probe_rollback
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import HealContext
 from wujiang.tactical.engine.core import HeroUnit
@@ -76,6 +81,8 @@ class BeetleArmorDeploymentStatus(H1AllActionLockStatus):
 
 
 class BeetleArmorDeploySkill(Skill):
+    ai_reaction_score_phase = "after_hidden_source"
+
     def __init__(self) -> None:
         super().__init__(
             "beetle_armor_deploy",
@@ -112,5 +119,30 @@ class BeetleArmorDeploySkill(Skill):
             "secondary_cells": [],
             "requires_target": False,
         }
+
+    def ai_reaction_score(self, context: AIReactionScoreContext) -> float:
+        battle, reactor, queued_action = (context.battle, context.actor,
+                                          context.queued_action)
+        target = battle.effect_recipient(reactor)
+        results = []
+        survival = []
+        for deployed in (False, True):
+            with ai_probe_rollback(battle):
+                if deployed:
+                    self.execute(battle, reactor, {})
+                battle.resolve_queued_action(replace(queued_action, payload=deepcopy(queued_action.payload)))
+                results.append(target.current_hp * 100 + (90 if target.alive else 0))
+                survival.append(target.alive)
+        gain = results[1] - results[0]
+        if not survival[0] and survival[1]:
+            gain += 70.0
+        with ai_probe_rollback(battle):
+            battle.resolving_action = None
+            battle.active_player, battle._exclusive_turn_unit_id, target.turn_ready = target.player_id, target.unit_id, True
+            target.move_used, target.normal_move_actions_used, target.normal_move_steps_used = False, 0, 0
+            target.attacks_used = 0
+            sacrifice = context.attack_window_value(target) * 0.7
+            sacrifice += min(3, sum(skill.timing in {"passive", "reaction"} and skill.code != "beetle_armor_deploy" and skill.cooldown_remaining == 0 and skill.mana_cost <= target.current_mana for skill in target.skills)) * 12
+        return gain - sacrifice - 8.0 if gain > 0 else -1000.0
 
 

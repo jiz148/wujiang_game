@@ -1,11 +1,13 @@
 """Source-preserving object assembly for excel_r329 / 骷髅飞盗团的参谋。深邃的流星。鲁托."""
 
 from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_hero_kit
+from wujiang.tactical.heroes.flying_dragon_ship import ShipCrewMovePolicy
 
 
 def install(r) -> None:
     register_hero_kit(FragmentMappedHeroKit(
         "excel_r329",
+        ai_policy=ShipCrewMovePolicy(62.0),
         skills={
             "飞龙船": r.FlyingDragonShipSkill,
             "加魔": r.AddManaSkill,

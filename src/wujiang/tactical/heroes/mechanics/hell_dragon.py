@@ -10,11 +10,12 @@ from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import TargetContext
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.engine.core import Unit
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.mechanics.weapon_copy import PhysicalImmunityStatus
-from wujiang.tactical.heroes.next_five import DeclaredAreaSkillMixin
-from wujiang.tactical.heroes.next_five import DragonBreathSkill
-from wujiang.tactical.heroes.next_five import remote_rectangle_patterns
+from wujiang.tactical.heroes.mechanics.declared_area import DeclaredAreaSkillMixin
+from wujiang.tactical.heroes.mechanics.dragon_breath import DragonBreathSkill
+from wujiang.tactical.heroes.mechanics.next_five_effects import remote_rectangle_patterns
 
 
 class HellDragonBreathSkill(DragonBreathSkill):
@@ -25,6 +26,9 @@ class HellDragonBreathSkill(DragonBreathSkill):
 
 
 class HellDragonFireSkill(DeclaredAreaSkillMixin, Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.paid_skill_value()
+
     target_cells_are_geometry_only = True
 
     def __init__(self) -> None:

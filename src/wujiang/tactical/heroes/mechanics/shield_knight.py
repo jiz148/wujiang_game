@@ -8,13 +8,50 @@ from wujiang.tactical.engine.core import (
     ActionError, Battle, DamageContext, HealContext, MoveContext, Position,
     Skill, StatusEffect, Trait, Unit,
 )
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
+from wujiang.tactical.prediction import expected_local
 from wujiang.tactical.heroes.common import (
     pattern_selection_preview, payload_position, positions_to_dict,
 )
-from wujiang.tactical.heroes.next_five import ALL_DIRECTIONS
+from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS
 
 class ShieldKnightChargeSkill(Skill):
     selection_cells_are_effect_cells = False
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        if actor.position is None:
+            return -1000.0
+        try:
+            route = self.route(battle, actor, context.payload)
+        except ActionError:
+            return -1000.0
+        destination = route[-1]
+        role = context.hero_style()
+        score = context.move_score(destination, role) - context.move_score(actor.position, role)
+        enemies = [unit for unit in context.hostile_units() if unit.position is not None]
+
+        @expected_local(battle)
+        def exposure(cell: Position) -> float:
+            return sum(min(actor.current_hp, context.estimate_damage(actor, enemy.stat("attack"))) * 95.0
+                       for enemy in enemies
+                       if context.distance_to_position(enemy, cell)
+                       <= enemy.normal_move_distance() + enemy.targeting_range())
+
+        score -= max(0.0, exposure(destination) - exposure(actor.position)) * (1.3 if actor.current_hp <= 0.5 else 0.85)
+        for target in battle.path_crossing_units(actor, route):
+            if not target.alive or target.banished:
+                continue
+            if not target.magic_immunity:
+                impact = min(target.current_hp, context.estimate_damage(target, actor.stat("attack"), ignore_shield=True)) * 115.0
+                impact += 12.0 if target.total_shields() else 0.0
+                score += impact if target.player_id != actor.player_id else -impact * 1.55
+            if "巨盾" in target.name:
+                heal = 0.0 if target.cannot_heal else min(0.25, max(0.0, target.max_health - target.current_hp))
+                mana = min(1.0, max(0.0, target.max_mana() - target.current_mana))
+                support = heal * 110.0 + mana * 20.0 + (18.0 if target.can_take_turn_actions(battle) else 9.0)
+                score += support if target.player_id == actor.player_id else -support * 1.2
+        return score - 8.0 if score > 8.0 else -8.0
 
     def __init__(self) -> None:
         super().__init__("shield_charge", "冲锋", "每本人轮一次；沿八方向恰好冲八格到第九格，途中双方各受一次当前攻的破魔伤害。",

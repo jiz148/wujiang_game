@@ -11,10 +11,27 @@ from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Trait
+from wujiang.tactical.heroes.ai_policy import HeroAIPolicy
 from wujiang.tactical.heroes.common import payload_target_unit
 from wujiang.tactical.heroes.common import positions_to_dict
-from wujiang.tactical.heroes.next_five import damage_followup_effect_applies
+from wujiang.tactical.heroes.mechanics.next_five_effects import damage_followup_effect_applies
 from wujiang.tactical.prediction import random
+
+
+class WuchangAttackPolicy(HeroAIPolicy):
+    """Price the next effective basic-attack seal on a surviving target."""
+
+    def early_attack_synergy_bonus(self, battle: Battle, actor: HeroUnit,
+                                   target: HeroUnit, damage: float) -> float:
+        if not (0 < damage < target.current_hp and not target.direct_effects_blocked()):
+            return 0.0
+        lock = target.get_status("无常普攻封锁")
+        if lock is not None:
+            return max(0, 2 - (lock.duration or 0)) * 12.0
+        score = 0.0 if target.cannot_attack else target.attack_actions_per_turn() * 32.0
+        if not target.cannot_use_skills:
+            score += min(4, len(target.skills)) * 18.0
+        return score
 
 
 class WuchangMistImmunityStatus(StatusEffect):

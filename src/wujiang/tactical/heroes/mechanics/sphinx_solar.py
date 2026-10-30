@@ -18,10 +18,10 @@ from wujiang.tactical.heroes.common import payload_cells
 from wujiang.tactical.heroes.common import payload_position
 from wujiang.tactical.heroes.common import positions_to_dict
 from wujiang.tactical.heroes.mechanics.terrain_helpers import _destroy_terrain_in_cells
-from wujiang.tactical.heroes.next_five import RemoteDragonBreathSkill
-from wujiang.tactical.heroes.next_five import position_key
-from wujiang.tactical.heroes.next_five import remote_rectangle_patterns
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.dragon_breath import RemoteDragonBreathSkill
+from wujiang.tactical.heroes.mechanics.next_five_geometry import position_key
+from wujiang.tactical.heroes.mechanics.next_five_effects import remote_rectangle_patterns
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 
 class SolarFlameSkill(RemoteDragonBreathSkill):

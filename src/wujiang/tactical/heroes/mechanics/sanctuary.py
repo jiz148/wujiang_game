@@ -12,17 +12,21 @@ from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Trait
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import ensure_ally
 from wujiang.tactical.heroes.common import ensure_distance
 from wujiang.tactical.heroes.common import payload_target_unit
 from wujiang.tactical.heroes.mechanics.hell_slash import HellSlashSkill
 from wujiang.tactical.heroes.mechanics.racial_weather import RacialWeatherEffect
-from wujiang.tactical.heroes.next_five import apply_piercing_status_effect
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_effects import apply_piercing_status_effect
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 
 class VitalityBlastSkill(HellSlashSkill):
     length = 5
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r18_effect_score(self)
 
     def __init__(self) -> None:
         Skill.__init__(self, "vitality_blast", "元气爆破",
@@ -109,6 +113,9 @@ class SkySanctuaryAuraTrait(Trait):
 
 
 class PunisherHealSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r12_effect_score(self)
+
     def __init__(self) -> None:
         super().__init__(
             "punisher_heal",
@@ -172,6 +179,9 @@ class SanctuaryBanishStatus(StatusEffect):
 
 
 class SanctuaryBanishSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r12_effect_score(self)
+
     def __init__(self) -> None:
         super().__init__(
             "sanctuary_banish",
@@ -210,6 +220,9 @@ class SanctuaryBanishSkill(Skill):
 
 
 class SanctuaryJudgmentSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r12_effect_score(self)
+
     def __init__(self) -> None:
         super().__init__(
             "sanctuary_judgment",

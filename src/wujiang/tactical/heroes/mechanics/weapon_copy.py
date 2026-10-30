@@ -19,7 +19,7 @@ from wujiang.tactical.heroes.common import MagicImmunityStatus
 from wujiang.tactical.heroes.common import payload_target_unit
 from wujiang.tactical.heroes.common import positions_to_dict
 from wujiang.tactical.heroes.mechanics.deadly_bow import BASIC_ATTACK_COPY_TRAIT_TYPES
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 
 class WeaponCopyStatus(StatusEffect):

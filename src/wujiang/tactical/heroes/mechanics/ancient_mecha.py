@@ -12,14 +12,17 @@ from wujiang.tactical.engine.core import (
     HealContext, HeroUnit, Position, Skill, Stats, StatusEffect, Trait, Unit,
 )
 from wujiang.tactical.heroes.base import AbstractHero
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import (
     StatModifierStatus, match_payload_pattern, pattern_selection_preview,
     payload_position, positions_to_dict,
 )
-from wujiang.tactical.heroes.next_five import (
-    ALL_DIRECTIONS, RemoteDragonBreathSkill, damage_followup_effect_applies,
+from wujiang.tactical.heroes.mechanics.dragon_breath import RemoteDragonBreathSkill
+from wujiang.tactical.heroes.mechanics.next_five_effects import (
+    damage_followup_effect_applies,
     remote_rectangle_patterns,
 )
+from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS
 
 class AncientRepairBonusStatus(StatModifierStatus):
     def __init__(self, stat_name: str, applied_turn_number: int) -> None:
@@ -39,6 +42,16 @@ class AncientRepairBonusStatus(StatModifierStatus):
 
 
 class AncientRepairSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        target = battle.units.get(str(context.payload.get("target_unit_id") or ""))
+        if target is None or target.player_id != actor.player_id or target.skill_non_damage_effects_blocked():
+            return -1000.0
+        heal = 0.0 if target.cannot_heal else min(0.25, max(0.0, target.max_health - target.current_hp))
+        mana = min(1.0, max(0.0, target.max_mana() - target.current_mana))
+        score = heal * 155.0 + mana * 26.0 + (19.0 if target.alive else 0.0)
+        return score if score > 21.0 else -1000.0
+
     def __init__(self) -> None:
         super().__init__("ancient_repair", "万古的修整",
                          "每回合一次；范4，机甲武将或其召唤物血+1/4、魔+1，随机一项能力值+1至其下回合结束。",
@@ -94,6 +107,45 @@ class AncientRepairSkill(Skill):
 
 class AncientFusionSkill(Skill):
     requires_direct_unit_target_line = False
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        selected = battle.units.get(str(payload.get("target_unit_id") or ""))
+        target = battle.effect_recipient(selected) if selected is not None else None
+        selected_code = str(payload.get("copied_skill_code") or "")
+        if (selected is None or "古代" not in selected.name or target is None
+                or target.player_id != actor.player_id or not target.alive
+                or target.skill_non_damage_effects_blocked() or target.summoner_id == actor.unit_id):
+            return -1000.0
+        skill = actor.skill_map().get(selected_code)
+        if skill is None:
+            return -1000.0
+        ability = {"shensu": 37.0, "pierce": 32.0, "protection": 34.0,
+                   "ancient_repair": 46.0, "ancient_rust": 38.0,
+                   "remote_dragon_breath": 42.0, "ancient_jaw": 47.0,
+                   "ancient_arm": 44.0, "ancient_vigor": 32.0,
+                   "ancient_cursed_rust": 51.0, "mechanical_horse": 42.0,
+                   "dragon_breath": 40.0, "ancient_fusion": 8.0}.get(selected_code, 22.0)
+        if selected_code in target.skill_map():
+            ability = 0.0
+        trait_gain = sum(24.0 for trait in actor.traits
+                         if trait.name != "机械马开局乘骑"
+                         and not any(t.name == trait.name for t in target.traits))
+        target_value = (36.0 + target.stat("attack") * 4.0 + target.stat("speed") * 3.0
+                        + (16.0 if target.turn_ready else 0.0))
+        donor_loss = actor.current_hp * 155.0 + (70.0 if actor.turn_ready and actor.attacks_used == 0 else 0.0)
+        if any(trait.name == "古代炮台4×4普攻" for trait in actor.traits):
+            donor_loss += 42.0
+        if actor.hero_code == "excel_r250":
+            donor_loss += 9.0 * sum(status.name == "溶解之颌弱化" and getattr(status, "source_unit_id", "") == actor.unit_id
+                                      for unit in battle.all_units() for status in unit.statuses)
+        if actor.hero_code == "excel_r252":
+            donor_loss += 32.0
+        if actor.hero_code == "excel_r253" and battle.mounted_unit_for(actor) is not None:
+            donor_loss += 36.0
+        if target.is_summon or target.is_clone:
+            target_value *= 0.6
+        return target_value + ability + trait_gain - donor_loss - 23.0
 
     def __init__(self) -> None:
         super().__init__("ancient_fusion", "古代融合",
@@ -253,6 +305,18 @@ class AncientRustReadyStatus(StatusEffect):
 
 
 class AncientRustSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        if actor.attacks_used >= actor.attack_actions_per_turn() or actor.cannot_attack:
+            return -14.0
+        enemies = [unit for unit in context.hostile_units()
+                   if unit.position is not None and not unit.cannot_heal
+                   and not unit.physical_immunity and battle.distance_between_units(actor, unit) <= actor.targeting_range()]
+        if not enemies:
+            return -12.0
+        return max(33.0 + min(30.0, max(0.0, unit.max_health - unit.current_hp) * 45.0)
+                   + (24.0 if any(context.is_heal_skill(skill.code) for skill in unit.skills) else 0.0)
+                   for unit in enemies)
     def __init__(self) -> None:
         super().__init__("ancient_rust", "生锈的气味", "每回合一次；下一次普攻破魔并令实际命中者禁疗至本人破坏。",
                          max_uses_per_turn=1, target_mode="self")
@@ -339,6 +403,14 @@ class AncientMechanicalHorseStartTrait(Trait):
 
 
 class AncientMechanicalHorseSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        if battle.mounted_unit_for(actor) is not None:
+            return -1000.0
+        enemies = list(context.hostile_units())
+        danger = min((battle.distance_between_units(actor, enemy) for enemy in enemies
+                      if enemy.position is not None), default=99)
+        return 76.0 + (24.0 if danger <= 3 else 0.0) + (18.0 if actor.current_hp <= 0.5 else 0.0)
     def __init__(self) -> None:
         super().__init__("mechanical_horse", "机械马",
                          "召唤并乘骑攻4守5速4、纵向1×2的机械马；被毁后隔一本人回合可再召。",
@@ -434,6 +506,28 @@ def resolve_ancient_cursed_rust(battle: Battle, actor: Unit, queued_action: Any)
 
 
 class AncientCursedRustSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        score = -10.0
+        enemies = 0
+        for target in ancient_cursed_rust_targets(battle, self.cells(battle, actor)):
+            if target.magic_immunity:
+                continue
+            if target.total_shields() > 0:
+                impact = 18.0
+            elif target.dodge_charges > 0:
+                impact = 8.0
+            elif target.has_status("古代伤害适应·普攻"):
+                impact = 0.0
+            else:
+                damage = min(target.current_hp, target.damage_fraction_after_limits(target.current_hp / 2))
+                impact = damage * 145.0
+            if target.player_id == actor.player_id:
+                score -= impact * 1.6
+            else:
+                score += impact
+                enemies += int(impact > 0)
+        return score if enemies and score > 0 else -1000.0
     target_cells_are_geometry_only = True
 
     def __init__(self) -> None:
@@ -499,6 +593,25 @@ class AncientJawWeaknessStatus(StatModifierStatus):
 
 
 class AncientJawSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        target = battle.units.get(str(context.payload.get("target_unit_id") or ""))
+        target = battle.effect_recipient(target) if target is not None else None
+        if target is None or target.player_id == actor.player_id or target.magic_immunity:
+            return -1000.0
+        score = context.r18_effect_score(self)
+        if score <= -1000.0:
+            return score
+        if not target.skill_non_damage_effects_blocked() and target.dodge_charges <= 0:
+            layers = sum(status.name == "溶解之颌弱化" for status in target.statuses)
+            score += max(9.0, 42.0 - layers * 9.0) + target.stat("attack") * 3.0
+        last = target.skill_map().get(str(getattr(target, "_last_active_skill_code", "") or ""))
+        owned = actor.skill_map().get(last.code) if last is not None else None
+        if (last is not None and last.timing == "active"
+                and (owned is None or getattr(owned, "_ancient_stolen_charges", 1) <= 0)):
+            if actor.current_mana >= last.mana_cost:
+                score += 22.0 + (12.0 if context.is_damaging_skill(last.code) else 0.0)
+        return score
     def __init__(self) -> None:
         super().__init__("ancient_jaw", "溶解之颌", "每本人回合一次；范2，当前攻单体技能伤害破魔，真实命中随机一项能力-1至本人破坏。",
                          max_uses_per_turn=1, target_mode="unit")
@@ -583,6 +696,8 @@ class AncientBeastTheftTrait(Trait):
 
 
 class AncientArmSkill(RemoteDragonBreathSkill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r18_effect_score(self)
     excludes_caster_from_effect = False
 
     def __init__(self) -> None:
@@ -621,6 +736,20 @@ class AncientArmSkill(RemoteDragonBreathSkill):
 
 
 class AncientVigorSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        missing = 0.0 if actor.cannot_heal else max(0.0, actor.max_health - actor.current_hp)
+        restored = min(0.25, missing)
+        if actor.attribute == "暗" or restored <= 0:
+            return -1000.0
+        destination = Position(int(payload["x"]), int(payload["y"])) if payload.get("x") is not None else actor.position
+        if destination is None:
+            return -1000.0
+        movement = 0.0
+        if destination != actor.position:
+            style = context.hero_style()
+            movement = context.move_score(destination, style) - context.move_score(actor.position, style)
+        return restored * (260.0 if actor.current_hp <= 0.5 else 175.0) + movement - 8.0
     def __init__(self) -> None:
         super().__init__("ancient_vigor", "活力锈迹", "每本人回合一次；先回血1/4，实得回血后可沿直线恰好移动4格。",
                          max_uses_per_turn=1, target_mode="cell")

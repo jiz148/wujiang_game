@@ -12,7 +12,7 @@ import pickle
 from types import CodeType, GetSetDescriptorType
 
 _HASHES = {
-    "score_skill_payload": "31181a95bb2cfb8379fd428e8c07afc9b19b116ba55800642ac30dea7e888677",
+    "score_skill_payload": "5b5f82d25ff61cbddbd7742d672592cc8db123eed3397ce490d74c2297e07f6b",
     "_score_skill_payload": "0c1a9dd29e0e77790729062bac367d81a449c5988e13a0f97a3a99f0b59336a2",
     "skill_payload_requires_enemy_impact": "ebb1d78772813dcc3b0c1d803eba4da823cfd9f4ccfa0b08d9fa2a814214adc0",
     "skill_from_ai_action": "07e34922ce89fcba0b16d81f7bdb6c3f2bf4e9c82767c8e134d26d83f74241b9",
@@ -335,5 +335,16 @@ def can_inline(function, battle, args, kwargs, session):
     from wujiang.tactical.rooms import ai
     if type(args[3]) is not ai.DifficultyProfile: return False
     if name == "score_skill_payload":
-        return actor.hero_code != "excel_r123" and _boundary(ai._score_skill_payload) and _boundary(ai.nova_paid_action_adjustment)
+        from wujiang.tactical.heroes.ai_policy import HeroAIPolicy
+        policy = _data(actor, "ai_policy", None)
+        if policy is _UNKNOWN:
+            return False
+        if policy is not None:
+            method = _data(policy, "skill_score_bonus")
+            if (method is not HeroAIPolicy.skill_score_bonus
+                    or code_hash(method.__code__) != "7886a6b91ad9282fc33e91dd8e620f699532a679cb745c1e21c0b8faaf07680f"
+                    or method.__module__ != "wujiang.tactical.heroes.ai_policy"
+                    or method.__qualname__ != "HeroAIPolicy.skill_score_bonus"):
+                return False
+        return _boundary(ai._score_skill_payload) and _boundary(ai.nova_paid_action_adjustment)
     return name == "_score_skill_payload" and _delegates(function, actor, action, payload, args[3], kwargs["instant_only"])

@@ -12,14 +12,68 @@ from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import TargetContext
 from wujiang.tactical.engine.core import Trait
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext, HeroAIPolicy
 from wujiang.tactical.heroes.common import line_patterns
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import pattern_signature
 from wujiang.tactical.heroes.common import payload_position
 from wujiang.tactical.heroes.common import positions_to_dict
-from wujiang.tactical.heroes.next_five import ALL_DIRECTIONS
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
+from wujiang.tactical.prediction import expected_local
+
+
+class FreyAreaAIScoring:
+    """Shared area and landing valuation for Frey's three skill objects."""
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.owned_effect_score(self)
+
+    def ai_score_destination(self, context: AISkillScoreContext) -> Position | None:
+        return None
+
+    def ai_effect_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        try:
+            cells = context.effect_cells(self)
+            destination = self.ai_score_destination(context)
+        except (ActionError, ValueError, TypeError, KeyError):
+            return -1000.0
+        score = context.area_damage_value(self, cells)
+        if destination is not None and actor.position is not None:
+            origin = actor.position
+            role = context.hero_style()
+            score += context.move_score(destination, role) - context.move_score(origin, role)
+
+            @expected_local(battle)
+            def pressure(position: Position) -> float:
+                previous = actor.position
+                actor.position = position
+                try:
+                    total = sum(
+                        context.estimate_damage(actor, enemy.stat("attack")) * max(1, enemy.attack_actions_per_turn())
+                        for enemy in context.hostile_units()
+                        if not enemy.cannot_attack and battle.distance_between_units(actor, enemy) <= enemy.targeting_range()
+                    )
+                    return total * 100.0 + (100.0 if total >= actor.current_hp - 1e-9 and total > 0 else 0.0)
+                finally:
+                    actor.position = previous
+            score += pressure(origin) - pressure(destination)
+            return score - 12.0
+        if score <= 0:
+            return -1000.0
+        return score - (28.0 if self.max_uses_per_battle is not None else 6.0)
+
+
+class FreyAttackPolicy(HeroAIPolicy):
+    """Value only the recoverable HP from a damaging basic attack."""
+
+    def late_attack_synergy_bonus(self, battle: Battle, actor: HeroUnit,
+                                  target: HeroUnit, damage: float) -> float:
+        if damage > 0 and not actor.cannot_heal:
+            return min(0.25, max(0.0, actor.max_health - actor.current_hp)) * 140.0
+        return 0.0
 
 
 class FreySkillPierceTrait(Trait):
@@ -50,11 +104,14 @@ class FreyDamageCapTrait(Trait):
         return min(0.25, amount)
 
 
-class FreyQuickFlashSkill(Skill):
+class FreyQuickFlashSkill(FreyAreaAIScoring, Skill):
     excludes_caster_from_effect = True
     target_unit_is_anchor = True
     selection_cells_are_effect_cells = False
     resolves_from_current_position = True
+
+    def ai_score_destination(self, context: AISkillScoreContext) -> Position | None:
+        return self.validate_selection(context.battle, context.actor, context.payload)[2]
 
     def __init__(self) -> None:
         super().__init__(
@@ -193,7 +250,7 @@ class FreyQuickFlashSkill(Skill):
                               "cell_prompt": "选择一个蓝色空落点；环形高亮显示本次攻击范围。"}}
 
 
-class FreyGodStabSkill(Skill):
+class FreyGodStabSkill(FreyAreaAIScoring, Skill):
     excludes_caster_from_effect = True
 
     def __init__(self) -> None:
@@ -269,7 +326,7 @@ class FreyGodStabSkill(Skill):
         return battle.effect_units_at_cells(cells, ignore=actor)
 
 
-class FreyLionSpearSkill(Skill):
+class FreyLionSpearSkill(FreyAreaAIScoring, Skill):
     excludes_caster_from_effect = True
 
     def __init__(self) -> None:

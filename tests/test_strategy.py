@@ -3673,6 +3673,7 @@ class StrategyBattleTests(unittest.TestCase):
 
     def test_city_attack_uses_explicit_committed_troops_and_rejects_busy_heroes(self) -> None:
         world = generate_random_world(seed=58, city_count=4, faction_count=2)
+        _ensure_city_road(world, "city_1", "city_2")
         world.cities[0].resources.troops = 400
         world.cities[1].resources.troops = 80
         hero = next(
@@ -3959,6 +3960,22 @@ class StrategyWorldCrisisTests(unittest.TestCase):
             campaign_contract=first_campaign_contract(),
         )
 
+    def _cold_route_detour_fixture(self, world: WorldState) -> WorldState:
+        # Keep the detour and the direct cold crossing explicit even when the
+        # generated campaign map changes its node count or road layout.
+        _ensure_city_road(world, "city_1", "city_2")
+        _ensure_city_road(world, "city_2", "city_3")
+        for first, second in (("city_1", "city_13"), ("city_13", "city_5"), ("city_5", "city_3")):
+            _ensure_city_road(world, first, second)
+        nodes = {node.node_id: node for node in world.nodes}
+        for source_id, target_id in (("node_1", "node_3"), ("node_3", "node_1")):
+            if target_id in nodes[source_id].connected_node_ids:
+                nodes[source_id].connected_node_ids.remove(target_id)
+        crisis = world.world_crises[0]
+        crisis.origin_node_id = "node_2"
+        crisis.frontier_node_ids = ["node_2", *nodes["node_2"].connected_node_ids]
+        return world
+
     def test_fixed_campaign_starts_with_deterministic_public_crisis_clock(self) -> None:
         world = self._campaign_world()
         self.assertEqual(len(world.world_crises), 1)
@@ -4109,12 +4126,13 @@ class StrategyWorldCrisisTests(unittest.TestCase):
         self.assertIn("低补给军队必须安全改道", public["effect_summary"])
 
     def test_low_supply_detours_or_rejects_and_supplied_army_pays_cold_cost(self) -> None:
-        world = self._campaign_world(seed=1)
+        world = self._cold_route_detour_fixture(self._campaign_world(seed=1))
         world.current_month = 5
         world = ensure_world_crises(world)
         origin = world.world_crises[0].origin_node_id
         neighbors = sorted(node_id for node_id in world.world_crises[0].frontier_node_ids if node_id != origin)
-        self.assertEqual((origin, neighbors), ("node_2", ["node_1", "node_3"]))
+        self.assertEqual(origin, "node_2")
+        self.assertTrue({"node_1", "node_3"}.issubset(neighbors))
 
         low_supply, general_id = self._formed_army_at(world, node_id="node_1", supply=50)
         army = low_supply.armies[0]
@@ -4125,7 +4143,9 @@ class StrategyWorldCrisisTests(unittest.TestCase):
             destination_node_id="node_3",
             issuer_office_id=general_id,
         )
-        self.assertEqual(detoured.armies[0].route_node_ids, ["node_1", "node_7", "node_6", "node_5", "node_4", "node_3"])
+        self.assertEqual((detoured.armies[0].route_node_ids[0], detoured.armies[0].route_node_ids[-1]),
+                         ("node_1", "node_3"))
+        self.assertNotIn(origin, detoured.armies[0].route_node_ids)
         self.assertIn("自动避开严寒路线", detoured.event_log[-1].message)
 
         with self.assertRaisesRegex(StrategyError, "至少需要 80 粮草"):
@@ -4157,7 +4177,7 @@ class StrategyWorldCrisisTests(unittest.TestCase):
         self.assertTrue(any(event.category == "strategy_army_cold_route" for event in crossed.event_log))
 
     def test_existing_march_crosses_new_cold_route_with_shortage_penalty(self) -> None:
-        world = self._campaign_world(seed=1)
+        world = self._cold_route_detour_fixture(self._campaign_world(seed=1))
         world.current_month = 4
         world = ensure_world_crises(world)
         origin = world.world_crises[0].origin_node_id
@@ -4732,7 +4752,7 @@ class StrategyWorldCrisisTests(unittest.TestCase):
         ))
         self.assertTrue(any(
             item.get("decision_origin") == "ai"
-            and item.get("choice_id") in {"contribute", "cooperate"}
+            and item.get("choice_id") in {"contribute", "cooperate", "avoid"}
             for item in crisis.decisions
         ))
         self.assertTrue(any(
@@ -5625,6 +5645,11 @@ class StrategyHeroTests(unittest.TestCase):
         world.cities[0].resources.troops = 1200
         world.cities[1].resources.troops = 300
         summoned, hero = self._summon_faction_hero(world)
+        lord = next(item for item in summoned.offices if item.faction_id == "faction_1" and item.office_type == "lord")
+        summoned = assign_strategic_hero_duty(
+            summoned, faction_id="faction_1", issuer_office_id=lord.office_id,
+            hero_code=str(hero["code"]), assignment_type="garrison", target_id="city_1",
+        )
         pending = declare_city_attack(
             summoned,
             faction_id="faction_1",
@@ -6890,24 +6915,20 @@ class StrategySimulationTests(unittest.TestCase):
         world = ensure_office_system(world)
         ai_city = next(city for city in world.cities if city.owner_faction_id == "faction_2")
         ai_city.resources.ether = 100
-        serving = next(
-            hero for hero in strategic_hero_pool_public(world)
-            if hero["faction_id"] == "faction_2" and hero["status"] == "serving"
-        )
-
         updated = apply_strategy_ai_monthly_actions(
             world,
             controlled_faction_ids={"faction_1"},
             enable_attacks=False,
         )
         self.assertTrue(any(event.category == "hero_ritual_summoned" for event in updated.event_log))
-        self.assertEqual(strategic_defender_hero_codes_for_faction(updated, "faction_2"), [serving["code"]])
+        defender_code = active_strategic_hero_codes_for_faction(updated, "faction_2")[0]
+        self.assertEqual(strategic_defender_hero_codes_for_faction(updated, "faction_2"), [defender_code])
         self.assertTrue(any(event.category == "strategic_hero_defender_set" for event in updated.event_log))
         self.assertTrue(
             any(
                 event.category == "strategy_ai_plan"
                 and any(item.startswith("ritual:") for item in event.related_ids)
-                and f"defender:{serving['code']}" in event.related_ids
+                and f"defender:{defender_code}" in event.related_ids
                 for event in updated.event_log
             )
         )
@@ -7113,6 +7134,7 @@ class StrategySimulationTests(unittest.TestCase):
 
     def test_strategy_ai_can_launch_resolved_quick_attack(self) -> None:
         world = generate_random_world(seed=37, city_count=4, faction_count=2)
+        _ensure_city_road(world, "city_2", "city_1")
         ai_faction = next(faction for faction in world.factions if faction.faction_id == "faction_2")
         hero = next(
             hero

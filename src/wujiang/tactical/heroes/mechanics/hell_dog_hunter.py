@@ -17,7 +17,7 @@ from wujiang.tactical.heroes.common import positions_to_dict
 from wujiang.tactical.heroes.mechanics.foundation import PermanentMagicImmunityTrait
 from wujiang.tactical.heroes.mechanics.hell_core import HellSnowManaStatus
 from wujiang.tactical.heroes.mechanics.hell_rebirth import HellRebirthTrait
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 
 class HellDogSummon(AbstractHero):

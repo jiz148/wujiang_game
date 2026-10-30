@@ -161,6 +161,11 @@ class MimicSkill(Skill):
         code = str(payload.get("mimic_skill_code") or "")
         return next((skill for skill in actor.skills if skill.code == code), None) or self.borrowed[code]
 
+    def effective_skill_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> Skill:
+        if payload.get("mimic_skill_code"):
+            return self.declared_skill(actor, payload)
+        return self._target_skill(battle, actor, payload)[1]
+
     def prepay_resources(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         if not payload.get("mimic_source_id") or not payload.get("queued_resolution"):
             ok, reason = self.can_use(battle, actor, payload)

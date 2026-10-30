@@ -1279,7 +1279,7 @@ class FullAIPredictionBehaviorTests(unittest.TestCase):
         self.assertTrue(factors._class_methods_original(Trait))
         support = factors.engine_factor_support()
         self.assertIn("wujiang.tactical.engine.core.Trait", support)
-        self.assertIn("wujiang.tactical.heroes.excel_roster.HellRebirthTrait", support)
+        self.assertIn("wujiang.tactical.heroes.mechanics.hell_rebirth.HellRebirthTrait", support)
         self.assertTrue(all(support.values()), support)
 
     def test_added_method_on_audited_empty_trait_class_is_rejected(self):
@@ -1705,7 +1705,7 @@ class FullAIPredictionBehaviorTests(unittest.TestCase):
     def test_metadata_filter_schema_invalidates_class_changes_and_dynamic_imports(self):
         from wujiang.tactical import prediction, prediction_inline, prediction_structure
         from wujiang.tactical.engine.core import Unit
-        from wujiang.tactical.heroes import excel_roster
+        from wujiang.tactical.heroes.mechanics import wuchang
         battle, actor, _ = self.fixture()
         function = ai.nova_paid_action_adjustment.__wrapped__
         with ai.ai_enemy_view(battle, 1):
@@ -1714,20 +1714,21 @@ class FullAIPredictionBehaviorTests(unittest.TestCase):
             self.assertTrue(prediction_inline.can_inline(function, battle, (actor, "missile", {}), {}, session))
             with mock.patch.object(Unit, "hero_code", property(lambda unit: "excel_r305"), create=True):
                 self.assertFalse(prediction_inline.can_inline(function, battle, (actor, "missile", {}), {}, session))
-            imports = ((excel_roster.__name__, ("WuchangMistField",)),)
+            imports = ((wuchang.__name__, ("WuchangMistField",)),)
             self.assertTrue(prediction_structure.inert_imports(ai.wuchang_action_success_probability.__wrapped__, imports))
-            with mock.patch.object(excel_roster, "__getattr__", lambda name: None, create=True):
+            with mock.patch.object(wuchang, "__getattr__", lambda name: None, create=True):
                 self.assertFalse(prediction_structure.inert_imports(ai.wuchang_action_success_probability.__wrapped__, imports))
 
     def test_shared_action_argument_preserves_payload_copy_and_custom_container_fallback(self):
         from wujiang.tactical import prediction
+        from wujiang.tactical.engine import core
         from wujiang.tactical.prediction_structure import copy_scoring_arguments
         battle, actor, _ = self.fixture()
         payload = {"cells": [{"x": 1, "y": 2}]}
         action = {"code": "missile", "payload": payload}
         function = ai.skill_payload_has_effective_enemy_impact.__wrapped__
-        with ai.ai_enemy_view(battle, 1):
-            copied = copy_scoring_arguments(function, (actor, action, payload), lambda value: value)
+        with mock.patch.dict("os.environ", {"WUJIANG_AI_EXPECTATION_METHOD": "enumerate"}), ai.ai_enemy_view(battle, 1):
+            copied = copy_scoring_arguments(function, (actor, action, payload), core._rollback_copy_value)
             self.assertIs(copied[1], action)
             self.assertIsNot(copied[2], payload)
             self.assertIsNot(copied[2]["cells"], payload["cells"])

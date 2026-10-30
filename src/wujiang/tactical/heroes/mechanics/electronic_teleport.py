@@ -9,6 +9,7 @@ from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.engine.core import Unit
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import positions_to_dict
@@ -61,6 +62,9 @@ class ElectronicDragonTeleportTrait(Trait):
 
 class SatelliteCannonSkill(Skill):
     target_cells_are_geometry_only = True
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.paid_skill_value()
 
     def __init__(self) -> None:
         super().__init__("satellite_cannon", "卫星加农炮",

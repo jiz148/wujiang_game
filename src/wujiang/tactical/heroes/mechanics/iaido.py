@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable, Iterable
+if TYPE_CHECKING:
+    from wujiang.tactical.heroes.ai_policy import AIReactionScoreContext
+    from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.engine.army import is_army_soldier
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import Battle
@@ -134,6 +137,29 @@ class IaidoChargeStatus(IaidoAttackRules, StatusEffect):
 
 
 class IaidoChargeSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.owned_effect_score(self)
+
+    def ai_effect_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        if actor.has_status("聚气。拔刀斩"):
+            return -1000.0
+        best_attack = context.best_attack_score()
+        remaining = max(0, actor.attack_actions_per_turn() - actor.attacks_used)
+        if best_attack > 0:
+            threats = [enemy for enemy in context.hostile_units()
+                       if battle.distance_between_units(actor, enemy) <= enemy.normal_move_distance() + enemy.targeting_range()
+                       and not battle.attack_ignores_shield(enemy, actor)]
+            preventable = sorted((context.attack_damage(enemy, actor) for enemy in threats), reverse=True)[:remaining]
+            can_kill_now = any(battle.attack_target_allowed(actor, enemy)[0]
+                               and context.attack_damage(actor, enemy) >= enemy.current_hp
+                               for enemy in threats)
+            if remaining and sum(preventable) >= actor.current_hp > 0 and not can_kill_now:
+                return best_attack + 35.0
+            return -1000.0
+        nearby = any(battle.distance_between_units(actor, enemy) <= 4 for enemy in context.hostile_units())
+        return 30.0 + remaining * (12.0 if nearby else 2.0) + (18.0 if actor.mana_points < 3 else 0.0)
+
     def __init__(self) -> None:
         super().__init__("iaido_charge", "聚气。拔刀斩", "普通技能：每回合1次；本回合不能攻击，下次普攻先移动1格，伤5、破魔、无法回避。", max_uses_per_turn=1, target_mode="self")
 
@@ -200,6 +226,17 @@ class PerfectSwordsmanDefenseTrait(Trait):
 
 
 class TimeStopSkill(Skill):
+    ai_reaction_score_phase = "after_hidden_source"
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.owned_effect_score(self)
+
+    def ai_effect_score(self, context: AISkillScoreContext) -> float:
+        return self.ai_turn_interrupt_value(
+            context.battle, context.actor,
+            lambda: context.hostile_units(),
+            lambda target, power: context.estimate_damage(target, power))
+
     def __init__(self) -> None:
         super().__init__("time_stop", "时停", "随时大招：仅在敌方回合且周围5×5有敌人时，结束当前回合并插入只有自身可行动的回合；之后恢复原顺序。", max_uses_per_battle=1, target_mode="self", timing="instant")
 
@@ -229,8 +266,35 @@ class TimeStopSkill(Skill):
         battle.log(f"{actor.name} 发动【时停】，结束当前回合并插入自己的独占回合。")
         battle.resolve_turn_end()
 
+    def ai_turn_interrupt_value(self, battle: Battle, actor: HeroUnit,
+                                hostile_units: Callable[[], Iterable[HeroUnit]],
+                                damage: Callable[[HeroUnit, float], float]) -> float:
+        if not self.condition(battle, actor)[0]:
+            return -1000.0
+        active = battle.current_turn_unit()
+        if active is None:
+            return -1000.0
+        attacks = max(0, active.attack_actions_per_turn() - active.attacks_used)
+        skills_left = sum(1 for item in active.skills if item.timing == "active" and item.can_use(battle, active, {})[0])
+        retaliation = sum(damage(enemy, 5 if actor.has_status("聚气。拔刀斩") else actor.stat("attack")) * 45.0
+                          for enemy in hostile_units() if battle.distance_between_units(actor, enemy) <= 3)
+        return min(3, attacks) * 28.0 + min(3, skills_left) * 12.0 + retaliation - 45.0
+
+    def ai_reaction_score(self, context: AIReactionScoreContext) -> float:
+        threat = context.threat(context.proxy_target())
+        return self.ai_turn_interrupt_value(context.battle, context.actor,
+                                            context.hostile_units, context.damage) + threat
+
 
 class FocusSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.owned_effect_score(self)
+
+    def ai_effect_score(self, context: AISkillScoreContext) -> float:
+        actor = context.actor
+        stop = next((item for item in actor.skills if item.code == "time_stop"), None)
+        return 65.0 if stop is not None and stop.uses_this_battle > 0 and actor.mana_points >= 3 else -1000.0
+
     def __init__(self) -> None:
         super().__init__("focus_reset", "定神", "普通技能：每回合 1 次；魔力点 -3，重置【时停】。", max_uses_per_turn=1, target_mode="self")
 

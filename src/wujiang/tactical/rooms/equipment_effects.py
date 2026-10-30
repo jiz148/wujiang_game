@@ -12,7 +12,7 @@ from wujiang.tactical.engine.core import Battle, DamageContext, HealContext, Sta
 from wujiang.tactical.heroes.common import (
     BlockCounterTrait, FlagStatus, FlyingTrait, InvincibleUntilActionStatus,
 )
-from wujiang.tactical.heroes.next_five import ArcAttackTrait
+from wujiang.tactical.heroes.mechanics.masamune import ArcAttackTrait
 
 
 def _rng(battle: Battle) -> random.Random:

@@ -12,6 +12,7 @@ from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.engine.core import Unit
 from wujiang.tactical.heroes.common import StatModifierStatus
+from wujiang.tactical.heroes.ai_policy import AIReactionScoreContext
 from wujiang.tactical.heroes.mechanics.gladiator_core import gladiator_swap
 from wujiang.tactical.heroes.mechanics.gladiator_core import gladiator_swap_destinations
 
@@ -158,6 +159,11 @@ class GladiatorRoarStatus(StatModifierStatus):
 
 
 class GladiatorRoarSkill(Skill):
+    ai_reaction_score_phase = "after_hidden_source"
+
+    def ai_reaction_score(self, context: AIReactionScoreContext) -> float:
+        return context.simulated_reaction(self, 8.0)
+
     def __init__(self) -> None:
         super().__init__("gladiator_roar", "咆哮", "敌方回合一次连锁：守+1至该敌英雄回合末，11×11内友方单体受体改向本人。",
                          max_uses_per_turn=1, timing="passive", target_mode="self")

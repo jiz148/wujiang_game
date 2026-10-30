@@ -6,6 +6,7 @@ from typing import Optional
 from wujiang.platform.id_sequence import IdSequence
 
 from wujiang.tactical.engine.core import HeroUnit, Stats
+from wujiang.tactical.heroes.ai_policy import HeroAIPolicy
 
 
 _unit_counter = IdSequence(1)
@@ -16,6 +17,7 @@ def build_unit_id(prefix: str) -> str:
 
 
 class AbstractHero(HeroUnit, ABC):
+    ai_policy: HeroAIPolicy | None = None
     hero_code = "hero"
     hero_name = "武将"
     hero_title = ""

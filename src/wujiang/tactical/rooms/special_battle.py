@@ -104,6 +104,9 @@ class BPSpecialModeEffect(BattleFieldEffect):
 
     @staticmethod
     def _deals_direct_damage(skill: Skill) -> bool:
+        declared = skill.directly_damages_on_use()
+        if declared is not None:
+            return declared
         # Classify the implemented skill operation, not prose that may describe
         # a later trigger, a defense against damage, or explicitly no damage.
         execute_code = getattr(type(skill).execute, "__code__", None)

@@ -9,7 +9,10 @@ from wujiang.tactical.engine.core import (
     StatusEffect, TargetContext, Trait,
 )
 from wujiang.tactical.heroes.common import FlagStatus, positions_to_dict
-from wujiang.tactical.heroes.next_five import position_key, square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import (
+    position_key,
+    square_around_cells,
+)
 
 class RequiredAttackStatus(StatusEffect):
     """One-turn taunt contract shared by heroes that require a specific basic-attack target."""

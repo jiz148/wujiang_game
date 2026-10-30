@@ -1,0 +1,9 @@
+[
+  {"code": "excel_r032", "skills": ["morning_holy_light"], "test_class": "DevelopedHeroReviewR11AaronBehaviorTests"},
+  {"code": "excel_r033", "skills": ["lao_wave_bullet"], "test_class": "DevelopedHeroReviewR11LaoBehaviorTests"},
+  {"code": "excel_r071", "skills": ["snow_avalanche"], "test_class": "DevelopedHeroReviewR14BehaviorTests"},
+  {"code": "excel_r248", "skills": ["hell_dragon_fire"], "test_class": "NewBatch248HellDragonBehaviorTests"},
+  {"code": "excel_r264", "skills": ["eagle_eye", "fly_leap"], "test_class": "DevelopedHeroReviewR21BehaviorTests"},
+  {"code": "excel_r326", "skills": ["vain_giant_shadow"], "test_class": "NewBatch325GentlemanBehaviorTests"},
+  {"code": "excel_r379", "skills": ["sun_slash"], "test_class": "DevelopedHeroReviewR23BehaviorTests"}
+]

@@ -10,19 +10,23 @@ from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import StatusEffect
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import StatModifierStatus
 from wujiang.tactical.heroes.common import ensure_enemy
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import payload_target_unit
 from wujiang.tactical.heroes.mechanics.electric_wind import front_rectangle_patterns
-from wujiang.tactical.heroes.next_five import DragonBreathSkill
-from wujiang.tactical.heroes.next_five import apply_piercing_status_effect
-from wujiang.tactical.heroes.next_five import damage_followup_effect_applies
-from wujiang.tactical.heroes.next_five import nearby_rectangle_patterns
+from wujiang.tactical.heroes.mechanics.dragon_breath import DragonBreathSkill
+from wujiang.tactical.heroes.mechanics.next_five_effects import apply_piercing_status_effect
+from wujiang.tactical.heroes.mechanics.next_five_effects import damage_followup_effect_applies
+from wujiang.tactical.heroes.mechanics.next_five_geometry import nearby_rectangle_patterns
 
 
 class NianLargeDragonBreathSkill(DragonBreathSkill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r13_effect_score(self)
+
     def __init__(self) -> None:
         super().__init__()
         self.code = "nian_large_dragon_breath"
@@ -34,6 +38,9 @@ class NianLargeDragonBreathSkill(DragonBreathSkill):
 
 
 class NianDragonDanceSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r13_effect_score(self)
+
     def __init__(self) -> None:
         super().__init__("nian_dragon_dance", "龙舞", "普通技能：2 轮一次；自身魔 +4，血回满。", cooldown_turns=2, target_mode="self")
 
@@ -77,6 +84,9 @@ class NianRoarStatus(StatusEffect):
 
 
 class NianRoarSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r13_effect_score(self)
+
     def __init__(self) -> None:
         super().__init__("nian_roar", "怒吼", "普通技能：2 轮一次，破魔；按当前攻击造成技能伤害，并使目标 2 轮内只能对年兽造成伤害。", cooldown_turns=2, target_mode="enemy")
 
@@ -149,6 +159,9 @@ class NianNoHealStatus(StatusEffect):
 
 
 class NianJadeFlashSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r13_effect_score(self)
+
     def __init__(self) -> None:
         super().__init__("nian_jade_flash", "碧玉闪光", "普通技能：每回合最多 1 次；身前 3*3，破魔，没有伤害；被击中单位直到下回合结束前不能回复。", max_uses_per_turn=1, target_mode="cell")
 

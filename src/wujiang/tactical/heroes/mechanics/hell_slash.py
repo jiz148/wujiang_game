@@ -8,15 +8,20 @@ from wujiang.tactical.engine.core import DamageContext
 from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import line_patterns
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import pattern_signature
-from wujiang.tactical.heroes.next_five import ALL_DIRECTIONS
+from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS
 
 
 class HellSlashSkill(Skill):
     length = 10
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r19_effect_score(self)
+
     def __init__(self) -> None:
         super().__init__(
             "hell_slash",

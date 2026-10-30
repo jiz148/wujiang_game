@@ -11,18 +11,25 @@ from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.engine.core import Unit
 from wujiang.tactical.heroes.common import StatModifierStatus
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import pattern_signature
 from wujiang.tactical.heroes.mechanics.gladiator_core import gladiator_swap
 from wujiang.tactical.heroes.mechanics.gladiator_core import gladiator_swap_destinations
 from wujiang.tactical.heroes.mechanics.world_seed import WorldSeedSkillEffectGuardTrait
-from wujiang.tactical.heroes.next_five import DeclaredAreaSkillMixin
-from wujiang.tactical.heroes.next_five import remote_rectangle_patterns
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.declared_area import DeclaredAreaSkillMixin
+from wujiang.tactical.heroes.mechanics.next_five_effects import remote_rectangle_patterns
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 
 class AlexanderHurricaneSkill(DeclaredAreaSkillMixin, Skill):
     target_cells_are_geometry_only = True
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        if not self.nearby_allies(context.battle, context.actor):
+            return -1000.0
+        value = context.paid_skill_value()
+        return value if value > 0 else -1000.0
 
     def __init__(self) -> None:
         super().__init__("battle_hurricane", "战斗飓风",

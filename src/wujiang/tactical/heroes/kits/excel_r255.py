@@ -3,13 +3,14 @@
 from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_hero_kit
 from wujiang.tactical.heroes.mechanics.giant_shield import (
     GiantShieldBlockTrait, GiantShieldNeighborTrait, GiantShieldRaiseSkill,
-    GiantShieldWallSkill,
+    GiantShieldWallSkill, GiantShieldMovePolicy,
 )
 
 
 def install(r) -> None:
     register_hero_kit(FragmentMappedHeroKit(
         "excel_r255",
+        ai_policy=GiantShieldMovePolicy(),
         skills={
             "举盾": GiantShieldRaiseSkill,
             "盾墙[0.5": GiantShieldWallSkill,

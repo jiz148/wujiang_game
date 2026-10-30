@@ -11,11 +11,12 @@ from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.engine.core import Unit
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import line_patterns
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import positions_to_dict
-from wujiang.tactical.heroes.next_five import ALL_DIRECTIONS
+from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS
 
 
 class BirdSkillMoveBoostStatus(StatusEffect):
@@ -46,6 +47,9 @@ class BirdSkillMoveBoostTrait(Trait):
 
 class BirdDashSkill(Skill):
     target_cells_are_geometry_only = True
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.bird_skill_score()
 
     def __init__(self, *, free: bool) -> None:
         self.free = free

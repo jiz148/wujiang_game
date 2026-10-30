@@ -1,5 +1,6 @@
 """Source-preserving object assembly for excel_r225 / 电子屏障龙."""
 
+from wujiang.tactical.heroes.ai_policy import BarrierShieldAIPolicy
 from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_hero_kit
 from wujiang.tactical.heroes.mechanics.electronic_barrier import (
     ElectronicBarrierAuraTrait,
@@ -11,6 +12,7 @@ from wujiang.tactical.heroes.mechanics.electronic_barrier import (
 def install(r) -> None:
     register_hero_kit(FragmentMappedHeroKit(
         "excel_r225",
+        ai_policy=BarrierShieldAIPolicy(),
         skills={
             "导弹": r.CommonMissileSkill,
             "离子盾": r.IonShieldSkill,

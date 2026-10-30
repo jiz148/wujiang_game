@@ -11,20 +11,24 @@ from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import StatusEffect
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import payload_position
 from wujiang.tactical.heroes.common import payload_target_unit
 from wujiang.tactical.heroes.common import positions_to_dict
-from wujiang.tactical.heroes.next_five import ALL_DIRECTIONS
-from wujiang.tactical.heroes.next_five import apply_piercing_status_effect
-from wujiang.tactical.heroes.next_five import damage_followup_effect_applies
-from wujiang.tactical.heroes.next_five import remote_rectangle_patterns
+from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS
+from wujiang.tactical.heroes.mechanics.next_five_effects import apply_piercing_status_effect
+from wujiang.tactical.heroes.mechanics.next_five_effects import damage_followup_effect_applies
+from wujiang.tactical.heroes.mechanics.next_five_effects import remote_rectangle_patterns
 
 
 class TrueBladeAirSlashSkill(Skill):
     requires_direct_unit_target_line = False
     target_unit_is_anchor = True
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r17_effect_score(self)
 
     def __init__(self) -> None:
         super().__init__(
@@ -177,6 +181,9 @@ class MovementSkillLockStatus(StatusEffect):
 
 
 class HundredBirdBurialSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r13_effect_score(self)
+
     def __init__(self) -> None:
         super().__init__(
             "hundred_bird_burial",

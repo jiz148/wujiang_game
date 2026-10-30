@@ -14,14 +14,15 @@ from wujiang.tactical.engine.core import Stats
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.heroes.base import AbstractHero
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import StatModifierStatus
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import pattern_signature
 from wujiang.tactical.heroes.mechanics.foundation import BasicAttackPierceTrait
 from wujiang.tactical.heroes.mechanics.kiku import PassiveSkillLockStatus
-from wujiang.tactical.heroes.next_five import remote_rectangle_patterns
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_effects import remote_rectangle_patterns
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 
 class GreatUnicornSummon(AbstractHero):
@@ -178,6 +179,9 @@ class AaronDestroyedSummonPendingStatus(StatusEffect):
 
 
 class MorningHolyLightSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.morning_holy_light_score(self)
+
     def __init__(self) -> None:
         super().__init__(
             "morning_holy_light",

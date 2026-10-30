@@ -9,12 +9,13 @@ from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Trait
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import StatModifierStatus
 from wujiang.tactical.heroes.common import is_mana_drain_immune
 from wujiang.tactical.heroes.common import payload_target_unit
 from wujiang.tactical.heroes.common import positions_to_dict
 from wujiang.tactical.heroes.mechanics.racial_weather import RacialWeatherEffect
-from wujiang.tactical.heroes.next_five import apply_piercing_status_effect
+from wujiang.tactical.heroes.mechanics.next_five_effects import apply_piercing_status_effect
 
 
 class VainGiantShadowStatus(StatModifierStatus):
@@ -46,6 +47,9 @@ class VainGiantShadowStatus(StatModifierStatus):
 
 
 class VainGiantShadowSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.control_score(self)
+
     def __init__(self) -> None:
         super().__init__(
             "vain_giant_shadow",

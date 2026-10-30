@@ -6,8 +6,12 @@ from typing import Any
 
 from wujiang.tactical.engine.army import is_army_soldier
 from wujiang.tactical.engine.core import Battle, DamageContext, HeroUnit, Skill, StatusEffect, Trait
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import payload_target_unit
-from wujiang.tactical.heroes.next_five import apply_piercing_status_effect, damage_followup_effect_applies
+from wujiang.tactical.heroes.mechanics.next_five_effects import (
+    apply_piercing_status_effect,
+    damage_followup_effect_applies,
+)
 
 
 class PassiveSkillLockStatus(StatusEffect):
@@ -22,6 +26,9 @@ class PassiveSkillLockStatus(StatusEffect):
 
 
 class SunSlashSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.sun_slash_score(self)
+
     def __init__(self) -> None:
         super().__init__("sun_slash", "斩技。阳",
                          "大招：0魔、每场一次；射程直斜双方实际受体，当前攻技能伤害和3个本人回合末的被动技能封锁共破魔。",

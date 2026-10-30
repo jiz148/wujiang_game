@@ -2,6 +2,7 @@
 
 from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_hero_kit
 from wujiang.tactical.heroes.mechanics.true_red import (
+    TrueRedAIPolicy,
     TrueRedFreeDashSkill,
     TrueRedFreeLeapSkill,
     TrueRedMovementTrait,
@@ -12,6 +13,7 @@ from wujiang.tactical.heroes.mechanics.zero_pass_through import ZeroDashSkill
 def install(r) -> None:
     register_hero_kit(FragmentMappedHeroKit(
         "excel_r302",
+        ai_policy=TrueRedAIPolicy(),
         skills={
             "冲刺": ZeroDashSkill,
         },

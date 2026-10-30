@@ -12,6 +12,7 @@ from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Trait
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import DrainManaSkill
 from wujiang.tactical.heroes.common import StatModifierStatus
 from wujiang.tactical.heroes.common import ensure_distance
@@ -22,7 +23,7 @@ from wujiang.tactical.heroes.common import pattern_signature
 from wujiang.tactical.heroes.common import payload_position
 from wujiang.tactical.heroes.common import payload_target_unit
 from wujiang.tactical.heroes.common import positions_to_dict
-from wujiang.tactical.heroes.next_five import ALL_DIRECTIONS
+from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS
 
 
 class MountainGodCounterStatus(StatusEffect):
@@ -35,6 +36,9 @@ def mountain_counter_count(unit: HeroUnit) -> int:
 
 
 class DemonBladeSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r12_effect_score(self)
+
     def __init__(self) -> None:
         super().__init__("demon_blade", "妖刀。魔鬼", "普通技能：费 1 魔，每回合最多 1 次；声明 3 格直线，三格伤害分别为 5、4、3。", mana_cost=1, max_uses_per_turn=1, target_mode="cell")
 

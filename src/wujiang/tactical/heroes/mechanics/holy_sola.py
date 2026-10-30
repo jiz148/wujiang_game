@@ -13,8 +13,41 @@ from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.heroes.common import LightWallSkill
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext, HeroAIPolicy
 from wujiang.tactical.heroes.common import positions_to_dict
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
+from wujiang.tactical.prediction import expected_numeric
+
+
+@expected_numeric(independent=True)
+def sola_harvest_position_value(battle: Battle, actor: HeroUnit, destination: Position | None) -> float:
+    from wujiang.tactical.rooms.ai_probe import ai_probe_rollback
+
+    if destination is None:
+        return 0.0
+    with ai_probe_rollback(battle):
+        actor.position = destination
+        auras = [set(effect.affected_cells(battle)) for effect in battle.field_effects
+                 if isinstance(effect, SolaHarvestAuraEffect) and effect.player_id == actor.player_id]
+        value = 0.0
+        for unit in battle.effect_units(battle.player_units(actor.player_id)):
+            if unit.position is None or unit.banished or unit.direct_effects_blocked():
+                continue
+            if not any(any(cell in cells for cell in battle.unit_cells(unit)) for cells in auras):
+                continue
+            if not unit.cannot_heal:
+                value += min(0.25, max(0.0, unit.max_health - unit.current_hp)) * 130
+            value += min(1.0, max(0.0, unit.max_mana() - unit.current_mana)) * 25
+        return value
+
+
+class SolaHarvestAIPolicy(HeroAIPolicy):
+    """Value reachable missing HP and mana inside the harvest aura."""
+
+    def aura_move_score_bonus(self, battle: Battle, actor: HeroUnit,
+                              destination: Position) -> float:
+        return (sola_harvest_position_value(battle, actor, destination)
+                - sola_harvest_position_value(battle, actor, actor.position))
 
 
 class HolyWallSkill(LightWallSkill):
@@ -104,6 +137,10 @@ class SolaHarvestAuraTrait(Trait):
 
 class IlluminationLightSkill(Skill):
     target_cells_are_geometry_only = True
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r18_effect_score(self)
+
     def __init__(self) -> None:
         super().__init__(
             "illumination_light",

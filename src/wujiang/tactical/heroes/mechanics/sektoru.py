@@ -9,7 +9,7 @@ from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.engine.core import Unit
 from wujiang.tactical.heroes.common import StatModifierStatus
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 
 class SektoruCooperationStatus(StatModifierStatus):

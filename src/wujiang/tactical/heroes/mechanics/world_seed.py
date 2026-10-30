@@ -20,7 +20,7 @@ from wujiang.tactical.heroes.base import AbstractHero
 from wujiang.tactical.heroes.common import FlyingTrait
 from wujiang.tactical.heroes.common import payload_position
 from wujiang.tactical.heroes.common import positions_to_dict
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 
 class WorldSeedSkillEffectGuardTrait(Trait):

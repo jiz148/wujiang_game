@@ -10,12 +10,13 @@ from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Unit
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import payload_position
 from wujiang.tactical.heroes.common import positions_to_dict
 from wujiang.tactical.heroes.mechanics.terrain_helpers import _destroy_terrain_in_cells
 from wujiang.tactical.heroes.mechanics.terrain_helpers import _terrain_unit
-from wujiang.tactical.heroes.next_five import ALL_DIRECTIONS
+from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS
 from wujiang.tactical.prediction import direct_scoring
 from wujiang.tactical.prediction import forecasting_active
 from wujiang.tactical.prediction import random
@@ -34,6 +35,11 @@ class TianyuanCounterStatus(StatusEffect):
 
 
 class TianyuanSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        status = context.actor.get_status("叹号计数点")
+        points = int(getattr(status, "points", 0))
+        return max(-1000.0, 32.0 - points * 5.0)
+
     def __init__(self) -> None:
         super().__init__("tianyuan", "天元", "每本人轮一次；公开掷1–6点并累加叹号计数点。",
                          max_uses_per_turn=1, target_mode="self")
@@ -52,6 +58,46 @@ class TianyuanSkill(Skill):
 class TianyuanBreakthroughSkill(Skill):
     selection_cells_are_effect_cells = False
     resolves_from_current_position = True
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        try:
+            route = self.route(battle, actor, context.payload)
+        except ActionError:
+            return -1000.0
+        points = self.points(actor)
+        if points <= 0 or actor.position is None:
+            return -1000.0
+        score = 0.0
+        stop = actor.position
+        seen: set[str] = set()
+        for cell in route:
+            blockers = [unit for unit in battle.units_at(cell) if unit.unit_id != actor.unit_id]
+            terrain = (cell.x, cell.y) in battle.blocked_cells
+            terrain = terrain or any(getattr(effect, "is_terrain", False) and cell in effect.affected_cells(battle)
+                                     for effect in battle.field_effects)
+            terrain = terrain or any(getattr(unit, "world_seed_terrain", False) or getattr(unit, "is_terrain", False)
+                                     or getattr(unit, "role", "") == "地形单位" for unit in blockers)
+            if terrain:
+                score += 24.0
+            remaining = []
+            for target in blockers:
+                if (getattr(target, "world_seed_terrain", False) or getattr(target, "is_terrain", False)
+                        or getattr(target, "role", "") == "地形单位"):
+                    continue
+                if target.unit_id not in seen:
+                    seen.add(target.unit_id)
+                    damage = context.estimate_damage(target, actor.stat("attack")) * points
+                    value = min(target.current_hp, damage) * 125.0 + (18.0 if damage >= target.current_hp else 0.0)
+                    score += value if target.player_id != actor.player_id else -value * 1.6
+                if context.estimate_damage(target, actor.stat("attack")) * points < target.current_hp - 1e-9:
+                    remaining.append(target)
+            if remaining:
+                break
+            stop = cell
+        role = context.hero_style()
+        score += context.move_score(stop, role) - context.move_score(actor.position, role)
+        return score - max(12.0, points * 3.0)
 
     def __init__(self) -> None:
         super().__init__("tianyuan_breakthrough", "突破", "每本人轮一次；沿八方向走满叹号点数格，破地形、对双方碰撞单位各结算点数次技能伤害，结束清零。",

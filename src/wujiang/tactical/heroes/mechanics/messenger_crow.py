@@ -9,11 +9,14 @@ from wujiang.tactical.engine.core import (
     Position, Skill, Stats, Trait, Unit,
 )
 from wujiang.tactical.heroes.base import AbstractHero
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import (
     FlyingTrait, match_payload_pattern, pattern_selection_preview,
     payload_position, payload_target_unit, positions_to_dict,
 )
-from wujiang.tactical.heroes.next_five import DeclaredAreaSkillMixin, square_around_cells
+from wujiang.tactical.heroes.mechanics.declared_area import DeclaredAreaSkillMixin
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
+from wujiang.tactical.rooms.ai_targets import living_hostile_combatants
 
 class MessengerCrowAura(BattleFieldEffect):
     def __init__(self, crow_id: str) -> None:
@@ -93,6 +96,39 @@ def own_messenger_crows(battle: Battle, actor: Unit) -> list[Unit]:
 
 
 class MessengerCrowSkill(Skill):
+    @staticmethod
+    def position_score(battle: Battle, actor: Unit, cell: Position, *, mana_cost: float,
+                       excluded_crow_id: str | None = None) -> float:
+        if not battle.in_bounds(cell):
+            return -1000.0
+        score = 3.0 - mana_cost * 22.0
+        for enemy in living_hostile_combatants(battle, actor.player_id):
+            if enemy.position is None:
+                continue
+            distance = min((cell.distance_to(target_cell) for target_cell in battle.unit_cells(enemy)), default=99)
+            if distance == 1:
+                already_covered = any(unit.hero_code == "messenger_crow" and unit.unit_id != excluded_crow_id
+                                      and unit.alive and unit.position is not None and unit.player_id == actor.player_id
+                                      and battle.distance_between_units(unit, enemy) == 1
+                                      for unit in battle.player_units(actor.player_id))
+                if already_covered:
+                    score += 4.0
+                else:
+                    zero_cost = sum(skill.timing == "active" and skill.mana_cost <= 0 for skill in enemy.action_skills())
+                    score += 23.0 + min(3, zero_cost) * 9.0 + min(3.0, max(0.0, enemy.stat("speed") - 1.0)) * 5.0
+            elif distance == 2:
+                score += 6.0
+        nearby_own_crows = sum(unit.hero_code == "messenger_crow" and unit.unit_id != excluded_crow_id
+                              and unit.summoner_id == actor.unit_id and unit.position is not None
+                              and unit.position.distance_to(cell) <= 1
+                              for unit in battle.player_units(actor.player_id))
+        score -= nearby_own_crows * 6.0
+        return score
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        cell = Position(int(context.payload.get("x", -1)), int(context.payload.get("y", -1)))
+        return self.position_score(context.battle, context.actor, cell, mana_cost=0.5)
+
     def __init__(self) -> None:
         super().__init__("messenger_crow", "报信乌鸦", "费0.5魔；选外邻合法空格召唤飞行报信乌鸦。",
                          mana_cost=0.5, target_mode="cell")
@@ -128,6 +164,19 @@ class CrowSwapSkill(Skill):
     requires_direct_unit_target_line = False
     target_cells_are_geometry_only = True
     resolves_from_current_position = True
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        crow = battle.units.get(str(context.payload.get("target_unit_id") or ""))
+        if crow is None or crow.position is None or actor.position is None:
+            return -1000.0
+        emperor_gain = (context.move_score(crow.position, context.hero_style())
+                        - context.move_score(actor.position, context.hero_style()))
+        crow_gain = (MessengerCrowSkill.position_score(battle, actor, actor.position, mana_cost=0.0,
+                                                     excluded_crow_id=crow.unit_id)
+                     - MessengerCrowSkill.position_score(battle, actor, crow.position, mana_cost=0.0,
+                                                         excluded_crow_id=crow.unit_id))
+        return emperor_gain + 0.45 * crow_gain - 8.0
 
     def __init__(self) -> None:
         super().__init__("crow_swap", "牵引式传送", "每本人轮一次；与自己召出的在场报信乌鸦交换合法位置。",
@@ -199,6 +248,23 @@ class CrowSwapSkill(Skill):
 
 class GreatCrowFlockSkill(DeclaredAreaSkillMixin, Skill):
     target_cells_are_geometry_only = True
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        targets = self.enemy_heroes(battle, actor, self.chosen_cells(battle, actor, context.payload))
+        if not targets:
+            return -1000.0
+        score = 0.0
+        for target in targets:
+            damage = context.estimate_damage(target, actor.stat("attack"))
+            score += min(target.current_hp, damage) * 120.0
+            if damage >= target.current_hp - 1e-9:
+                score += 65.0
+            else:
+                free_cells = [cell for cell in square_around_cells(battle, battle.unit_cells(target), radius=1)
+                              if battle.can_place_unit(actor, cell)]
+                score += min(5, len(free_cells)) * 9.0
+        return score - 30.0
 
     def __init__(self) -> None:
         super().__init__("great_crow_flock", "超大群乌鸦", "3本人轮一次；选身前6×6先伤敌方武将，后围绕存活目标尽量召鸦。",

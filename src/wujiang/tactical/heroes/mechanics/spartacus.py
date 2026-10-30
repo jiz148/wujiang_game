@@ -11,11 +11,12 @@ from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.engine.core import Unit
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import StatModifierStatus
 from wujiang.tactical.heroes.common import positions_to_dict
 from wujiang.tactical.heroes.mechanics.gladiator_core import gladiator_swap
 from wujiang.tactical.heroes.mechanics.gladiator_core import gladiator_swap_destinations
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 
 class SpartacusShatterStatus(StatModifierStatus):
@@ -89,6 +90,12 @@ def resolve_spartacus_placement(battle: Battle, actor: Unit, queued_action: Any)
 class EarthShatterSkill(Skill):
     excludes_caster_from_effect = True
     target_cells_are_geometry_only = True
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        if not context.effective_enemy_impact():
+            return -1000.0
+        value = context.paid_skill_value()
+        return value - 28.0 if value > 28.0 else -1000.0
 
     def __init__(self) -> None:
         super().__init__("earth_shatter", "天崩地裂",

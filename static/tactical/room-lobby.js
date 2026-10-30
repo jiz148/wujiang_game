@@ -226,6 +226,7 @@ export async function confirmRoomSetup() {
     return;
   }
   const nextMode = draft.mode;
+  const nextSeatCount = Number.parseInt(draft.seatCount, 10) || 2;
   const nextRosterSize = draft.randomRosterSize;
   const nextBpTeamSize = Number(draft.bpTeamSize) === 5 ? 5 : 3;
   const nextBpLevelCap = Math.max(1, Math.min(50, Number.parseInt(draft.bpLevelCap, 10) || nextBpTeamSize * 5));
@@ -243,6 +244,9 @@ export async function confirmRoomSetup() {
   state.roomSetupOpen = false;
   state.roomSetupDraft = null;
   if (nextMode && nextMode !== state.room.mode) await setRoomMode(nextMode);
+  if (["classic", "random"].includes(state.room?.mode) && nextSeatCount !== Number(state.room?.seat_count || 2)) {
+    await setRoomSeatCount(nextSeatCount);
+  }
   if (isRandomRoomMode() && Number(nextRosterSize) !== randomRoomRosterSize()) {
     await setRandomRosterSize(nextRosterSize);
   }

@@ -11,7 +11,7 @@ from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.heroes.common import payload_position
 from wujiang.tactical.heroes.mechanics.remi_bat import _payload_direction
-from wujiang.tactical.heroes.next_five import ALL_DIRECTIONS
+from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS
 
 
 class ZeroDashSkill(Skill):

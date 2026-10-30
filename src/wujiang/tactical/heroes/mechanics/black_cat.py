@@ -10,12 +10,13 @@ from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import StatusEffect
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import is_mana_drain_immune
 from wujiang.tactical.heroes.common import payload_position
 from wujiang.tactical.heroes.common import payload_target_unit
 from wujiang.tactical.heroes.common import positions_to_dict
-from wujiang.tactical.heroes.next_five import damage_followup_effect_applies
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_effects import damage_followup_effect_applies
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 
 class BlackCatPawSkill(Skill):
@@ -133,6 +134,9 @@ class BlackCatFormSkill(Skill):
 
 
 class FantasyMoveSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r17_effect_score(self)
+
     def __init__(self) -> None:
         super().__init__("fantasy_move", "幻想", "普通技能：每回合最多 1 次，破魔且无法被回避；按当前攻击造成双方技能伤害，并强制实际受体移动 4 格。", max_uses_per_turn=1, target_mode="unit")
 
@@ -191,11 +195,20 @@ class FantasyMoveSkill(Skill):
         return True
 
     def legal_destinations(self, battle: Battle, target: HeroUnit) -> list[Position]:
+        if target.position is None:
+            return []
+        reachable = set(battle.reachable_positions(target, max_distance=4, exact_distance=4))
+        # Preserve the current declaration behavior for the origin. The
+        # existing find_path check accepts it before testing exact_distance.
+        reachable.add(target.position)
         result: list[Position] = []
         for x in range(battle.width):
             for y in range(battle.height):
                 destination = Position(x, y)
-                if self.destination_is_legal(battle, target, destination):
+                if (destination in reachable
+                        and battle.terrain_step_allowed(target, target.position, destination)
+                        and not battle.is_forced_movement_blocked(destination)
+                        and battle.can_place_unit(target, destination, ignore=target, mover=target)):
                     result.append(destination)
         return result
 

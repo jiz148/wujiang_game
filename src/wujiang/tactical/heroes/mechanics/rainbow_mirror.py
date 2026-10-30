@@ -11,12 +11,13 @@ from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import StatusEffect
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import FlagStatus
 from wujiang.tactical.heroes.common import ensure_ally
 from wujiang.tactical.heroes.common import payload_position
 from wujiang.tactical.heroes.common import payload_target_unit
 from wujiang.tactical.heroes.common import positions_to_dict
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 
 class RainbowMirrorNoMoveStatus(FlagStatus):
@@ -26,6 +27,9 @@ class RainbowMirrorNoMoveStatus(FlagStatus):
 
 class RainbowMirrorSkill(Skill):
     requires_direct_unit_target_line = False
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r17_effect_score(self)
 
     def __init__(self) -> None:
         super().__init__("rainbow_mirror", "彩虹镜", "普通技能：费 0.5 魔；将一个本回合未实际移动的己方单位移至自身周围，当前全局回合不能普通移动。", mana_cost=0.5, target_mode="ally")

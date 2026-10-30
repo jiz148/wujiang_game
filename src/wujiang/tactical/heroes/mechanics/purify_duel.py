@@ -9,7 +9,7 @@ from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.heroes.common import ensure_enemy
 from wujiang.tactical.heroes.common import payload_target_unit
-from wujiang.tactical.heroes.next_five import apply_piercing_status_effect
+from wujiang.tactical.heroes.mechanics.next_five_effects import apply_piercing_status_effect
 
 
 class PurifyManaSkill(Skill):

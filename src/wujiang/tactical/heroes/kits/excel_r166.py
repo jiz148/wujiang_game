@@ -1,12 +1,13 @@
 """Source-preserving object assembly for excel_r166 / E。电击人."""
 
 from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_hero_kit
-from wujiang.tactical.heroes.mechanics.electric_wind import AutoElectricWindTrait, ElectricWindSkill
+from wujiang.tactical.heroes.mechanics.electric_wind import AutoElectricWindTrait, ElectricWindAIPolicy, ElectricWindSkill
 
 
 def install(r) -> None:
     register_hero_kit(FragmentMappedHeroKit(
         "excel_r166",
+        ai_policy=ElectricWindAIPolicy(),
         skills={
             "电风": ElectricWindSkill,
         },

@@ -1,6 +1,7 @@
 """Source-preserving object assembly for excel_r239 / 地狱的狂王。BURON."""
 
 from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_hero_kit
+from wujiang.tactical.heroes.ai_policy import PaidReactionAIPolicy
 from wujiang.tactical.heroes.mechanics.hell_core import (
     HellOrbSkill,
     HellShuffleSkill,
@@ -12,6 +13,7 @@ from wujiang.tactical.heroes.mechanics.hell_rebirth import HellRebirthTrait
 def install(r) -> None:
     register_hero_kit(FragmentMappedHeroKit(
         "excel_r239",
+        ai_policy=PaidReactionAIPolicy({"hell_wall", "hell_wall_free"}, multi_target=True),
         skills={
             "魔动球": HellOrbSkill,
             "魔墙": HellWallSkill,

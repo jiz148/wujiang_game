@@ -5,7 +5,7 @@ from __future__ import annotations
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Position
-from wujiang.tactical.heroes.next_five import position_key
+from wujiang.tactical.heroes.mechanics.next_five_geometry import position_key
 
 
 def _terrain_unit(unit: HeroUnit) -> bool:

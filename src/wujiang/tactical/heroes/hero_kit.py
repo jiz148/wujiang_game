@@ -11,10 +11,12 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 from wujiang.tactical.engine.core import Skill, Stats, Trait
+from wujiang.tactical.heroes.ai_policy import HeroAIPolicy
 
 
 class HeroKit:
     code: str = ""
+    ai_policy: HeroAIPolicy | None = None
 
     def special_skill(self, fragment: Mapping[str, Any]) -> Skill | None:
         return None
@@ -51,8 +53,10 @@ class FragmentMappedHeroKit(HeroKit):
         extra_skill_factories: tuple[Callable[[], Skill], ...] = (),
         extra_trait_factories: tuple[Callable[[], Trait], ...] = (),
         attributes: Mapping[str, Any] | None = None,
+        ai_policy: HeroAIPolicy | None = None,
     ) -> None:
         self.code = code
+        self.ai_policy = ai_policy
         self._skill_factories = MappingProxyType(dict(skills or {}))
         self._skill_fragment_factories = MappingProxyType(dict(skill_fragments or {}))
         self._trait_factories = MappingProxyType(dict(traits or {}))

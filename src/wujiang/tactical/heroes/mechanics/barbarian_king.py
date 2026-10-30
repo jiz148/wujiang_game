@@ -8,14 +8,37 @@ from wujiang.tactical.engine.core import (
     ActionError, Battle, DamageContext, HealContext, Position, Skill,
     StatusEffect, Trait, Unit,
 )
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import (
     DashMoveSkill, ensure_distance, line_patterns, match_payload_pattern,
     pattern_selection_preview, payload_target_unit, positions_to_dict,
 )
-from wujiang.tactical.heroes.next_five import ALL_DIRECTIONS
+from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS
 
 class BarbarianAxeSkill(Skill):
     bypasses_block_counter = True
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        try:
+            cells = self.chosen_cells(battle, actor, payload)
+        except ActionError:
+            return -1000.0
+        power = actor.stat("attack") - int(self.weak(payload))
+        score, enemy_hits = 0.0, 0
+        for target in battle.effect_units_at_cells(cells):
+            if target.magic_immunity or target.dodge_charges > 0:
+                continue
+            impact = min(target.current_hp, context.estimate_damage(target, power)) * 105.0
+            impact += 9.0 if target.total_shields() else 0.0
+            if target.player_id == actor.player_id:
+                score -= impact * 1.5
+            else:
+                score += impact
+                enemy_hits += 1
+        if not enemy_hits:
+            return -1000.0
+        return score - (12.0 if self.weak(payload) else 27.0)
 
     def __init__(self) -> None:
         super().__init__("barbarian_axe", "疾风战斧", "贴身八方向四格直线伤双方；可选1.5魔完整攻或0.5魔攻-1；无视免费格挡反击。",
@@ -75,6 +98,17 @@ class BarbarianAxeSkill(Skill):
 
 
 class BarbarianHarassSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        target = battle.units.get(str(context.payload.get("target_unit_id") or ""))
+        if target is None or target.player_id == actor.player_id:
+            return -1000.0
+        recipient = battle.effect_recipient(target)
+        score = context.damage_score(self)
+        if recipient.name != "野人" and recipient.total_shields() == 0 and not recipient.magic_immunity:
+            score += 32.0
+        return score + (9.0 if self.code.endswith("_free") else -6.0)
+
     def __init__(self, *, free: bool = False) -> None:
         super().__init__("barbarian_harass_free" if free else "barbarian_harass", "人身骚扰（免费）" if free else "人身骚扰",
                          "近身技能伤害；真正命中后将实际受体本场显示名改为野人。每本人轮一次免费档。",
@@ -138,6 +172,18 @@ class BarbarianGluttonyStatus(StatusEffect):
 
 
 class BarbarianGluttonySkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        missing = 0.0 if actor.cannot_heal else max(0.0, actor.max_health - actor.current_hp)
+        enemies = list(context.hostile_units())
+        danger = any(enemy.position is not None and battle.distance_between_units(enemy, actor)
+                     <= enemy.normal_move_distance() + enemy.targeting_range() for enemy in enemies)
+        gain = missing * (220.0 if actor.current_hp <= 0.5 else 150.0)
+        gain += 32.0 if danger else 0.0
+        gain -= 28.0 if actor.position is not None and any(enemy.position is not None
+                     and battle.distance_between_units(enemy, actor) > 1 for enemy in enemies) else 0.0
+        return gain - 12.0 if gain > 28.0 else -1000.0
+
     def __init__(self) -> None:
         super().__init__("barbarian_gluttony", "暴食", "每两本人轮一次；恢复至满血，至下一本人回合结束前守+3、速固定1且不能用位移技能。",
                          cooldown_turns=2, target_mode="self")

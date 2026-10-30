@@ -620,6 +620,8 @@ class MatchAuditToolTests(unittest.TestCase):
     def test_action_diagnostic_marks_repeat_utility_throttle_as_expected(self) -> None:
         battle = create_battle("erasure_apostle", "bard")
         apostle = next(unit for unit in battle.player_units(1) if not unit.is_summon)
+        battle.configure_turn_order([apostle.unit_id])
+        battle.start_current_turn()
         stealth = apostle.get_skill("stealth")
         stealth.uses_this_turn = 1
         action = next(
@@ -653,6 +655,8 @@ class MatchAuditToolTests(unittest.TestCase):
         battle.add_unit(horse, Position(6, 6))
         battle.set_mounted_state(panther, horse)
         panther.mana_points = 1
+        battle.configure_turn_order([panther.unit_id, bard.unit_id])
+        battle.start_current_turn()
         action = next(item for item in battle.action_snapshot_for(panther)["actions"] if item.get("code") == "mimic_skill")
 
         diagnostic = action_diagnostic(battle, panther, action, difficulty_profile("standard"), instant_only=False)

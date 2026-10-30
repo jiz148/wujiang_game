@@ -7,12 +7,44 @@ from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import MoveContext
+from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Trait
+from wujiang.tactical.heroes.ai_policy import HeroAIPolicy
 from wujiang.tactical.heroes.common import DashMoveSkill
 from wujiang.tactical.heroes.common import positions_to_dict
 from wujiang.tactical.heroes.mechanics.tianyuan import resolve_true_red_move_blast
 from wujiang.tactical.heroes.mechanics.zero_pass_through import ZeroDashSkill
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
+from wujiang.tactical.prediction import expected_numeric
+
+
+@expected_numeric(independent=True)
+def true_red_blast_score(battle: Battle, actor: HeroUnit, destination: Position) -> float:
+    """Value the real landing halo, including allied damage and shield/dodge loss."""
+    body = set(battle.unit_cells_at(actor, destination))
+    total = 0.0
+    for target in battle.all_units():
+        if target.unit_id == actor.unit_id or not target.alive or target.position is None or target.banished:
+            continue
+        if not any(any(max(abs(cell.x - own.x), abs(cell.y - own.y)) == 1 for own in body)
+                   for cell in battle.unit_cells(target)):
+            continue
+        raw = max(0.0, battle.damage_rule.calculate_damage(5, target.stat("defense")))
+        if target.total_shields() > 0 or target.dodge_charges > 0:
+            raw = 0.0
+        impact = min(target.current_hp, raw) * 105.0 + (22.0 if raw >= target.current_hp > 0 else 0.0)
+        if raw <= 0 and (target.total_shields() > 0 or target.dodge_charges > 0):
+            impact = 11.0
+        total += impact if target.player_id != actor.player_id else -impact * 1.6
+    return total
+
+
+class TrueRedAIPolicy(HeroAIPolicy):
+    """Value the blast caused by a real landing position."""
+
+    def move_candidate_score_bonus(self, battle: Battle, actor: HeroUnit,
+                                   destination: Position) -> float:
+        return true_red_blast_score(battle, actor, destination)
 
 
 class TrueRedMovementTrait(Trait):

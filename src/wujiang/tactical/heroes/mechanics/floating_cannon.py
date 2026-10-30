@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+if TYPE_CHECKING:
+    from wujiang.tactical.heroes.ai_policy import AIReactionScoreContext
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import DamageContext
@@ -16,8 +18,8 @@ from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.heroes.base import AbstractHero
 from wujiang.tactical.heroes.common import StatModifierStatus
 from wujiang.tactical.heroes.common import payload_position
-from wujiang.tactical.heroes.next_five import position_key
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import position_key
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 
 class FloatingCannonBerserkStatus(StatusEffect):
@@ -314,6 +316,8 @@ class FloatingCannonCoverStatus(StatusEffect):
 
 
 class FloatingCannonCoverSkill(Skill):
+    ai_reaction_score_phase = "after_hidden_source"
+
     def __init__(self) -> None:
         super().__init__("floating_cannon_cover", "浮游炮掩护", "被动技能：狂暴化关闭时，指定受保护者和其周围 7*7 内一座自己的浮游炮；真实破坏该炮，仅保护该目标免受当前动作的伤害和附效。", timing="passive", target_mode="unit")
 
@@ -404,6 +408,21 @@ class FloatingCannonCoverSkill(Skill):
             "selection": {"mode": "multi_unit", "min_targets": 2, "max_targets": 2,
                           "prompt": "先点受保护单位，再点要牺牲的浮游炮，最后完成选择。"},
         }
+
+    def ai_reaction_score(self, context: AIReactionScoreContext) -> float:
+        battle, actor, queued, payload = (context.battle, context.actor,
+                                          context.queued_action, context.payload)
+        if not self.can_react_with_payload(battle, actor, queued, payload)[0]:
+            return -1000.0
+        target = battle.get_unit(str(payload["target_unit_id"]))
+        cannon = battle.get_unit(str(payload["cannon_unit_id"]))
+        threat = context.threat(target)
+        if target.player_id != actor.player_id:
+            threat = -threat
+        cost = 42.0 + (18.0 if cannon.attacks_used < cannon.attack_actions_per_turn() else 0.0)
+        if target.player_id == actor.player_id and target.current_hp <= threat / 100.0:
+            threat += 100.0
+        return threat - cost
 
 
 class SakuraFloatingCannonTrait(Trait):

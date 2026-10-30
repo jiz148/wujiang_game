@@ -7,6 +7,7 @@ from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import Unit
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import payload_target_unit
 from wujiang.tactical.heroes.common import positions_to_dict
 from wujiang.tactical.heroes.mechanics.gladiator_core import gladiator_swap
@@ -15,6 +16,9 @@ from wujiang.tactical.heroes.mechanics.gladiator_core import gladiator_swap_dest
 
 class BirdSoulSkill(Skill):
     requires_direct_unit_target_line = False
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.bird_skill_score()
 
     def __init__(self, *, free: bool) -> None:
         self.free = free

@@ -7,9 +7,10 @@ from typing import Any
 from wujiang.tactical.engine.core import (
     ActionError, Battle, DamageContext, HeroUnit, MoveContext, Position, Skill, Trait, Unit,
 )
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import payload_position, payload_target_unit, positions_to_dict
 from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_hero_kit
-from wujiang.tactical.heroes.next_five import StandardCloneSummon
+from wujiang.tactical.heroes.mechanics.clone_split import StandardCloneSummon
 
 
 _DIRECTIONS = ((-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1))
@@ -30,6 +31,37 @@ def gentleman_crossings(battle: Battle, actor: Unit, path: list[Position]) -> li
 
 class GentlemanSurpriseStepSkill(Skill):
     selection_cells_are_effect_cells = False
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float | None:
+        if context.actor.hero_code != "excel_r325":
+            return None
+        battle, actor, payload = context.battle, context.actor, context.payload
+        if actor.position is None:
+            return -1000.0
+        try:
+            route = self.route(battle, actor, payload)
+        except ActionError:
+            return -1000.0
+        destination = route[-1]
+        role = context.hero_style()
+        score = (context.move_score(destination, role)
+                 - context.move_score(actor.position, role))
+        future_clones = set()
+        for target, previous in gentleman_crossings(battle, actor, route):
+            if previous in future_clones or previous == destination:
+                continue
+            future_clones.add(previous)
+            occupied = any(unit is not actor and battle.unit_occupies(unit, previous)
+                           for unit in battle.all_units())
+            if occupied or (previous.x, previous.y) in battle.blocked_cells:
+                continue
+            score += 24.0 if target.player_id != actor.player_id else 0.0
+            if target.position is not None and battle.distance_between_units(actor, target) <= 1:
+                score += 7.0
+        score += 15.0 if any(enemy.position is not None and
+                            context.distance_to_position(enemy, destination) <= actor.targeting_range()
+                            for enemy in context.hostile_units()) else 0.0
+        return score - 7.0 if score > 9.0 else -1000.0
 
     def __init__(self) -> None:
         super().__init__("surprise_step", "突现", "每本人轮三次零魔；先一步，再沿左右垂线直行两步，可穿人并在穿敌前格造影。",
@@ -114,6 +146,28 @@ class GentlemanSurpriseStepSkill(Skill):
 
 class GentlemanDuelSkill(Skill):
     requires_direct_unit_target_line = False
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float | None:
+        if context.actor.hero_code != "excel_r325":
+            return None
+        battle, actor, payload = context.battle, context.actor, context.payload
+        try:
+            target, destination = self.validate_choice(battle, actor, payload)
+        except ActionError:
+            return -1000.0
+        if target.player_id == actor.player_id or target.magic_immunity or target.direct_effects_blocked():
+            return -1000.0
+        origin = actor.position
+        if origin is None:
+            return -1000.0
+        role = context.hero_style()
+        score = (context.move_score(destination, role)
+                 - context.move_score(origin, role))
+        if target.total_shields():
+            score += 15.0
+        if actor.attacks_used < actor.attack_actions_per_turn():
+            score += 24.0 if context.distance_to_position(target, destination) <= actor.targeting_range() else 0.0
+        return score - 12.0 if score > 17.0 else -1000.0
 
     def __init__(self) -> None:
         super().__init__("gentleman_duel", "绅士决斗", "两本人轮一次、范6、无伤破魔；命中后选择目标外邻合法格瞬移。",

@@ -1,5 +1,95 @@
 ﻿# wujiang_game Project Map
 
+- 2026-10-29 AI 第三十四、三十五批：抹杀使徒/龙骑士/岩神/末日光龙十技能与噬血/咏唱者/李十技能的专属估值归各技能或本将牌策略，共用模拟、资源、支援和范围评分小对象。40 场景/86 评分、七将快照/25 步轨迹/发现全等；相关行为分组 51/60、预测各 111、共享各 384 项通过。整体粗估 81%，大文件 10/4/2，AI 9201 行，顶层代码条件余 57；下一步迁通用移动与候选生成，详见 OOP 计划。
+
+- 2026-10-29 AI 第三十三批：R021 剑客四技能、R023 芙蕾三技能、R024 弗里德两技能的专属估值归技能类；通用预期值包装保留，旧函数薄兼容。18 场景/36 分值及三将快照/25 步轨迹/发现全等，相关行为 68、预测 111、共享 384 项通过。整体粗估 79%，大文件 10/4/2，AI 9467 行，顶层代码条件余 62；下一步迁 R06 复合效果与资源/卡牌家族，详见 OOP 计划。
+
+- 2026-10-29 AI 第三十二批：清 R036/R056/R059/R326 八个旧评分回退，电子融合/维修专属公式归对象；R127/R136/R137/R139/R143/R158/R166/R172 十一技能经技能对象调 R17–R19 共用效果，重锤魔耗与电风控制收益归技能，随后再清五个不可达后段分支。R17–R19 的 22 场景/78 分值、八将短局/快照/发现全等，相关行为 130、预测 111、共享 384 项通过。整体粗估 78%，大文件 10/4/2，AI 9542 行，顶层代码条件余 65；下一步批量迁主动评分与候选生成，详见 OOP 计划。
+
+- 2026-10-29 AI 第三十一批：R223 电子融合/动态射击/解除、R222 维修四技能归对象；附着后 4 场景/12 分值和普通 6 场景/10 分值及三将快照/短局/发现全等，电子行为 18、预测 111、共享 384 项通过。本轮四组合计 26 将 39 代码、80 场景/190 分值；整体约 76%，大文件 10/4/2，AI 9796 行，顶层代码条件余 80。下步处理专属模拟辅助和候选分支，详见 OOP 计划。
+
+- 2026-10-29 AI 第二十八至三十批：连续三组 24 将 35 个主动技能代码接入技能对象评分，70 场景/168 分值、24 将快照/短局/发现全等；各组相关行为、预测 111 和共享 384 项通过。整体粗估 75%，大文件 10/4/2，AI 9797 行，主动评分还有 84 个顶层代码条件。下组优先电子融合动态技能及剩余专属试算，详见 OOP 计划。
+
+- 2026-10-29 AI 第二十七批：剑斗/圣域/地狱/电子十二将共九个 R17/R18 通用效果技能代码改由技能对象调共用试算，R373 策略优先和 R138 特殊龙息顺序保持。34 个技能场景/102 评分、十二将快照/25 步轨迹/发现全等，708 项短测通过。本轮两组累计迁二十五个技能代码，整体粗估 72%，大文件 10/4/2，AI 9839 行；下一步继续成组迁融合、地狱和移动技能。
+
+- 2026-10-29 AI 第二十六批：R254–R257 巨盾、R249–R253 古代机甲九将十六主动技能代码归规则技能对象；多将见证工具复用，48 个技能场景/124 分值及状态/RNG/ID、九将快照/25 步轨迹/发现全等，537 项短测通过。整体粗估 71%，大文件 10/4/2，AI 9843 行；继续批量迁地狱/电子/位移等相邻分支。详见 OOP 计划。
+
+- 2026-10-29 AI 第二十五批：R262 鸟王、R263 冰帝、R260 野蛮人国王八个主动技能代码的专属评分归七个规则技能对象；冰帝位移分类通过共享上下文查询。23 组候选/评分/状态/RNG/ID、三将快照/25 步短局/发现全等，513 项受影响短测通过。整体粗估 69%，大文件 10/4/2，AI 10021 行；下一批迁 R254–R257 巨盾家族。详见 OOP 计划。
+
+- 2026-10-29 AI 第二十四批：R323 夜空派对、R290 召鸦/换位/大鸦群评分归技能对象；R290 空格普攻复用技能内鸦位估值，旧入口留薄兼容。13 组候选/评分/状态/RNG/ID、两将快照/25 步短局/发现全等，517 项受影响短测通过。整体粗估 68%，大文件 10/4/2，AI 10118 行；下一步迁鸟王与冰帝控制技能。详见 OOP 计划。
+
+- 2026-10-28 AI 第二十三批：R304 交换、R277 天元/突破、R322 奇美拉/火焰密码评分归各技能对象；共享上下文提供 R17 试算及距离/移动估值，旧火系入口薄兼容，柳异将借用保持通用路径。17 组候选/评分/状态/RNG/ID、三将快照/25 步短局/发现全等，525 项短测通过。整体粗估 67%，大文件 10/4/2，AI 10195 行；下一步迁 R323 夜空派对与 R290 鸦群主动收益。详见 OOP 计划。
+
+- 2026-10-28 AI 第二十二批：R324 召鸦/四阵和 R325 突现/决斗的主动评分归各技能对象；原 R324 三次阵法策略门槛先执行，外将借用者保持通用评分。15 组候选/评分/状态/RNG/ID、两将快照/25 步短局/发现全等，522 项相关短测通过。整体粗估 66%，大文件 10/4/2，AI 10297 行；下一步迁 R304 换位、天元蓄点/突破及 R322 火系主动收益。详见 OOP 计划。
+
+- 2026-10-28 AI 第二十一批：R328/R329 召船、R328 启航、R329 加魔/守+1/信号弹主动评分归各自 `Skill.ai_priority_score`；共享 AI 用能力分发，船代施递归保持优先。12 组候选/评分/状态/RNG/ID、两将快照/25 步短局/发现全等，506 项短测通过。整体粗估 65%，大文件 10/4/2，AI 10415 行；下一步迁 R324 信鸦与 R325 绅士主动收益。详见 OOP 计划。
+
+- 2026-10-28 AI 第二十批：共用单盾反应评分归 `ShieldReactionScoring`，翡翠量子盾的离子盾机会成本归 `QuantumShieldSkill`；R225 本将屏障策略仍优先。13 组候选/评分/状态/RNG/ID、五将快照/25 步轨迹/发现全等，604 项相关短测通过。整体粗估 64%，大文件 10/4/2，AI 10454 行；下一步迁共享主动技能评分。详见 OOP 计划。
+
+- 2026-10-28 AI 第十九批：引擎免费格挡/反击归 `FreeReactionScoring` 规则对象，回避归 `PassiveEvasionSkill`，R256 第二段反击归 `GiantShieldSwordTrait`；中央不再按 R256 编号加分。9 组候选/评分/状态/RNG/ID、三将快照/25 步轨迹/发现全等，544 项相关短测通过。整体粗估 63%，大文件 10/4/2，AI 10488 行；下一步迁通用护盾估值与主动技能大分支。详见 OOP 计划。
+
+- 2026-10-28 AI 第十八批：咏唱者卡牌换位、通用震开/六将继承魔压与 R206 拳手合并反击评分归各技能对象；共享上下文只提供通用临时守减伤与反噬成本。22 组候选/评分/状态/RNG/ID、十将快照/25 步轨迹/发现全等，640 项相关短测通过。整体粗估 62%，大文件 10/4/2，AI 10500 行；下一步迁通用格挡/反击/回避与 R256 第二段。详见 OOP 计划。
+
+- 2026-10-28 AI 第十七批：R256/R259 盾击、R172 甲虫装甲、普通精兵撤步射击与抹杀使徒暗影反击评分归各自 `Skill.ai_reaction_score`；共享上下文只供通用威胁、移动和攻击窗口试算。9 组候选/评分/状态/RNG/ID、五将快照/25 步轨迹/审计发现全等，618 项受影响短测通过。整体粗估 61%，大文件 10/4/2，AI 10530 行；下一步迁换位、击退/威压与拳师反击。详见 OOP 计划。
+
+- 2026-10-28 AI 第十六批：R025 暮别代行借技递归反应、R021 时停/鬼步及李见切评分归各自技能对象；时停主动/反应共用技能估值。6 组候选/评分/状态/RNG/ID、三将快照/25 步轨迹/审计发现全等，568 项受影响短测通过。整体粗估 60%，大文件 10/4/2，AI 10577 行；下一步迁盾击、甲虫装甲、后撤射击和暗影反击等专属防御反应。详见 OOP 计划。
+
+- 2026-10-28 AI 第十五批：R033 拉奥、R031 夏目、R034 樱火反应评分分别归 `LaoDamageStatCancelSkill`、`NatsumeWindWallSkill`、`FloatingCannonCoverSkill.ai_reaction_score`；共享上下文只供通用威胁、状态与收益快照，保留原不可见敌源门槛。9 组固定候选/评分/状态/RNG/ID、三将快照/25 步轨迹/审计发现全等，553 项受影响短测通过。整体粗估 59%，大文件 10/4/2，AI 10587 行；下一步盘点代理借技和时间停止/幽步/先知反应。详见 OOP 计划。
+
+- 2026-10-28 AI 第十四批：R326/R327/R337/R352 反击与 R225 屏障评分归本将 `CounterReactionAIPolicy`/`BarrierShieldAIPolicy`；R337/R352 由 `CompositeReactionAIPolicy` 并存既有付费防护。共享 AI 提供通用价值/防护试算并删除五将编号分支，兼容函数保留。12 个固定评分、状态/RNG/ID、五将快照/25 步轨迹/审计发现全等，604 项短测通过；整体粗估 58%，大文件 10/4/2，AI 10630 行。下一步迁老魔法师、夏目、浮游炮反应；长测留 AI 阶段末。详见 OOP 计划。
+
+- 2026-10-28 AI 第十三批：R304/R337 光墙、R322 火墙、R239/R247 魔墙和 R352 回避的付费反应评分由六将 kit 配置 `PaidReactionAIPolicy`，共用 `SharedReactionScoring.paid_reaction`；共享 AI 删除按六将编号增长的长条件，旧函数保留兼容。15 个固定评分与状态/RNG/ID、六将快照/25 步轨迹/审计发现全等，577 项短测通过。整体粗估 57%，大文件 10/4/2，AI 10624 行；下一步迁反击与屏障评分并组合 R337/R352 现有策略。完整长测留 AI 阶段末。详见 OOP 计划。
+
+- 2026-10-28 AI 第十二批：R306 电子风暴敌方轮避袭估值归 `StormSpiritAIPolicy`，R192 咆哮反应取舍归 `GladiatorRoarSkill`；通用前后结算试算由 `SharedReactionScoring` 提供，旧安德鲁函数留兼容入口。保留预测不可见敌源的原门槛次序。6 个固定评分及状态/RNG/ID、两将快照/25 步轨迹/审计发现全等，520 项短测通过。整体粗估 56%，大文件 10/4/2，AI 10610 行；下一步迁 R22 多将付费墙/闪避反应，长测仍待 AI 段末。详见 OOP 计划。
+
+- 2026-10-28 AI 第十一批：新增 `AIReactionScoreContext`/`SharedReactionScoring`；R373 付费反应估值归 `ElectronicInfinityAIPolicy`，R328/R329 船代施保护/光墙估值归 `ShipBorrowedSkill`。9 个固定评分和状态/RNG/ID、三将快照/25 步轨迹/审计发现迁前迁后全等，520 项受影响短测通过，预测认证更新。整体粗估 55%，大文件 10/4/2，AI 10589 行。下一批按设计基线迁 R306/R192 反应估值及多将共用付费墙/盾规则；完整长测仍待 AI 阶段末。详见 OOP 计划。
+
+- 2026-10-28 AI 第十批：建立 `AISkillCandidateContext`、`AIReactionCandidateContext` 和共享预览几何协议；R373 付费技能/反应候选归本将策略，R257 巨盾火枪手区域短名单和 R324 超级信鸦阵法候选归技能对象，复制技能仍带自身候选规则；乌鸦牺牲估值归本将模块。8 组固定候选/评分与状态/RNG/ID 全等，三将短审计、526 项受影响短测通过；R324 无首次迁前短局对照，不声称其初始轨迹等价。整体粗估 54%，大文件 10/4/2，AI 10575 行；完整长测仍待 AI 段末。详见 OOP 计划和架构说明。
+
+- 2026-10-28 AI 第九批：先建立 `heroes/ai_policy.py::AISkillScoreContext` 与 `SharedSkillScoring` 框架，`rooms/ai.py` 适配通用计算；R320 神风之戟、R321 黑夜魔影、R306 电子风暴/残影归本将上下文策略。旧风暴函数保留薄兼容入口，所有已迁策略核对为同一 `HeroAIPolicy` 继承链且无武将模块反向导入 AI。三将快照/25 步轨迹/审计发现、10 个分值与状态/RNG/ID 全等，521 项相关短测通过。整体粗估 53%，大文件 10/4/2，AI 10600 行；长测留 AI 段末。详见架构说明和 OOP 计划。
+
+- 2026-10-28 AI 第八批：R320 潜行、R321 黑魔化/入魔、R324 阵法次数限制、R306 雷电锁链评分迁入各将 `HeroAIPolicy`；共用有效敌人筛选抽到 `rooms/ai_targets.py` 并固定预测源码指纹。四将快照、25 步轨迹、审计发现及 10 个分值/状态/RNG/ID 见证全等，148 项本将/预测与 384 项共享战斗/倾向/审计短测通过。整体粗估 52%，大文件 10/4/2，AI 10643 行；长测按用户要求留待整个 AI 段结束。详见 OOP 计划。
+
+- 2026-10-28 AI 第七批：销魂的死灵移动魔免/技能压力、不死王利娜风沙恢复估值归本将 `HeroAIPolicy`；吟游诗人“原地回复”离位成本归 `StationaryRecoveryTrait`，共享 AI 按对象钩子评分。三将短局轨迹/审计发现、7 个固定分值与状态/RNG/ID 全等；吟游诗人同名对阵快照须控制随机先手后对照。预测契约重建后 534 项受影响测试通过。整体粗估 51%，大文件 10/4/2，AI 10707 行；长测留到 AI 阶段末。详见 OOP 计划。
+
+- 2026-10-27 武将 AI 第六批：R139/R166 光环或自动电风落点估值归各将机制/策略，电风控制机会辅助也迁出共享 AI；通用 `ai_probe_rollback` 独立到 `rooms/ai_probe.py`，预测源码指纹和契约同步。两将快照、25 步轨迹、审计发现、6 个分值/状态/RNG/ID 见证全等；相关行为/预测/倾向 210 项通过，前批固定见证不变。整段 AI 完成后用户统一跑长测；整体粗估 50%，大文件 10/4/2，共享 AI 10719 行。详见 OOP 计划。
+
+- 2026-10-27 武将 AI 第五批：R302 位移爆破、R303 追猎候选、末日光攻防专属估值归各将 `HeroAIPolicy`，共享 AI 删相应编号分支。三将快照/25 步轨迹/审计发现全等；六个固定候选/评分见证一致，真红既有 ID 消耗 62→62、状态/RNG 不变；150 项定向行为和预测测试通过，契约有效。整段 AI 结束后由用户统一跑全库/全公开长测；整体粗估 49%，大文件 10/4/2，AI 10814 行。详见 OOP 计划。
+
+- 2026-10-27 武将普攻协同 AI 第四批：R023/R027/R303/不死王利娜的 `reviewed_attack_synergy` 专属评分和利娜后续攻击可达辅助迁入各自策略/模块，通用“终结”与末日光评分留在共享入口；8 个固定分值、状态/RNG/ID 及四将短局轨迹前后全等，受影响行为/预测 191 项通过，预编译契约有效。全库及全公开审计留待整个 AI 阶段完成；整体粗估 48%，大文件 10/4/2，AI 10838 行。详见 OOP 计划。
+
+- 2026-10-27 武将移动 AI 第三批：R328/R329 船员、R303 追猎、R254/R255 巨盾移动评分从 `rooms/ai.py` 编号分支迁入三类本将策略，五将 kit 装配；保持原阶段、公式及快速模拟边界。五将快照/25 步轨迹/审计发现迁前迁后全等，138 项受影响行为及预测测试通过，预编译契约有效。整段 AI 完成后统一由用户运行全库/全公开长测；整体粗估 47%，≥1000/2000/5000 行战场文件 10/4/2，AI 10879 行。详见 OOP 计划。
+
+- 2026-10-27 用户调整当前武将 AI OOP 阶段测试节奏：每批仅跑受影响的行为/预测/固定分值与候选决策、状态/RNG/ID 对照及相关短对局，修复新增失败后可继续下一 AI 批；完整 unittest 与 125 名公开武将审计在整段 AI 对象化收尾时由用户一次运行。R320/R324/R123 批 676 项短测及精确见证已绿，长测状态留为阶段末待验收；整体粗估 46%、大文件 10/4/2。规则见 SKILL.md 与 OOP 计划。
+
+- 2026-10-27 武将 AI 策略第二批：上批 `--resume` 全库 2677 项通过、1250/1250 场审计完整，原失败场恢复；1249 场复用旧结果。R320/R324/R123 专属攻击/技能评分迁入本将策略，`FragmentMappedHeroKit` 接策略对象；11 个固定评分、三将快照/轨迹/审计发现全等，676 项短测通过。预测内联哈希与默认策略守卫、预编译契约同步更新；本批全库与全公开审计待用户。整体粗估 46%，大文件 10/4/2。详见 OOP 计划。
+
+- 2026-10-27 全公开审计 125 将 1250 场、内置全库 2676 项通过；1249 场完整，1 场在 R022 黑豹模仿 R127“幻想”第 19 步发生 Windows 访问冲突。`heroes/mechanics/black_cat.py::FantasyMoveSkill.legal_destinations` 改为一次求可达格并按原条件过滤，新旧落点、原失败对局前 19 步轨迹一致，修后短预算完成 25 步；相关 584 项短测通过。全库及唯一失败场待用户 `python detail_test_all_wujiangs.py --resume` 长测，复用对局须标明来源；整体 44%、大文件 10/4/2 不变。详见 OOP 计划。
+
+- 2026-10-27 首批武将 AI 策略迁后完整 unittest：2676 项、0 失败/错误、9 跳过，约 1072 秒；用户确认本次仅跑了完整 unittest。共享 AI 评分改动要求的全公开武将长审计仍待运行，结果到来前不进入下一共享 AI/引擎迁移。整体粗估仍 44%，大文件数 10/4/2 不变。
+
+- 2026-10-27 武将 AI OOP 首批：上批 `next_five` 迁后全库 2675 项、0 失败/错误、9 跳过。`heroes/ai_policy.py` 新增攻击评分策略接口，独立武将和 Excel `HeroKit` 均可装配；李、抹杀使徒、N、魂灵的专属攻击评分归各自 `mechanics/` 模块，`rooms/ai.py` 改调用策略钩子。七个固定分值、四将快照/25 步轨迹/审计发现前后全等，494+146+1 项短测通过；预测契约有效。本批改共享 AI 分发，全库及全公开武将长审计待用户；整体粗估 44%，≥1000/2000/5000 行战场文件仍 10/4/2。详见 OOP 计划。
+
+- 2026-10-27 `next_five` 最后四将：用户第三批迁后全库 2675 项、0 失败/错误、9 跳过。全场/局部沙尘及风沙技能归 `heroes/mechanics/sandstorm.py`，元素猎人/莉娜/岩神/末日光龙归各自模块；注册表直引。`next_five.py` 仅约 298 行兼容导出、0 个战场定义，源码运行路径不再导入它。四将快照、25 步固定 AI 轨迹和审计发现全等，663 项短测、231 英雄模块导入与旧 pickle 名称通过。≥1000 行文件 10 个、≥2000 行 4 个、≥5000 行 2 个，整体粗估 42%；迁后完整回归待用户。下一结构热点为 AI/引擎/多人/UI，详见 OOP 计划。
+
+- 2026-10-27 `next_five` 第三批：用户第二批迁后全库 2675 项、0 失败/错误、9 跳过。本批先迁共享破魔/面积/魔点能力，再迁翡翠、N、噬血者、龙骑士至各自 `heroes/mechanics/` 模块；74 个源码文件已迁对象导入改直引，旧 `next_five.py` 只剩 2000 行并保留 pickle 兼容。八将快照、固定 AI 轨迹和审计发现全等，663 项短测通过，226 英雄模块可导入，预测契约有效。≥1000 行文件 11 个、≥2000 行 5 个、≥5000 行 2 个，整体粗估 38%；迁后完整回归已绿。详见 OOP 计划。
+
+- 2026-10-27 `next_five` 第二批：用户完整复跑 2675 项、0 失败/错误、9 跳过，关闭上一批门槛。李、咒歌者、魂灵对象分归 `heroes/mechanics/li.py`、`chanter.py`、`soul_wraith.py`；共用几何/自然回魔归 `next_five_geometry.py`、`mana_recovery.py`。运行入口改直引，旧全局名留兼容；`next_five.py` 5260→约 4060 行，≥1000 行 11 个、≥5000 行 2 个，整体粗估 34%。六名本将/间接使用者的快照、固定 AI 轨迹和审计发现全等；606 项相关短测通过，迁后完整回归已绿。详见 OOP 计划。
+
+- 2026-10-27 `next_five` 迁后完整 unittest：2675 项、1 失败、0 错误、9 跳过。唯一失败是 BP 测试从全局名册而非本局随机池取 10 级对象，先触发“不在本局池”；夹具改从本局池取，单项连续五次通过、BP 组 14/14。生产规则未改，用户之后的全库复跑已转绿。
+
+- 2026-10-27 OOP `next_five` 首批：用户第三次完整 unittest 已绿（2674 项、0 失败/错误、9 跳过），作为迁移前基线。状态替换与分身共享对象迁到 `heroes/mechanics/status_replacement.py`、`clone_split.py`，政宗/抹杀使徒分别迁到 `masamune.py`、`erasure_apostle.py`；注册、装配及运行依赖直引，`next_five.py` 保留旧 pickle 全局名兼容导出，6414→5260 行。两将迁前迁后快照、固定轨迹和审计发现全等；短测 33+336+111+46+35 项及旧 pickle 名称测试通过。迁后完整 unittest 待用户运行，不能把迁前绿基线当本批验收；见 `docs/武将OOP重构计划.md`。
+
+- 2026-10-26 R06 弧形普攻受体修复：`next_five.ArcAttackTrait` 通过对象钩子排除友军，真实战斗与 AI 共用；修前弧内友军掉血，修后 R06 行为33/33、战斗336/336、预测111/111。详见英雄索引和修复记录。完整回归待用户长测。
+
+- 2026-10-26 全库红基线修复阶段收尾短测：战斗/预测/直达期望/倾向/多人/军兵/审计及相关英雄场景合并800/800，约13秒；用户原完整结果2672项50失败43错误9跳过，修后完整剩余数待用户长测，未声称全库通过。战略旧地图节点、特殊BP模式和若干AI/HTTP场景仍有已知短测红项，先归因再改。
+
+- 2026-10-26 OOP结构盘点：战场源码+战场前端排除生成数据后，≥1000行文件11个（≥2000行5个、≥5000行3个）；热点`rooms/ai.py`10913、`engine/core.py`7867、`heroes/next_five.py`6409、`rooms/multiplayer.py`4610、`heroes/common.py`2265。源表装配125/125、总表机制迁出100%，整体按七阶段粗估约30%，完整测试仍红。详见`docs/武将OOP重构计划.md`。
+
+- 2026-10-26 用户完整 unittest 回报：2672 项、50 失败/43 错误/9 跳过、约 938 秒，原始日志 `reports/oop-user-full-unittest.log`。本轮修倾向 AI 假对象、多人大厅存档/先手夹具、战略地图旧固定城连接/驻防、自走棋准备、地狱系过时胜负/名单断言、飞跃旧落点；R329 参谋 `DefenseOneSkill.execute` 漏 `action_name` 是真实战斗错误。合并短测 629/629 通过，全库长测待用户复跑；见 OOP 计划及修复记录。
+
+- 2026-10-26 OOP旧存档兼容与AI导入：`excel_roster.py`仅为旧pickle全局类名提供惰性映射，新战场对象仍在`heroes/mechanics/`；`rooms/ai.py`原从总表导入的30处机制对象及其他5处机制导入改直指真实模块，避免动态兼容钩子禁用预测优化。预编译契约按规范化源码重建，战斗/预测/直达期望/前端/密集旧存档526/526通过；R027快照与旧见证全等，全量门槛待用户长测。城主注册入口按现存后端行动和战略设计恢复，前端专项32/32。用户2026-10-26要求长测由其运行，代理只做短定向检查。见`docs/武将OOP重构计划.md`。
+- 2026-10-25 AI OOP第一接口：`Skill.effective_skill_for_payload`由模仿/代行技能对象解析候选或已宣告的实际技能，`rooms/ai.py`直达评分不再按这两个技能码分支。旧战斗测试的开局夹具明确输入顺序与玩家1先手；正式先手测试仍直接使用真实建局入口。`prediction_factors.py`的迁移后类路径和预编译契约同步更新；验收和全量审计状态见`docs/武将OOP重构计划.md`。
 - 2026-10-25 OOP总表战场机制类抽离完成：最后19组模块迁出后`excel_roster.py`只余627行/8个装配函数，无战场机制类；21份快照/42场固定轨迹及审计发现全等，定向红项集合不变。总表机制类抽离100%，**不是整体OOP完成**；专属AI、目标选择、引擎分支及全量测试红基线仍待处理。见`docs/武将OOP重构计划.md`。
 
 - 2026-10-25 OOP角斗士/雷神/地狱合批：19组机制按无环依赖图迁出，总表降为3810行/98顶层定义，约387/485=80%的总表定义清理，非整体OOP完成率。27名武将快照、54场固定轨迹及审计发现前后全等，定向测试无新增失败；完整unittest仍红。见`docs/武将OOP重构计划.md`。
@@ -955,10 +1045,15 @@ The codebase was reorganised by domain on 2026-08-27. Every phase record further
 - Strategy mode UI direction: prioritize a game-like map command screen over webpage/card-grid layout. The strategy home now renders a browser-validated war-room shell with a map-first city node stage, HUD resource strip, a "next step" monthly guidance panel, map legend, and a selected-city command panel grouped into governance, recruitment, rebellion, and attack actions. Pending story events appear before routine briefings, expose readable choice consequences and unresolved future threads, and can replace an already queued choice even when the faction budget is otherwise full. The draft home has a mode-gateway menu that puts "英灵城邦战役" and "武将对战房间" before lower-priority forms, routes unauthenticated mode clicks into the account gate, and keeps the long reference hero roster hidden on that home screen. Creating, joining, locking, or entering a strategy campaign must focus the war room instead of leaving the player in lower records; strategy guide buttons include map/command shortcuts, and mobile city-map clicks should jump to the command panel so feedback and actions are immediately visible. The war room includes a top-level state banner for lobby/resume blockers and host lock action, compact map/command/dossier tabs for mobile reachability, city map nodes show queued-action badges, selected-city command cards summarize already planned orders and city order capacity, and city/order interactions raise transient toasts for immediate feedback. Strategy panel select/input focus must suppress poll-driven strategy re-render so dropdowns do not collapse while players choose options. Map city nodes must preserve their centered transform on hover and have stable hit targets; route lists live behind a compact "路线情报" drawer instead of occupying the map surface, and route/dossier drawers use explicit frontend state so polling rerenders do not make them appear unclickable. Recruitment command sections include a local search filter before the hero select so large hero pools stay usable. Mobile map/command/dossier targets need scroll-margin under sticky tabs so the tabs do not cover the target panel. Secondary campaign/member/log/hero/tech details are collapsed into the "战报卷宗" surface by default, and that surface should use internal dossier tabs such as members/orders/objectives/battles/heroes/tech/events instead of exposing a single long webpage-like list. Web strategy create/join/lock/enter paths should mark the current account online so the resume gate does not show the acting player as absent.
 - Strategy hero identity is actor-first: each player/AI controls one persistent strategic hero, which may be a lord, remain roaming, found a faction at its current city, or request allegiance to another lord. A roaming player gets a dedicated map workspace and no faction/city commands. Additional faction heroes are obtained through the confirmed city ritual-site random summon rule: the ritual pays 30 city ether and one command point, requires free non-lord office capacity, and binds the summoned hero to that city. Acceptance/allegiance or ritual summoning never grants an office automatically; the lord must appoint an unassigned serving hero as grand general, general, or governor. A campaign-founded faction starts with only its founding lord, and office migration must never synthesize free heroes.
 
+- 2026-10-25 OOP回归入口续批：`tests/test_behavior.py::frontend_script`恢复ES模块私有词法作用域，前端渲染专项收敛到32项仅1失败；余下城主注册士兵入口缺失待产品归因。`static/tactical/room-lobby.js::confirmRoomSetup`现在只为标准/随机模式提交改变的席位数，BP/自走棋保持固定席位；定向场景、前端模块/全局/浏览器启动及战斗+AI预测493项通过。完整unittest仍未绿，见`docs/武将OOP重构计划.md`。
+
 ## Testing Policy
 
 - BP 特殊模式的阵亡判定必须覆盖伤害结算与非伤害途径：统一阵亡清理在移除单位前通知房间规则，处理骤死、软柿子替死与擂台接替；替死者要标记以防递归替死。当前生命与当前魔量的直接增加必须走与回复 API 一致的 BP 禁止回复/回复反噬判定。
+- BP“同情弱者”的直接伤害限制优先读取 `Skill.directly_damages_on_use()` 对象能力；通过后续动作伤害的技能（如 R324 四种飞鸦阵）必须在本技能类明确声明，不能只依赖源码关键词。法师模式的隐身例外只跳过模式满魔，不取消角色正常回合回魔。
 - BP“铁链”跟随应沿开场同队行动顺序继续传递，且不得绕回推动本次最初移动的单位；跟随移动不消耗行动资源。
+- 回归夹具若直接把敌城、军队或围城传送进战局，读取按阵营过滤的 HTTP 公开状态前须显式建立玩家已知城市；不要因匿名/被遮蔽响应缺字段就改生产视野。AI 换位场景需让回避带来明确净收益，不能仅把致命伤害转给另一名友军就断言 AI 必须换位。
+- 并行完整 AI 计划的 `_army_anchor_cache` 可以合法不存在；工作线程与父进程必须区分无字段和存在但无效的缓存，仍用完整提交快照、别名、随机数与两路编号校验。战略 AI 测试如需断言敌城内部政策，读取存档世界；公开 HTTP 响应遵守玩家视野。
 
 - Add focused tests for every durable gameplay rule change.
 - After every gameplay, room-flow, or player-visible UI change, add or update at least one behavior scenario that exercises the changed feature from the player's point of view.

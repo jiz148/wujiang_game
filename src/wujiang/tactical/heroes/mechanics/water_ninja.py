@@ -6,7 +6,8 @@ from typing import Any
 
 from wujiang.tactical.prediction import random, direct_scoring
 from wujiang.tactical.engine.core import Battle, DamageContext, HeroUnit, Trait
-from wujiang.tactical.heroes.next_five import StandardCloneSummon, square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
+from wujiang.tactical.heroes.mechanics.clone_split import StandardCloneSummon
 
 
 class WaterNinjaCloneAfterAttackTrait(Trait):

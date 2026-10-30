@@ -1,0 +1,6 @@
+[
+  {"code": "erasure_apostle", "skills": ["premature_burial", "erasure", "descent_moment", "extra_stealth"], "test_class": "DevelopedHeroReviewR06BehaviorTests"},
+  {"code": "dragon_rider", "skills": ["dragon_slash", "smoke_spray"], "test_class": "DevelopedHeroReviewR06BehaviorTests"},
+  {"code": "rock_god", "skills": ["rock_absorb", "rock_cannon"], "test_class": "DevelopedHeroReviewR06BehaviorTests"},
+  {"code": "doomlight_dragon", "skills": ["doom_light", "apocalypse"], "test_class": "DevelopedHeroReviewR06BehaviorTests"}
+]

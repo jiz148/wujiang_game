@@ -1,7 +1,9 @@
 ﻿from __future__ import annotations
 
 from wujiang.tactical.prediction import random, direct_scoring
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+if TYPE_CHECKING:
+    from wujiang.tactical.heroes.ai_policy import AIReactionScoreContext, AISkillScoreContext
 
 from wujiang.tactical.engine.geometry import localized_line_coordinates
 
@@ -717,6 +719,15 @@ class BlockCounterTrait(Trait):
 class StationaryRecoveryTrait(Trait):
     def __init__(self) -> None:
         super().__init__("原地回复", "若本回合未移动，则回魔并回血。")
+
+    def ai_move_departure_score(self, score: float) -> float:
+        owner = self.owner
+        if owner is None:
+            return score
+        score -= min(1.0, max(0.0, owner.max_mana() - owner.current_mana)) * 18.0
+        if not owner.cannot_heal:
+            score -= min(0.25, max(0.0, owner.max_health - owner.current_hp)) * 120.0
+        return score
 
     def on_owner_turn_end(self, battle: Battle) -> None:
         if self.owner is None or self.owner.moved_this_turn:
@@ -1488,6 +1499,8 @@ class PierceSkill(Skill):
 
 
 class KnockbackSkill(Skill):
+    ai_reaction_score_phase = "after_hidden_source"
+
     def __init__(self) -> None:
         super().__init__(
             "knockback",
@@ -1499,6 +1512,27 @@ class KnockbackSkill(Skill):
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         raise ActionError("震开只能通过连锁使用。")
+
+    def ai_reaction_score(self, context: AIReactionScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        proxy_target = context.proxy_target()
+        threat = context.threat(proxy_target)
+        score = threat * 0.8 + 18.0
+        adjacent_units = [
+            unit for unit in battle.all_units()
+            if unit.unit_id != actor.unit_id and unit.position is not None
+            and battle.distance_between_units(actor, unit) <= 1
+        ]
+        nearby_enemies = [unit for unit in adjacent_units if unit.player_id != actor.player_id]
+        nearby_allies = [unit for unit in adjacent_units if unit.player_id == actor.player_id]
+        future_melee_value = sum(context.damage(enemy, actor.stat("attack")) * 55.0
+                                 for enemy in nearby_enemies)
+        score -= min(110.0, future_melee_value)
+        score -= len(nearby_allies) * 12.0
+        urgent = proxy_target.current_hp <= max(0.25, threat / 100.0)
+        if self.code != "hell_pressure_free" and actor.current_mana <= 1.0 + 1e-9 and not urgent:
+            score -= 55.0
+        return score
 
     def can_react_to(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> tuple[bool, str]:
         ok, reason = super().can_react_to(battle, actor, queued_action)
@@ -1602,6 +1636,9 @@ class KnockbackSkill(Skill):
 
 
 class MachineGunSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r18_effect_score(self)
+
 
     def __init__(self) -> None:
         super().__init__(
@@ -1983,6 +2020,8 @@ class PassiveProtectionSkill(MultiTargetChainShieldSkill):
 
 
 class PassiveEvasionSkill(Skill):
+    ai_reaction_score_phase = "after_hidden_source"
+
     def __init__(self) -> None:
         super().__init__(
             "evasion",
@@ -1995,6 +2034,16 @@ class PassiveEvasionSkill(Skill):
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         raise ActionError("回避只能通过连锁使用。")
+
+    def ai_reaction_score(self, context: AIReactionScoreContext) -> float:
+        destination = context.destination()
+        if destination is None:
+            return -5.0
+        if context.destination_still_targeted(destination):
+            return -50.0
+        skill_context = context.skill_context(self.code)
+        return (context.threat(context.proxy_target())
+                + skill_context.move_score(destination, skill_context.hero_style()) / 2.0 + 18.0)
 
     def evade_cells(self, battle: Battle, actor: HeroUnit) -> list[Position]:
         if (actor.position is None or actor.cannot_move or getattr(actor, "attached_to_unit_id", None)
@@ -2072,6 +2121,8 @@ class PassiveEvasionSkill(Skill):
 
 
 class BackstepShotSkill(Skill):
+    ai_reaction_score_phase = "after_hidden_source"
+
     def __init__(self) -> None:
         super().__init__(
             "backstep_shot",
@@ -2084,6 +2135,22 @@ class BackstepShotSkill(Skill):
 
     def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
         raise ActionError("撤步射击只能通过连锁使用。")
+
+    def ai_reaction_score(self, context: AIReactionScoreContext) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        threat = context.threat(context.proxy_target())
+        destination = context.destination()
+        if destination is None:
+            return -5.0
+        skill_context = context.skill_context(self.code)
+        score = threat + skill_context.move_score(destination, skill_context.hero_style()) / 2.0 + 12.0
+        if context.destination_still_targeted(destination):
+            score -= threat + 30.0
+        if payload.get("target_unit_id"):
+            attacker = battle.get_unit(context.queued_action.actor_id)
+            expected = context.damage(attacker, battle.basic_attack_preview_power(actor))
+            score += expected * 85.0 + context.profile.aggressive_bonus
+        return score
 
     def can_react_to(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> tuple[bool, str]:
         ok, reason = super().can_react_to(battle, actor, queued_action)

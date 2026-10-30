@@ -6,6 +6,8 @@ from contextlib import contextmanager
 from typing import Any, Iterator
 
 from wujiang.tactical.engine.core import ActionError, Battle, QueuedAction, Skill, Trait, Unit
+from wujiang.tactical.heroes.ai_policy import (AIReactionCandidateContext,
+    AIReactionScoreContext, AISkillCandidateContext, HeroAIPolicy)
 from wujiang.tactical.heroes.hero_kit import HeroKit, register_hero_kit
 
 
@@ -22,6 +24,71 @@ class ZeroManaOverdriveTrait(Trait):
 class InstantConversionTrait(Trait):
     def __init__(self) -> None:
         super().__init__("电子超频", "使用任意技能时可额外费1魔，将本次技能变成随时使用。")
+
+
+class ElectronicInfinityAIPolicy(HeroAIPolicy):
+    """Keep paid instant candidates tied to their source skill's target model."""
+
+    contextual_reaction_prefixes = ("infinity_instant__",)
+
+    def contextual_reaction_score(self, context: AIReactionScoreContext) -> float | None:
+        if not context.code.startswith("infinity_instant__"):
+            return None
+        source_code = context.code.rsplit("__", 1)[-1]
+        if source_code == "ion_shield":
+            base = context.base_score("ion_shield")
+            return base - 26.0 if base > 0 else -1000.0
+        if source_code in {"machine_gun", "missile"}:
+            cells = context.positions()
+            if not cells:
+                return -1000.0
+            battle, reactor = context.battle, context.actor
+            power = reactor.stat("attack") + (2.0 if reactor.current_mana > 0 else 0.0)
+            net = 0.0
+            for target in battle.effect_units_at_cells(cells):
+                if target.magic_immunity:
+                    continue
+                hit = context.damage(target, power + max(0, battle.unit_hit_count_for_cells(target, cells) - 1))
+                net += hit * (110.0 if target.player_id != reactor.player_id else -165.0)
+            return net - 28.0 if net > 0 else -1000.0
+        return -1000.0
+
+    @staticmethod
+    def _ranked_patterns(context: AISkillCandidateContext | AIReactionCandidateContext,
+                         patterns: list) -> list[tuple[float, Any, list]]:
+        ranked = []
+        for pattern in patterns:
+            cells = context.positions(pattern)
+            net = sum((1.0 if unit.player_id != context.actor.player_id else -1.6)
+                      * max(1, context.battle.unit_hit_count_for_cells(unit, cells))
+                      for unit in context.battle.effect_units_at_cells(cells)
+                      if not unit.magic_immunity)
+            if net > 0:
+                ranked.append((net, pattern, cells))
+        ranked.sort(key=lambda entry: entry[0], reverse=True)
+        return ranked[:24]
+
+    def skill_candidate_patterns(self, context: AISkillCandidateContext,
+                                 patterns: list) -> list | None:
+        if not context.code.startswith("infinity_instant__"):
+            return None
+        return [pattern for _, pattern, _ in self._ranked_patterns(context, patterns)]
+
+    def reaction_candidate_payloads(self, context: AIReactionCandidateContext) -> list[dict] | None:
+        if not context.code.startswith("infinity_instant__"):
+            return None
+        source_code = context.code.rsplit("__", 1)[-1]
+        preview = context.option.get("preview") or {}
+        if source_code == "ion_shield":
+            return [{**context.base_payload, "target_unit_ids": [str(unit_id)]}
+                    for unit_id in preview.get("target_unit_ids", [])]
+        if source_code in {"machine_gun", "missile"}:
+            patterns = (preview.get("selection") or {}).get("patterns", [])
+            return [{**context.base_payload, "cells": context.payload_cells(cells)}
+                    for _, _, cells in self._ranked_patterns(context, patterns)]
+        if source_code == "shensu":
+            return []
+        return None
 
 
 @contextmanager
@@ -217,6 +284,7 @@ class ElectronicInfinityKit(HeroKit):
     """Own R373's per-skill instant modes and zero-mana unit ability."""
 
     code = "excel_r373"
+    ai_policy = ElectronicInfinityAIPolicy()
 
     def augment_skills(self, skills: list[Skill]) -> list[Skill]:
         skills.extend(InfinityInstantSkill(source) for source in list(skills))

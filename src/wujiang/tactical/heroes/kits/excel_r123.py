@@ -2,6 +2,7 @@
 
 from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_hero_kit
 from wujiang.tactical.heroes.mechanics.fuma import (
+    FumaAIPolicy,
     FumaPursuitSkill,
     FumaShurikenSkill,
     FumaSkillManaTrait,
@@ -12,6 +13,7 @@ from wujiang.tactical.heroes.mechanics.fuma import (
 def install(r) -> None:
     register_hero_kit(FragmentMappedHeroKit(
         "excel_r123",
+        ai_policy=FumaAIPolicy(),
         skills={
             "追身": FumaPursuitSkill,
             "陷阱": FumaTrapSkill,

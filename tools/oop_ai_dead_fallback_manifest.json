@@ -1,0 +1,6 @@
+[
+  {"code": "excel_r036", "skills": ["punisher_heal", "sanctuary_banish", "sanctuary_judgment"], "test_class": "SecondRepairR12BehaviorTests"},
+  {"code": "excel_r056", "skills": ["remi_chaos"], "test_class": "SecondRepairR13BehaviorTests"},
+  {"code": "excel_r059", "skills": ["nian_roar", "nian_jade_flash", "nian_dragon_dance"], "test_class": "SecondRepairR13BehaviorTests"},
+  {"code": "excel_r326", "skills": ["vain_giant_shadow"], "test_class": "DevelopedHeroReviewR23BehaviorTests"}
+]

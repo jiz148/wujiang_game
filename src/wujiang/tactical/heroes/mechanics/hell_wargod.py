@@ -9,6 +9,7 @@ from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Unit
 from wujiang.tactical.heroes.common import positions_to_dict
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.mechanics.hell_rebirth import HellRebirthTrait
 
 
@@ -46,6 +47,22 @@ class HellWarGodStatus(StatusEffect):
 
 
 class HellWarGodSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        actor, battle = context.actor, context.battle
+        enemies = [unit for unit in context.hostile_units() if unit.position is not None]
+        if not enemies:
+            return -1000.0
+        contact = min(battle.distance_between_units(actor, enemy) for enemy in enemies)
+        reach = actor.targeting_range() + actor.remaining_normal_move_distance(battle)
+        if contact > reach + 2:
+            return -1000.0
+        score = 52.0 + (38.0 if contact <= reach else 12.0)
+        if actor.attacks_used >= actor.attack_actions_per_turn() and actor.performed_active_skill:
+            score -= 45.0
+        if actor.current_hp <= 0.25 and contact <= 1:
+            score -= 35.0 if actor.attacks_used < actor.attack_actions_per_turn() else 90.0
+        return score
+
     def __init__(self) -> None:
         super().__init__("hell_war_god", "武神", "大招：本场一次，攻守各+1；2个敌方武将回合末后技能破坏本人。",
                          max_uses_per_battle=1)

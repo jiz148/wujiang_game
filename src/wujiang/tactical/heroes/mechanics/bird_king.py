@@ -9,6 +9,7 @@ from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.engine.core import Unit
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import ensure_distance
 from wujiang.tactical.heroes.common import ensure_enemy
 from wujiang.tactical.heroes.common import is_mana_drain_immune
@@ -18,8 +19,8 @@ from wujiang.tactical.heroes.common import payload_target_unit
 from wujiang.tactical.heroes.common import positions_to_dict
 from wujiang.tactical.heroes.mechanics.mountain_god import LargeDrainManaSkill
 from wujiang.tactical.heroes.mechanics.piercing_control import piercing_nondamage_recipient
-from wujiang.tactical.heroes.next_five import DeclaredAreaSkillMixin
-from wujiang.tactical.heroes.next_five import remote_rectangle_patterns
+from wujiang.tactical.heroes.mechanics.declared_area import DeclaredAreaSkillMixin
+from wujiang.tactical.heroes.mechanics.next_five_effects import remote_rectangle_patterns
 
 
 class GreatFeatherFanSealStatus(StatusEffect):
@@ -34,6 +35,26 @@ class GreatFeatherFanSealStatus(StatusEffect):
 
 
 class GreatFeatherFanSkill(DeclaredAreaSkillMixin, Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        actor = context.actor
+        score = 0.0
+        for target in context.effect_units(self):
+            if target.magic_immunity or target.skill_non_damage_effects_blocked():
+                continue
+            active_count = sum(skill.timing == "active" for skill in target.skills)
+            current = target.get_status("大羽毛扇封技")
+            seal_gain = (19.0 + active_count * 11.0) if current is None else max(0.0, 2 - (current.duration or 0)) * 12.0
+            status_gain = 0.0
+            for status in list(target.statuses):
+                delta = sum(status.modify_stat(stat, 4.0) - 4.0
+                            for stat in ("attack", "defense", "speed", "attack_range"))
+                status_gain -= delta * 16.0
+                if abs(delta) < 0.01:
+                    status_gain -= 12.0 if status.name not in {"鹰眼", "绝对零度", "大羽毛扇封技"} else -30.0
+            value = seal_gain + status_gain
+            score += value if target.player_id != actor.player_id else -value * 1.5
+        return score - 12.0 if score > 12.0 else -1000.0
+
     def __init__(self) -> None:
         super().__init__("great_feather_fan", "大羽毛扇",
                          "2轮一次；远程4×4无伤破魔；命中后清除全部持续状态并封锁主动技能2轮。",
@@ -74,6 +95,24 @@ class GreatFeatherFanSkill(DeclaredAreaSkillMixin, Skill):
 
 
 class PoisonFeatherSkill(LargeDrainManaSkill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        target = battle.units.get(str(context.payload.get("target_unit_id") or ""))
+        if target is None or target.player_id == actor.player_id or target.magic_immunity:
+            return -1000.0
+        recipient = battle.effect_recipient(target)
+        if recipient.skill_non_damage_effects_blocked():
+            return -1000.0
+        stolen = min(1.0, recipient.current_mana)
+        if stolen <= 0:
+            return -1000.0
+        own_gain = min(stolen, max(0.0, actor.max_mana() - actor.current_mana))
+        exposed = any(enemy.position is not None and battle.distance_between_units(enemy, actor)
+                      <= enemy.normal_move_distance() + enemy.targeting_range()
+                      for enemy in context.hostile_units())
+        defense_cost = 0.0 if actor.stat("defense") <= 1 else (38.0 if exposed else 19.0)
+        return stolen * 35.0 + own_gain * 25.0 - defense_cost
+
     def __init__(self) -> None:
         super().__init__()
         self.code = "poison_feather"

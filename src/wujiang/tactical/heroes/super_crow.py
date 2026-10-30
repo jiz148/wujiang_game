@@ -4,15 +4,17 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from wujiang.tactical.prediction import direct_scoring, random
+from wujiang.tactical.prediction import direct_scoring, expected_numeric, random
 from wujiang.tactical.engine.core import (
     ActionError, Battle, BattleFieldEffect, DamageContext, Position, Skill, Stats,
     StatusEffect, Trait, Unit,
 )
 from wujiang.tactical.heroes.base import AbstractHero
+from wujiang.tactical.heroes.ai_policy import AISkillCandidateContext, AISkillScoreContext, HeroAIPolicy
 from wujiang.tactical.heroes.common import FlyingTrait, payload_position, payload_target_unit, positions_to_dict
 from wujiang.tactical.heroes.hero_kit import HeroKit, register_hero_kit
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
+from wujiang.tactical.rooms.ai_targets import living_hostile_combatants
 
 
 FORMATION_RULES = {
@@ -21,6 +23,33 @@ FORMATION_RULES = {
     "hexagram_crow_array": ("六芒星杀阵", 6, 15, 15),
     "eight_dragon_crow_array": ("八龙封印阵", 8, 15, 15),
 }
+
+
+class SuperCrowAttackPolicy(HeroAIPolicy):
+    def priority_skill_score(self, battle: Battle, actor: Unit, code: str,
+                             payload: dict) -> float | None:
+        if code not in FORMATION_RULES:
+            return None
+        already = sum(item.startswith("skill:") and item.removeprefix("skill:") in FORMATION_RULES
+                      for item in actor.actions_taken_this_turn)
+        return -1000.0 if already >= 3 else None
+
+    def attack_followup_bonus(self, battle: Battle, actor: Unit, target: Unit,
+                              payload: dict, expected_damage: float) -> float:
+        if actor.innate_traits_suppressed():
+            return 0.0
+        capacity = len(available_super_crow_cells(battle, actor))
+        return sum(min(face, capacity) for face in range(1, 7)) / 6.0 * 5.0
+
+
+@expected_numeric(independent=True)
+def super_crow_sacrifice_value(battle: Battle, actor: Unit, crow: Unit | None) -> float:
+    if crow is None or crow.position is None:
+        return 0.0
+    enemies = living_hostile_combatants(battle, actor.player_id)
+    adjacent = sum(battle.distance_between_units(crow, enemy) == 1 for enemy in enemies if enemy.position is not None)
+    nearby = sum(battle.distance_between_units(crow, enemy) <= 2 for enemy in enemies if enemy.position is not None)
+    return 7.0 + adjacent * 13.0 + nearby * 3.0 + min(6.0, crow.current_hp * 6.0)
 
 
 def _adjacent_cells(battle: Battle, unit: Unit) -> list[Position]:
@@ -164,6 +193,30 @@ class SuperCrowFreeSkillTrait(Trait):
 
 
 class SuperCrowSummonSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float | None:
+        if context.actor.hero_code != "excel_r324":
+            return None
+        battle, actor, payload = context.battle, context.actor, context.payload
+        cell = Position(int(payload.get("x", -1)), int(payload.get("y", -1)))
+        enemies = list(context.hostile_units())
+        if not enemies:
+            return -1000.0
+        adjacent = [enemy for enemy in enemies if enemy.position is not None and
+                    any(cell.distance_to(body) == 1 for body in battle.unit_cells(enemy))]
+        near = min((context.distance_to_position(enemy, cell) for enemy in enemies), default=99)
+        if near > 4:
+            return -1000.0
+        setup = 0.0
+        for enemy in adjacent:
+            existing = sum(crow.hero_code == "super_messenger_crow" and crow.summoner_id == actor.unit_id
+                           and crow.alive and crow.position is not None
+                           and battle.distance_between_units(crow, enemy) == 1
+                           for crow in battle.player_units(actor.player_id))
+            setup = max(setup, 22.0 + existing * 13.0 + min(3, existing + 1) * 6.0)
+        pressure = len(adjacent) * 16.0 + max(0.0, 4.0 - near) * 6.0
+        cost = self.mana_cost_for_payload(battle, actor, payload)
+        return setup + pressure - cost * 34.0 - (20.0 if not adjacent else 0.0)
+
     def __init__(self) -> None:
         super().__init__("super_messenger_crow", "报信乌鸦", "每本人轮前三次免费，之后每次费0.5魔；外邻召一只飞行乌鸦。",
                          mana_cost=0.5, target_mode="cell")
@@ -242,7 +295,7 @@ class CrowFormationStatus(StatusEffect):
         if self.formation_code == "square_crow_array" and skill.timing == "active":
             return True, "四方飞鸦阵使该单位不能使用主动技能。"
         if self.formation_code == "triangle_crow_array":
-            from wujiang.tactical.heroes.excel_roster import skill_has_movement_effect
+            from wujiang.tactical.heroes.mechanics.true_blade_bird import skill_has_movement_effect
             if skill_has_movement_effect(skill):
                 return True, "三角飞鸦阵使该单位不能使用位移技能。"
         return False, ""
@@ -250,6 +303,71 @@ class CrowFormationStatus(StatusEffect):
 
 class CrowFormationSkill(Skill):
     requires_direct_unit_target_line = False
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float | None:
+        if context.actor.hero_code != "excel_r324":
+            return None
+        battle, actor, payload = context.battle, context.actor, context.payload
+        target = battle.units.get(str(payload.get("target_unit_id") or ""))
+        if target is None or not target.alive or target.position is None:
+            return -1000.0
+        count = self.crow_count
+        shields = target.total_shields() + target.dodge_charges
+        hits = max(0, count - shields)
+        per_hit = context.estimate_damage(target, 3, ignore_shield=True)
+        life = min(target.current_hp, hits * max(0.0, per_hit))
+        control = 0.0
+        if self.code == "triangle_crow_array":
+            control = max(0.0, min(3.0, target.stat("speed") - 1.0)) * 12.0 + 22.0
+        elif self.code == "square_crow_array":
+            control = 48.0 + target.stat("attack") * 9.0
+        elif self.code == "eight_dragon_crow_array":
+            control = 170.0 + target.stat("attack") * 13.0
+        if target.skill_non_damage_effects_blocked():
+            control = 0.0
+        status_names = {"triangle_crow_array": "三角飞鸦阵减速禁位移",
+                        "square_crow_array": "四方飞鸦阵禁攻施技",
+                        "eight_dragon_crow_array": "八龙封印"}
+        if target.has_status(status_names.get(self.code, "")):
+            control *= 0.1
+        drain = min(1.0, target.current_mana) * 19.0 if target.player_id != actor.player_id else 0.0
+        sacrificed = sum(super_crow_sacrifice_value(battle, actor, battle.units.get(str(item)))
+                          for item in payload.get("raven_ids", []))
+        benefit = life * 108.0 + control + drain
+        if life >= target.current_hp - 1e-9 and life > 0:
+            benefit += 45.0
+        if target.player_id == actor.player_id:
+            benefit = -life * 170.0 - control * 1.4
+        free_space = len(available_super_crow_cells(battle, actor))
+        replenishment = sum(min(face, free_space) for face in range(1, 7)) / 6.0 * 5.0
+        if life <= 0 and control <= 0 and drain <= 0:
+            return -1000.0
+        return benefit - sacrificed * 0.9 + replenishment - 12.0
+
+    def ai_candidate_payloads(self, context: AISkillCandidateContext) -> list[dict]:
+        preview = context.action.get("preview") or {}
+        selection = preview.get("selection") or {}
+        required = int(selection.get("count") or 0)
+        payloads: list[dict[str, Any]] = []
+        for target_id, raven_ids in (preview.get("raven_ids_by_target") or {}).items():
+            target = context.battle.units.get(str(target_id))
+            if target is None or target.position is None or len(raven_ids) < required:
+                continue
+            ordered_ravens = sorted((str(item) for item in raven_ids),
+                key=lambda item: super_crow_sacrifice_value(context.battle, context.actor,
+                                                            context.battle.units.get(item)))
+            subsets = [ordered_ravens[:required]]
+            # A bounded alternative keeps construction linear on large crow bodies.
+            for replacement in ordered_ravens[required:required + 2]:
+                subsets.append([*ordered_ravens[:required - 1], replacement])
+            for ids in subsets:
+                payloads.append({**context.base_payload, "target_unit_id": str(target_id),
+                                 "x": target.position.x, "y": target.position.y,
+                                 "raven_ids": list(ids)})
+        return payloads
+
+    def directly_damages_on_use(self) -> bool:
+        return True
 
     def __init__(self, code: str) -> None:
         name, count, width, height = FORMATION_RULES[code]
@@ -398,6 +516,7 @@ class SuperCrowKit(HeroKit):
     """Own R324's crow and formation assembly."""
 
     code = "excel_r324"
+    ai_policy = SuperCrowAttackPolicy()
     _aura_fragment = "此单位周围的对方单位速-1，不能使用不费魔的技能"
     _free_skill_fragment = "所有不费魔的技能无视魔免，带有破魔的吸魔效果"
     _replenishment_fragment = "攻击或使用除“报信乌鸦”以外的主动技能后在周围召唤投骰子数量的“报信乌鸦”"

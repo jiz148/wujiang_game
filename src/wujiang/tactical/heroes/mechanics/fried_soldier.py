@@ -10,10 +10,11 @@ from wujiang.tactical.engine.core import (
     Position, Skill, Stats, StatusEffect, Trait,
 )
 from wujiang.tactical.heroes.base import AbstractHero
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import (
     ensure_ally, payload_position, payload_target_unit, positions_to_dict,
 )
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 class FriedInspireStatus(StatusEffect):
     def __init__(self) -> None:
@@ -27,6 +28,25 @@ class FriedInspireStatus(StatusEffect):
 
 
 class FriedInspireSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.owned_effect_score(self)
+
+    def ai_effect_score(self, context: AISkillScoreContext) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        try:
+            target = self.validate_target(battle, actor, payload)
+        except ActionError:
+            return -1000.0
+        if target.has_status("鼓舞") or not target.can_take_turn_actions(battle) or target.cannot_move or target.cannot_normal_move:
+            return -1000.0
+        before_cells = context.reachable_positions(target)
+        before_value = context.best_move_score(target, before_cells)
+        with context.probe_rollback():
+            target.add_status(FriedInspireStatus(), source=actor)
+            after_cells = context.reachable_positions(target)
+            gain = context.best_move_score(target, after_cells) - before_value
+        return gain + 10.0 - self.mana_cost_for_payload(battle, actor, payload) * 12.0 if gain > 1 else -1000.0
+
     def __init__(self) -> None:
         super().__init__("fried_inspire", "鼓舞", "普通技能：周围3*3己方单位本回合移动次数+1，速度*2，同名不叠加；普通不限次，另有每回合一次免费使用。", target_mode="ally")
 
@@ -143,6 +163,30 @@ class RoyalSoldierSummon(AbstractHero):
 
 class RoyalSoldierSkill(Skill):
     selection_cells_are_effect_cells = False
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.owned_effect_score(self)
+
+    def ai_effect_score(self, context: AISkillScoreContext) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        try:
+            (attack, defense, reach), destination = self.validate_selection(battle, actor, payload)
+        except (ActionError, ValueError, TypeError):
+            return -1000.0
+        enemies = list(context.hostile_units())
+        if not enemies:
+            return -1000.0
+        with context.probe_rollback():
+            probe = RoyalSoldierSummon(actor.player_id, actor.unit_id, attack, defense, reach)
+            probe.position, probe._battle_ref = destination, actor._battle_ref
+            best = max(context.estimate_damage(enemy, probe.stat("attack")) * 100.0
+                       + (24.0 if battle.distance_between_units(probe, enemy) <= probe.targeting_range() + probe.normal_move_distance() else 0.0)
+                       - max(0.0, battle.distance_between_units(probe, enemy) - probe.targeting_range() - probe.normal_move_distance()) * 8.0
+                       for enemy in enemies)
+            danger = max((context.estimate_damage(probe, enemy.stat("attack")) for enemy in enemies
+                          if battle.distance_between_units(probe, enemy) <= enemy.targeting_range() + enemy.normal_move_distance()), default=0.0)
+            support = 12.0 if battle.unit_can_use_block_counter(probe) else 0.0
+            return 30.0 + best + support - danger * 35.0 - self.mana_cost_for_payload(battle, actor, payload) * 12.0
 
     def __init__(self) -> None:
         super().__init__("royal_soldier", "皇家士兵", "普通技能：每回合2次；攻/守/范分配10点，每项1~5，速2魔0；场上己方同名最多4个。", target_mode="cell", max_uses_per_turn=2)

@@ -1,5 +1,88 @@
 ﻿# Hero Rule Index
 
+- 2026-10-29 AI R06/资源与 R03–R05：抹杀使徒 `premature_burial`/`erasure`/`descent_moment`/`extra_stealth`，龙骑士 `dragon_slash`/`smoke_spray`，岩神 `rock_absorb`/`rock_cannon`，末日光龙 `doom_light`/`apocalypse`，噬血 `blood_guard`/`blood_art`/`blood_dance`/`sacrifice_ritual`，咏唱者三牌/`magic_claw`，李 `chain_pull`/`whirlwind_attack` 的 AI 估值归所属对象；咏唱者三牌沿原技能类委托各自策略。40 场景/86 评分与七将短局/快照/发现全等，相关短测通过；全库长测待 AI 段末。
+
+- 2026-10-29 AI R021/R023/R024：剑客 `iaido_charge`/`ghost_step`/`time_stop`/`focus_reset`、芙蕾 `frey_quick_flash`/`frey_god_stab`/`frey_lion_spear`、弗里德 `fried_inspire`/`royal_soldier` 的专属估值归技能对象；芙蕾共用区域评分对象。18 场景/36 分值与三将短局/发现全等，68 项行为、111 项预测、384 项共享测试通过；长测待 AI 段末。
+
+- 2026-10-29 AI R17–R19：R127 幻想/彩虹镜、R136 真刀空气斩、R137 吞噬、R139 照明、R143 重锤/暴怒冲击/毁灭电击、R158 地狱之斩、R166 电风、R172 兵刺共十一技能评分归对象；重锤反应魔耗和电风封技机会收益归对应技能，R138 特殊穿刺/龙息保留原顺序。22 场景/78 分值及八将短局/发现全等，130 项相关行为、111 项预测、384 项共享测试通过；全库长测待 AI 段末。
+
+- 2026-10-29 AI 电子公式与旧分支：R223 融合、R222 维修的专属估值归技能，R036/R056/R059/R326 八个不可达旧分支删除，R037 重力场直达路径保留；维修有效/无效对照及四将旧分支固定见证、短局全等。预测契约随中央源码变更重建。
+
+- 2026-10-29 AI 电子融合动态评分：R223 `electronic_fusion`、宿主动态 `fusion_piercing_shot__*`/`electronic_unfuse__*` 与 R222 `electronic_repair` 归各自技能 `ai_priority_score`；破魔射击的永久能力代价及残血安全解除由动态技能自身判断。附着后 4 场景/12 分值和普通 6 场景/10 分值、三将短局/发现全等；长测待 AI 段末。
+
+- 2026-10-29 AI 三组续迁：R259/R246/R239/R305/R221/R193/R194/R196/R197/R215/R219，R035/R036/R037/R047/R056/R059，R032/R033/R071/R248/R264/R326/R379 共 24 将 35 个主动技能代码归所属技能 `ai_priority_score`。70 场景/168 分值、各将短局/快照/发现全等，重力场直达期望路径保留；AI 余 84 个顶层代码条件，长测待 AI 段末。
+
+- 2026-10-29 AI 共用效果对象：R191/R195 力爪/暴风、R193 水波炮、R188 元气爆破、R239 魔动球两档、R221/R223/R224/R305/R373 机枪、R221/R223/R225/R277/R373 导弹、R224 镭射使用各自技能 `ai_priority_score` 调 R17/R18 共用试算。十二将 34 场景/102 评分与短局/快照/发现全等，708 项短测通过。
+
+- 2026-10-29 AI 巨盾/古代机甲主动评分：R254–R257 八个巨盾技能代码、R249–R253 八个古代技能代码由各自规则技能 `ai_priority_score` 接管；通用分类和预览经上下文。九将 48 个技能场景、124 个评分及短局/快照/发现全等，537 项短测通过；长测待 AI 段末。
+
+- 2026-10-29 AI 鸟王/冰帝/野蛮人国王评分：R262 `great_feather_fan`/`poison_feather`，R263 `absolute_zero`/`floating_crane_city`，R260 `barbarian_gluttony`/`barbarian_axe`/`barbarian_harass`/`barbarian_harass_free` 归各技能 `ai_priority_score`；位移分类经上下文共享。23 组候选/评分/状态/RNG/ID 和三将短局/快照/发现全等，513 项短测通过；长测待 AI 段末。
+
+- 2026-10-29 AI 翼龙/雀皇主动评分：R323 `night_sky_party`、R290 `messenger_crow`/`crow_swap`/`great_crow_flock` 归各技能 `ai_priority_score`；空格普攻复用 `MessengerCrowSkill.position_score`。13 组候选/评分/状态/RNG/ID 和两将短局/快照/发现全等，517 项短测通过；长测待 AI 段末。
+
+- 2026-10-28 AI 柳/天元/火系主动评分：R304 `exchange`、R277 `tianyuan`/`tianyuan_breakthrough`、R322 `chimera`/`flame_password` 归各技能 `ai_priority_score`；共享上下文提供 R17 效果试算。17 组候选/评分/状态/RNG/ID 与三将短局/快照/发现全等，525 项短测通过；长测待 AI 段末。
+
+- 2026-10-28 AI 信鸦/绅士主动评分：R324 `super_messenger_crow` 与四阵、R325 `surprise_step`/`gentleman_duel` 归各技能 `ai_priority_score`；R324 本轮三阵门槛仍由本将策略先判断，外将借用技能继续通用评分。15 组候选/评分/状态/RNG/ID 和两将短局/快照/发现全等，522 项短测通过；长测待 AI 段末。
+
+- 2026-10-28 AI 船队主动评分：R328/R329 共用 `flying_dragon_ship`、R328 `departure_signal`、R329 `add_mana`/`defense_one`/`silver_signal_flare` 各归技能对象 `ai_priority_score`；共用召唤位置及敌人查询通过上下文。12 组候选/评分/状态/RNG/ID 与两将短局/快照/发现全等，506 项短测通过；长测待 AI 段末。
+
+- 2026-10-28 AI 共用护盾：通用魔墙/光墙/石墙/保护/离子/量子的共有评分归 `ShieldReactionScoring`；翡翠 `QuantumShieldSkill` 自评离子可替代时的机会成本，R225 `BarrierShieldAIPolicy` 仍优先。13 组固定候选/评分/状态/RNG/ID 与艾莉/翡翠/R328/R225/R304 短局/快照/发现全等，604 项短测通过；长测待 AI 段末。
+
+- 2026-10-28 AI 通用反应：免费 `block`/`counter` 由 `FreeReactionScoring` 估值，R256 范围第二击由 `GiantShieldSwordTrait.ai_counter_bonus` 补敌友净值；`evasion` 由 `PassiveEvasionSkill.ai_reaction_score` 估安全落点。9 组固定候选/评分/状态/RNG/ID 与 R256/R328/R198 短局/快照/发现全等，544 项短测通过；长测待 AI 段末。
+
+- 2026-10-28 AI 反应续迁：咏唱者 `card_transposition`、通用 `knockback` 与六将 `hell_pressure`/`hell_pressure_free`、R206 `boxer_block_counter` 的评分归各自技能；魔压复用震开对象方法，拳手用共享减伤/反噬服务。22 组固定候选/评分/状态/RNG/ID 与十将短局/快照/发现全等，含其他震开使用者共 640 项短测通过；长测待 AI 段末。
+
+- 2026-10-28 AI 防御反应续迁：R256/R259 `shield_bash`、R172 `beetle_armor_deploy`、普通精兵 `backstep_shot`、抹杀使徒 `shadow_counter` 的反应取舍归各自技能对象；装甲的下一轮机会成本由共享攻击窗口服务提供。9 组固定候选/评分/状态/RNG/ID 与五将短局/快照/发现全等，618 项短测通过；长测待 AI 段末。
+
+- 2026-10-28 AI 借技与随时反应：R025 `agency_borrowed_skill` 的内层复制递归评分、R021 `time_stop`/`ghost_step`、李 `foresight` 归各自技能 `ai_reaction_score`；时停主动/反应共用同一技能估值。6 组候选/评分/状态/RNG/ID 和三将短局/快照/发现全等，568 项短测通过；长测待 AI 段末。
+
+- 2026-10-28 AI 反应技能：R033 `lao_damage_stat_cancel` 的伤害/属性取舍、R031 `natsume_wind_wall` 的实际防护试算、R034 `floating_cannon_cover` 的受体威胁/牺牲炮成本归各自技能对象 `ai_reaction_score`。9 组候选/评分/状态/RNG/ID 与三将短局/快照/发现全等，553 项短测通过；全库和全公开审计待 AI 段末。
+
+- 2026-10-28 AI 反击/屏障：R326 `counter` 用基础普攻估值，R327/R337/R352 `counter` 用含后续效果估值；R225 `ion_shield`/`quantum_shield` 按真实防护收益和量子盾机会成本估值。四将反击归 `CounterReactionAIPolicy`，R225 屏障归 `BarrierShieldAIPolicy`，R337/R352 复合已有付费防护。12 个固定评分、五将短局/快照/发现全等，604 项定向短测通过；长测待 AI 段末。
+
+- 2026-10-28 AI 付费反应：R304/R337 `light_wall`、R322 `fire_wall`、R239/R247 `hell_wall`/`hell_wall_free`、R352 `evasion` 由各自 kit 配置 `PaidReactionAIPolicy`；共用通用付费反应试算，且维持不可见敌源门槛。15 个固定分值、六将短局/快照/发现全等，577 项定向短测通过；全库与全公开审计待 AI 段末。
+
+- 2026-10-28 AI 反应续迁：R306 `StormSpiritAIPolicy.contextual_reaction_score` 估电子风暴避开已声明攻击区域和反应位移；R192 `GladiatorRoarSkill.ai_reaction_score` 通过共享前后结算试算估咆哮改向。两者位于不可见敌源门槛之后，6 个固定评分及两将短局全等、520 项定向短测通过；全库/全公开长测待 AI 段末。
+
+- 2026-10-28 AI 反应评分：R373 `ElectronicInfinityAIPolicy.contextual_reaction_score` 估付费离子盾/机枪/导弹；R328/R329 的船代施 `ShipBorrowedSkill.ai_reaction_score` 估借用保护/光墙。共享上下文提供基础评分、威胁和几何，9 个固定分值及三将短局全等，520 项定向短测通过。全库和全公开长测待 AI 段末。
+
+- 2026-10-28 AI 候选框架：R373 `ElectronicInfinityAIPolicy` 管付费机枪/导弹区域候选与离子盾/区域反应；R257 `GiantShieldGunAreaSkill` 管扫射/排射区域短名单；R324 `CrowFormationSkill` 管阵法选鸦，`super_crow_sacrifice_value` 同归本将。技能对象入口保留复制使用者的候选行为。共用 `AISkillCandidateContext`、`AIReactionCandidateContext` 与几何服务，不反向导入 AI 大文件。8 组固定候选全等、526 项短测通过，长测待 AI 段末。
+
+- 2026-10-28 AI 第九批：R320 `FisherAttackPolicy` 接神风之戟重置估值；R321 `GardenDemonAIPolicy` 接黑夜魔影敌友多段估值；R306 `StormSpiritAIPolicy` 接电子风暴、残影与既有锁链估值。复杂技能共用 `AISkillScoreContext`，通用计算经类型化服务接口注入；原先轻量策略仍在同一 `HeroAIPolicy` 框架内。三将短局/快照及 10 个固定分值全等，521 项相关短测通过，阶段末长测待用户。
+
+- 2026-10-28 AI 第八批：R320 `FisherAttackPolicy` 估潜行威胁；R321 新 `GardenDemonAIPolicy` 估黑魔化/入魔；R324 `SuperCrowAttackPolicy` 管四阵本人轮三次上限；R306 新 `StormSpiritAIPolicy` 估雷电锁链，旧 AI 函数名保留兼容导入。共用敌人筛选归 `rooms/ai_targets.py`。四将短局/快照、10 个固定分值全等，532 项受影响测试通过；长测待 AI 段收尾。
+
+- 2026-10-28 AI 第七批：魂灵 `SoulWraithAttackPolicy.post_fast_move_score` 保持条件魔免/技能压力；利娜 `LinaAttackPolicy.sandstorm_score` 保持风沙本人恢复；吟游诗人 `StationaryRecoveryTrait.ai_move_departure_score` 保持原地回复离位成本。三将定向短局及 7 个固定分值全等，534 项受影响测试通过；预测契约已更新，全库与全公开长测待整段 AI 收尾。
+
+- 2026-10-27 AI 第六批：R139 索拉 `SolaHarvestAIPolicy` 与光环位置估值归 `mechanics/holy_sola.py`；R166 电击人 `ElectricWindAIPolicy`、自动电风落点及控制机会估值归 `mechanics/electric_wind.py`。共享移动评分只调用光环钩子；通用试算回滚抽到 `rooms/ai_probe.py` 且保持预测认证。两将快照/轨迹/发现、6 个分值及状态/RNG/ID 变化量全等，210 项相关行为/预测/倾向测试通过；长测待整段 AI 收尾。
+
+- 2026-10-27 AI 第五批：R303 昼行武者的快速模拟追猎候选归 `DaylightHunterAIPolicy`；R302 真红位移爆破估值函数和 `TrueRedAIPolicy` 归 `mechanics/true_red.py`；末日光主动传播及被攻击反噬评分归 `DoomlightAIPolicy`。三将快照/25 步轨迹/发现及六个固定候选和评分见证全等，真红旧编号消耗 62→62；150 项定向行为/预测测试通过，长测待整段 AI 收尾。
+
+- 2026-10-27 普攻协同 AI 第四批：R023 `FreyAttackPolicy`（真实吸血）、R027 `WuchangAttackPolicy`（非致死封锁）、R303 `DaylightHunterAIPolicy`（连续追猎与封技）、利娜 `LinaAttackPolicy`（合格击破回魔/后续攻击与执念锁定）各归本将机制模块。利娜可达后续攻击辅助归本将，其他 AI 直接复用。8 个固定分值和状态/RNG/ID 全等，四将快照/轨迹/发现全等，191 项受影响行为及预测测试通过；长测待整段 AI 收尾。
+
+- 2026-10-27 移动 AI 策略第三批：R328/R329 船员登船分别 +42/+62 的 `ShipCrewMovePolicy` 归 `flying_dragon_ship.py`；R303 昼行追猎 `DaylightHunterAIPolicy` 归 `mechanics/daylight_hunter.py`；R254/R255 巨盾相邻、盾墙保位 `GiantShieldMovePolicy` 归 `mechanics/giant_shield.py`。五将 kit 装配，快速模拟边界不变；快照/短轨迹/发现全等，138 项定向行为和预测测试通过。全库及全公开长测按新节奏在 AI 阶段收尾统一进行。
+
+- 2026-10-27 AI 策略第二批：R320 传奇渔人 `FisherAttackPolicy` 在 `fisher_garden_demon.py` 估普攻后硬币/击破成长；R324 超级信鸦 `SuperCrowAttackPolicy` 在 `super_crow.py` 估补鸦容量；R123 风魔 `FumaAIPolicy` 在 `mechanics/fuma.py` 估主动技能后回魔期望。均由本将 kit 装配，公式与短轨迹全等，676 项短测通过；本批全库/全公开审计待用户。
+
+- 2026-10-27 R127“幻想”与 R022 黑豹模仿：`FantasyMoveSkill.legal_destinations` 属于 `heroes/mechanics/black_cat.py` 的技能对象，原全格逐一寻路导致模仿候选预览卡顿；改一次可达格求解并保持原地形、占位及网格顺序。新旧落点、原失败对局前 19 步轨迹相同，修后短预算完成 25 步；584 项短测通过，完整审计失败场待用户复跑。
+
+- 2026-10-27 AI 攻击评分策略：李 `LiAttackPolicy`、抹杀使徒 `ErasureAttackPolicy`、N `NAttackPolicy`、魂灵 `SoulWraithAttackPolicy` 分归各自 `heroes/mechanics/` 模块，由武将类装配；后续 Excel 武将可通过 `HeroKit.ai_policy` 装配。共享 `score_attack_payload` 只调用对象钩子。七个固定分值、四将快照/轨迹/审计发现全等，短测通过，规则及评分数值未改；本批全库/全公开长测待用户。
+
+- 2026-10-27 OOP 最后四将位置迁移：元素猎人→`heroes/mechanics/element_hunter.py`，不死王莉娜→`undead_king_lina.py`，岩神→`rock_god.py`，末日光龙→`doomlight_dragon.py`；全场/局部沙尘和风沙技能归 `sandstorm.py`。四将快照、固定 AI 轨迹及审计发现全等；663 项相关短测通过，规则未改。`next_five.py` 仅旧存档兼容，迁后全库待用户。
+
+- 2026-10-27 OOP 第三批位置迁移：翡翠、N、噬血者、龙骑士分别归 `heroes/mechanics/jade.py`、`n.py`、`blood_eater.py`、`dragon_rider.py`；共享破魔/面积/魔点对象归 `next_five_effects.py`、`half_pierce.py`、`dragon_breath.py`、`declared_area.py`、`area_helpers.py`、`mana_point_cost.py`。八将快照、固定 AI 轨迹与审计发现全等；663 项相关短测通过，没有规则改动，迁后全库已绿。
+
+- 2026-10-27 OOP 第二批位置迁移：李、咒歌者、魂灵及其技能/特性对象分别归 `heroes/mechanics/li.py`、`chanter.py`、`soul_wraith.py`；共享几何和自然回魔归 `next_five_geometry.py`、`mana_recovery.py`。龙骑士、翡翠、岩神等间接使用者固定见证全等，没有规则改动。六将定向审计、606 项相关短测通过；迁后全库已绿。
+
+- 2026-10-27 OOP 位置迁移：政宗 `Masamune`/弧形攻击等归 `heroes/mechanics/masamune.py`（R06 的 `ArcAttackTrait` 也由该模块定义）；抹杀使徒 `ErasureApostle`/抹杀计数与状态归 `erasure_apostle.py`；共享状态替换和通用分身/分裂归 `status_replacement.py`、`clone_split.py`。`next_five.py` 仅保留这些旧全局名的兼容导出。两将公开/动作快照、各一场固定 AI 轨迹和审计发现迁前迁后相同；迁后全库复跑已绿。没有规则改动。
+
+- 2026-10-26 R06 销魂的死灵：`next_five.ArcAttackTrait.basic_attack_area_affects_allies` 明确返回假，弧形普攻只伤敌方；此前通用面积普攻默认真导致弧内友军真实受伤、AI 错扣友伤。新增修前红/修后绿行为场景，R06 33/33、战斗 336/336、预测 111/111；全库长测待用户。
+- 2026-10-26 R324 超级信鸦：四种飞鸦阵通过后续排队动作造成直接伤害；`CrowFormationSkill.directly_damages_on_use` 明确声明，BP“同情弱者”因此正确禁止攻击最高者施放。原源码关键词判断漏掉后续动作。修前两项专项红，修后 BP 模式 23/23、R324 13/13、预测 111/111；全库待用户。
+
+- 2026-10-26 R329 参谋“守+1”：`heroes/flying_dragon_ship.py::DefenseOneSkill.execute` 的目标范围/视线校验必须传 `action_name=self.name`。用户全库日志暴露缺参 `TypeError`，修后飞龙船行为 9/9、合并短测 629/629；全库复跑待用户完成。地狱系复活权不保已灭阵营存活，赛后待复活标记清除，旧场景按此修正；R239 不拥有 `hell_pressure`。
+
+- 2026-10-25 R022/R025 AI对象入口：`heroes/mechanics/mimic.py`与`agency.py`各自实现`Skill.effective_skill_for_payload`，让共享直达评分读取候选阶段的实际技能时机。R025旧候选缺少已宣告字段导致`KeyError: ''`，现候选可生成，固定对局的四条构建错误警告消失；R022固定轨迹全等。战斗336/336、预测111/111，完整全库仍红，见`reports/oop-ai-effective-skill-20261025/summary.md`。
+
 - 2026-10-25 OOP机制位置最终批：R023弗雷→`heroes/mechanics/frey.py`，R123风魔→`fuma.py`，R059年→`nian.py`，R166/R188电风→`electric_wind.py`，R224/R225屏障龙→`electronic_barrier.py`，R221–R223电子传送/聚变→`electronic_teleport.py`/`electronic_fusion.py`，R262鸟王→`bird_king.py`，R263冰帝→`ice_emperor.py`，R277天元→`tianyuan.py`，R291红铁锁→`iron_chain_red.py`，R302真红→`true_red.py`，R305后段电子→`electronic_guard.py`；庇护、零、猫、镜像、地形及太阳/狮身炮亦迁至同批对应模块。21将42场轨迹全等，总表无战场机制类。见`docs/武将OOP重构计划.md`。
 
 - 2026-10-25 OOP机制位置续迁：R029武装复制→`heroes/mechanics/weapon_copy.py`，R030聚变→`fusion_rush.py`，R070天罚→`heaven_punishment.py`，R094噪音/干扰→`noise_interference.py`，R326虚影→`vain_shadow.py`；角斗士族→`gladiator_core.py`、`sektoru.py`、`alexander.py`、`spartacus.py`、`gladiator_cooperation.py`，雷神/甲虫→`thor.py`/`beetle.py`，R219鸟魂→`bird_soul.py`，地狱族→`hell_core.py`、`hell_rebirth.py`、`hell_dog_hunter.py`、`hell_wargod.py`、`hell_dragon.py`。27将54场轨迹全等。见`docs/武将OOP重构计划.md`。

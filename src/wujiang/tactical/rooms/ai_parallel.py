@@ -239,10 +239,11 @@ def _turn_job(request):
         old_anchor = battle.__dict__.get("_army_anchor_cache")
         payload, actor = ai.choose_turn_bundle_action(battle, actors, difficulty)
         end_ids, end_rng = acceleration._id_state(), random.getstate()
-        after_anchor = _freeze_anchor(battle.__dict__.get("_army_anchor_cache"))
+        anchor_present = "_army_anchor_cache" in battle.__dict__
+        after_anchor = _freeze_anchor(battle._army_anchor_cache) if anchor_present else None
         payload_data = _pack_payload(battle, payload) if _payload_supported(payload) else None
         committed = acceleration._snapshot(battle)
-        if (after_anchor is None or type(payload) is not dict or not _payload_supported(payload)
+        if ((anchor_present and after_anchor is None) or type(payload) is not dict or not _payload_supported(payload)
                 or before is None or committed is None or not _payload_is_unshared(battle, payload)):
             return {"rejected": "payload"}
         # This documented cache is the sole allowed battle-side effect of a
@@ -299,9 +300,10 @@ def take_turn_result(battle, units, difficulty):
             coordinator.statistics["rejected"] += 1
             return None
         payload, statistics = _unpack_payload(battle, result["payload_data"]), dict(result["statistics"])
-        proposed_anchor = dict(result["anchor"])
+        anchor = result["anchor"]
+        proposed_anchor = None if anchor is None else dict(anchor)
         if (type(payload) is not dict or not _payload_supported(payload)
-                or _freeze_anchor(proposed_anchor) is None):
+                or (proposed_anchor is not None and _freeze_anchor(proposed_anchor) is None)):
             coordinator.statistics["rejected"] += 1
             return None
         # Validate the proposed cache's complete alias graph before reserving
@@ -310,7 +312,10 @@ def take_turn_result(battle, units, difficulty):
         present = "_army_anchor_cache" in battle.__dict__
         old_anchor = battle.__dict__.get("_army_anchor_cache")
         try:
-            battle._army_anchor_cache = proposed_anchor
+            if proposed_anchor is None:
+                battle.__dict__.pop("_army_anchor_cache", None)
+            else:
+                battle._army_anchor_cache = proposed_anchor
             proposed = acceleration._snapshot(battle)
         finally:
             if present:
@@ -333,7 +338,10 @@ def take_turn_result(battle, units, difficulty):
         coordinator.statistics["stale"] += 1
         return None
     # No fall back after reservation: that would consume the same IDs twice.
-    battle._army_anchor_cache = proposed_anchor
+    if proposed_anchor is None:
+        battle.__dict__.pop("_army_anchor_cache", None)
+    else:
+        battle._army_anchor_cache = proposed_anchor
     acceleration._last_statistics.set(statistics)
     coordinator.statistics["hits"] += 1
     coordinator.wave_hits += 1

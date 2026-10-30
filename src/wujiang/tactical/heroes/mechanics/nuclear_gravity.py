@@ -9,11 +9,12 @@ from wujiang.tactical.engine.core import DamageContext
 from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import is_mana_drain_immune
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import positions_to_dict
-from wujiang.tactical.heroes.next_five import remote_rectangle_patterns
+from wujiang.tactical.heroes.mechanics.next_five_effects import remote_rectangle_patterns
 from wujiang.tactical.prediction import direct_scoring
 from wujiang.tactical.prediction import random
 
@@ -24,6 +25,9 @@ def _area_hit_count(battle: Battle, target: HeroUnit, cells: list[Position]) -> 
 
 
 class NuclearMutationSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r12_effect_score(self)
+
     def __init__(self) -> None:
         super().__init__("nuclear_mutation", "核变", "普通技能：费 2 魔，选择远程 6*6 区域，造成当前攻击伤害。", mana_cost=2, target_mode="cell")
 
@@ -64,6 +68,11 @@ class NuclearMutationSkill(Skill):
 
 
 class GravityFieldSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float | None:
+        if direct_scoring():
+            return None
+        return context.r12_effect_score(self)
+
     def __init__(self) -> None:
         super().__init__("gravity_field", "重力场", "普通技能：3 轮一次；扔 3 次硬币决定范围，半破魔伤害，附带破魔吸魔。", cooldown_turns=3, target_mode="cell")
 

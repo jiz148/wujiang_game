@@ -14,9 +14,9 @@ from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import payload_target_unit
-from wujiang.tactical.heroes.next_five import apply_piercing_status_effect
-from wujiang.tactical.heroes.next_five import damage_followup_effect_applies
-from wujiang.tactical.heroes.next_five import remote_rectangle_patterns
+from wujiang.tactical.heroes.mechanics.next_five_effects import apply_piercing_status_effect
+from wujiang.tactical.heroes.mechanics.next_five_effects import damage_followup_effect_applies
+from wujiang.tactical.heroes.mechanics.next_five_effects import remote_rectangle_patterns
 
 
 class SkillDisabledStatus(StatusEffect):

@@ -855,6 +855,14 @@ class Skill(BattleComponent, ABC):
     def is_active(self) -> bool:
         return self.timing == "active"
 
+    def effective_skill_for_payload(self, battle: "Battle", actor: "Unit", payload: dict[str, Any]) -> "Skill":
+        """Return the skill whose timing and effects this payload actually uses."""
+        return self
+
+    def directly_damages_on_use(self) -> Optional[bool]:
+        """Declare direct damage when a skill's effect is queued by another object."""
+        return None
+
     @property
     def is_reaction(self) -> bool:
         return self.timing in {"passive", "instant", "reaction"}

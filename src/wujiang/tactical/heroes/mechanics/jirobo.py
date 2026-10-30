@@ -10,10 +10,11 @@ from wujiang.tactical.engine.core import DamageContext
 from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import Trait
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import StatModifierStatus
 from wujiang.tactical.heroes.common import payload_position
 from wujiang.tactical.heroes.common import payload_target_unit
-from wujiang.tactical.heroes.next_five import damage_followup_effect_applies
+from wujiang.tactical.heroes.mechanics.next_five_effects import damage_followup_effect_applies
 
 
 class JiroboAfterAttackStatus(StatModifierStatus):
@@ -122,6 +123,9 @@ class JiroboFollowStepSkill(Skill):
 
 
 class DevourSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r17_effect_score(self)
+
     def __init__(self) -> None:
         super().__init__(
             "undead_boy_devour",

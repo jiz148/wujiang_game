@@ -10,13 +10,14 @@ from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Trait
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import FlagStatus
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import positions_to_dict
 from wujiang.tactical.heroes.mechanics.fusion_rush import FusionCircleAttackTrait
 from wujiang.tactical.heroes.mechanics.h1_line_damage import H1LineDamageSkill
-from wujiang.tactical.heroes.next_five import damage_followup_effect_applies
+from wujiang.tactical.heroes.mechanics.next_five_effects import damage_followup_effect_applies
 
 
 class BlindEvasionAttackResetTrait(Trait):
@@ -76,6 +77,9 @@ class ThorLineDamageSkill(H1LineDamageSkill):
     excludes_allies_from_effect = True
     target_cells_are_geometry_only = True
 
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r18_effect_score(self)
+
     def affected_units(self, battle: Battle, actor: HeroUnit, cells: list[Position]) -> list[HeroUnit]:
         return [unit for unit in battle.effect_units_at_cells(cells) if unit.player_id != actor.player_id]
 
@@ -96,6 +100,15 @@ class ThorLineDamageSkill(H1LineDamageSkill):
 
 
 class ThorHeavyHammerSkill(ThorLineDamageSkill):
+    def ai_reaction_mana_pressure(self, battle: Battle, queued: Any) -> float:
+        pressure = 0.0
+        for unit_id in queued.target_unit_ids:
+            target = battle.get_unit(unit_id)
+            paid = [target.get_skill(option.action_code).mana_cost_for_payload(battle, target, {})
+                    for option in battle.available_reaction_options(target, queued) if option.action_type == "skill"]
+            pressure += max((min(25.0, cost * 16.0) for cost in paid if cost > 0), default=0.0)
+        return pressure
+
     def __init__(self) -> None:
         super().__init__(
             "thor_heavy_hammer",

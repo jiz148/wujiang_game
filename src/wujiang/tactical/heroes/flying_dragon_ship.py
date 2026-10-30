@@ -8,11 +8,14 @@ from wujiang.tactical.engine.core import (
     Skill, Stats, StatusEffect, Trait, Unit,
 )
 from wujiang.tactical.heroes.base import AbstractHero
+from wujiang.tactical.heroes.ai_policy import (AIReactionScoreContext,
+    AISkillScoreContext, HeroAIPolicy)
 from wujiang.tactical.heroes.common import (
     FlyingTrait, HealSkill, MagicImmunityStatus, StatModifierStatus,
     ensure_distance, payload_target_unit, positions_to_dict,
 )
-from wujiang.tactical.heroes.next_five import RecoverManaSkill, damage_followup_effect_applies
+from wujiang.tactical.heroes.mechanics.blood_eater import RecoverManaSkill
+from wujiang.tactical.heroes.mechanics.next_five_effects import damage_followup_effect_applies
 
 
 SHIP_CODE = "flying_dragon_ship_atlanta"
@@ -23,6 +26,20 @@ def allied_ship(battle: Battle, player_id: int) -> Unit | None:
     return next((unit for unit in battle.all_units()
                  if unit.hero_code == SHIP_CODE and unit.player_id == player_id
                  and unit.alive and not unit.banished and unit.position is not None), None)
+
+
+class ShipCrewMovePolicy(HeroAIPolicy):
+    """Prefer boarding the allied ship before the crew is mounted."""
+
+    def __init__(self, boarding_bonus: float) -> None:
+        self.boarding_bonus = boarding_bonus
+
+    def early_move_score_bonus(self, battle: Battle, actor: Unit,
+                               destination: Position) -> float:
+        if battle.mounted_unit_for(actor) is not None:
+            return 0.0
+        ship = allied_ship(battle, actor.player_id)
+        return self.boarding_bonus if ship is not None and destination in battle.unit_cells(ship) else 0.0
 
 
 class ShipCrewAttackTrait(Trait):
@@ -102,6 +119,18 @@ _SHIP_PLACEMENT_PROBES = {player_id: FlyingDragonShip(player_id) for player_id i
 
 
 class ShipBorrowedSkill(Skill):
+    def ai_reaction_score(self, context: AIReactionScoreContext) -> float | None:
+        if self.source_skill.code not in {"protection", "light_wall"}:
+            return None
+        if context.queued_action.payload.get("ignore_shield"):
+            return -1000.0
+        target = context.primary_target() or context.battle.reaction_proxy_target(
+            context.actor, context.queued_action)
+        if target is None or target.player_id != context.actor.player_id:
+            return -1000.0
+        threat = context.threat(target)
+        return threat + 24.0 if threat > 0 else -1000.0
+
     def __init__(self, rider_id: str, source_skill: Skill) -> None:
         super().__init__(
             f"ship_borrow__{rider_id}__{source_skill.code}",
@@ -196,6 +225,18 @@ class ShipBorrowedSkill(Skill):
 
 
 class FlyingDragonShipSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        if allied_ship(battle, actor.player_id) is not None:
+            return -1000.0
+        destination = context.destination()
+        if destination is None:
+            return -1000.0
+        crew = [unit for unit in battle.player_units(actor.player_id)
+                if unit.hero_code in {"excel_r328", "excel_r329"} and unit.alive and unit.position is not None]
+        access = sum(max(0, 4 - battle.unit_distance_to_cell(unit, destination)) * 9.0 for unit in crew)
+        return 30.0 + access + context.summon_position_score(destination) * 0.35
+
     def __init__(self) -> None:
         super().__init__("flying_dragon_ship", "飞龙船。亚特兰大",
                          "0魔大招、每场一次；在身边完整合法的2×3区域召唤己方唯一飞行船。",
@@ -261,6 +302,21 @@ class DepartureMagicImmunity(MagicImmunityStatus):
 class DepartureSkill(Skill):
     directions = ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1))
 
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        ship = allied_ship(battle, actor.player_id)
+        destination = context.destination()
+        if ship is None or destination is None or ship.position is None:
+            return -1000.0
+        enemies = list(context.hostile_units())
+        if not enemies:
+            return -1000.0
+        before = min(battle.distance_between_units(ship, enemy) for enemy in enemies)
+        after = min(context.distance_to_position(enemy, destination) for enemy in enemies)
+        score = (before - after) * 8.0 + (35.0 if ship.current_hp <= 0.5 else 12.0)
+        score += len(battle.riders_for(ship)) * 8.0
+        return score if score > 22.0 else -1000.0
+
     def __init__(self) -> None:
         super().__init__("departure_signal", "启航号", "3轮一次；己方飞龙船直线恰移5格，魔免至团长下一本人轮末。",
                          cooldown_turns=3, target_mode="cell")
@@ -317,6 +373,17 @@ class DepartureSkill(Skill):
 
 
 class AddManaSkill(RecoverManaSkill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        target = battle.units.get(str(payload.get("target_unit_id") or ""))
+        if target is None or target.player_id != actor.player_id:
+            return -1000.0
+        cost = actor.get_skill(str(payload.get("skill_code") or self.code)).mana_cost_for_payload(
+            battle, actor, payload)
+        room = max(0.0, target.max_mana() - target.current_mana + (cost if target is actor else 0))
+        gain = min(1.0, room)
+        return gain * 48.0 - cost * 18.0 if gain > (cost if target is actor else 0) else -1000.0
+
     def __init__(self) -> None:
         super().__init__()
         self.code = "add_mana"
@@ -348,12 +415,25 @@ class DefenseOneStatus(StatModifierStatus):
 
 
 class DefenseOneSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        target = battle.units.get(str(context.payload.get("target_unit_id") or ""))
+        if (target is None or target.player_id != actor.player_id
+                or any(status.name == "守+1" and getattr(status, "source_id", None) == actor.unit_id
+                       for status in target.statuses)):
+            return -1000.0
+        threatened = any(battle.distance_between_units(target, enemy)
+                         <= enemy.normal_move_distance() + enemy.targeting_range()
+                         for enemy in context.hostile_units())
+        return 26.0 + (22.0 if threatened else 0.0)
+
     def __init__(self) -> None:
         super().__init__("defense_one", "守+1", "0魔；范内直线单体守+1，持续该单位两个本人回合。", target_mode="unit")
 
     def execute(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
         target = battle.effect_recipient(payload_target_unit(battle, payload))
-        battle.require_unit_target_in_range_and_line(actor, target, actor.targeting_range())
+        battle.require_unit_target_in_range_and_line(
+            actor, target, actor.targeting_range(), action_name=self.name)
         ctx = battle.validate_target(actor, target, action_name=self.name, is_skill=True,
                                      is_hostile=target.player_id != actor.player_id)
         if ctx.cancelled:
@@ -379,6 +459,18 @@ class DefenseOneSkill(Skill):
 
 
 class SilverSignalFlareSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        targets = [unit for unit in self.beneficiaries(battle, actor)
+                   if not unit.has_status("银制信号弹攻势")]
+        beneficiaries = [unit for unit in targets if not unit.is_clone
+                         and battle.unit_belongs_to_current_turn(unit)
+                         and unit.attacks_used < unit.attack_actions_per_turn()]
+        if not beneficiaries:
+            return -1000.0
+        collateral = sum(1 for unit in targets if unit.is_clone and not unit.direct_effects_blocked())
+        return len(beneficiaries) * 25.0 - 12.0 - collateral * 80.0
+
     def __init__(self) -> None:
         super().__init__("silver_signal_flare", "银制的信号弹",
                          "费0.5魔，每本人轮一次；本人5×5内同队名字含骷髅飞盗团者本回合攻+1，不叠加。",
@@ -413,7 +505,7 @@ class RutoMovementLock(StatusEffect):
         self.owner_ends = 0
 
     def blocks_skill_use(self, battle: Battle, actor: Unit, skill: Skill) -> tuple[bool, str]:
-        from wujiang.tactical.heroes.excel_roster import skill_has_movement_effect
+        from wujiang.tactical.heroes.mechanics.true_blade_bird import skill_has_movement_effect
         if actor is self.owner and skill_has_movement_effect(skill):
             return True, "被鲁托击中，下一个本人回合不能使用位移技能。"
         return False, ""

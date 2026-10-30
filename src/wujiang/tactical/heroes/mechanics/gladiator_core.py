@@ -12,6 +12,7 @@ from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.engine.core import Unit
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import LightWallSkill
 from wujiang.tactical.heroes.common import StatModifierStatus
 from wujiang.tactical.heroes.common import ensure_ally
@@ -21,9 +22,9 @@ from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import payload_target_unit
 from wujiang.tactical.heroes.common import positions_to_dict
 from wujiang.tactical.heroes.mechanics.h1_line_damage import H1LineDamageSkill
-from wujiang.tactical.heroes.next_five import ALL_DIRECTIONS
-from wujiang.tactical.heroes.next_five import RemoteDragonBreathSkill
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS
+from wujiang.tactical.heroes.mechanics.dragon_breath import RemoteDragonBreathSkill
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 
 def gladiator_swap_destinations(battle: Battle, actor: Unit, ally: Unit, *, via_skill: bool = True) -> tuple[Position, Position] | None:
@@ -79,6 +80,19 @@ def gladiator_swap_destinations(battle: Battle, actor: Unit, ally: Unit, *, via_
 
 class WillowExchangeSkill(Skill):
     resolves_from_current_position = True
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float | None:
+        actor, payload = context.actor, context.payload
+        if actor.hero_code != "excel_r304":
+            return None
+        target = context.battle.units.get(str(payload.get("target_unit_id") or ""))
+        if target is None or target is actor or target.skill_non_damage_effects_blocked():
+            return -1000.0
+        value = context.r17_effect_score(self)
+        if value <= -1000.0:
+            return value
+        # The once-per-battle exchange needs an immediate rescue or position gain.
+        return value - 55.0
 
     def __init__(self) -> None:
         super().__init__("exchange", "交换", "一场一次；破魔并与范内直线目标交换位置，多格身体取双方最近合法落点。",
@@ -258,6 +272,9 @@ def gladiator_swap(battle: Battle, actor: Unit, ally: Unit, *, skill_code: str, 
 
 
 class GladiatorSwapSkill(H1LineDamageSkill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r17_effect_score(self)
+
     target_cells_are_geometry_only = True
 
     def __init__(self, *, code: str, name: str, length: int, requires_damage: bool, pierces: bool) -> None:
@@ -386,6 +403,9 @@ class GladiatorGaleSkill(GladiatorSwapSkill):
 
 
 class WaterWaveCannonSkill(RemoteDragonBreathSkill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r18_effect_score(self)
+
     def __init__(self) -> None:
         super().__init__()
         self.code = "water_wave_cannon"
@@ -406,6 +426,9 @@ class GladiatorSoulStatus(StatModifierStatus):
 
 
 class GladiatorSoulSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.paid_skill_value()
+
     excludes_caster_from_effect = True
 
     def __init__(self) -> None:

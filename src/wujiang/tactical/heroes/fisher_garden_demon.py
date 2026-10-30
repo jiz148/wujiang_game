@@ -11,13 +11,108 @@ from wujiang.tactical.engine.core import (
     HeroUnit, Position, Skill, Trait, Unit,
 )
 from wujiang.tactical.heroes.common import InvincibleUntilActionStatus
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext, HeroAIPolicy
 from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_hero_kit
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
+from wujiang.tactical.rooms.ai_targets import living_hostile_combatants
 
 
 def _outer_ring(battle: Battle, actor: Unit) -> list[Position]:
     body = set(battle.unit_cells(actor))
     return [cell for cell in square_around_cells(battle, body, radius=1) if cell not in body]
+
+
+class FisherAttackPolicy(HeroAIPolicy):
+    contextual_skill_codes = frozenset({"gale_halberd"})
+
+    def contextual_skill_score(self, context: AISkillScoreContext) -> float | None:
+        skill = context.skill("gale_halberd")
+        enemies = [unit for unit in context.effect_units(skill)
+                   if unit.player_id != context.actor.player_id]
+        if not enemies:
+            return -1000.0
+        score = context.damage_score(skill)
+        # A reset is worth most after spending attacks, and only if another
+        # attack can be used this turn. The cell still needs real impact.
+        if context.actor.attacks_used > 0:
+            score += min(context.actor.attacks_used, 3) * 46.0
+        return score - 16.0
+
+    def priority_skill_score(self, battle: Battle, actor: Unit, code: str,
+                             payload: dict) -> float | None:
+        if code != "fisher_stealth":
+            return None
+        if actor.is_stealthed():
+            return -1000.0
+        threats = [enemy for enemy in living_hostile_combatants(battle, actor.player_id)
+                   if enemy.position is not None and battle.distance_between_units(enemy, actor)
+                   <= enemy.normal_move_distance() + enemy.targeting_range()]
+        return (30.0 + len(threats) * 20.0 + (24.0 if actor.current_hp <= 0.5 else 0.0)
+                if threats else -1000.0)
+
+    def attack_followup_bonus(self, battle: Battle, actor: Unit, target: Unit,
+                              payload: dict, expected_damage: float) -> float:
+        if expected_damage <= 0:
+            return 0.0
+        # A completed attack may grant a public coin; only a real kill grows
+        # future attack quotas. Do not inspect the live coin outcome here.
+        bonus = 18.0
+        if expected_damage >= target.current_hp - 1e-9:
+            if isinstance(target, HeroUnit) and not target.is_summon and not target.is_clone and not is_army_soldier(target):
+                bonus += 75.0
+            if battle.unit_in_weather("暴雨", actor) or battle.unit_in_weather("大海", actor):
+                bonus += 55.0
+        return bonus
+
+
+class GardenDemonAIPolicy(HeroAIPolicy):
+    contextual_skill_codes = frozenset({"black_night_shadow"})
+
+    def contextual_skill_score(self, context: AISkillScoreContext) -> float | None:
+        actor = context.actor
+        skill = context.skill("black_night_shadow")
+        if forecasting_active() and not direct_scoring():
+            return context.r18_effect_score(skill)
+        score = 0.0
+        for target in context.effect_units(skill):
+            if target.magic_immunity:
+                continue
+            per_segment = context.battle.damage_rule.calculate_damage(2, target.stat("defense"))
+            if per_segment <= 0:
+                continue
+            expected_hits = max(0.0, 3.5 - target.total_shields())
+            value = min(target.current_hp, per_segment * expected_hits) * 100.0
+            if value <= 0:
+                continue
+            if target.player_id != actor.player_id:
+                score += value + context.hostile_value(target) * 0.1 * min(1.0, value / 50.0)
+            else:
+                score -= value * 1.65 + context.friendly_penalty(target)
+        return score - 20.0 if score > 20.0 else -1000.0
+
+    def priority_skill_score(self, battle: Battle, actor: Unit, code: str,
+                             payload: dict) -> float | None:
+        if code == "black_transformation":
+            existing = next((effect for effect in battle.field_effects
+                             if isinstance(effect, BlackTransformationField)
+                             and effect.source_unit_id == actor.unit_id), None)
+            if existing is not None and existing.remaining_owner_ends >= 2:
+                return -1000.0
+            enemies = [enemy for enemy in living_hostile_combatants(battle, actor.player_id)
+                       if enemy.position is not None and battle.distance_between_units(enemy, actor) <= 3
+                       and not enemy.magic_immunity and not enemy.skill_non_damage_effects_blocked()]
+            if not enemies:
+                return -1000.0
+            penalty = min(actor.current_mana, max(enemy.stat("speed") - 1 for enemy in enemies))
+            return 26.0 + 21.0 * min(3, len(enemies)) + 12.0 * penalty - (35.0 if existing else 0.0)
+        if code == "enter_darkness":
+            if actor.mana_points >= 3:
+                return -1000.0
+            nearby = any(enemy.position is not None
+                         and battle.distance_between_units(enemy, actor) <= 3 + actor.normal_move_distance()
+                         for enemy in living_hostile_combatants(battle, actor.player_id))
+            return 50.0 if nearby else -1000.0
+        return None
 
 
 class FisherGrowthTrait(Trait):
@@ -365,6 +460,7 @@ class EnterDarknessSkill(Skill):
 
 LEGENDARY_FISHER_KIT = register_hero_kit(FragmentMappedHeroKit(
     "excel_r320",
+    ai_policy=FisherAttackPolicy(),
     skills={"神风之戟": GaleHalberdSkill, "潜行": FisherStealthSkill},
     traits={fragment: FisherGrowthTrait for fragment in (
         "此单位攻击后有1/2几率本回合攻击次数+1",
@@ -377,6 +473,7 @@ LEGENDARY_FISHER_KIT = register_hero_kit(FragmentMappedHeroKit(
 
 GARDEN_DEMON_KIT = register_hero_kit(FragmentMappedHeroKit(
     "excel_r321",
+    ai_policy=GardenDemonAIPolicy(),
     skills={"黑魔化": BlackTransformationSkill, "黑夜魔影": BlackNightShadowSkill, "入魔": EnterDarknessSkill},
     traits={"周围7*7内每有对方单位使用技能时血+1/4，魔+2，魔力点+1": GardenSkillFeastTrait},
 ))

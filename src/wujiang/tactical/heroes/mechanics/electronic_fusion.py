@@ -10,14 +10,15 @@ from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import Unit
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import FlyingTrait
 from wujiang.tactical.heroes.common import StatModifierStatus
 from wujiang.tactical.heroes.common import payload_position
 from wujiang.tactical.heroes.common import payload_target_unit
 from wujiang.tactical.heroes.common import positions_to_dict
 from wujiang.tactical.heroes.mechanics.lao_mage import MageCloakEquippedStatus
-from wujiang.tactical.heroes.next_five import PassThroughMovementTrait
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.soul_wraith import PassThroughMovementTrait
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 
 class ElectronicFusionStatus(StatModifierStatus):
@@ -77,6 +78,36 @@ class ElectronicFusionStatus(StatModifierStatus):
 
 
 class ElectronicFusionSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        try:
+            host = battle.get_unit(str(payload["target_unit_id"]))
+            if host not in self.valid_hosts(battle, actor):
+                return -1000.0
+        except (ActionError, KeyError, TypeError, ValueError):
+            return -1000.0
+        if host.current_hp <= 0.25:
+            return -1000.0
+        with context.probe_rollback():
+            before = context.action_state()
+            try:
+                self.execute(battle, actor, payload)
+            except (ActionError, KeyError, TypeError, ValueError):
+                return -1000.0
+            if getattr(actor, "equipped_to_id", None) != host.unit_id:
+                return -1000.0
+            benefit = context.action_delta(before) + 12.0
+        host_threat = max((enemy.stat("attack") - host.stat("defense")
+                           for enemy in context.hostile_units()
+                           if battle.distance_between_units(host, enemy)
+                           <= enemy.normal_move_distance() + enemy.targeting_range()),
+                          default=-10.0)
+        if host_threat >= 0 and host.current_hp <= 0.5:
+            benefit -= 45.0
+        if actor.attacks_used < actor.attack_actions_per_turn():
+            benefit -= max(0.0, context.best_attack_score()) * 0.6
+        return benefit - 47.0
+
     def __init__(self) -> None:
         super().__init__("electronic_fusion", "电子融合", "装备到范内一名己方电子系武将身上。", target_mode="unit")
 
@@ -122,6 +153,26 @@ class ElectronicFusionSkill(Skill):
 
 class ElectronicFusionShotSkill(Skill):
     target_cells_are_geometry_only = True
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        actor, battle, payload = context.actor, context.battle, context.payload
+        try:
+            cell = self.selected_cell(payload)
+            target = next((unit for unit in battle.effect_units_at_cells([cell])
+                           if unit.player_id != actor.player_id), None)
+            if target is None or str(payload.get("choice_code") or "") not in self.available_stats(actor):
+                return -1000.0
+        except (ActionError, KeyError, TypeError, ValueError):
+            return -1000.0
+        value = context.paid_skill_value()
+        if value <= 0:
+            return -1000.0
+        stat = str(payload["choice_code"])
+        future_cost = {"attack": 13.0, "defense": 16.0, "speed": 12.0,
+                       "attack_range": 31.0, "mana": 30.0}[stat]
+        if actor.stat(stat) <= (1 if stat != "mana" else 0) + 1:
+            future_cost += 12.0
+        return value - future_cost
 
     def __init__(self, wing_id: str) -> None:
         self.wing_id = wing_id
@@ -209,6 +260,24 @@ class ElectronicFusionShotSkill(Skill):
 
 
 class ElectronicFusionDetachSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        wing = battle.units.get(self.wing_id)
+        if wing is None or not wing.alive or actor.current_hp > 0.5:
+            return -1000.0
+        try:
+            cell = Position(int(payload["x"]), int(payload["y"]))
+            if cell not in self.available_cells(battle, actor):
+                return -1000.0
+        except (ActionError, KeyError, TypeError, ValueError):
+            return -1000.0
+        threats = [enemy for enemy in context.hostile_units()
+                   if context.distance_to_position(enemy, cell)
+                   <= enemy.normal_move_distance() + enemy.targeting_range()]
+        if not threats:
+            return 28.0 + (0.5 - actor.current_hp) * 70.0
+        return -1000.0
+
     def __init__(self, wing_id: str) -> None:
         self.wing_id = wing_id
         super().__init__(f"electronic_unfuse__{wing_id}", "解除电子融合", "将原电子翼放到宿主身体外邻合法空格。", target_mode="cell")
@@ -251,6 +320,24 @@ class ElectronicFusionDetachSkill(Skill):
 
 
 class ElectronicRepairSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        try:
+            target = self.candidate_by_payload(battle, payload)
+            destination = Position(int(payload["x"]), int(payload["y"]))
+        except (ActionError, KeyError, TypeError, ValueError):
+            return -1000.0
+        if target.player_id != actor.player_id or destination not in self.legal_destinations(battle, actor, target):
+            return -1000.0
+        with context.probe_rollback():
+            try:
+                self.execute(battle, actor, payload)
+            except (ActionError, KeyError, TypeError, ValueError):
+                return -1000.0
+            if not target.alive or target.position != destination:
+                return -1000.0
+            return 90.0 + 45.0 * target.current_hp + context.position_value(target) * 0.8
+
     def __init__(self) -> None:
         super().__init__("electronic_repair", "电子维修",
                          "每回合一次，在自身周围合法位置以满生命和满魔力修复一名已被破坏的机甲武将。",

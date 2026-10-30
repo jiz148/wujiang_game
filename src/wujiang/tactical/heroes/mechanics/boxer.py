@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+if TYPE_CHECKING:
+    from wujiang.tactical.heroes.ai_policy import AIReactionScoreContext
 
 from wujiang.tactical.engine.core import (
     ActionError, Battle, DamageContext, HeroUnit, Position, Skill,
@@ -12,7 +14,7 @@ from wujiang.tactical.heroes.common import positions_to_dict
 from wujiang.tactical.heroes.mechanics.cat_taunt import (
     RequiredAttackStatus, replace_required_attack_status,
 )
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 class BoxerTauntStatus(RequiredAttackStatus):
     def __init__(self, boxer_unit_id: str) -> None:
@@ -96,6 +98,8 @@ class RingTauntSkill(Skill):
 
 
 class BoxerBlockCounterSkill(Skill):
+    ai_reaction_score_phase = "after_hidden_source"
+
     def __init__(self) -> None:
         super().__init__(
             "boxer_block_counter",
@@ -104,6 +108,20 @@ class BoxerBlockCounterSkill(Skill):
             timing="passive",
             target_mode="self",
         )
+
+    def ai_reaction_score(self, context: AIReactionScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        attacker = battle.get_unit(context.queued_action.actor_id)
+        threat = context.threat(context.proxy_target())
+        expected = context.damage(attacker, battle.basic_attack_preview_power(actor))
+        prevention = context.temporary_defense_prevention()
+        missing_hp = max(0.0, actor.max_health - actor.current_hp)
+        lifesteal_value = min(0.25, missing_hp) * 100.0 if expected > 0 else 0.0
+        score = threat + prevention + expected * 95.0 + lifesteal_value + 36.0
+        if expected >= attacker.current_hp - 1e-9:
+            score += 90.0
+        score -= context.retaliation_penalty([attacker])
+        return score
 
     def can_react_to(self, battle: Battle, actor: HeroUnit, queued_action: Any) -> tuple[bool, str]:
         ok, reason = super().can_react_to(battle, actor, queued_action)

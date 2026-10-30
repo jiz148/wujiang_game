@@ -8,9 +8,11 @@ from wujiang.tactical.engine.core import (
     Skill, Stats, StatusEffect, Trait, Unit,
 )
 from wujiang.tactical.heroes.base import AbstractHero
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import FlyingTrait, StatModifierStatus
 from wujiang.tactical.heroes.hero_kit import HeroKit, register_hero_kit
-from wujiang.tactical.heroes.next_five import AttackManaDrainTrait, PassThroughMovementTrait, apply_piercing_status_effect
+from wujiang.tactical.heroes.mechanics.next_five_effects import apply_piercing_status_effect
+from wujiang.tactical.heroes.mechanics.soul_wraith import AttackManaDrainTrait, PassThroughMovementTrait
 
 
 class WyvernSlowStatus(StatModifierStatus):
@@ -183,6 +185,26 @@ class NightSkyPartyStatus(StatusEffect):
 
 
 class NightSkyPartySkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, rider = context.battle, context.actor
+        if rider.position is None or rider.has_status("夜空派对"):
+            return -1000.0
+        mount = battle.mounted_unit_for(rider)
+        if mount is None or mount.position is None:
+            return -1000.0
+        combat = next((trait for trait in rider.traits if trait.name == "翼龙骑手追击"), None)
+        locked = set(getattr(combat, "attacked_ids", ()))
+        target_value = 0.0
+        for enemy in context.hostile_units():
+            if enemy.position is None or battle.distance_between_units(mount, enemy) > 3:
+                continue
+            base = min(enemy.current_hp, context.estimate_damage(enemy, rider.stat("attack"))) * 90.0
+            if enemy.unit_id in locked:
+                target_value = max(target_value, base + 20.0)
+            elif mount.remaining_normal_move_distance(battle) > 0:
+                target_value = max(target_value, base * 0.45)
+        return target_value - 24.0 if target_value > 20.0 else -1000.0
+
     def __init__(self) -> None:
         super().__init__("night_sky_party", "夜空派对", "三本人轮一次，至下个本人轮结束前取消同目标每轮一次限制。",
                          cooldown_turns=3, target_mode="self")

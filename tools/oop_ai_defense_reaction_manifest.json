@@ -1,0 +1,7 @@
+[
+  {"code": "excel_r256", "test_class": "NewBatch256257GiantShieldBehaviorTests"},
+  {"code": "excel_r259", "test_class": "NewBatch259260KnightKingBehaviorTests"},
+  {"code": "excel_r172", "test_class": "DevelopedHeroReviewR19BehaviorTests"},
+  {"code": "elite_soldier", "test_class": "HeroBatchH12AIDecisionTests"},
+  {"code": "erasure_apostle", "test_class": "DevelopedHeroReviewR06BehaviorTests"}
+]

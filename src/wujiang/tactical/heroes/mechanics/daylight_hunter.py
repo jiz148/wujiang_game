@@ -4,8 +4,56 @@ from __future__ import annotations
 
 from typing import Any
 
-from wujiang.tactical.engine.core import Battle, DamageContext, Skill, StatusEffect, Trait, Unit
-from wujiang.tactical.heroes.next_five import apply_piercing_status_effect, damage_followup_effect_applies
+from wujiang.tactical.engine.core import Battle, DamageContext, Position, Skill, StatusEffect, Trait, Unit
+from wujiang.tactical.heroes.ai_policy import HeroAIPolicy
+from wujiang.tactical.heroes.mechanics.next_five_effects import (
+    apply_piercing_status_effect,
+    damage_followup_effect_applies,
+)
+
+
+class DaylightHunterAIPolicy(HeroAIPolicy):
+    """Chase the locked target and value repeated attacks on that target."""
+
+    def focused_move_shortlist(self, battle: Battle, actor: Unit,
+                               cells: list[Position]) -> list[Position] | None:
+        hunt = next((trait for trait in actor.traits if trait.name == "昼行追猎"), None)
+        quarry_id = (getattr(hunt, "current_target_id", None)
+                     or getattr(hunt, "previous_target_id", None))
+        quarry = battle.units.get(quarry_id) if quarry_id else None
+        if quarry is None or not quarry.alive or quarry.position is None or quarry.banished:
+            return None
+        return sorted(cells, key=lambda cell: battle.unit_distance_to_cell(quarry, cell))[:6]
+
+    def post_forced_move_score_bonus(self, battle: Battle, actor: Unit,
+                                    destination: Position) -> float:
+        hunt = next((trait for trait in actor.traits if trait.name == "昼行追猎"), None)
+        preferred_id = (getattr(hunt, "current_target_id", None)
+                        or getattr(hunt, "previous_target_id", None))
+        preferred = battle.units.get(preferred_id) if preferred_id else None
+        if preferred is None or not preferred.alive or preferred.position is None or preferred.banished:
+            return 0.0
+        distance = battle.unit_distance_to_cell(preferred, destination)
+        return max(0.0, actor.targeting_range() + 1.0 - distance) * (
+            11.0 + min(5, actor.attack_actions_per_turn()) * 3.0)
+
+    def early_attack_synergy_bonus(self, battle: Battle, actor: Unit,
+                                   target: Unit, damage: float) -> float:
+        score = 0.0
+        hunt = next((trait for trait in actor.traits if trait.name == "昼行追猎"), None)
+        if hunt is not None:
+            if not getattr(hunt, "current_target_id", None):
+                if target.unit_id == getattr(hunt, "previous_target_id", None):
+                    score += min(5, getattr(hunt, "previous_bonus", 0) + 1) * 27.0
+                elif getattr(hunt, "previous_target_id", None):
+                    score -= min(4, getattr(hunt, "previous_bonus", 0) + 1) * 14.0
+            if (target.alive and not target.direct_effects_blocked()
+                    and not target.has_status("昼行破魔封技")):
+                active_count = sum(skill.timing == "active" for skill in target.skills)
+                score += min(4, active_count) * 15.0
+        if damage > 0 and not actor.cannot_heal:
+            score += min(0.25, max(0.0, actor.max_health - actor.current_hp)) * 140.0
+        return score
 
 
 class DaylightActiveSealStatus(StatusEffect):

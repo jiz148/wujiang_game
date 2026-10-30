@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+from copy import deepcopy
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any
+if TYPE_CHECKING:
+    from wujiang.tactical.heroes.ai_policy import AIReactionScoreContext
+from wujiang.tactical.rooms.ai_probe import ai_probe_rollback
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import DamageContext
@@ -15,7 +20,7 @@ from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.heroes.common import payload_target_unit
 from wujiang.tactical.heroes.common import payload_target_units
 from wujiang.tactical.heroes.common import positions_to_dict
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 
 class WindWallCounterStatus(StatusEffect):
@@ -150,6 +155,8 @@ class NatsumeWindWordSkill(Skill):
 
 
 class NatsumeWindWallSkill(Skill):
+    ai_reaction_score_phase = "after_hidden_source"
+
     def __init__(self) -> None:
         super().__init__(
             "natsume_wind_wall",
@@ -252,6 +259,41 @@ class NatsumeWindWallSkill(Skill):
             "requires_target": True,
             "selection": {"mode": "multi_unit", "min_targets": 1, "max_targets": 1},
         }
+
+    def ai_reaction_score(self, context: AIReactionScoreContext) -> float:
+        battle, actor, queued_action, payload = (context.battle, context.actor,
+                                                  context.queued_action, context.payload)
+        if not self.can_react_with_payload(battle, actor, queued_action, payload)[0]:
+            return -1000.0
+        ids = payload.get("target_unit_ids") or [payload.get("target_unit_id")]
+        target = battle.units.get(str(ids[0] or ""))
+        if target is None:
+            targets = self._selectable_targets(battle, actor, queued_action)
+            target = targets[0] if len(targets) == 1 else None
+        if target is None or target.unit_id in context.shield_protected_ids():
+            return -1000.0
+        values = []
+        for protected in (False, True):
+            with ai_probe_rollback(battle):
+                before = context.outcome_snapshot()
+                was_banished, previous_position = target.banished, target.position
+                danger = context.unit_danger(target)
+                if protected:
+                    target.add_status(WindWallBlockStatus(), source=actor)
+                battle.resolve_queued_action(replace(queued_action, payload=deepcopy(queued_action.payload)))
+                value = context.outcome_value(before)
+                for unit, _, _, _, names, _ in before.values():
+                    if unit.player_id == actor.player_id:
+                        current = {status.name for status in unit.statuses if status.name != "风壁"}
+                        value -= len(current - names) * 45.0
+                        value -= len(names - current) * 25.0
+                if not was_banished and target.banished:
+                    value -= 110.0
+                if target.alive and target.position != previous_position:
+                    value += danger - context.unit_danger(target)
+                values.append(value)
+        gain = values[1] - values[0]
+        return gain - 18.0 if gain > 0 else -1000.0
 
 
 class NatsumeDispelSkill(Skill):

@@ -1,6 +1,7 @@
 """Source-preserving object assembly for excel_r247 / 地狱的术士。SNOW."""
 
 from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_hero_kit
+from wujiang.tactical.heroes.ai_policy import PaidReactionAIPolicy
 from wujiang.tactical.heroes.mechanics.hell_core import HellWallSkill
 from wujiang.tactical.heroes.mechanics.hell_dog_hunter import (
     HellDogSkill,
@@ -12,6 +13,7 @@ from wujiang.tactical.heroes.mechanics.hell_dog_hunter import (
 def install(r) -> None:
     register_hero_kit(FragmentMappedHeroKit(
         "excel_r247",
+        ai_policy=PaidReactionAIPolicy({"hell_wall", "hell_wall_free"}, multi_target=True),
         skills={
             "[1地狱犬": HellDogSkill,
             "魔墙": HellWallSkill,

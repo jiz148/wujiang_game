@@ -14,13 +14,14 @@ from wujiang.tactical.engine.core import TargetContext
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.engine.core import Unit
 from wujiang.tactical.heroes.base import AbstractHero
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import KnockbackSkill
 from wujiang.tactical.heroes.common import LightWallSkill
 from wujiang.tactical.heroes.common import PierceSkill
 from wujiang.tactical.heroes.common import payload_target_unit
 from wujiang.tactical.heroes.common import positions_to_dict
 from wujiang.tactical.heroes.mechanics.foundation import RemotePierceSkill
-from wujiang.tactical.heroes.next_five import RemoteDragonBreathSkill
+from wujiang.tactical.heroes.mechanics.dragon_breath import RemoteDragonBreathSkill
 
 
 class HellSpearSkill(PierceSkill):
@@ -83,6 +84,9 @@ class HellPressureSkill(KnockbackSkill):
 
 
 class HellOrbSkill(RemoteDragonBreathSkill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r18_effect_score(self)
+
     def __init__(self, *, free: bool = False) -> None:
         super().__init__()
         self.free = free
@@ -122,6 +126,9 @@ class HellWallSkill(LightWallSkill):
 
 class HellShuffleSkill(Skill):
     requires_direct_unit_target_line = False
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.hell_shuffle_score()
 
     def __init__(self) -> None:
         super().__init__("hell_shuffle", "地狱洗牌",

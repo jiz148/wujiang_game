@@ -27,10 +27,40 @@ from wujiang.tactical.prediction import (ForecastRandom, forecasting_active, not
 # A later engine/trait edit disables this specialization until reviewed again.
 # Normalize CRLF so checkout line endings do not change the contract.
 _SOURCES = {
-    "wujiang.tactical.engine.core": "2067df6bd62d34521c495342219cd009b8e29416f0e6af54b94a7f7053099063",
-    "wujiang.tactical.heroes.common": "be1cd8afbf0515417df549faa839ed3c2b055ec8fdc1cadc5b3bb9ecdf3cf0c3",
-    "wujiang.tactical.heroes.excel_roster": "30af5475d0ca5fc402637e718f2feb7f3b5132fb9b4938a1622bc9de4504a8f1",
-    "wujiang.tactical.rooms.equipment_effects": "fd89edd2a7cd8c15e73126e8d16b646255c5793286b0c83a3fb42e9d56d99936",
+    "wujiang.tactical.heroes.ai_policy": "fd4a60de23c4e97dcd1812c91b8bae63f0e19dc31b86a6b7c8bb5da0285cf805",
+    "wujiang.tactical.heroes.mechanics.resource_effect_ai": "59fc73bb39add025fb6daaccb350f3fc8d44d21180bed23ed2a21bfa2580f729",
+    "wujiang.tactical.heroes.mechanics.simulated_effect_ai": "a70f77084c36349c4b4b5e6eec747dd3104d8d8e65eddd7e0422462814875ad7",
+    "wujiang.tactical.heroes.electronic_infinity": "eb29844e2e3adecd803691cc1ad41fbb9714af34d1485960046a48b3c1456fc2",
+    "wujiang.tactical.heroes.flying_dragon_ship": "f10498fb3c4a07103106c07572aff229691357019ce0535f40ca1746566b1fd1",
+    "wujiang.tactical.heroes.flame_manager": "92956aea1ca8c55e17a56aefa653cf9a9b7ee276780abe9ccc0728d6770fa6fb",
+    "wujiang.tactical.heroes.gentleman": "c47eaba7eeecd076d6900715042349e88aeb7fcc70f51fef4ab94b2fb741d149",
+    "wujiang.tactical.heroes.mechanics.ancient_mecha": "f91a95499f5e3f468e92f6656fe28461f4bdf5683e2ca38cd216587b18469f21",
+    "wujiang.tactical.heroes.mechanics.barbarian_king": "4f342947bf07301a00b0839c6ee7175409e2220f58f1611855d9fa680b19e5da",
+    "wujiang.tactical.heroes.mechanics.bird_king": "47ed47d4fd235379e96d70b4cdb19d2d8c9312cb9fe9ca07031a97709eb7efa9",
+    "wujiang.tactical.heroes.mechanics.gladiator_cooperation": "3ebb6db2d6721efe1ff45971577f3a0578680ad3fefc8e910a71e35c2a867814",
+    "wujiang.tactical.heroes.mechanics.gladiator_core": "6b6af4befd058a5a27ed67706d327b63b95e55216b150a2daa671c2ad8372dc2",
+    "wujiang.tactical.heroes.mechanics.electronic_barrier": "dfa6dde46527a9d104de2a1c158a5961f2fdde13eaccb726239cac5344dd72eb",
+    "wujiang.tactical.heroes.mechanics.hell_core": "c7dd2695244a55b342b9cec74d716fcef25a18e542004ef3b20298b0e014e13f",
+    "wujiang.tactical.heroes.mechanics.jade": "7af49d6fa113474507f17da95e5c6f07528cc0836e08702ed19102b864c910ff",
+    "wujiang.tactical.heroes.mechanics.sanctuary": "5751be8bbb0739aa53437e42b105dcff42991b6c6d8a118ab8a7e31dbc110fa1",
+    "wujiang.tactical.heroes.mechanics.giant_shield": "0b5df87036113d62b358b2d0967cd95f63282a89ea3ff33143f6d485b52deae8",
+    "wujiang.tactical.heroes.mechanics.ice_emperor": "81d49245a0ba22074d5613a0111c95717c1e074468b119dffb30156c1313f10a",
+    "wujiang.tactical.heroes.mechanics.tianyuan": "70aee47dd4f36fb2100088c209361cb177dddf91d9691e140b745a46f343dc23",
+    "wujiang.tactical.heroes.mechanics.messenger_crow": "632958697ade8e72a6bc44770d773803e84f461a9d9ccfc4af2158c938653c71",
+    "wujiang.tactical.heroes.storm_spirit": "d388eeca89e67a6c228ce5ae74c99578f637fd97d214ee40e0708b63afcf8bab",
+    "wujiang.tactical.heroes.super_crow": "9d3978ed1af17ee970041f80b327851c3086109e5cef216c81765c7abde356d9",
+    "wujiang.tactical.heroes.wyvern_raider": "bfceea3825506de5f7e140d45f0ba637b4aab51909ef1869ee280f99d5e60264",
+    "wujiang.tactical.rooms.ai_targets": "390f6e548aaa40d535c222017da79f50489dbd977e36222298718aae9bda6824",
+    "wujiang.tactical.rooms.ai_probe": "72fba98cc9f2814dda6dfada6a9c0446358535c5da0c783f5381cfd40e682885",
+    "wujiang.tactical.engine.core": "08ddc2dab3cf88654d0453b4079fbaa589fba9babe53b8159b1f0ccf2e4f87ba",
+    "wujiang.tactical.heroes.common": "427b78a3e5f2f4b688fff68ab67e491d3b556f9465f2703ad3d65d1896a1d210",
+    "wujiang.tactical.heroes.excel_roster": "e32124761f4088d139db1407985b103419ba64d364c831f031cd6506d1898684",
+    "wujiang.tactical.heroes.mechanics.hell_rebirth": "888025e1a3cbd1f9e487990cdc321507dd47dbb3864484bc2163b8ac51230d0c",
+    "wujiang.tactical.heroes.mechanics.hell_dog_hunter": "b6f33c32a67245d1d7987533dfc3d8c18a1bc2a51ae69ed7161c19b87fa074ec",
+    "wujiang.tactical.heroes.mechanics.hell_dragon": "9745b7ef379350ae975b86cd449a063c87e79c3347579873cfb235735106a173",
+    "wujiang.tactical.heroes.mechanics.hell_wargod": "269e3a860b9dce5d32c09eb4d268b851320b852fc5ad4f20ba1d03f1ef5a3f31",
+    "wujiang.tactical.heroes.mechanics.weapon_copy": "27747f6f3128e392f0ceaddcc1588b4b7cb17c6e355488cceb4d62c428658fc6",
+    "wujiang.tactical.rooms.equipment_effects": "4df3f0232e6d804921df4b5c789791ba178618d58688f27288353c2409dab83b",
     "wujiang.tactical.rooms.synergy": "6e650a65f2023ed76778e6e7e5c5c4202ed2a64b9e74dd1c9c1ebf653305a2b9",
 }
 
@@ -74,16 +104,25 @@ _LOCAL = {
         "EquipmentStatus.on_after_damage", "EquipmentStatus.on_damage_cancelled",
         "EquipmentStatus.lethal_damage_remaining_hp", "EquipmentStatus.on_before_heal",
     },
-    "wujiang.tactical.heroes.excel_roster": {
+    "wujiang.tactical.heroes.mechanics.hell_rebirth": {
         "HellRebirthTrait.on_after_damage", "HellRebirthTrait.on_hell_forced_skill_death",
         "HellAssassinRebirthTrait.on_after_damage", "HellAssassinRebirthTrait.on_hell_forced_skill_death",
+    },
+    "wujiang.tactical.heroes.mechanics.hell_dog_hunter": {
         "HellHunterRescueTrait.on_after_damage", "HellHunterRescueTrait.on_hell_forced_skill_death",
         "HellSnowRebirthTrait.on_after_damage", "HellSnowRebirthTrait.on_hell_forced_skill_death",
+    },
+    "wujiang.tactical.heroes.mechanics.hell_wargod": {
         "HellWarGodRebirthTrait.on_after_damage", "HellWarGodRebirthTrait.on_hell_forced_skill_death",
-        "HellSikaSacrificeTrait.on_after_damage", "HellDragonSacrificeTrait.on_hell_dragon_destroyed",
-        "HellWarGodStatus.modify_stat",
+        "HellSikaSacrificeTrait.on_after_damage", "HellWarGodStatus.modify_stat",
+    },
+    "wujiang.tactical.heroes.mechanics.hell_dragon": {
+        "HellDragonSacrificeTrait.on_hell_dragon_destroyed",
+        "FlyingDragonOrbStatus.on_before_damage",
+    },
+    "wujiang.tactical.heroes.mechanics.weapon_copy": {
         # Both implementations only cancel physical attacks; skill hits return.
-        "PhysicalImmunityStatus.on_before_damage", "FlyingDragonOrbStatus.on_before_damage",
+        "PhysicalImmunityStatus.on_before_damage",
     },
 }
 
@@ -333,8 +372,8 @@ def _settled_groups(battle, targets, queued):
     nonlethal ones. This also retains source healing/stacking, repeated hits,
     and further death sweeps inside one exact joint tree.
     """
-    from wujiang.tactical.heroes.excel_roster import (HellWarGodRebirthTrait,
-                                                    resolve_hell_war_god_death_sweep)
+    from wujiang.tactical.heroes.mechanics.hell_wargod import (
+        HellWarGodRebirthTrait, resolve_hell_war_god_death_sweep)
     if not _original(resolve_hell_war_god_death_sweep):
         _reject("changed_death_resolver")
         return None
@@ -377,7 +416,7 @@ class _SettledResolver:
         self.recipients = frozenset(unit.unit_id for unit in group)
 
     def __call__(self, ctx):
-        from wujiang.tactical.heroes.excel_roster import resolve_hell_war_god_death_sweep
+        from wujiang.tactical.heroes.mechanics.hell_wargod import resolve_hell_war_god_death_sweep
         caller = sys._getframe(1).f_code
         action = self.battle.resolving_action
         if not ctx.is_skill or not (
@@ -493,7 +532,7 @@ def expected_settled_area_utilities(battle, targets, queued, utility, *, utility
         # Unaffected utility is evaluated once with the canonical queue's
         # bookkeeping, retaining prior payment/resource changes and order.
         groups = tuple(active + ([unchanged] if unchanged else []))
-    from wujiang.tactical.heroes.excel_roster import resolve_hell_war_god_death_sweep
+    from wujiang.tactical.heroes.mechanics.hell_wargod import resolve_hell_war_god_death_sweep
     values = {}
     try:
         for group in groups:

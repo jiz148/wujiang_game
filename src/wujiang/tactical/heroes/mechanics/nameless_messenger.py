@@ -10,7 +10,7 @@ from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.heroes.common import PierceSkill
-from wujiang.tactical.heroes.next_five import DragonBreathSkill
+from wujiang.tactical.heroes.mechanics.dragon_breath import DragonBreathSkill
 
 
 class MessengerPierceSkill(PierceSkill):

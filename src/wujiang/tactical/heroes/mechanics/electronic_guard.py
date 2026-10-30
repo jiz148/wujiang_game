@@ -11,14 +11,15 @@ from wujiang.tactical.engine.core import Stats
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.engine.core import Unit
 from wujiang.tactical.heroes.base import AbstractHero
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import MachineGunSkill
 from wujiang.tactical.heroes.common import StatModifierStatus
 from wujiang.tactical.heroes.common import payload_position
 from wujiang.tactical.heroes.common import positions_to_dict
 from wujiang.tactical.heroes.mechanics.racial_weather import SimpleGlobalWeatherEffect
 from wujiang.tactical.heroes.mechanics.racial_weather import WeatherUltimateSkill
-from wujiang.tactical.heroes.next_five import CommonMissileSkill
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.jade import CommonMissileSkill
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 
 class ElectronicGuardDragonExpiry(Trait):
@@ -134,6 +135,9 @@ class ElectromagneticFieldEffect(SimpleGlobalWeatherEffect):
 
 
 class ElectromagneticFieldSkill(WeatherUltimateSkill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.electromagnetic_weather_score()
+
     def __init__(self) -> None:
         super().__init__("electromagnetic_field", "电磁场", weather_name="电磁场", marker="电")
         self.description += "双方每次真正支付正数魔力时各自失去最大生命的1/8。"

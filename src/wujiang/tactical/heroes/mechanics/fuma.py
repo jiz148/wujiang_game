@@ -11,15 +11,29 @@ from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import Trait
+from wujiang.tactical.engine.core import Unit
+from wujiang.tactical.heroes.ai_policy import HeroAIPolicy
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import pattern_signature
 from wujiang.tactical.heroes.common import payload_position
 from wujiang.tactical.heroes.common import positions_to_dict
 from wujiang.tactical.heroes.mechanics.remi_bat import _payload_direction
-from wujiang.tactical.heroes.next_five import ALL_DIRECTIONS
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 from wujiang.tactical.prediction import random
+
+
+class FumaAIPolicy(HeroAIPolicy):
+    def skill_score_bonus(self, battle: Battle, actor: Unit, action: dict,
+                          payload: dict, score: float) -> float:
+        if score <= 0:
+            return 0.0
+        skill = action.get("_skill_object") or actor.get_skill(str(action.get("code") or payload.get("skill_code") or ""))
+        if skill.timing != "active":
+            return 0.0
+        after_payment = actor.current_mana - skill.mana_cost_for_payload(battle, actor, payload)
+        return 0.5 * min(1.0, max(0.0, actor.max_mana() - after_payment)) * 24.0
 
 
 class FumaPursuitSkill(Skill):

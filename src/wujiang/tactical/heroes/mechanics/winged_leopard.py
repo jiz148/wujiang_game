@@ -10,16 +10,20 @@ from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Trait
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import DashMoveSkill
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import pattern_signature
 from wujiang.tactical.heroes.common import payload_position
-from wujiang.tactical.heroes.next_five import DeclaredAreaSkillMixin
-from wujiang.tactical.heroes.next_five import remote_rectangle_patterns
+from wujiang.tactical.heroes.mechanics.declared_area import DeclaredAreaSkillMixin
+from wujiang.tactical.heroes.mechanics.next_five_effects import remote_rectangle_patterns
 
 
 class WingedLeopardLeapSkill(DashMoveSkill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.winged_leap_score()
+
     def __init__(self) -> None:
         super().__init__(
             "fly_leap",
@@ -70,6 +74,9 @@ class EagleEyeStatus(StatusEffect):
 
 
 class EagleEyeSkill(DeclaredAreaSkillMixin, Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.control_score(self)
+
     def __init__(self) -> None:
         super().__init__("eagle_eye", "鹰眼", "普通技能：基础费 0.5 魔，每回合第一次免费；2*3 范围，无伤害，封锁攻击和主动技能 3 轮。", mana_cost=0.5, target_mode="cell")
 

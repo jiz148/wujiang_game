@@ -12,9 +12,28 @@ from wujiang.tactical.heroes.common import (
     StatModifierStatus, pattern_selection_preview, pattern_signature,
     payload_target_unit, positions_to_dict,
 )
-from wujiang.tactical.heroes.next_five import (
-    DeclaredAreaSkillMixin, remote_rectangle_patterns, square_around_cells,
-)
+from wujiang.tactical.heroes.ai_policy import (AIReactionScoreContext,
+    AISkillCandidateContext, AISkillScoreContext, HeroAIPolicy)
+from wujiang.tactical.heroes.mechanics.declared_area import DeclaredAreaSkillMixin
+from wujiang.tactical.heroes.mechanics.next_five_effects import remote_rectangle_patterns
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
+
+
+class GiantShieldMovePolicy(HeroAIPolicy):
+    """Keep shield partners adjacent, especially while a wall is active."""
+
+    def late_move_score_bonus(self, battle: Battle, actor: Unit,
+                              destination: Position, allies: list[Unit]) -> float:
+        shield_allies = [unit for unit in allies if "巨盾" in unit.name]
+        if not shield_allies:
+            return 0.0
+        near_now = min(battle.distance_between_units(actor, unit) for unit in shield_allies) <= 1
+        near_after = min(battle.unit_distance_to_cell(unit, destination) for unit in shield_allies) <= 1
+        score = (13.0 if near_after else 0.0) - (13.0 if near_now else 0.0)
+        if actor.has_status("盾墙") and near_now and not near_after:
+            score -= 34.0
+        return score
+
 
 def shield_named_neighbor(battle: Battle, owner: Unit) -> bool:
     return any(unit is not owner and unit.alive and not unit.banished and unit.position is not None
@@ -52,6 +71,20 @@ class GiantShieldRaiseStatus(StatusEffect):
 
 
 class GiantShieldRaiseSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        allies = [unit for unit in self.beneficiaries(battle, actor)
+                  if not unit.has_status("举盾") and not unit.skill_non_damage_effects_blocked()]
+        enemies = [unit for unit in context.hostile_units()
+                   if unit.position is not None and not unit.banished]
+        score = 0.0
+        for ally in allies:
+            danger = max((enemy.stat("attack") * 6 + 18
+                          if battle.distance_between_units(enemy, ally) <= enemy.targeting_range() + min(2, enemy.stat("speed"))
+                          else 0.0 for enemy in enemies), default=0.0)
+            score += danger * (0.55 if ally.current_hp <= 0.5 else 0.4)
+        return score - (15.0 if actor.current_mana <= 1 else 9.0) if score >= 18.0 else -1000.0
+
     def __init__(self) -> None:
         super().__init__("shield_raise", "举盾", "0.5魔；施放时5×5内己方单位一轮近身伤害-1、其他-2，同名不叠加。",
                          mana_cost=0.5, target_mode="self")
@@ -89,6 +122,17 @@ class GiantShieldFlatStatus(StatModifierStatus):
 
 
 class GiantShieldFlatShotSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        target = battle.units.get(str(context.payload.get("target_unit_id") or ""))
+        target = battle.effect_recipient(target) if target is not None else None
+        if target is None or target.player_id == actor.player_id or target.magic_immunity:
+            return -1000.0
+        score = context.r18_effect_score(self)
+        if score > -1000 and not target.has_status("平射降守") and not target.skill_non_damage_effects_blocked():
+            score += 19.0 + max(0.0, target.current_hp) * 8.0
+        return score
+
     def __init__(self) -> None:
         super().__init__("shield_flat_shot", "平射", "每本人轮一次；范内单体按当前攻伤害，命中后守-1四轮，同名不叠加。",
                          max_uses_per_turn=1, target_mode="unit")
@@ -151,6 +195,9 @@ class GiantShieldFlatShotSkill(Skill):
 
 
 class GiantShieldLobSkill(DeclaredAreaSkillMixin, Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r18_effect_score(self)
+
     def __init__(self) -> None:
         super().__init__("shield_lob", "抛射", "每本人轮一次；按范选择3×3区域，对双方按当前攻造成技能伤害。",
                          max_uses_per_turn=1, target_mode="cell")
@@ -275,6 +322,20 @@ class GiantShieldWallStatus(StatusEffect):
 
 
 class GiantShieldWallSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        partner = battle.units.get(str(context.payload.get("target_unit_id") or ""))
+        if partner is None or partner.player_id != actor.player_id or "巨盾" not in partner.name:
+            return -1000.0
+        enemies = [unit for unit in context.hostile_units()
+                   if unit.position is not None and not unit.banished]
+        pressure = sum(1 for unit in (actor, partner)
+                       if any(battle.distance_between_units(unit, enemy) <= enemy.targeting_range() + min(2, enemy.stat("speed"))
+                              for enemy in enemies))
+        if pressure == 0:
+            return -1000.0
+        return 17.0 + pressure * 18.0 + max(0.0, 4 - partner.stat("defense")) * 7.0 - (10.0 if actor.current_mana <= 1 else 5.0)
+
     def __init__(self, *, sword: bool = False) -> None:
         self.sword_guard = sword
         self.wall_defense = 5.0 if sword else 4.0
@@ -334,6 +395,16 @@ class GiantShieldSwordTrait(Trait):
 
     def grants_counter(self, battle: Battle, unit: Unit) -> bool:
         return self.owner is unit
+
+    def ai_counter_bonus(self, context: AIReactionScoreContext) -> float:
+        actor, battle = context.actor, context.battle
+        if self.owner is not actor or actor.position is None:
+            return 0.0
+        score = 0.0
+        for unit in battle.effect_units_at_cells(battle.neighbors(actor.position), ignore=actor):
+            expected_second = context.damage(unit, actor.stat("attack")) * 85.0
+            score += expected_second if unit.player_id != actor.player_id else -expected_second * 1.45
+        return score
 
     def on_before_damage(self, battle: Battle, ctx: DamageContext) -> None:
         owner = self.owner
@@ -396,6 +467,13 @@ class GiantShieldDanceGuardStatus(StatusEffect):
 
 
 class GiantShieldSwordDanceSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        enemies = list(context.hostile_units())
+        reachable = any(enemy.position is not None and battle.distance_between_units(actor, enemy)
+                        <= actor.normal_move_distance() + 1 for enemy in enemies)
+        return (92.0 if reachable else 54.0) - (16.0 if actor.current_mana <= 1 else 0.0) if enemies else -1000.0
+
     def __init__(self) -> None:
         super().__init__("shield_sword_dance", "剑舞", "0.5魔；下一个武将回合近战免伤；此后每回合多攻击两次。",
                          mana_cost=0.5, target_mode="self")
@@ -430,6 +508,8 @@ class GiantShieldBashChargeStatus(StatusEffect):
 
 
 class GiantShieldBashSkill(Skill):
+    ai_reaction_score_phase = "after_hidden_source"
+
     def __init__(self) -> None:
         super().__init__("shield_bash", "盾击", "0.5魔；每个武将回合一次，被影响时连锁；挡下一次可能损血的伤害。",
                          mana_cost=0.5, max_uses_per_turn=1, timing="passive", target_mode="self")
@@ -455,8 +535,48 @@ class GiantShieldBashSkill(Skill):
         actor.add_status(GiantShieldBashChargeStatus(), source=actor)
         battle.log_public_event(f"{actor.name} 使用盾击，下一次可能损血的伤害无效。", source=actor)
 
+    def ai_reaction_score(self, context: AIReactionScoreContext) -> float:
+        if context.actor.has_status("盾击护身"):
+            return -1000.0
+        threat = context.threat(context.proxy_target())
+        return threat + (75.0 if threat >= context.actor.current_hp * 100 else 0.0) - 35.0
+
 
 class GiantShieldGunAreaSkill(GiantShieldLobSkill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        cells = context.positions(context.payload.get("cells"))
+        if not cells:
+            return -1000.0
+        score, enemy_hits = 0.0, 0
+        for target in battle.effect_units_at_cells(cells):
+            if target.magic_immunity or target.dodge_charges > 0:
+                continue
+            power = actor.stat("attack") + max(0, battle.unit_hit_count_for_cells(target, cells) - 1)
+            damage = context.estimate_damage(target, power, ignore_shield=True)
+            value = min(target.current_hp, damage) * 100.0 + (20.0 if target.total_shields() > 0 else 0.0)
+            if target.player_id == actor.player_id:
+                score -= value * 1.45
+            else:
+                score += value
+                enemy_hits += 1
+        return score - (13.0 if self.code == "shield_volley" else 7.0) if enemy_hits else -1000.0
+
+    def ai_candidate_patterns(self, context: AISkillCandidateContext,
+                              patterns: list) -> list:
+        ranked: list[tuple[float, Any]] = []
+        for pattern in patterns:
+            cells = context.positions(pattern)
+            score = sum((1.0 if unit.player_id != context.actor.player_id else -1.45)
+                        * (2.0 if unit.current_hp <= 0.5 else 1.0)
+                        * max(1, context.battle.unit_hit_count_for_cells(unit, cells))
+                        for unit in context.battle.effect_units_at_cells(cells)
+                        if not unit.magic_immunity)
+            if score > 0:
+                ranked.append((score, pattern))
+        ranked.sort(key=lambda entry: entry[0], reverse=True)
+        return [pattern for _, pattern in ranked[:24]]
+
     def __init__(self, *, volley: bool = False) -> None:
         Skill.__init__(self, "shield_volley" if volley else "shield_sweep", "排射" if volley else "扫射",
                        "按范选择1×5横纵区域，冷却2轮，对双方造成当前攻伤害。" if volley
@@ -499,6 +619,14 @@ class GiantShieldBladeStatus(StatusEffect):
 
 
 class GiantShieldDrawBladeSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        enemies = list(context.hostile_units())
+        close = any(enemy.position is not None and battle.distance_between_units(actor, enemy) <= 2 for enemy in enemies)
+        gun_ready = any(skill.code in {"shield_sweep", "shield_volley", "shield_flat_shot"}
+                        and skill.can_use(battle, actor, {})[0] for skill in actor.skills)
+        return (48.0 if close else -1000.0) - (22.0 if gun_ready else 0.0)
+
     def __init__(self) -> None:
         super().__init__("shield_draw_blade", "拔刀", "0.5魔；永久改为近战，范1、守+1、可格挡反击，50%完全格挡。",
                          mana_cost=0.5, target_mode="self")

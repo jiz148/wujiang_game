@@ -8,11 +8,12 @@ from wujiang.tactical.engine.core import BattleFieldEffect
 from wujiang.tactical.engine.core import DamageContext
 from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Skill
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.mechanics.kaiser import CannotActNextTurnStatus
-from wujiang.tactical.heroes.next_five import damage_followup_effect_applies
-from wujiang.tactical.heroes.next_five import remote_rectangle_patterns
+from wujiang.tactical.heroes.mechanics.next_five_effects import damage_followup_effect_applies
+from wujiang.tactical.heroes.mechanics.next_five_effects import remote_rectangle_patterns
 
 
 class BigAvalancheWeatherEffect(BattleFieldEffect):
@@ -61,6 +62,9 @@ class BigAvalancheWeatherEffect(BattleFieldEffect):
 
 
 class SnowAvalancheSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.snow_avalanche_score(self)
+
     def __init__(self) -> None:
         super().__init__(
             "snow_avalanche",

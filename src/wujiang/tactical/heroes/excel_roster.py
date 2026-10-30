@@ -86,34 +86,33 @@ from wujiang.tactical.heroes.flying_dragon_ship import (
     SilverSignalFlareSkill,
 )
 from wujiang.tactical.heroes import electronic_infinity  # register R373 kit
-from wujiang.tactical.heroes.next_five import (
-    ArcAttackTrait,
-    DeclaredAreaSkillMixin,
-    AttackLifeStealTrait,
-    AttackManaDrainTrait,
-    BasicAttackImmunityTrait,
-    ChainPullSkill,
+from wujiang.tactical.heroes.mechanics.blood_eater import (
+    MagicShieldSkill,
+    RecoverManaSkill,
+)
+from wujiang.tactical.heroes.mechanics.declared_area import DeclaredAreaSkillMixin
+from wujiang.tactical.heroes.mechanics.dragon_breath import (
     DragonBreathSkill,
-    HalfPierceAttackTrait,
-    ALL_DIRECTIONS,
+    RemoteDragonBreathSkill,
+)
+from wujiang.tactical.heroes.mechanics.half_pierce import HalfPierceAttackTrait
+from wujiang.tactical.heroes.mechanics.jade import (
     CommonMissileSkill,
     IonShieldSkill,
     LaserSkill,
-    MagicShieldSkill,
-    NaturalManaRecoveryTrait,
-    PassThroughMovementTrait,
     QuantumShieldSkill,
-    RecoverManaSkill,
-    RemoteDragonBreathSkill,
-    SplitSkill,
-    StandardCloneSummon,
+)
+from wujiang.tactical.heroes.mechanics.next_five_effects import (
     apply_piercing_status_effect,
     damage_followup_effect_applies,
-    nearby_rectangle_patterns,
-    position_key,
     remote_rectangle_patterns,
-    square_around_cells,
 )
+from wujiang.tactical.heroes.mechanics.li import AttackLifeStealTrait, ChainPullSkill
+from wujiang.tactical.heroes.mechanics.soul_wraith import AttackManaDrainTrait, BasicAttackImmunityTrait, PassThroughMovementTrait
+from wujiang.tactical.heroes.mechanics.mana_recovery import NaturalManaRecoveryTrait
+from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS, nearby_rectangle_patterns, position_key, square_around_cells
+from wujiang.tactical.heroes.mechanics.clone_split import SplitSkill
+from wujiang.tactical.heroes.mechanics.masamune import ArcAttackTrait
 from wujiang.tactical.heroes.mechanics.kiku import KikuLegacyStatus, PassiveSkillLockStatus
 from wujiang.tactical.heroes.mechanics.giant_shield import shield_named_neighbor
 from wujiang.tactical.heroes.mechanics.piercing_control import piercing_nondamage_recipient
@@ -491,6 +490,8 @@ def _hero_class_from_spec(spec: dict[str, Any]) -> type[AbstractHero]:
         attrs["entry_footprint_height"] = height
     if kit is not None:
         attrs.update(kit.unit_attributes())
+        if kit.ai_policy is not None:
+            attrs["ai_policy"] = kit.ai_policy
     class_name = f"ExcelHero{int(spec['source_row']):03d}_{_slug_tail(int(spec['source_row']), spec['code'])}"
     return type(class_name, (AbstractHero,), attrs)
 
@@ -625,3 +626,35 @@ EXCEL_HERO_NAMES_BY_CODE: dict[str, str] = {
     spec["code"]: spec["name"]
     for spec in EXCEL_HERO_SPECS
 }
+
+
+_legacy_mechanic_classes: dict[str, type] | None = None
+
+
+def __getattr__(name: str) -> type:
+    """Resolve old pickle globals after their classes moved to mechanics modules.
+
+    Historical battle snapshots name classes in this module. Keep the old
+    import path readable without making the assembly layer own their behavior.
+    """
+    if not name or not name[0].isupper():
+        raise AttributeError(name)
+    global _legacy_mechanic_classes
+    if _legacy_mechanic_classes is None:
+        import importlib
+        import pkgutil
+
+        from wujiang.tactical.heroes import mechanics
+
+        classes: dict[str, type] = {}
+        for info in pkgutil.iter_modules(mechanics.__path__):
+            module = importlib.import_module(f"{mechanics.__name__}.{info.name}")
+            for value in vars(module).values():
+                if isinstance(value, type) and value.__module__ == module.__name__:
+                    classes[value.__name__] = value
+        _legacy_mechanic_classes = classes
+    if name in _legacy_mechanic_classes:
+        value = _legacy_mechanic_classes[name]
+        globals()[name] = value
+        return value
+    raise AttributeError(name)
