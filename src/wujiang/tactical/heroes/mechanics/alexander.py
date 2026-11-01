@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import DAMAGE_DEDUPED_RANKED_CANDIDATES
+
 from typing import Any
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import DamageContext
@@ -23,6 +25,7 @@ from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_c
 
 
 class AlexanderHurricaneSkill(DeclaredAreaSkillMixin, Skill):
+    ai_candidate_plan = DAMAGE_DEDUPED_RANKED_CANDIDATES
     target_cells_are_geometry_only = True
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float:

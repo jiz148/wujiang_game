@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import RANKED_CANDIDATES
+
 from typing import TYPE_CHECKING, Any
 from typing import Iterable
 if TYPE_CHECKING:
@@ -161,6 +163,7 @@ class ChanterCardFieldEffect(BattleFieldEffect):
 
 
 class ChanterCardSkill(Skill):
+    ai_candidate_plan = RANKED_CANDIDATES
     ai_early_effect_score = True
     def ai_target_value(self, context: AISkillScoreContext, target: HeroUnit) -> float:
         return _CARD_AI_VALUES[self.card_type].score(context, target)

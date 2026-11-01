@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import DAMAGE_DEDUPED_CANDIDATES
+
 from typing import Any
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import Battle
@@ -88,6 +90,11 @@ def resolve_spartacus_placement(battle: Battle, actor: Unit, queued_action: Any)
 
 
 class EarthShatterSkill(Skill):
+    def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
+        bonus = 0.0 if actor.has_status("天崩地裂强化") else 1.0
+        return actor.stat("attack") + bonus + (max(0, battle.unit_hit_count_for_cells(target, cells) - 1) if cells else 0)
+
+    ai_candidate_plan = DAMAGE_DEDUPED_CANDIDATES
     excludes_caster_from_effect = True
     target_cells_are_geometry_only = True
 

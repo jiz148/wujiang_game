@@ -1,6 +1,7 @@
 """R035 mountain god attacks and counter mechanics."""
 
 from __future__ import annotations
+from wujiang.tactical.heroes.ai_impact_rule import R12_IMPACT
 
 from typing import Any
 from wujiang.tactical.engine.core import ActionError
@@ -36,6 +37,16 @@ def mountain_counter_count(unit: HeroUnit) -> int:
 
 
 class DemonBladeSkill(Skill):
+    ai_effective_impact_rule = R12_IMPACT
+    def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
+        raw_cells = payload.get("cells")
+        blade_cells = ([Position(int(cell["x"]), int(cell["y"])) for cell in raw_cells
+                        if isinstance(cell, dict) and cell.get("x") is not None and cell.get("y") is not None]
+                       if isinstance(raw_cells, list) else []) or cells
+        target_cells = set(battle.unit_cells(target))
+        return max((5.0 - index for index, cell in enumerate(blade_cells[:3])
+                    if cell in target_cells), default=0.0)
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r12_effect_score(self)
 

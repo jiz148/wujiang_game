@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import RANKED_CANDIDATES
+
 import re
 from typing import Any
 
@@ -10,7 +12,7 @@ from wujiang.tactical.engine.core import (
     Position, Skill, Stats, StatusEffect, Trait,
 )
 from wujiang.tactical.heroes.base import AbstractHero
-from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
+from wujiang.tactical.heroes.ai_policy import AISkillCandidateContext, AISkillScoreContext
 from wujiang.tactical.heroes.common import (
     ensure_ally, payload_position, payload_target_unit, positions_to_dict,
 )
@@ -162,7 +164,13 @@ class RoyalSoldierSummon(AbstractHero):
 
 
 class RoyalSoldierSkill(Skill):
+    ai_candidate_plan = RANKED_CANDIDATES
     selection_cells_are_effect_cells = False
+
+    def ai_candidate_payloads(self, context: AISkillCandidateContext) -> list[dict[str, Any]]:
+        selection = (context.action.get("preview") or {}).get("selection") or {}
+        return [{**context.base_payload, "choice_code": choice["code"], "cells": pattern}
+                for choice in selection.get("choices", []) for pattern in choice.get("patterns", [])]
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.owned_effect_score(self)

@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import (
+    DAMAGE_DEDUPED_CANDIDATES,
+    RANKED_CANDIDATES,
+)
+
 from typing import Any
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import ActionMiss
@@ -393,16 +398,19 @@ class GladiatorSwapSkill(H1LineDamageSkill):
 
 
 class GladiatorClawSkill(GladiatorSwapSkill):
+    ai_candidate_plan = RANKED_CANDIDATES
     def __init__(self) -> None:
         super().__init__(code="gladiator_claw", name="剑斗力爪", length=2, requires_damage=True, pierces=True)
 
 
 class GladiatorGaleSkill(GladiatorSwapSkill):
+    ai_candidate_plan = RANKED_CANDIDATES
     def __init__(self) -> None:
         super().__init__(code="gladiator_gale", name="暴风", length=5, requires_damage=False, pierces=False)
 
 
 class WaterWaveCannonSkill(RemoteDragonBreathSkill):
+    ai_candidate_plan = DAMAGE_DEDUPED_CANDIDATES
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r18_effect_score(self)
 

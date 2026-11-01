@@ -6,6 +6,7 @@ from typing import Any
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Skill
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.heroes.common import ensure_enemy
 from wujiang.tactical.heroes.common import payload_target_unit
@@ -13,6 +14,9 @@ from wujiang.tactical.heroes.mechanics.next_five_effects import apply_piercing_s
 
 
 class PurifyManaSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r15_effect_score(self)
+
     def __init__(self) -> None:
         super().__init__(
             "purify_mana",
@@ -86,6 +90,9 @@ class SacredDuelStatus(StatusEffect):
 
 
 class SacredDuelSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r15_effect_score(self)
+
     def __init__(self) -> None:
         super().__init__(
             "sacred_duel",

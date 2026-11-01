@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import RANKED_CANDIDATES
+
 from typing import Any
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import Position
@@ -15,6 +17,7 @@ from wujiang.tactical.heroes.mechanics.gladiator_core import gladiator_swap_dest
 
 
 class BirdSoulSkill(Skill):
+    ai_candidate_plan = RANKED_CANDIDATES
     requires_direct_unit_target_line = False
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float:

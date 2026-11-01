@@ -8,6 +8,7 @@ from wujiang.tactical.engine.core import (
     ActionError, Battle, DamageContext, HeroUnit, MoveContext, Position, Skill, Trait, Unit,
 )
 from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
+from wujiang.tactical.heroes.ai_candidate_plan import TargetDestinationCandidates
 from wujiang.tactical.heroes.common import payload_position, payload_target_unit, positions_to_dict
 from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_hero_kit
 from wujiang.tactical.heroes.mechanics.clone_split import StandardCloneSummon
@@ -144,7 +145,8 @@ class GentlemanSurpriseStepSkill(Skill):
         return [unit for unit, _ in gentleman_crossings(battle, actor, self.route(battle, actor, payload))]
 
 
-class GentlemanDuelSkill(Skill):
+class GentlemanDuelSkill(TargetDestinationCandidates, Skill):
+    ai_destination_fields = ("dest_x", "dest_y")
     requires_direct_unit_target_line = False
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float | None:

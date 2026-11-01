@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import RANKED_CANDIDATES
+
 from typing import Any
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import ActionMiss
@@ -105,6 +107,18 @@ class FreyDamageCapTrait(Trait):
 
 
 class FreyQuickFlashSkill(FreyAreaAIScoring, Skill):
+    ai_candidate_plan = RANKED_CANDIDATES
+
+    def ai_unique_candidate_payloads(self, battle: Battle, actor: HeroUnit,
+                                     payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        unique: dict[tuple[Position, bool], dict[str, Any]] = {}
+        for candidate in payloads:
+            try:
+                _, strike, destination = self.validate_selection(battle, actor, candidate)
+                unique.setdefault((destination, strike), candidate)
+            except (ActionError, ValueError, TypeError, KeyError):
+                continue
+        return list(unique.values())
     excludes_caster_from_effect = True
     target_unit_is_anchor = True
     selection_cells_are_effect_cells = False
@@ -251,6 +265,7 @@ class FreyQuickFlashSkill(FreyAreaAIScoring, Skill):
 
 
 class FreyGodStabSkill(FreyAreaAIScoring, Skill):
+    ai_candidate_plan = RANKED_CANDIDATES
     excludes_caster_from_effect = True
 
     def __init__(self) -> None:
@@ -327,6 +342,7 @@ class FreyGodStabSkill(FreyAreaAIScoring, Skill):
 
 
 class FreyLionSpearSkill(FreyAreaAIScoring, Skill):
+    ai_candidate_plan = RANKED_CANDIDATES
     excludes_caster_from_effect = True
 
     def __init__(self) -> None:

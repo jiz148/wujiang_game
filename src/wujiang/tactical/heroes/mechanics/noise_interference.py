@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import (
+    DAMAGE_DEDUPED_RANKED_CANDIDATES,
+    UNIT_DEDUPED_RANKED_CANDIDATES,
+)
+
 from typing import Any
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import DamageContext
 from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import StatModifierStatus
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
@@ -40,6 +46,10 @@ class NoiseWaveStatus(StatModifierStatus):
 
 
 class NoiseWaveSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r15_effect_score(self)
+
+    ai_candidate_plan = UNIT_DEDUPED_RANKED_CANDIDATES
     def __init__(self) -> None:
         super().__init__(
             "noise_wave",
@@ -100,6 +110,10 @@ class NoiseWaveSkill(Skill):
 
 
 class InterferenceSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.r15_effect_score(self)
+
+    ai_candidate_plan = DAMAGE_DEDUPED_RANKED_CANDIDATES
     def __init__(self) -> None:
         super().__init__(
             "interference",

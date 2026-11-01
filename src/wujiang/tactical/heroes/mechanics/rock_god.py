@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from itertools import combinations
 from typing import Any
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import Battle
@@ -14,7 +15,8 @@ from wujiang.tactical.engine.core import Stats
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.heroes.base import AbstractHero
-from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
+from wujiang.tactical.heroes.ai_policy import AISkillCandidateContext, AISkillScoreContext
+from wujiang.tactical.rooms.ai_targets import living_hostile_combatants
 from wujiang.tactical.heroes.common import HardenSkill
 from wujiang.tactical.heroes.common import KnockbackSkill
 from wujiang.tactical.heroes.common import payload_cells
@@ -140,6 +142,39 @@ class RockAbsorbLinkStatus(StatusEffect):
 
 
 class RockAbsorbSkill(ResourceEffectScoring, Skill):
+    def ai_candidate_payloads(self, context: AISkillCandidateContext) -> list[dict[str, Any]]:
+        battle, actor = context.battle, context.actor
+        preview = context.action.get("preview", {}) or {}
+        selection = dict(preview.get("selection") or {})
+        required = int(selection.get("required_cells") or 0)
+        candidate_cells = context.positions(preview.get("cells"))
+        selected_cells: list[Position] = []
+        if required:
+            connected = {(cell.x, cell.y) for cell in battle.unit_cells(actor)}
+            enemies = living_hostile_combatants(battle, actor.player_id)
+            while len(selected_cells) < required:
+                frontier = [cell for cell in candidate_cells if (cell.x, cell.y) not in connected
+                            and any((cell.x + dx, cell.y + dy) in connected for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)))]
+                if not frontier:
+                    break
+                cell = min(frontier, key=lambda cell: min((battle.unit_distance_to_cell(enemy, cell) for enemy in enemies), default=0))
+                selected_cells.append(cell)
+                connected.add((cell.x, cell.y))
+            if len(selected_cells) != required:
+                return []
+        payloads: list[dict[str, Any]] = []
+        for stat_entry in selection.get("stats", []):
+            stat_name = str(stat_entry.get("code") or "")
+            payload = {**context.base_payload, "stat_name": stat_name,
+                       "cells": context.geometry.positions_to_payload(selected_cells)}
+            try:
+                self.selected_stat(payload)
+                self.selected_growth_cells(battle, actor, payload, required)
+            except Exception:
+                continue
+            payloads.append(payload)
+        return payloads
+
     def ai_unit_stat_bonus(self, context: AISkillScoreContext, unit: HeroUnit,
                            stats: dict[str, float], mana: float, sign: float) -> float:
         return (sum((unit.stat(stat) - stats[stat]) * weight * sign
@@ -322,6 +357,45 @@ class RockAbsorbSkill(ResourceEffectScoring, Skill):
 
 
 class RockCannonSkill(ResourceEffectScoring, Skill):
+    def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
+        raw_cells = payload.get("cells", [])
+        selected_cells = ([Position(int(cell["x"]), int(cell["y"])) for cell in raw_cells
+                           if isinstance(cell, dict) and cell.get("x") is not None and cell.get("y") is not None]
+                          if isinstance(raw_cells, list) else [])
+        return 3.0 + float(len(selected_cells))
+
+    def ai_candidate_payloads(self, context: AISkillCandidateContext) -> list[dict[str, Any]]:
+        battle, actor = context.battle, context.actor
+        body = battle.unit_cells(actor)
+        if len(body) <= 1:
+            return []
+        payloads: list[dict[str, Any]] = []
+        candidate_groups: list[list[Position]] = [[cell] for cell in body]
+        candidate_groups.extend([list(group) for group in combinations(body[:12], 2)
+                                 if len(body) > 2 and abs(group[0].x - group[1].x) + abs(group[0].y - group[1].y) == 1])
+        if len(body) > 2:
+            for keep_cell in body:
+                group = [cell for cell in body if cell != keep_cell]
+                if group:
+                    candidate_groups.append(group)
+        seen_groups: set[tuple[tuple[int, int], ...]] = set()
+        for group in candidate_groups:
+            key = tuple(sorted((cell.x, cell.y) for cell in group))
+            if key in seen_groups:
+                continue
+            seen_groups.add(key)
+            for dx, dy in ((0, -1), (1, -1), (1, 0), (1, 1), (0, 1),
+                           (-1, 1), (-1, 0), (-1, -1)):
+                payload = {**context.base_payload,
+                           "cells": context.geometry.positions_to_payload(group),
+                           "direction": {"dx": dx, "dy": dy}}
+                try:
+                    self.validate_selection(battle, actor, payload)
+                except Exception:
+                    continue
+                payloads.append(payload)
+        return payloads
+
     def ai_effect_preflight(self, context: AISkillScoreContext) -> bool:
         battle, actor = context.battle, context.actor
         try:

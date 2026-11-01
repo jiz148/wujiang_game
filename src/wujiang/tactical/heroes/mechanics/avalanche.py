@@ -1,6 +1,7 @@
 """R071 avalanche weather and skills."""
 
 from __future__ import annotations
+from wujiang.tactical.heroes.ai_impact_rule import SNOW_AVALANCHE_IMPACT
 
 from typing import Any
 from wujiang.tactical.engine.core import Battle
@@ -62,6 +63,10 @@ class BigAvalancheWeatherEffect(BattleFieldEffect):
 
 
 class SnowAvalancheSkill(Skill):
+    ai_effective_impact_rule = SNOW_AVALANCHE_IMPACT
+    def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
+        return actor.stat("attack") + (1.0 if battle.has_weather("大雪崩") else 0.0)
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.snow_avalanche_score(self)
 

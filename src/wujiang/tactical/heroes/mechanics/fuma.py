@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import (
+    DAMAGE_DEDUPED_RANKED_CANDIDATES,
+    RANKED_CANDIDATES,
+)
+
 from typing import Any
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import Battle
@@ -12,7 +17,7 @@ from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.engine.core import Unit
-from wujiang.tactical.heroes.ai_policy import HeroAIPolicy
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext, HeroAIPolicy
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import pattern_signature
@@ -165,6 +170,10 @@ class FumaTrapEffect(BattleFieldEffect):
 
 
 class FumaTrapSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.fuma_trap_score(context)
+
+    ai_candidate_plan = RANKED_CANDIDATES
     def __init__(self) -> None:
         super().__init__(
             "fuma_trap",
@@ -197,6 +206,10 @@ class FumaTrapSkill(Skill):
 
 
 class FumaShurikenSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.fuma_shuriken_score(context)
+
+    ai_candidate_plan = DAMAGE_DEDUPED_RANKED_CANDIDATES
     def __init__(self) -> None:
         super().__init__(
             "fuma_shuriken",

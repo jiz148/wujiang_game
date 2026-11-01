@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import MAGIC_AREA_SHORTLIST
+
 from copy import copy
 from typing import Any
 
@@ -12,7 +14,7 @@ from wujiang.tactical.engine.core import (
     HealContext, HeroUnit, Position, Skill, Stats, StatusEffect, Trait, Unit,
 )
 from wujiang.tactical.heroes.base import AbstractHero
-from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
+from wujiang.tactical.heroes.ai_policy import AISkillCandidateContext, AISkillScoreContext
 from wujiang.tactical.heroes.common import (
     StatModifierStatus, match_payload_pattern, pattern_selection_preview,
     payload_position, positions_to_dict,
@@ -107,6 +109,12 @@ class AncientRepairSkill(Skill):
 
 class AncientFusionSkill(Skill):
     requires_direct_unit_target_line = False
+
+    def ai_candidate_payloads(self, context: AISkillCandidateContext) -> list[dict[str, Any]]:
+        selection = dict((context.action.get("preview") or {}).get("selection") or {})
+        return [{**context.base_payload, "target_unit_id": target["unit_id"],
+                 "copied_skill_code": skill["code"]}
+                for target in selection.get("targets", []) for skill in selection.get("skills", [])]
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         battle, actor, payload = context.battle, context.actor, context.payload
@@ -696,6 +704,25 @@ class AncientBeastTheftTrait(Trait):
 
 
 class AncientArmSkill(RemoteDragonBreathSkill):
+    ai_candidate_plan = MAGIC_AREA_SHORTLIST
+
+    def ai_prefilter_score(self, battle: Battle, actor: Unit, payload: dict[str, Any], shared: Any) -> float:
+        cells = shared.positions(payload.get("cells"))
+        if not cells:
+            return -1000.0
+        score = 0.0
+        for target in battle.effect_units_at_cells(cells):
+            recipient = battle.effect_recipient(target)
+            if not recipient.alive or recipient.magic_immunity:
+                continue
+            power = actor.stat("attack") + max(0, battle.unit_hit_count_for_cells(recipient, cells) - 1)
+            damage = min(recipient.current_hp, shared.estimate_damage(
+                battle, recipient, power, half_ignore_shield=True))
+            impact = damage * 100.0 + (18.0 if recipient.total_shields() else 0.0)
+            if any(trait.name == "技能伤害免疫" for trait in recipient.traits):
+                impact = 18.0 if recipient.total_shields() else 0.0
+            score += impact if recipient.player_id != actor.player_id else -impact * 1.4
+        return score
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r18_effect_score(self)
     excludes_caster_from_effect = False

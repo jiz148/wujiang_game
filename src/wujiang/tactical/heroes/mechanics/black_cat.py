@@ -1,6 +1,10 @@
 """Black cat form and fantasy movement objects."""
 
 from __future__ import annotations
+from wujiang.tactical.heroes.ai_impact_rule import R17_IMPACT
+
+from wujiang.tactical.heroes.ai_candidate_plan import POSITIVE_RANKED_CANDIDATES
+from wujiang.tactical.heroes.ai_candidate_plan import TargetDestinationCandidates
 
 from typing import Any
 from wujiang.tactical.engine.core import ActionError
@@ -133,7 +137,9 @@ class BlackCatFormSkill(Skill):
             battle.log(f"{actor.name} 开启【化猫】。")
 
 
-class FantasyMoveSkill(Skill):
+class FantasyMoveSkill(TargetDestinationCandidates, Skill):
+    ai_effective_impact_rule = R17_IMPACT
+    ai_candidate_plan = POSITIVE_RANKED_CANDIDATES
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r17_effect_score(self)
 

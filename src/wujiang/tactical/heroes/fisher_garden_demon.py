@@ -137,6 +137,10 @@ class FisherGrowthTrait(Trait):
         # An AI probe must not reveal or consume the next live coin toss.
         if getattr(battle, "_ai_probe_active", False):
             return
+        # Direct scoring prices the fair coin in FisherAttackPolicy's attack
+        # follow-up bonus. A projected attack must not roll or grant a live turn.
+        if direct_scoring():
+            return
         heads = random.random() < 0.5
         if heads:
             self.coin_bonus += 1
@@ -396,6 +400,9 @@ class BlackTransformationSkill(PointCostSkill):
 
 
 class BlackNightShadowSkill(PointCostSkill):
+    def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
+        return 2.0
+
     def __init__(self) -> None:
         super().__init__("black_night_shadow", "黑夜魔影", "消耗1魔力点；公开掷d6，身体外邻双方每段受攻2技能伤。",
                          point_cost=1, target_mode="self")

@@ -7,6 +7,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from wujiang.tactical.heroes.ai_policy import AIReactionScoreContext
+    from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.rooms.ai_probe import ai_probe_rollback
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import Battle
@@ -21,6 +22,31 @@ from wujiang.tactical.heroes.common import payload_target_unit
 from wujiang.tactical.heroes.common import payload_target_units
 from wujiang.tactical.heroes.common import positions_to_dict
 from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
+
+
+def _natsume_active_score(skill: Skill, context: AISkillScoreContext) -> float:
+    battle, actor, payload = context.battle, context.actor, context.payload
+    target = battle.units.get(str(payload.get("target_unit_id") or ""))
+    target = battle.effect_recipient(target) if target is not None else None
+    danger_before = context.unit_danger(target) if target is not None else 0.0
+    caster_danger = context.unit_danger(actor) if target is not None and target.player_id != actor.player_id else 0.0
+    with context.probe_rollback():
+        before = context.outcome_snapshot()
+        hidden = {unit.unit_id for unit in battle.all_units() if unit.has_status("隐身")}
+        declared = {**payload, **skill.queued_payload_metadata(battle, actor, payload)}
+        skill.execute(battle, actor, declared)
+        value = context.outcome_value(before)
+        for unit, hp, _, _, _, _ in before.values():
+            if unit.player_id != actor.player_id:
+                value -= max(0.0, unit.current_hp - hp) * 110.0
+            if unit.alive and unit.unit_id in hidden and not unit.has_status("隐身"):
+                value += 65.0 if unit.player_id != actor.player_id else -85.0
+        if target is not None and target.alive:
+            danger_after = context.unit_danger(target)
+            value += danger_before - danger_after if target.player_id == actor.player_id else (danger_after - danger_before) * 0.5
+            if target.player_id != actor.player_id:
+                value += caster_danger - context.unit_danger(actor)
+    return value if value > 0 else -20.0
 
 
 class WindWallCounterStatus(StatusEffect):
@@ -88,8 +114,13 @@ def natsume_protection_changes_outcome(battle, queued_action, target):
 
 
 class NatsumeWindWordSkill(Skill):
+    ai_early_effect_score = True
+
     def __init__(self) -> None:
         super().__init__("natsume_wind_word", "风之语", "普通技能：每回合1次、0魔；范内直线点单位，破魔，只回复1/4生命，再尽量沿直线拉到自身邻圈合法格。", max_uses_per_turn=1, target_mode="unit")
+
+    def ai_effect_score(self, context: AISkillScoreContext) -> float:
+        return _natsume_active_score(self, context)
 
     def ignores_shield_for_payload(self, battle, actor, payload):
         return True
@@ -297,8 +328,13 @@ class NatsumeWindWallSkill(Skill):
 
 
 class NatsumeDispelSkill(Skill):
+    ai_early_effect_score = True
+
     def __init__(self) -> None:
         super().__init__("natsume_dispel", "驱散", "普通技能：每回合1次、0魔；固定声明周围11×11，双方召唤物/分身破坏，隐身解除；每个实际受影响受体回复1魔。", max_uses_per_turn=1, target_mode="self")
+
+    def ai_effect_score(self, context: AISkillScoreContext) -> float:
+        return _natsume_active_score(self, context)
 
     def affected_cells(self, battle, actor):
         return square_around_cells(battle, battle.unit_cells(actor), radius=5)

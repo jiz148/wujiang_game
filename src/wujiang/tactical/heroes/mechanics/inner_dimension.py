@@ -11,6 +11,7 @@ from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Trait
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import StatModifierStatus
 from wujiang.tactical.heroes.mechanics.next_five_geometry import position_key
 from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
@@ -143,6 +144,9 @@ class WeaponTransferStatus(StatModifierStatus):
 
 
 class WeaponTransferSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.red_preparation_score(context)
+
     def __init__(self) -> None:
         super().__init__("weapon_transfer", "武器传送", "普通技能：2 轮一次；直到回合结束前攻 +5。", cooldown_turns=2, target_mode="self")
 
@@ -151,6 +155,9 @@ class WeaponTransferSkill(Skill):
 
 
 class RedChargeSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.red_preparation_score(context)
+
     def __init__(self) -> None:
         super().__init__("red_charge", "蓄力", "普通技能：每回合一次；魔力点 +1。", max_uses_per_turn=1, target_mode="self")
 

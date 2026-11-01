@@ -13,9 +13,10 @@ from types import CodeType, GetSetDescriptorType
 
 _HASHES = {
     "score_skill_payload": "5b5f82d25ff61cbddbd7742d672592cc8db123eed3397ce490d74c2297e07f6b",
-    "_score_skill_payload": "0c1a9dd29e0e77790729062bac367d81a449c5988e13a0f97a3a99f0b59336a2",
-    "skill_payload_requires_enemy_impact": "ebb1d78772813dcc3b0c1d803eba4da823cfd9f4ccfa0b08d9fa2a814214adc0",
-    "skill_from_ai_action": "07e34922ce89fcba0b16d81f7bdb6c3f2bf4e9c82767c8e134d26d83f74241b9",
+    "_score_skill_payload": "096ca8226b32406d6f5c07c761c33690f923c0b14bcece24df555d18e4a8223c",
+    "skill_score_coordinator": "3324fc74f06d9fc3c34ad16af3049a1205f4495ebe22420ac1fc5f1d4cd5dfc6",
+    "skill_payload_requires_enemy_impact": "64e4af3d55a40fd2bcc68c364d5a2291d354cb7708aca0a66dfb7ea15318bd74",
+    "skill_from_ai_action": "801bc61cf369e3871f9f150cf0ee1a3588eea5bfaba1ca6e2558cdd8bca11b83",
 }
 _BOUNDARY = "e2d06321f5abacfa9095e8dac388ab86628ff936ea9898a0a551aff110af59c6"
 _UNKNOWN = object()
@@ -216,19 +217,20 @@ def _metadata(function, battle, args, kwargs, session, saved):
 @lru_cache(maxsize=4)
 def _dispatch_tree(filename):
     import inspect
+    import textwrap
     import __future__
     from wujiang.tactical.rooms import ai
     try:
-        function = ai._score_skill_payload.__wrapped__
+        function = ai.AISkillScoreCoordinator._score_skill_payload
         if function.__code__.co_filename != filename:
             return None
-        source = inspect.getsource(function)
+        source = textwrap.dedent(inspect.getsource(function))
         flags = function.__code__.co_flags & sum(getattr(__future__, name).compiler_flag for name in __future__.all_feature_names)
         compiled = compile(source, filename, "exec", flags=flags, dont_inherit=True)
         body = next(code for code in compiled.co_consts if isinstance(code, CodeType) and code.co_name == "_score_skill_payload")
     except (OSError, SyntaxError, ValueError, StopIteration, AttributeError, TypeError):
         return None
-    if code_hash(body) != _HASHES["_score_skill_payload"]:
+    if code_hash(body) != _HASHES["skill_score_coordinator"]:
         return None
     tree = ast.parse(source)
     return next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_score_skill_payload")
@@ -236,6 +238,12 @@ def _dispatch_tree(filename):
 
 def _delegates(function, actor, action, payload, profile, instant_only):
     from wujiang.tactical.rooms import ai
+    from wujiang.tactical.prediction_factors import _original
+    service = ai._AI_SKILL_DISPATCH_SCORING
+    method = ai.AISkillScoreCoordinator._score_skill_payload
+    if (type(service) is not ai.AISkillScoreCoordinator or service.services is not ai
+            or service._score_skill_payload.__func__ is not method or not _original(method)):
+        return False
     env = {"code": action.get("code") or payload.get("skill_code") or "", "instant_only": instant_only}
     def expr(node):
         if isinstance(node, ast.Constant): return node.value
@@ -290,13 +298,16 @@ def _delegates(function, actor, action, payload, profile, instant_only):
             if isinstance(node, ast.Return):
                 value = node.value
                 if isinstance(value, ast.Constant) and type(value.value) in (bool, int, float): return True
-                return (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
-                        and _boundary(function.__globals__.get(value.func.id))
+                return (isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+                        and isinstance(value.func.value, ast.Attribute)
+                        and isinstance(value.func.value.value, ast.Name)
+                        and value.func.value.value.id == "self" and value.func.value.attr == "services"
+                        and _boundary(getattr(ai, value.func.attr, None))
                         and all(pure_arg(arg) for arg in value.args)
                         and all(pure_arg(kw.value) for kw in value.keywords))
             return False
         return False
-    tree = _dispatch_tree(function.__code__.co_filename)
+    tree = _dispatch_tree(method.__code__.co_filename)
     return tree is not None and body(tree.body)
 
 

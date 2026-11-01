@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import DAMAGE_DEDUPED_CANDIDATES, MAGIC_AREA_SHORTLIST, MagicAreaPrefilter
+
 from typing import Any
 
 from wujiang.tactical.engine.core import (
@@ -194,7 +196,8 @@ class GiantShieldFlatShotSkill(Skill):
                 battle.log_public_event(f"{target.name} 被平射命中，守-1持续四轮。", source=actor, target=target)
 
 
-class GiantShieldLobSkill(DeclaredAreaSkillMixin, Skill):
+class GiantShieldLobSkill(MagicAreaPrefilter, DeclaredAreaSkillMixin, Skill):
+    ai_candidate_plan = MAGIC_AREA_SHORTLIST
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r18_effect_score(self)
 
@@ -543,6 +546,8 @@ class GiantShieldBashSkill(Skill):
 
 
 class GiantShieldGunAreaSkill(GiantShieldLobSkill):
+    ai_candidate_plan = DAMAGE_DEDUPED_CANDIDATES
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         battle, actor = context.battle, context.actor
         cells = context.positions(context.payload.get("cells"))

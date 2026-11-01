@@ -1,6 +1,7 @@
 """Sky sanctuary, healing, banishment, and judgment objects."""
 
 from __future__ import annotations
+from wujiang.tactical.heroes.ai_impact_rule import R12_IMPACT
 
 from typing import Any
 from wujiang.tactical.engine.core import Battle
@@ -179,6 +180,7 @@ class SanctuaryBanishStatus(StatusEffect):
 
 
 class SanctuaryBanishSkill(Skill):
+    ai_effective_impact_rule = R12_IMPACT
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r12_effect_score(self)
 
@@ -220,6 +222,7 @@ class SanctuaryBanishSkill(Skill):
 
 
 class SanctuaryJudgmentSkill(Skill):
+    ai_effective_impact_rule = R12_IMPACT
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r12_effect_score(self)
 

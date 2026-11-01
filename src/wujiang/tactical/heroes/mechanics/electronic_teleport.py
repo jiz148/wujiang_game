@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import DAMAGE_DEDUPED_RANKED_CANDIDATES
+
 from typing import Any
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import Battle
@@ -61,6 +63,7 @@ class ElectronicDragonTeleportTrait(Trait):
 
 
 class SatelliteCannonSkill(Skill):
+    ai_candidate_plan = DAMAGE_DEDUPED_RANKED_CANDIDATES
     target_cells_are_geometry_only = True
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float:

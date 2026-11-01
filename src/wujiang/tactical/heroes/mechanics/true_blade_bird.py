@@ -1,6 +1,10 @@
 """True blade air slash and hundred-bird burial objects."""
 
 from __future__ import annotations
+from wujiang.tactical.heroes.ai_impact_rule import R13_IMPACT, R17_IMPACT
+
+from wujiang.tactical.heroes.ai_candidate_plan import RANKED_CANDIDATES
+from wujiang.tactical.heroes.ai_candidate_plan import TargetDestinationCandidates
 
 from typing import Any
 from wujiang.tactical.engine.core import ActionError
@@ -23,7 +27,12 @@ from wujiang.tactical.heroes.mechanics.next_five_effects import damage_followup_
 from wujiang.tactical.heroes.mechanics.next_five_effects import remote_rectangle_patterns
 
 
-class TrueBladeAirSlashSkill(Skill):
+class TrueBladeAirSlashSkill(TargetDestinationCandidates, Skill):
+    ai_effective_impact_rule = R17_IMPACT
+    def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
+        return target.stat("defense") + 1
+
+    ai_candidate_plan = RANKED_CANDIDATES
     requires_direct_unit_target_line = False
     target_unit_is_anchor = True
 
@@ -181,6 +190,10 @@ class MovementSkillLockStatus(StatusEffect):
 
 
 class HundredBirdBurialSkill(Skill):
+    ai_effective_impact_rule = R13_IMPACT
+    def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
+        return actor.stat("attack") + 2.0
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r13_effect_score(self)
 

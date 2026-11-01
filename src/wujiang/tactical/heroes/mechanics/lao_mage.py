@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import RANKED_CANDIDATES
+
 from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from wujiang.tactical.heroes.ai_policy import AIReactionScoreContext
@@ -16,6 +18,7 @@ from wujiang.tactical.engine.core import Stats
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.heroes.base import AbstractHero
+from wujiang.tactical.heroes.ai_policy import AISkillCandidateContext
 from wujiang.tactical.heroes.common import FlyingTrait
 from wujiang.tactical.heroes.common import StatModifierStatus
 from wujiang.tactical.heroes.common import ensure_enemy
@@ -30,6 +33,17 @@ from wujiang.tactical.heroes.mechanics.next_five_effects import remote_rectangle
 
 
 class LaoWaveBulletSkill(Skill):
+    def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
+        return actor.stat("attack") - (1 if payload.get("free_cast") is True or payload.get("choice_code") == "free" else 0)
+
+    ai_candidate_plan = RANKED_CANDIDATES
+
+    def ai_candidate_payload_variants(self, context: AISkillCandidateContext,
+                                      payload: dict[str, Any]) -> list[dict[str, Any]]:
+        free_payload = dict(payload)
+        free_payload["free_cast"] = True
+        return [payload, free_payload]
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         score = context.damage_score(self)
         cost = self.mana_cost_for_payload(context.battle, context.actor, context.payload)
@@ -101,6 +115,32 @@ class LaoWaveBulletSkill(Skill):
 
 
 class LaoMageHandSkill(Skill):
+    ai_early_effect_score = True
+
+    def ai_effect_score(self, context: AISkillScoreContext) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        target = battle.units.get(str(payload.get("target_unit_id") or ""))
+        if target is None or target.position is None:
+            return -1000.0
+        before_position = target.position
+        before_hp = target.current_hp
+        before_shields = target.total_shields()
+        with context.probe_rollback():
+            try:
+                self.execute(battle, actor, payload)
+            except ActionError:
+                return -1000.0
+            damage = max(0.0, before_hp - target.current_hp)
+            shield_break = max(0, before_shields - target.total_shields())
+            move_gain = 0.0
+            if target.alive and target.position is not None and target.position != before_position:
+                move_gain = (context.move_score_for(target, before_position)
+                             - context.move_score_for(target, target.position)) * 0.5
+            score = damage * 100.0 + shield_break * 16.0 + move_gain
+            if context.death_probability(target) > 0:
+                score += (90.0 * context.death_probability(target) if context.direct_scoring() else 90.0)
+            return score - 8.0 if score > 0 else -1000.0
+
     def __init__(self) -> None:
         super().__init__(
             "lao_mage_hand",

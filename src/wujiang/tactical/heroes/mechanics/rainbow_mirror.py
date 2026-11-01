@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import RANKED_CANDIDATES
+from wujiang.tactical.heroes.ai_candidate_plan import TargetDestinationCandidates
+
 from typing import Any
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import ActionMiss
@@ -25,7 +28,8 @@ class RainbowMirrorNoMoveStatus(FlagStatus):
         super().__init__("彩虹镜", "cannot_normal_move", description="当前全局回合不能普通移动，技能位移和回避仍可。", duration=1, tick_scope="any_turn_end")
 
 
-class RainbowMirrorSkill(Skill):
+class RainbowMirrorSkill(TargetDestinationCandidates, Skill):
+    ai_candidate_plan = RANKED_CANDIDATES
     requires_direct_unit_target_line = False
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
@@ -122,6 +126,9 @@ class FriendlyMirrorStatus(StatusEffect):
 
 
 class FriendlyMirrorSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.friendly_mirror_score(context)
+
     def __init__(self) -> None:
         super().__init__("friendly_mirror", "友好镜", "大招：一场战斗一次；5 轮内不受当前攻击 3 以上单位的普攻和技能伤害。", max_uses_per_battle=1, target_mode="self")
 

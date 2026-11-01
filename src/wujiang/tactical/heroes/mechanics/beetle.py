@@ -1,6 +1,7 @@
 """R172 beetle spear and armor objects."""
 
 from __future__ import annotations
+from wujiang.tactical.heroes.ai_impact_rule import R19_IMPACT
 
 from copy import deepcopy
 from dataclasses import replace
@@ -19,6 +20,7 @@ from wujiang.tactical.heroes.mechanics.thor import H1AllActionLockStatus
 
 
 class BeetleSpearSkill(HellSlashSkill):
+    ai_effective_impact_rule = R19_IMPACT
     length = 5
 
     def __init__(self) -> None:

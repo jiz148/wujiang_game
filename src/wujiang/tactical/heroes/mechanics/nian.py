@@ -1,6 +1,7 @@
 """R059 Nian dragon breath, roar, and jade flash."""
 
 from __future__ import annotations
+from wujiang.tactical.heroes.ai_impact_rule import R13_IMPACT
 
 from typing import Any
 from wujiang.tactical.engine.core import Battle
@@ -24,6 +25,7 @@ from wujiang.tactical.heroes.mechanics.next_five_geometry import nearby_rectangl
 
 
 class NianLargeDragonBreathSkill(DragonBreathSkill):
+    ai_effective_impact_rule = R13_IMPACT
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r13_effect_score(self)
 
@@ -84,6 +86,7 @@ class NianRoarStatus(StatusEffect):
 
 
 class NianRoarSkill(Skill):
+    ai_effective_impact_rule = R13_IMPACT
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r13_effect_score(self)
 
@@ -159,6 +162,7 @@ class NianNoHealStatus(StatusEffect):
 
 
 class NianJadeFlashSkill(Skill):
+    ai_effective_impact_rule = R13_IMPACT
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r13_effect_score(self)
 

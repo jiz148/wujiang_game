@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import RANKED_CANDIDATES
+
 from itertools import permutations
 from typing import Any
 from wujiang.tactical.engine.core import ActionError
@@ -16,6 +18,7 @@ from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import TargetContext
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.engine.core import Unit
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.base import AbstractHero
 from wujiang.tactical.heroes.common import FlyingTrait
 from wujiang.tactical.heroes.common import payload_position
@@ -305,6 +308,9 @@ def alive_world_root_numbers(battle: Battle, seed_or_summoner: HeroUnit) -> set[
 
 
 class JudgmentStoneSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.judgment_stone_score(context)
+
     def __init__(self) -> None:
         super().__init__("judgment_stone", "审判之石", "普通技能：每回合第一次免费，之后费 0.5 魔；召唤飞行审判之石，与敌方单位重合时爆裂。", mana_cost=0.5, target_mode="cell")
 
@@ -343,6 +349,10 @@ class JudgmentStoneSkill(Skill):
 
 
 class WorldSeedSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.world_seed_score(context)
+
+    ai_candidate_plan = RANKED_CANDIDATES
     EDGE_DEFS = {"north": ((2, 0), (0, -1)), "east": ((4, 2), (1, 0)),
                  "south": ((2, 4), (0, 1)), "west": ((0, 2), (-1, 0))}
     EDGE_NAMES = {"north": "上", "east": "右", "south": "下", "west": "左"}

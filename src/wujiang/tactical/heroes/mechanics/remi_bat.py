@@ -1,6 +1,7 @@
 """R056 Remi bat and chaos mechanics."""
 
 from __future__ import annotations
+from wujiang.tactical.heroes.ai_impact_rule import R13_IMPACT
 
 from typing import Any
 from wujiang.tactical.engine.core import ActionError
@@ -42,6 +43,7 @@ class RemiBatSummon(AbstractHero):
 
 
 class RemiChaosSkill(Skill):
+    ai_effective_impact_rule = R13_IMPACT
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r13_effect_score(self)
 

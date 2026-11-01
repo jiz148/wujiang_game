@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import HELL_FIRE_SHORTLIST, MagicAreaPrefilter
+
 from typing import Any
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import DamageContext
@@ -25,7 +27,8 @@ class HellDragonBreathSkill(DragonBreathSkill):
         self.description = "普通技能：沿近身龙息的2×2范围和2魔、每本人轮两次额度结算。"
 
 
-class HellDragonFireSkill(DeclaredAreaSkillMixin, Skill):
+class HellDragonFireSkill(MagicAreaPrefilter, DeclaredAreaSkillMixin, Skill):
+    ai_candidate_plan = HELL_FIRE_SHORTLIST
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.paid_skill_value()
 
@@ -77,6 +80,9 @@ class FlyingDragonOrbStatus(PhysicalImmunityStatus):
 
 
 class FlyingDragonOrbSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.red_preparation_score(context)
+
     def __init__(self) -> None:
         super().__init__("flying_dragon_orb", "飞龙宝珠", "大招：本场一次，物免3轮。",
                          max_uses_per_battle=1, target_mode="self")

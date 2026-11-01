@@ -16,6 +16,9 @@ from wujiang.tactical.heroes.common import (
 from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS
 
 class BarbarianAxeSkill(Skill):
+    def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
+        return actor.stat("attack") - (1.0 if payload.get("choice_code") == "weak" else 0.0)
+
     bypasses_block_counter = True
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float:

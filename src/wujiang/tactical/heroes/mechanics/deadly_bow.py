@@ -9,10 +9,17 @@ from wujiang.tactical.engine.core import DamageContext
 from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import positions_to_dict
 
 
 class DeadlyBowSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.deadly_bow_score(context)
+
+    def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
+        return float(payload.get("deadly_bow_points", actor.mana_points))
+
     selection_cells_are_effect_cells = False
     DIRECTIONS = {
         "north": (0, -1), "northeast": (1, -1), "east": (1, 0), "southeast": (1, 1),

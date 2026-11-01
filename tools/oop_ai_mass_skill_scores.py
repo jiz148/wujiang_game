@@ -30,7 +30,7 @@ def snapshot(battle) -> tuple[str, str, int]:
 
 def picked_payloads(candidates: list[dict], actor, ally, enemy) -> list[dict]:
     if not candidates:
-        return [{}]
+        return []
     indexes = {0, len(candidates) // 2, len(candidates) - 1}
     for unit in (enemy, ally):
         indexes.update(i for i, payload in enumerate(candidates)

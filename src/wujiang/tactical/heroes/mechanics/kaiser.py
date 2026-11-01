@@ -8,10 +8,17 @@ from wujiang.tactical.engine.core import DamageContext
 from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import StatusEffect
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import payload_target_unit
 
 
 class KaiserFistSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.kaiser_fist_score(context)
+
+    def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
+        return actor.stat("attack") + 1
+
     def __init__(self) -> None:
         super().__init__(
             "kaiser_fist",

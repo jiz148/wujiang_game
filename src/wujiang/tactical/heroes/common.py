@@ -1359,6 +1359,9 @@ class StoneWallSkill(MultiTargetChainShieldSkill):
 
 
 class DrainManaSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.drain_mana_score(context)
+
     def __init__(self) -> None:
         super().__init__("drain_mana", "吸魔", "命中后令目标魔力 -1，自身魔力 +1。", target_mode="enemy", max_uses_per_turn=1)
 
@@ -1956,6 +1959,9 @@ class GreatHolyLightField(BattleFieldEffect):
 
 
 class GreatHolyLightSkill(SelfBuffSkill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.field_skill_score(context)
+
     def __init__(self) -> None:
         super().__init__("great_holy_light", "大圣光", "大招：持续 2.5 轮，以自己为中心生成范围会变化的圣光场。", max_uses_per_battle=1)
 

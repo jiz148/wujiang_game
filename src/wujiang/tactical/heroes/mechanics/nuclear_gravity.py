@@ -1,6 +1,7 @@
 """R037 nuclear mutation and gravity field mechanics."""
 
 from __future__ import annotations
+from wujiang.tactical.heroes.ai_impact_rule import R12_IMPACT
 
 from typing import Any
 from wujiang.tactical.engine.core import ActionError
@@ -25,6 +26,7 @@ def _area_hit_count(battle: Battle, target: HeroUnit, cells: list[Position]) -> 
 
 
 class NuclearMutationSkill(Skill):
+    ai_effective_impact_rule = R12_IMPACT
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r12_effect_score(self)
 
@@ -68,6 +70,7 @@ class NuclearMutationSkill(Skill):
 
 
 class GravityFieldSkill(Skill):
+    ai_effective_impact_rule = R12_IMPACT
     def ai_priority_score(self, context: AISkillScoreContext) -> float | None:
         if direct_scoring():
             return None

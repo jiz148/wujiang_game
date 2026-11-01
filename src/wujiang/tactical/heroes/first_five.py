@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import TargetDestinationCandidates
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.prediction import random, direct_scoring
 from typing import Any
 
@@ -58,7 +60,8 @@ from wujiang.tactical.heroes.common import (
 )
 
 
-class ManaPullSkill(Skill):
+class ManaPullSkill(TargetDestinationCandidates, Skill):
+    ai_destination_fields = ("dest_x", "dest_y")
     def __init__(self) -> None:
         super().__init__(
             "mana_pull",
@@ -559,6 +562,12 @@ class GreatFireFuneralField(BattleFieldEffect):
 
 
 class GreatFireFuneralSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.great_funeral_score(context)
+
+    def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
+        return 5.0
+
     excludes_caster_from_effect = True
 
     def __init__(self) -> None:
@@ -624,6 +633,9 @@ class GreatFireFuneralSkill(Skill):
 
 
 class JudgmentFireSkill(Skill):
+    def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
+        return 6.0
+
     def __init__(self) -> None:
         super().__init__("judgment_fire", "审判日之火", "仅在攻击为1时可用；按当前攻守速范及魔力之和豁免所有并列最低者，对其余在场单位以攻6结算并禁疗3轮，无视魔免、不可回避。", max_uses_per_battle=1, target_mode="self")
 

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import RANKED_CANDIDATES
+from wujiang.tactical.heroes.ai_candidate_plan import TargetDestinationCandidates
+
 from typing import Any
 from typing import Optional
 from wujiang.tactical.engine.army import is_army_soldier
@@ -340,7 +343,9 @@ class DescentMomentAttackStatus(StatusEffect):
         return data
 
 
-class DescentMomentSkill(Skill):
+class DescentMomentSkill(TargetDestinationCandidates, Skill):
+    ai_candidate_plan = RANKED_CANDIDATES
+    ai_destination_fields = ("dest_x", "dest_y")
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.owned_effect_score(self)
 

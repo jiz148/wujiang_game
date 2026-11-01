@@ -14,6 +14,7 @@ from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import TargetContext
 from wujiang.tactical.engine.core import Trait
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import AttackCountTrait
 from wujiang.tactical.heroes.common import MagicImmunityStatus
 from wujiang.tactical.heroes.common import payload_target_unit
@@ -41,6 +42,9 @@ class WeaponCopyStatus(StatusEffect):
 
 
 class WeaponCopySkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.weapon_copy_score(context)
+
     def __init__(self) -> None:
         super().__init__("weapon_copy", "武装复制", "普通技能：每回合一次；选择周围可见武将，快照其当前攻及普攻相关特性，持续本回合。", max_uses_per_turn=1, target_mode="unit")
 
@@ -169,6 +173,9 @@ class GlobalAttackStatus(StatusEffect):
 
 
 class InfiniteSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.red_preparation_score(context)
+
     def __init__(self) -> None:
         super().__init__("infinite", "无限", "大招：3个己方回合内，每次普攻可指定全场任意一格。", max_uses_per_battle=1, target_mode="self")
 
@@ -192,6 +199,9 @@ class PhysicalImmunityStatus(StatusEffect):
 
 
 class InfiniteArmorSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.red_preparation_score(context)
+
     def __init__(self) -> None:
         super().__init__("infinite_armor", "无限铠甲", "大招：物免 3 轮。", max_uses_per_battle=1, target_mode="self")
 
@@ -200,6 +210,9 @@ class InfiniteArmorSkill(Skill):
 
 
 class InfiniteRobeSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.red_preparation_score(context)
+
     def __init__(self) -> None:
         super().__init__("infinite_robe", "无限法袍", "大招：魔免 3 轮。", max_uses_per_battle=1, target_mode="self")
 

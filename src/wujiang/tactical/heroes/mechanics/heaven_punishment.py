@@ -14,6 +14,7 @@ from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import payload_target_unit
+from wujiang.tactical.heroes.ai_policy import AISkillCandidateContext
 from wujiang.tactical.heroes.mechanics.next_five_effects import apply_piercing_status_effect
 from wujiang.tactical.heroes.mechanics.next_five_effects import damage_followup_effect_applies
 from wujiang.tactical.heroes.mechanics.next_five_effects import remote_rectangle_patterns
@@ -33,6 +34,39 @@ class SkillDisabledStatus(StatusEffect):
 
 class HeavenPunishmentSkill(Skill):
     target_unit_is_anchor = True
+
+    def ai_candidate_payloads(self, context: AISkillCandidateContext) -> list[dict[str, Any]]:
+        battle, actor, action = context.battle, context.actor, context.action
+        preview = action.get("preview", {}) or {}
+        selection = dict(preview.get("selection") or {})
+        allowed_ids = set(preview.get("target_unit_ids") or [])
+        payloads: list[dict[str, Any]] = []
+        for pattern in selection.get("patterns", []):
+            cells = context.positions(pattern)
+            cell_keys = {(cell.x, cell.y) for cell in cells}
+            for target in battle.enemy_units(actor.player_id):
+                if target.unit_id not in allowed_ids:
+                    continue
+                if not any((cell.x, cell.y) in cell_keys for cell in battle.unit_cells(target)):
+                    continue
+                for target_skill in self.public_active_skills(battle, target):
+                    if getattr(target_skill, "timing", None) != "active":
+                        continue
+                    if target_skill.max_uses_per_battle is not None and target_skill.uses_this_battle >= target_skill.max_uses_per_battle:
+                        continue
+                    if any(getattr(status, "skill_code", None) == target_skill.code for status in target.statuses):
+                        continue
+                    payloads.append(
+                        {
+                            "type": "skill",
+                            "unit_id": actor.unit_id,
+                            "skill_code": "heaven_punishment",
+                            "cells": context.geometry.positions_to_payload(cells),
+                            "target_unit_id": target.unit_id,
+                            "disabled_skill_code": target_skill.code,
+                        }
+                    )
+        return context.require_shared().dedupe_payloads(payloads)
 
     def __init__(self) -> None:
         super().__init__(

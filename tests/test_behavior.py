@@ -20480,7 +20480,8 @@ class DevelopedHeroReviewR04BehaviorTests(unittest.TestCase):
             self.assertFalse(battle.get_unit(clone.unit_id).is_clone)
             return [], []
 
-        with mock.patch("wujiang.tactical.rooms.ai.turn_action_candidates", side_effect=inspect_view):
+        from wujiang.tactical.rooms import ai
+        with mock.patch.object(ai._AI_DECISION_COORDINATOR, "turn_action_candidates", side_effect=inspect_view):
             self.assertEqual(choose_turn_action(battle, actor=actor, difficulty="standard"), {"type": "end_turn"})
         self.assertIs(battle.get_unit(clone.unit_id), clone)
         with self.assertRaises(RuntimeError):
@@ -38374,6 +38375,23 @@ class NewBatch277290TianyuanCrowBehaviorTests(unittest.TestCase):
         self.assertIsInstance(score, float)
         self.assertFalse(battle.has_weather("万魔殿"))
 
+    def test_future_attack_estimate_uses_legal_dragon_area_cells(self):
+        from wujiang.tactical.rooms.ai import legal_attack_payload, r19_attack_window_value, r21_unit_attack_opportunity
+
+        battle = create_battle("dragon_rider", "bard")
+        rider = primary_hero(battle, 1)
+        dragon = summon_by_code(battle, 1, "dragon_mount")
+        target = primary_hero(battle, 2)
+        rider.position = dragon.position = Position(2, 2)
+        target.position = Position(5, 2)
+
+        payload = legal_attack_payload(battle, dragon, target)
+        self.assertIsNotNone(payload)
+        self.assertTrue(payload.get("cells") or payload.get("attack_cells"))
+        self.assertTrue(battle.attack_target_allowed(dragon, target, payload=payload)[0])
+        self.assertGreaterEqual(r21_unit_attack_opportunity(battle, dragon), 0)
+        self.assertGreaterEqual(r19_attack_window_value(battle, dragon, difficulty_profile("standard")), 0)
+
     def test_registry_skills_and_target_previews(self):
         from wujiang.tactical.heroes.registry import list_heroes
 
@@ -39420,6 +39438,17 @@ class NewBatch320321FisherGardenBehaviorTests(unittest.TestCase):
         self.assertEqual(fisher.attack_actions_per_turn(), 3)
         trait.on_owner_turn_start(battle)
         self.assertEqual(fisher.attack_actions_per_turn(), 2)
+
+    def test_direct_coin_uses_expected_followup_without_rolling_or_granting_a_turn(self):
+        battle, fisher, _, bard, _ = self.fixture()
+        trait = next(item for item in fisher.traits if item.name == "渔人连击")
+        before_logs = len(battle.logs)
+        with mock.patch("wujiang.tactical.heroes.fisher_garden_demon.direct_scoring", return_value=True), \
+                mock.patch("wujiang.tactical.heroes.fisher_garden_demon.random.random", side_effect=AssertionError("live coin")):
+            trait.on_basic_attack_finished(battle, fisher, {}, [], False)
+        self.assertEqual(trait.coin_bonus, 0)
+        self.assertEqual(len(battle.logs), before_logs)
+        self.assertEqual(fisher.ai_policy.attack_followup_bonus(battle, fisher, bard, {}, 0.25), 18.0)
 
     def test_true_hero_kill_and_weather_enemy_kill_stack_once(self):
         from wujiang.tactical.heroes.excel_roster import SimpleGlobalWeatherEffect
@@ -40819,7 +40848,8 @@ class HeroAIStormRoarReactionPolicyBehaviorTests(unittest.TestCase):
                                   display_name="未知攻击", speed=1, payload={"type": "attack"},
                                   target_unit_ids=[actor.unit_id], target_cells=[actor.position],
                                   source_player_id=2, hostile=True)
-            with mock.patch("wujiang.tactical.rooms.ai.forecasting_active", return_value=True):
+            with mock.patch("wujiang.tactical.rooms.ai_reaction_scoring.forecasting_active", return_value=True), \
+                    mock.patch("wujiang.tactical.rooms.ai_weather_scoring.forecasting_active", return_value=True):
                 self.assertEqual(_score_reaction_payload(battle, actor, unseen, option,
                                                         payload, profile), -1000.0)
 
@@ -41657,3 +41687,248 @@ class HeroAIBloodChanterLiSkillObjectBehaviorTests(unittest.TestCase):
                         profile, instant_only=False)
                 self.assertEqual(value, 321.0)
                 scorer.assert_called_once()
+
+
+class HeroAICandidatePlanRoutingBehaviorTests(unittest.TestCase):
+    def test_special_payload_generation_dispatches_to_owning_skill(self):
+        from wujiang.tactical.rooms.ai import skill_payloads_for_action
+
+        for hero, code in (
+            ("excel_r024", "royal_soldier"),
+            ("excel_r025", "agency_contract"),
+            ("excel_r025", "agency_borrowed_skill"),
+            ("excel_r027", "split"),
+            ("excel_r070", "heaven_punishment"),
+            ("excel_r022", "mimic_skill"),
+            ("excel_r252", "ancient_fusion"),
+            ("rock_god", "rock_absorb"),
+            ("rock_god", "rock_cannon"),
+            ("undead_king_lina", "crazy_sand"),
+            ("element_hunter", "earth_walker"),
+        ):
+            with self.subTest(hero=hero, code=code):
+                battle = create_battle(hero, "bard")
+                actor = primary_hero(battle, 1)
+                skill = actor.get_skill(code)
+                result = [{"owned_by": code}]
+                with mock.patch.object(type(skill), "ai_candidate_payloads", return_value=result) as owned:
+                    self.assertIs(skill_payloads_for_action(
+                        battle, actor, {"code": code, "target_mode": skill.target_mode,
+                                        "preview": {}}), result)
+                owned.assert_called_once()
+
+    def test_pattern_payload_variants_dispatch_to_skill(self):
+        from wujiang.tactical.rooms.ai import skill_payloads_for_action
+
+        battle = create_battle("excel_r033", "bard")
+        actor = primary_hero(battle, 1)
+        skill = actor.get_skill("lao_wave_bullet")
+        action = {"code": skill.code, "target_mode": "cell",
+                  "preview": {"selection": {"mode": "pattern_cells",
+                                            "patterns": [[{"x": 1, "y": 1}]]}}}
+        result = [{"owned_variant": True}]
+        with mock.patch.object(type(skill), "ai_candidate_payload_variants", return_value=result) as owned:
+            self.assertEqual(skill_payloads_for_action(battle, actor, action), result)
+        owned.assert_called_once()
+
+    def test_area_prefilter_shortlists_are_skill_owned(self):
+        from wujiang.tactical.heroes.ai_candidate_plan import (
+            DAMAGE_DEDUPED_CANDIDATES, HELL_FIRE_SHORTLIST, MAGIC_AREA_SHORTLIST)
+
+        for hero, code, plan in (
+            ("excel_r248", "hell_dragon_fire", HELL_FIRE_SHORTLIST),
+            ("excel_r252", "ancient_arm", MAGIC_AREA_SHORTLIST),
+            ("excel_r254", "shield_lob", MAGIC_AREA_SHORTLIST),
+        ):
+            with self.subTest(hero=hero, code=code):
+                battle = create_battle(hero, "bard")
+                skill = primary_hero(battle, 1).get_skill(code)
+                self.assertIs(skill.ai_candidate_plan, plan)
+                self.assertTrue(callable(skill.ai_prefilter_score))
+        battle = create_battle("excel_r257", "bard")
+        self.assertIs(primary_hero(battle, 1).get_skill("shield_sweep").ai_candidate_plan,
+                      DAMAGE_DEDUPED_CANDIDATES)
+
+    def test_early_effect_scores_are_owned_by_skill_or_hero_policy(self):
+        from wujiang.tactical.rooms.ai import difficulty_profile, score_skill_payload
+
+        for hero, code in (
+            ("excel_r027", "wuchang_mist"),
+            ("excel_r027", "migratory_bird_mark"),
+            ("excel_r031", "natsume_wind_word"),
+            ("excel_r031", "natsume_dispel"),
+            ("excel_r033", "lao_mage_hand"),
+        ):
+            with self.subTest(hero=hero, code=code):
+                battle = create_battle(hero, "bard")
+                actor = primary_hero(battle, 1)
+                skill = actor.get_skill(code)
+                self.assertTrue(skill.ai_early_effect_score)
+                with mock.patch.object(type(skill), "ai_effect_score", return_value=321.0) as scorer:
+                    value = score_skill_payload(
+                        battle, actor, {"code": code, "_skill_object": skill}, {},
+                        difficulty_profile("standard"), instant_only=False)
+                self.assertEqual(value, 321.0)
+                scorer.assert_called_once()
+
+        battle = create_battle("excel_r027", "bard")
+        actor = primary_hero(battle, 1)
+        with mock.patch.object(type(actor.ai_policy), "contextual_skill_score", return_value=123.0) as scorer:
+            value = score_skill_payload(
+                battle, actor, {"code": "split"}, {},
+                difficulty_profile("standard"), instant_only=False)
+        self.assertEqual(value, 123.0)
+        scorer.assert_called_once()
+
+    def test_target_destination_payloads_are_built_by_skill_objects(self):
+        from wujiang.tactical.heroes.ai_candidate_plan import TargetDestinationCandidates
+        from wujiang.tactical.heroes.ai_policy import AISkillCandidateContext
+        from wujiang.tactical.rooms.ai import _SHARED_CANDIDATE_GEOMETRY, skill_payloads_for_action
+
+        for hero, code in (
+            ("ellie", "mana_pull"),
+            ("excel_r325", "gentleman_duel"),
+            ("erasure_apostle", "descent_moment"),
+            ("excel_r127", "fantasy_move"),
+            ("excel_r127", "rainbow_mirror"),
+            ("excel_r136", "true_blade_air_slash"),
+        ):
+            with self.subTest(hero=hero, code=code):
+                battle = create_battle(hero, "bard")
+                actor = primary_hero(battle, 1)
+                skill = actor.get_skill(code)
+                self.assertIsInstance(skill, TargetDestinationCandidates)
+                action = {"code": code, "target_mode": skill.target_mode,
+                          "preview": skill.preview(battle, actor)}
+                expected = skill.ai_candidate_payloads(AISkillCandidateContext(
+                    battle, actor, action, _SHARED_CANDIDATE_GEOMETRY))
+                self.assertEqual(skill_payloads_for_action(battle, actor, action), expected)
+
+    def test_candidate_pipeline_uses_the_skill_owned_plan(self):
+        from wujiang.tactical.rooms.ai import build_skill_candidates, difficulty_profile
+
+        battle = create_battle("chanter", "bard")
+        actor = primary_hero(battle, 1)
+        skill = actor.get_skill("poison_card")
+        action = {"code": skill.code, "target_mode": skill.target_mode,
+                  "preview": skill.preview(battle, actor)}
+
+        class EmptyPlan:
+            def __init__(self):
+                self.deduped = False
+                self.prepared = False
+
+            def dedupe_payloads(self, battle, actor, skill, payloads, shared):
+                self.deduped = True
+                return payloads
+
+            def prepare_payloads(self, battle, actor, action, skill, payloads,
+                                 profile, instant_only, shared, pre_scored, prequalified):
+                self.prepared = True
+                return [], pre_scored, prequalified
+
+        plan = EmptyPlan()
+        with mock.patch.object(type(skill), "ai_candidate_plan", plan):
+            candidates = build_skill_candidates(
+                battle, actor, action, difficulty_profile("standard"), instant_only=False)
+        self.assertEqual(candidates, [])
+        self.assertTrue(plan.deduped)
+        self.assertTrue(plan.prepared)
+
+    def test_unusual_candidate_rules_remain_on_the_skill(self):
+        from wujiang.tactical.heroes.ai_candidate_plan import (
+            DAMAGE_DEDUPED_RANKED_CANDIDATES, POSITIVE_RANKED_CANDIDATES,
+            UNIT_DEDUPED_CANDIDATES)
+
+        for hero, code, plan in (
+            ("excel_r194", "battle_hurricane", DAMAGE_DEDUPED_RANKED_CANDIDATES),
+            ("excel_r262", "great_feather_fan", UNIT_DEDUPED_CANDIDATES),
+            ("excel_r127", "fantasy_move", POSITIVE_RANKED_CANDIDATES),
+        ):
+            with self.subTest(hero=hero, code=code):
+                battle = create_battle(hero, "bard")
+                self.assertIs(primary_hero(battle, 1).get_skill(code).ai_candidate_plan, plan)
+
+        battle = create_battle(["excel_r223", "excel_r221"], ["bard"])
+        wing = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r223")
+        host = next(unit for unit in battle.hero_units(1) if unit.hero_code == "excel_r221")
+        enemy = primary_hero(battle, 2)
+        wing.get_skill("electronic_fusion").execute(battle, wing, {"target_unit_id": host.unit_id})
+        shot = next(skill for skill in host.action_skills()
+                    if skill.code.startswith("fusion_piercing_shot__"))
+        payload = {"choice_code": "defense", "cells": [enemy.position.to_dict()]}
+        self.assertEqual(shot.ai_unique_candidate_payloads(
+            battle, host, [payload, dict(payload)]), [payload])
+
+
+class HeroAIAttackPowerRoutingBehaviorTests(unittest.TestCase):
+    def test_special_attack_power_uses_owning_skill(self):
+        from wujiang.tactical.rooms.ai import skill_attack_power
+
+        for hero, code in (
+            ("excel_r321", "black_night_shadow"),
+            ("excel_r260", "barbarian_axe"),
+            ("excel_r029", "deadly_bow"),
+            ("fire_funeral", "judgment_fire"),
+            ("fire_funeral", "great_funeral"),
+            ("excel_r093", "kaiser_fist"),
+            ("excel_r196", "earth_shatter"),
+            ("excel_r139", "illumination_light"),
+            ("excel_r136", "true_blade_air_slash"),
+            ("dragon_rider", "dragon_slash"),
+            ("excel_r033", "lao_wave_bullet"),
+            ("excel_r035", "demon_blade"),
+            ("excel_r047", "hundred_bird_burial"),
+            ("excel_r071", "snow_avalanche"),
+            ("rock_god", "rock_cannon"),
+            ("doomlight_dragon", "apocalypse"),
+        ):
+            with self.subTest(hero=hero, code=code):
+                battle = create_battle(hero, "bard")
+                actor = primary_hero(battle, 1)
+                target = primary_hero(battle, 2)
+                skill = actor.get_skill(code)
+                with mock.patch.object(type(skill), "ai_attack_power", return_value=123.0) as owned:
+                    self.assertEqual(skill_attack_power(
+                        battle, actor, skill, {}, target, [target.position]), 123.0)
+                owned.assert_called_once()
+
+
+class HeroAIImpactRuleRoutingBehaviorTests(unittest.TestCase):
+    def test_positive_effect_impact_uses_owning_skill_rule(self):
+        from wujiang.tactical.rooms.ai import skill_payload_has_effective_enemy_impact
+
+        for hero, code in (
+            ("excel_r035", "demon_blade"),
+            ("excel_r036", "sanctuary_banish"),
+            ("excel_r036", "sanctuary_judgment"),
+            ("excel_r037", "nuclear_mutation"),
+            ("excel_r037", "gravity_field"),
+            ("excel_r047", "hundred_bird_burial"),
+            ("excel_r056", "remi_chaos"),
+            ("excel_r059", "nian_large_dragon_breath"),
+            ("excel_r059", "nian_roar"),
+            ("excel_r059", "nian_jade_flash"),
+            ("excel_r071", "snow_avalanche"),
+            ("excel_r127", "fantasy_move"),
+            ("excel_r136", "true_blade_air_slash"),
+            ("excel_r137", "undead_boy_devour"),
+            ("excel_r139", "illumination_light"),
+            ("excel_r143", "thor_heavy_hammer"),
+            ("excel_r143", "thor_rage_impact"),
+            ("excel_r143", "thor_destroy_lightning"),
+            ("excel_r158", "hell_slash"),
+            ("excel_r166", "electric_wind"),
+            ("excel_r172", "beetle_spear"),
+            ("excel_r379", "sun_slash"),
+        ):
+            with self.subTest(hero=hero, code=code):
+                battle = create_battle(hero, "bard")
+                actor = primary_hero(battle, 1)
+                skill = actor.get_skill(code)
+                action = {"code": code, "target_mode": skill.target_mode}
+                with mock.patch.object(type(skill.ai_effective_impact_rule), "has_impact",
+                                       return_value=True) as owned:
+                    self.assertTrue(skill_payload_has_effective_enemy_impact(
+                        battle, actor, action, {}))
+                owned.assert_called_once()

@@ -15,7 +15,10 @@ from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import Stats
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Trait
+from wujiang.tactical.engine.core import Unit
 from wujiang.tactical.heroes.base import AbstractHero
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
+from wujiang.tactical.rooms.ai_targets import living_hostile_combatants
 from wujiang.tactical.heroes.common import FlagStatus
 from wujiang.tactical.heroes.common import LightWallSkill
 from wujiang.tactical.heroes.common import ShensuSkill
@@ -373,6 +376,9 @@ class EarthWalkerCleanupStatus(StatusEffect):
 
 
 class PlantGrowthSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.field_skill_score(context)
+
     def __init__(self) -> None:
         super().__init__("plant_growth", "植物生长", "普通技能：每回合最多 1 次，远程选择完整 5*5 区域；持续 1轮，普通移动每步若起点在区域内则消耗 2 点移动点数，飞行单位也会受到影响。", max_uses_per_turn=1, target_mode="cell")
 
@@ -494,6 +500,9 @@ class ElementHunter(AbstractHero):
 
 
 class EarthWalkerSkill(SplitSkill):
+    def ai_clone_placement_enemies(self, battle: Battle, actor: HeroUnit) -> list[Unit]:
+        return living_hostile_combatants(battle, actor.player_id)
+
     def __init__(self) -> None:
         super().__init__()
         self.code = "earth_walker"

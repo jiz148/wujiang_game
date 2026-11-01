@@ -1,6 +1,7 @@
 """Blind evasion and Thor line, impact, and lightning objects."""
 
 from __future__ import annotations
+from wujiang.tactical.heroes.ai_impact_rule import R18_IMPACT
 
 from typing import Any
 from wujiang.tactical.engine.core import ActionError
@@ -74,6 +75,7 @@ class BlindCircleAttackTrait(FusionCircleAttackTrait):
 
 
 class ThorLineDamageSkill(H1LineDamageSkill):
+    ai_effective_impact_rule = R18_IMPACT
     excludes_allies_from_effect = True
     target_cells_are_geometry_only = True
 

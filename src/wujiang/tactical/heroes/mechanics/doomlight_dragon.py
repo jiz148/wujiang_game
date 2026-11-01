@@ -171,6 +171,13 @@ class DoomLightSkill(ResourceEffectScoring, Skill):
 
 
 class ApocalypseSkill(ResourceEffectScoring, Skill):
+    def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
+        try:
+            n = int(payload.get("choice_code", payload.get("n", 0)))
+        except (TypeError, ValueError):
+            n = 0
+        return actor.stat("attack") + n
+
     def ai_probe_prepare(self, context: AISkillScoreContext, probe: dict[str, Any]) -> None:
         self.prepay_resources(context.battle, context.actor, probe)
 

@@ -17,6 +17,7 @@ from wujiang.tactical.heroes.registry import create_battle, create_hero  # noqa:
 from wujiang.tools.match_audit import (  # noqa: E402
     FindingRecorder,
     action_diagnostic,
+    build_fallback_decision,
     build_turn_decision,
     parse_roster,
     record_candidate_gap,
@@ -66,6 +67,16 @@ def normalize_unit_ids(value):
 
 
 class MatchAuditToolTests(unittest.TestCase):
+    def test_damage_fallback_uses_legal_target_choice_shape(self) -> None:
+        battle = create_battle("bard", "n")
+        actor = battle.current_turn_unit()
+        battle.pending_damage_choice = {
+            "unit_id": actor.unit_id, "kind": "rotation", "options": [actor.unit_id],
+        }
+        payload = build_fallback_decision(battle, "failed decision")["payload"]
+        self.assertEqual(payload["target_unit_id"], actor.unit_id)
+        self.assertNotIn("stat_name", payload)
+
     def test_design_profiles_accept_utf8_bom(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "design.json"

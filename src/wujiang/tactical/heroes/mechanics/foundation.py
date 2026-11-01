@@ -11,6 +11,7 @@ from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import TargetContext
 from wujiang.tactical.engine.core import Trait
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import PierceSkill
 from wujiang.tactical.heroes.common import localized_line_patterns
 from wujiang.tactical.heroes.common import match_payload_pattern
@@ -217,6 +218,9 @@ class GuardianFinaleStatus(StatusEffect):
 
 
 class GuardianFinaleSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.guardian_finale_score(context)
+
     def __init__(self) -> None:
         super().__init__(
             "guardian_finale",

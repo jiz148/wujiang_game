@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import RANKED_CANDIDATES
+
 from typing import Any
 from wujiang.tactical.engine.army import is_army_soldier
 from wujiang.tactical.engine.core import ActionError
@@ -152,6 +154,21 @@ class ElectronicFusionSkill(Skill):
 
 
 class ElectronicFusionShotSkill(Skill):
+    ai_candidate_plan = RANKED_CANDIDATES
+
+    def ai_unique_candidate_payloads(self, battle: Battle, actor: HeroUnit,
+                                     payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        # One cell per actual recipient is enough for this single-cell strike.
+        unique: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
+        for payload in payloads:
+            cells = [Position(int(cell["x"]), int(cell["y"]))
+                     for cell in payload.get("cells", []) if isinstance(cell, dict)
+                     and cell.get("x") is not None and cell.get("y") is not None]
+            if not cells:
+                continue
+            targets = tuple(unit.unit_id for unit in battle.effect_units_at_cells(cells[:1]))
+            unique.setdefault((str(payload.get("choice_code") or ""), targets), payload)
+        return list(unique.values())
     target_cells_are_geometry_only = True
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
@@ -320,6 +337,7 @@ class ElectronicFusionDetachSkill(Skill):
 
 
 class ElectronicRepairSkill(Skill):
+    ai_candidate_plan = RANKED_CANDIDATES
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         battle, actor, payload = context.battle, context.actor, context.payload
         try:

@@ -11,7 +11,7 @@ from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import Stats
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.engine.core import Unit
-from wujiang.tactical.heroes.ai_policy import HeroAIPolicy
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext, HeroAIPolicy
 from wujiang.tactical.heroes.base import AbstractHero
 from wujiang.tactical.heroes.common import DrainManaSkill
 from wujiang.tactical.heroes.common import PassiveProtectionSkill
@@ -32,6 +32,9 @@ class NAttackPolicy(HeroAIPolicy):
 
 
 class MagneticWaveSkill(DeclaredAreaSkillMixin, ManaPointCostSkill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.magnetic_wave_score(context)
+
     def __init__(self) -> None:
         super().__init__(
             "magnetic_wave",

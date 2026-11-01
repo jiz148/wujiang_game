@@ -1,6 +1,7 @@
 """Electric wind and rectangular targeting objects."""
 
 from __future__ import annotations
+from wujiang.tactical.heroes.ai_impact_rule import R19_IMPACT
 
 from typing import Any
 from wujiang.tactical.engine.core import ActionError
@@ -123,6 +124,7 @@ def front_rectangle_patterns(battle: Battle, actor: HeroUnit, depth: int, width:
 
 
 class ElectricWindSkill(Skill):
+    ai_effective_impact_rule = R19_IMPACT
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r19_effect_score(self)
 

@@ -10,6 +10,7 @@ from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Trait
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import DrainManaSkill
 from wujiang.tactical.heroes.common import ensure_distance
 from wujiang.tactical.heroes.common import ensure_enemy
@@ -46,6 +47,9 @@ class RedNextDamageStatus(StatusEffect):
 
 
 class IronChainPathSkill(H1LineDamageSkill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.iron_chain_path_score(context)
+
     def __init__(self) -> None:
         super().__init__(
             "iron_chain_path",

@@ -122,7 +122,12 @@ def copy_scoring_arguments(function, args, fallback):
         code = action.get("code") if plain else None
         one_read = (type(code) is str and bool(code) and code not in {"heaven_punishment", "mimic_skill", "agency_borrowed_skill"}
                     and (function.__name__ != "skill_payload_requires_enemy_impact" or action.get("target_mode") != "cell"))
-        if one_read and _original(function) and _original(ai.skill_from_ai_action):
+        skill_resolver = ai.skill_from_ai_action
+        if (one_read and _original(function)
+                and getattr(skill_resolver, "__func__", None) is ai.SkillPayloadBuilder.skill_from_ai_action
+                and getattr(skill_resolver, "__self__", None) is ai._SKILL_PAYLOAD_BUILDER
+                and type(ai._SKILL_PAYLOAD_BUILDER) is ai.SkillPayloadBuilder
+                and _original(skill_resolver.__func__)):
             # These source-reviewed branches read action metadata before any
             # effect probe. Other branches may consult it after a game hook
             # or pass it to another scorer and must retain the private copy.

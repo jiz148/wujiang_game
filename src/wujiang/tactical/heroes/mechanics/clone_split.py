@@ -10,9 +10,12 @@ from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import Stats
 from wujiang.tactical.engine.core import Trait
+from wujiang.tactical.engine.core import Unit
 from wujiang.tactical.heroes.base import AbstractHero
+from wujiang.tactical.heroes.ai_policy import AISkillCandidateContext
 from wujiang.tactical.heroes.common import positions_to_dict
 from wujiang.tactical.prediction import direct_scoring
+from wujiang.tactical.prediction import expected_local
 from wujiang.tactical.prediction import random
 
 
@@ -64,6 +67,42 @@ class StandardCloneSummon(AbstractHero):
 
 class SplitSkill(Skill):
     clone_count = 3
+
+    def ai_clone_placement_enemies(self, battle: Battle, actor: HeroUnit) -> list[Unit]:
+        return []
+
+    def ai_candidate_payloads(self, context: AISkillCandidateContext) -> list[dict[str, Any]]:
+        battle, actor = context.battle, context.actor
+        preview = context.action.get("preview", {}) or {}
+        candidate_cells = context.positions(preview.get("cells"))
+        required = int((preview.get("selection") or {}).get("required_cells") or self.clone_count)
+        probe = self._clone_probe(actor)
+        selected: list[Position] = []
+        occupied: set[tuple[int, int]] = set()
+        enemies = self.ai_clone_placement_enemies(battle, actor)
+
+        @expected_local(battle)
+        def placement_key(cell: Position) -> float:
+            return (-min(battle.unit_distance_to_cell(enemy, cell) for enemy in enemies)
+                    if enemies else battle.unit_distance_to_cell(actor, cell))
+
+        for cell in sorted(candidate_cells, key=placement_key):
+            footprint_keys = {(footprint.x, footprint.y) for footprint in battle.unit_cells_at(probe, cell)}
+            if occupied & footprint_keys:
+                continue
+            occupied.update(footprint_keys)
+            selected.append(cell)
+            if len(selected) >= required:
+                break
+        if len(selected) != required:
+            return []
+        payload = {**context.base_payload,
+                   "cells": context.geometry.positions_to_payload(selected)}
+        try:
+            self.selected_destinations(battle, actor, payload)
+        except Exception:
+            return []
+        return [payload]
 
     def __init__(self) -> None:
         super().__init__(

@@ -1,0 +1,5 @@
+[
+  {"code": "excel_r027", "skills": ["wuchang_mist", "migratory_bird_mark", "split"], "test_class": "DevelopedHeroReviewR09WuchangBehaviorTests"},
+  {"code": "excel_r031", "skills": ["natsume_wind_word", "natsume_dispel"], "test_class": "DevelopedHeroReviewR10NatsumeBehaviorTests"},
+  {"code": "excel_r033", "skills": ["lao_mage_hand"], "test_class": "DevelopedHeroReviewR11LaoBehaviorTests"}
+]

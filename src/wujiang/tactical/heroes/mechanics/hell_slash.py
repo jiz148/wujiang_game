@@ -1,6 +1,7 @@
 """Hell slash battlefield skill."""
 
 from __future__ import annotations
+from wujiang.tactical.heroes.ai_impact_rule import R18_IMPACT
 
 from typing import Any
 from wujiang.tactical.engine.core import Battle
@@ -17,6 +18,8 @@ from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS
 
 
 class HellSlashSkill(Skill):
+    # A real hit remains a candidate even when the one-use cost lowers its priority.
+    ai_effective_impact_rule = R18_IMPACT
     length = 10
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float:

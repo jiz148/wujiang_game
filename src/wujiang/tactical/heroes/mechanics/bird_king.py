@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import UNIT_DEDUPED_CANDIDATES
+
 from typing import Any
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import Position
@@ -35,6 +37,7 @@ class GreatFeatherFanSealStatus(StatusEffect):
 
 
 class GreatFeatherFanSkill(DeclaredAreaSkillMixin, Skill):
+    ai_candidate_plan = UNIT_DEDUPED_CANDIDATES
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         actor = context.actor
         score = 0.0

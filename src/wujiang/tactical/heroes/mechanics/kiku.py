@@ -1,6 +1,7 @@
 """R379 Kiku sun slash and post-death attack behavior."""
 
 from __future__ import annotations
+from wujiang.tactical.heroes.ai_impact_rule import SUN_SLASH_IMPACT
 
 from typing import Any
 
@@ -26,6 +27,7 @@ class PassiveSkillLockStatus(StatusEffect):
 
 
 class SunSlashSkill(Skill):
+    ai_effective_impact_rule = SUN_SLASH_IMPACT
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.sun_slash_score(self)
 

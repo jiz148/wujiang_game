@@ -11,6 +11,7 @@ from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import QueuedAction
 from wujiang.tactical.engine.core import Skill
+from wujiang.tactical.heroes.ai_policy import AISkillCandidateContext, AISkillScoreContext
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import pattern_signature
@@ -86,6 +87,9 @@ class SandstormWeatherEffect(BattleFieldEffect):
 
 
 class WindSandSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.wind_sand_score(context)
+
     def __init__(self) -> None:
         super().__init__(
             "wind_sand",
@@ -163,6 +167,12 @@ class WindSandSkill(Skill):
 
 class CrazySandSkill(Skill):
     excludes_caster_from_effect = True
+
+    def ai_candidate_payloads(self, context: AISkillCandidateContext) -> list[dict[str, Any]]:
+        preview = context.action.get("preview", {}) or {}
+        return [{**context.base_payload, "cells": entry["pattern"],
+                 "x": entry["destination"]["x"], "y": entry["destination"]["y"]}
+                for entry in preview.get("pattern_destinations", [])]
 
     def __init__(self) -> None:
         super().__init__(

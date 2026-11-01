@@ -1732,6 +1732,10 @@ class FullAIPredictionBehaviorTests(unittest.TestCase):
             self.assertIs(copied[1], action)
             self.assertIsNot(copied[2], payload)
             self.assertIsNot(copied[2]["cells"], payload["cells"])
+            with mock.patch.object(ai, "skill_from_ai_action", return_value=None):
+                copied_with_replaced_resolver = copy_scoring_arguments(
+                    function, (actor, action, payload), core._rollback_copy_value)
+                self.assertIsNot(copied_with_replaced_resolver[1], action)
             class CustomDict(dict):
                 pass
             custom = CustomDict(action)

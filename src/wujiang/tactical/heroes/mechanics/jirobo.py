@@ -1,7 +1,7 @@
 """Jirobo follow-step, devour, and undying traits."""
 
 from __future__ import annotations
-
+from wujiang.tactical.heroes.ai_impact_rule import R17_IMPACT
 from typing import Any
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import ActionMiss
@@ -123,6 +123,7 @@ class JiroboFollowStepSkill(Skill):
 
 
 class DevourSkill(Skill):
+    ai_effective_impact_rule = R17_IMPACT
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r17_effect_score(self)
 

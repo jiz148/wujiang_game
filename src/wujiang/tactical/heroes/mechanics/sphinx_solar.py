@@ -11,6 +11,7 @@ from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import Stats
 from wujiang.tactical.engine.core import Trait
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.base import AbstractHero
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
@@ -116,6 +117,9 @@ class SphinxCannonSummon(AbstractHero):
 
 
 class SphinxCannonSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.sphinx_cannon_score(context)
+
     def __init__(self) -> None:
         super().__init__(
             "sphinx_cannon",
@@ -152,6 +156,9 @@ class SphinxCannonSkill(Skill):
 
 
 class SolarJudgmentSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.solar_judgment_score(context)
+
     def __init__(self) -> None:
         super().__init__(
             "solar_judgment",

@@ -2,17 +2,59 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import RANKED_CANDIDATES
+
 from contextlib import contextmanager
 from typing import Any
 
 from wujiang.tactical.engine.core import ActionError, Battle, HeroUnit, Position, Skill
+from wujiang.tactical.heroes.ai_policy import AISkillCandidateContext, SharedCandidateConstruction
 from wujiang.tactical.heroes.common import (
     ensure_ally, ensure_enemy, match_payload_pattern, payload_position,
     positions_to_dict,
 )
 
 class MimicSkill(Skill):
+    ai_candidate_plan = RANKED_CANDIDATES
     excluded_codes = {"mimic_skill", "agency_borrowed_skill", "agency_contract"}
+
+    def ai_payload_context(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any],
+                           shared: SharedCandidateConstruction) -> tuple[HeroUnit, Skill, dict[str, Any], dict[str, Any]] | None:
+        try:
+            source, copied, inner = self._target_skill(battle, actor, payload)
+            with self.copying(actor, copied, reserve_point=True):
+                if not copied.can_use(battle, actor, inner)[0]:
+                    return None
+                action = shared.copied_skill_action(battle, actor, copied)
+            return source, copied, inner, action
+        except (ActionError, AttributeError, KeyError, TypeError, ValueError):
+            return None
+
+    def ai_candidate_payloads(self, context: AISkillCandidateContext) -> list[dict[str, Any]]:
+        battle, actor, action = context.battle, context.actor, context.action
+        shared = context.require_shared()
+        preview = action.get("preview", {}) or self.preview(battle, actor)
+        payloads, seen = [], set()
+        for entry in (preview.get("selection") or {}).get("targets", []):
+            source = battle.get_unit(entry["unit_id"])
+            for definition in entry.get("skills", []):
+                if not definition.get("action", {}).get("available"):
+                    continue
+                copied = self.borrowed_skill(actor, source, definition["code"])
+                copied_action = {**definition["action"], "_skill_object": copied}
+                with self.copying(actor, copied, reserve_point=True):
+                    inner_payloads = shared.skill_payloads_for_action(battle, actor, copied_action)
+                for inner in inner_payloads:
+                    signature = repr((copied.code, sorted(inner.items())))
+                    if signature in seen:
+                        continue
+                    payload = {"type": "skill", "unit_id": actor.unit_id, "skill_code": "mimic_skill",
+                               "target_unit_id": source.unit_id, "mimic_skill_code": copied.code, "copied_payload": inner}
+                    if not shared.payload_is_legal(battle, payload):
+                        continue
+                    seen.add(signature)
+                    payloads.append(payload)
+        return payloads
 
     def __init__(self) -> None:
         super().__init__("mimic_skill", "模仿", "普通技能：消耗1魔力点，模仿11×11内可见武将主动/瞬发技能；实际魔费减3，保留其他成本及自身限制。", target_mode="unit")

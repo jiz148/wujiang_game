@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import RANKED_CANDIDATES
+
 from typing import Any
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import Battle
@@ -74,6 +76,7 @@ class EagleEyeStatus(StatusEffect):
 
 
 class EagleEyeSkill(DeclaredAreaSkillMixin, Skill):
+    ai_candidate_plan = RANKED_CANDIDATES
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.control_score(self)
 

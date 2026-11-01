@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import RANKED_CANDIDATES
+
 from typing import TYPE_CHECKING, Any
 from typing import Optional
 if TYPE_CHECKING:
@@ -153,6 +155,7 @@ class MissileAreaMixin(DeclaredAreaSkillMixin):
 
 
 class MissileSkill(MissileAreaMixin, WindowChargeSkill):
+    ai_candidate_plan = RANKED_CANDIDATES
     """Jade's unique three-use window."""
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
@@ -180,6 +183,7 @@ class MissileSkill(MissileAreaMixin, WindowChargeSkill):
 
 
 class CommonMissileSkill(MissileAreaMixin, Skill):
+    ai_candidate_plan = RANKED_CANDIDATES
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r18_effect_score(self)
 
@@ -516,6 +520,9 @@ class StanceFieldEffect(BattleFieldEffect):
 
 
 class StanceSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.field_skill_score(context)
+
     def __init__(self) -> None:
         super().__init__(
             "stance",

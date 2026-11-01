@@ -10,6 +10,7 @@ from wujiang.tactical.engine.core import (
     ActionError, Battle, DamageContext, HeroUnit, Position, Skill,
     TemporaryDefenseStatus,
 )
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import positions_to_dict
 from wujiang.tactical.heroes.mechanics.cat_taunt import (
     RequiredAttackStatus, replace_required_attack_status,
@@ -34,6 +35,9 @@ class BoxerTauntStatus(RequiredAttackStatus):
 
 
 class RingTauntSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.taunt_control_score(context)
+
     excludes_caster_from_effect = True
 
     def __init__(self) -> None:

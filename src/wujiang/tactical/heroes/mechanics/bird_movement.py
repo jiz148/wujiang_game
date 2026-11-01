@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import RANKED_CANDIDATES
+
 from typing import Any
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import Battle
@@ -46,6 +48,7 @@ class BirdSkillMoveBoostTrait(Trait):
 
 
 class BirdDashSkill(Skill):
+    ai_candidate_plan = RANKED_CANDIDATES
     target_cells_are_geometry_only = True
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float:

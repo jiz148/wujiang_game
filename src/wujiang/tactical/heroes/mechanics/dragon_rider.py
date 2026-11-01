@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import RANKED_CANDIDATES
+
 from typing import Any
 from typing import Optional
 from wujiang.tactical.engine.core import ActionError
@@ -484,6 +486,10 @@ class DragonSummonSkill(Skill):
 
 
 class DragonSlashSkill(SimulatedEffectDeltaScoring, DeclaredAreaSkillMixin, Skill):
+    def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
+        return 5.0
+
+    ai_candidate_plan = RANKED_CANDIDATES
     def ai_unit_delta_bonus(self, context: AISkillScoreContext, unit: Unit,
                             speed: float, position: Position | None) -> float:
         if not unit.alive:
@@ -645,6 +651,7 @@ class DragonSlashSkill(SimulatedEffectDeltaScoring, DeclaredAreaSkillMixin, Skil
 
 
 class DragonSmokeSkill(DeclaredAreaSkillMixin, Skill):
+    ai_candidate_plan = RANKED_CANDIDATES
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.owned_effect_score(self)
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+if TYPE_CHECKING:
+    from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import BattleFieldEffect
@@ -20,6 +22,25 @@ from wujiang.tactical.prediction import random
 
 class WuchangAttackPolicy(HeroAIPolicy):
     """Price the next effective basic-attack seal on a surviving target."""
+
+    contextual_skill_codes = frozenset({"split"})
+
+    def contextual_skill_score(self, context: AISkillScoreContext) -> float | None:
+        if context.action.get("code") != "split":
+            return None
+        battle, actor, profile = context.battle, context.actor, context.profile
+        if context.best_attack_score() >= profile.action_threshold:
+            return -1000.0
+        for code in ("migratory_bird_mark", "remote_dragon_breath", "wuchang_mist"):
+            skill = actor.get_skill(code)
+            if not skill.can_use(battle, actor, {})[0]:
+                continue
+            for payload in context.candidate_payloads_for_skill(skill):
+                if context.candidate_is_legal(payload) and context.score_candidate(skill, payload) >= profile.action_threshold:
+                    return -1000.0
+        threatened = any(battle.distance_between_units(actor, enemy) <= enemy.normal_move_distance() + enemy.targeting_range()
+                         for enemy in context.hostile_units())
+        return 26.0 + max(0.0, actor.max_health - actor.current_hp) * 30.0 if threatened else -10.0
 
     def early_attack_synergy_bonus(self, battle: Battle, actor: HeroUnit,
                                    target: HeroUnit, damage: float) -> float:
@@ -84,6 +105,21 @@ class WuchangMistField(BattleFieldEffect):
 
 
 class WuchangMistSkill(Skill):
+    ai_early_effect_score = True
+
+    def ai_effect_score(self, context: AISkillScoreContext) -> float:
+        battle, actor, profile = context.battle, context.actor, context.profile
+        if battle.has_weather("无常之雾"):
+            return -1000.0
+        value = 0.0
+        for unit in battle.all_units():
+            if not WuchangMistField.affects_actor(unit):
+                continue
+            pressure = context.action_exposure(unit) * 0.5
+            value += pressure if unit.player_id != actor.player_id else -pressure
+        score = value * 2.0 - 15.0
+        return score if score >= profile.once_per_battle_threshold else -10.0
+
     def __init__(self) -> None:
         super().__init__("wuchang_mist", "无常之雾", "大招：永久加入天气无常之雾，同名不叠加；除无常及免雾单位外，每次普攻或主动技能公开判定1/2失败；失败照常消耗。", max_uses_per_battle=1, target_mode="self")
 
@@ -92,6 +128,27 @@ class WuchangMistSkill(Skill):
 
 
 class MigratoryBirdMarkSkill(Skill):
+    ai_early_effect_score = True
+
+    def ai_effect_score(self, context: AISkillScoreContext) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        selected = battle.units.get(str(payload.get("target_unit_id") or ""))
+        if selected is None:
+            return -1000.0
+        target = battle.effect_recipient(selected)
+        hp, old = target.current_hp, target.get_status("侯鸟标记")
+        previous_duration = old.duration if old is not None else 0
+        exposure = 0.0 if getattr(target, "hero_code", "") == "excel_r027" else context.action_exposure(target)
+        with context.probe_rollback():
+            self.execute(battle, actor, payload)
+            damage = max(0.0, hp - target.current_hp)
+            marker = target.get_status("侯鸟标记")
+            extra_duration = max(0, (marker.duration if marker is not None else 0) - (previous_duration or 0))
+            immunity_value = exposure * 0.5 * extra_duration if target.alive and battle.has_weather("无常之雾") else 0.0
+            if target.player_id == actor.player_id:
+                return immunity_value - damage * 140.0 - (180.0 if not target.alive else 0.0) - 12.0
+            return damage * 100.0 + (95.0 if not target.alive else 0.0) - immunity_value - 8.0
+
     def __init__(self) -> None:
         super().__init__("migratory_bird_mark", "侯鸟标记", "普通技能：2轮一次；范内直线选择其他友方或敌方单位，按攻造成技能伤害，不破魔；命中后目标2个己方回合内不受无常之雾影响。", cooldown_turns=2, target_mode="unit")
 

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.heroes.ai_candidate_plan import RANKED_CANDIDATES
+
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
+from wujiang.tactical.heroes.ai_policy import AISkillCandidateContext, AISkillScoreContext, SharedCandidateConstruction
 if TYPE_CHECKING:
     from wujiang.tactical.heroes.ai_policy import AIReactionScoreContext
 
@@ -129,11 +132,34 @@ class AgencyAttachedStatus(StatusEffect):
 
 
 class AgencyBorrowedSkill(MimicSkill):
+    ai_candidate_plan = RANKED_CANDIDATES
     ai_reaction_score_phase = "after_hidden_source"
 
     MOVEMENT_SKILL_CODES = {"fly_leap", "fate_kick", "crazy_sand", "plasma_thruster", "zero_dash", "fuma_pursuit",
                            "fantasy_move", "true_blade_air_slash", "mounted_leap", "frey_quick_flash", "teleport",
                            "descent_moment", "earth_walker", "split", "leap", "jirobo_follow_step", "iron_chain_path", "ghost_step"}
+
+    def ai_payload_context(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any],
+                           shared: SharedCandidateConstruction) -> tuple[HeroUnit, Skill, dict[str, Any], dict[str, Any]] | None:
+        try:
+            carrier, copied, inner = self.target_skill(battle, actor, payload)
+            with self.copying(actor, copied):
+                return carrier, copied, inner, shared.copied_skill_action(battle, actor, copied)
+        except (ActionError, KeyError, TypeError, ValueError):
+            return None
+
+    def ai_candidate_payloads(self, context: AISkillCandidateContext) -> list[dict[str, Any]]:
+        battle, actor = context.battle, context.actor
+        shared = context.require_shared()
+        try:
+            _, copied, _ = self.target_skill(battle, actor, {})
+            with self.copying(actor, copied):
+                copied_action = shared.copied_skill_action(battle, actor, copied)
+                payloads = shared.skill_payloads_for_action(battle, actor, copied_action)
+            return shared.dedupe_payloads([{**context.base_payload,
+                                            "contract_payload": dict(payload)} for payload in payloads])
+        except (ActionError, KeyError, TypeError, ValueError):
+            return []
 
     def __init__(self) -> None:
         Skill.__init__(self, "agency_borrowed_skill", "代行技能", "使用已选技能；完整费用与限制按暮别自身计算，跨契约保留。", target_mode="none")
@@ -309,10 +335,42 @@ class AgencyBorrowedSkill(MimicSkill):
 
 
 class AgencyContractSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.agency_contract_score(context)
+
+    ai_candidate_plan = RANKED_CANDIDATES
     VALID_STATS = ("attack", "defense", "speed", "attack_range", "mana")
     excludes_allies_from_effect = True
     resolves_from_current_position = True
     selection_cells_are_effect_cells = False
+
+    def ai_candidate_payloads(self, context: AISkillCandidateContext) -> list[dict[str, Any]]:
+        battle, actor = context.battle, context.actor
+        preview = context.action.get("preview", {}) or {}
+        selection = dict(preview.get("selection") or {})
+        if selection.get("attached"):
+            return [context.base_payload]
+        target_entries = {
+            str(entry.get("unit_id")): entry
+            for entry in selection.get("targets", [])
+            if isinstance(entry, dict) and entry.get("unit_id")
+        }
+        stats = [str(stat) for stat in selection.get("stats", [])] or ["attack", "defense", "speed", "attack_range", "mana"]
+        payloads: list[dict[str, Any]] = []
+        for target_id in preview.get("target_unit_ids", []):
+            try:
+                target = battle.get_unit(str(target_id))
+            except Exception:
+                continue
+            entry = target_entries.get(target.unit_id) or {}
+            skill_codes = [str(skill.get("code")) for skill in entry.get("skills", []) if isinstance(skill, dict) and skill.get("code")]
+            if not skill_codes:
+                skill_codes = [skill.code for skill in target.skills if getattr(skill, "timing", None) in {"active", "instant"}]
+            for skill_code in skill_codes:
+                for stat_name in stats:
+                    payloads.append({**context.base_payload, "target_unit_id": target.unit_id,
+                                     "stat_name": stat_name, "copied_skill_code": skill_code})
+        return context.require_shared().dedupe_payloads(payloads)
 
     def __init__(self) -> None:
         super().__init__("agency_contract", "代行契约", "每自己回合1次，绑定可见友方英雄或主动解除。借一项当前属性和一个技能；解除守+4并对声明外圈敌人伤害吸魔。", target_mode="none", max_uses_per_turn=1)

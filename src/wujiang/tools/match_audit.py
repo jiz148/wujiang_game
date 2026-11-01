@@ -888,10 +888,25 @@ def record_candidate_gap(
 
 def build_fallback_decision(battle: Battle, summary: str) -> Optional[dict[str, Any]]:
     if battle.pending_damage_choice is not None:
-        unit = battle.get_unit(battle.pending_damage_choice["unit_id"])
+        pending = battle.pending_damage_choice
+        unit = battle.get_unit(pending["unit_id"])
+        target_choice_kinds = {
+            "rotation", "attack_swap", "formation", "optional_swap", "optional_placement",
+            "end_dash", "electronic_teleport", "hell_sacrifice", "hell_death_strike",
+            "hell_rescue", "hell_dragon_first", "hell_dragon_second",
+            "hell_dragon_effect", "gentleman_guard",
+        }
+        payload = {"type": "damage_choice", "unit_id": unit.unit_id}
+        if pending.get("kind") in target_choice_kinds:
+            options = pending.get("options") or []
+            if not options:
+                return None
+            payload["target_unit_id"] = options[0]
+        else:
+            payload["stat_name"] = "decline"
         return {
             "reason": "ai_damage_fallback", "phase": "damage", "actor": unit_ref(unit),
-            "payload": {"type": "damage_choice", "unit_id": unit.unit_id, "stat_name": "decline"},
+            "payload": payload,
             "summary": summary,
         }
     if battle.pending_chain is not None:

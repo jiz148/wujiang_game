@@ -1,6 +1,7 @@
 """Holy wall, Sola aura, and illumination objects."""
 
 from __future__ import annotations
+from wujiang.tactical.heroes.ai_impact_rule import R18_IMPACT
 
 from typing import Any
 from wujiang.tactical.engine.army import is_army_soldier
@@ -136,6 +137,10 @@ class SolaHarvestAuraTrait(Trait):
 
 
 class IlluminationLightSkill(Skill):
+    ai_effective_impact_rule = R18_IMPACT
+    def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
+        return 4.0
+
     target_cells_are_geometry_only = True
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
@@ -206,6 +211,11 @@ class IlluminationLightSkill(Skill):
 
 
 class MeditateManaSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        missing_mana = max(0.0, context.actor.max_mana() - context.actor.current_mana)
+        restored = min(1.5, missing_mana)
+        return restored * 34.0 if restored >= 0.5 else -8.0
+
     def __init__(self) -> None:
         super().__init__(
             "oboro_meditate",
