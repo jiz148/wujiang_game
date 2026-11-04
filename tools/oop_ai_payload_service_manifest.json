@@ -1,0 +1,25 @@
+{
+  "source": "src/wujiang/tactical/rooms/ai.py",
+  "module": "src/wujiang/tactical/rooms/ai_skill_payloads.py",
+  "class": "SkillPayloadBuilder",
+  "description": "Skill payload construction from battle previews and skill-owned candidate policies.",
+  "start": "skill_payloads_for_action",
+  "end": "rock_cannon_payloads",
+  "services": [
+    "MOVE_SKILL_CODES",
+    "_SHARED_CANDIDATE_GEOMETRY",
+    "dedupe_payloads",
+    "distance_to_position",
+    "payload_is_legal",
+    "positions_to_payload",
+    "preview_positions"
+  ],
+  "imports": [
+    "from itertools import combinations",
+    "from typing import Any, Optional",
+    "from wujiang.tactical.engine.core import ActionError, Battle, Position, Unit",
+    "from wujiang.tactical.heroes.ai_policy import AISkillCandidateContext",
+    "from wujiang.tactical.prediction import expected_local",
+    "from wujiang.tactical.rooms.ai_targets import living_hostile_combatants"
+  ]
+}

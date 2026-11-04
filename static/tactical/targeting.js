@@ -73,6 +73,31 @@ export function multiUnitSelection(action) {
   return action?.preview?.selection?.mode === "multi_unit" ? action.preview.selection : null;
 }
 
+export function crowFormationSelection(action) {
+  return action?.preview?.selection?.mode === "crow_formation" ? action.preview.selection : null;
+}
+
+export function stagedCrowFormationTargetId(action = selectedAction()) {
+  if (!crowFormationSelection(action) || state.selectedActionCode !== action.code) return "";
+  return String(state.stagedPayload?.crowTargetId || "");
+}
+
+export function stagedCrowFormationRavenIds(action = selectedAction()) {
+  if (!crowFormationSelection(action) || state.selectedActionCode !== action.code) return [];
+  return normalizedTargetIds(state.stagedPayload?.ravenIds || []);
+}
+
+export function setStagedCrowFormationTargetId(targetId) {
+  const id = String(targetId || "");
+  state.stagedPayload = id ? { crowTargetId: id, ravenIds: [] } : null;
+}
+
+export function setStagedCrowFormationRavenIds(ids) {
+  const target = stagedCrowFormationTargetId();
+  if (!target) return;
+  state.stagedPayload = { crowTargetId: target, ravenIds: normalizedTargetIds(ids) };
+}
+
 export function unitDirectionSelection(action) {
   return action?.preview?.selection?.mode === "unit_direction" ? action.preview.selection : null;
 }
@@ -535,6 +560,7 @@ export function actionManaLabel(action) {
 
 export function actionTierLabel(action) {
   if (action.kind !== "skill") return "基础动作";
+  if (action.timing === "instant") return "随时技能";
   if (action.timing !== "active") return "被动技能";
   if (action.max_uses_per_battle === 1) return "大招";
   return "普通技能";
@@ -617,6 +643,18 @@ export function currentPreview() {
     };
   }
 
+  if (crowFormationSelection(action)) {
+    const targetId = stagedCrowFormationTargetId(action);
+    const ravenIds = targetId ? (action.preview?.raven_ids_by_target?.[targetId] || []) : [];
+    const available = targetId ? [targetId, ...ravenIds] : (action.preview?.target_unit_ids || []);
+    return {
+      cellKeys: positionsToSet(previewCellsForTargetIds(available)),
+      targetIds: targetIdsToSet(available),
+      secondaryCellKeys: positionsToSet(previewCellsForTargetIds([targetId, ...stagedCrowFormationRavenIds(action)])),
+      destinationCellKeys: new Set(),
+    };
+  }
+
   const filteredTargetIds = (action.preview?.target_unit_ids || []).filter((id) => unitIsSelectableTarget(unitById(id)));
   if (action.code === "backstep_shot" && isChainMode()) {
     const retreatCell = stagedBackstepRetreatCell(action);
@@ -685,17 +723,19 @@ export function currentPreview() {
   if (patternSelection(action)) {
     const chosenCells = stagedPatternCells(action);
     const activeCells = nextPatternSelectionCells(action, chosenCells);
-    const destinations = chosenCells.length ? (action.preview?.pattern_destinations || [])
+    const selectedPaths = chosenCells.length ? (action.preview?.pattern_destinations || [])
       .filter((entry) => {
         if (entry.choice_code && String(entry.choice_code) !== stagedPatternChoiceCode(action)) return false;
         const patternKeys = positionsToSet(entry.pattern || []);
         return chosenCells.every((cell) => patternKeys.has(positionKey(cell)));
-      })
-      .flatMap((entry) => entry.destination_cells || []) : [];
+      }) : [];
+    const destinations = selectedPaths.flatMap((entry) => entry.destination_cells || []);
+    const cloneCells = action.code === "surprise_step"
+      ? selectedPaths.flatMap((entry) => entry.clone_cells || []) : [];
     return {
       cellKeys: positionsToSet(activeCells),
       targetIds: new Set(),
-      secondaryCellKeys: positionsToSet(chosenCells),
+      secondaryCellKeys: positionsToSet([...chosenCells, ...cloneCells]),
       destinationCellKeys: positionsToSet(destinations),
     };
   }
@@ -835,6 +875,14 @@ export function canCompleteTargetSelection() {
     return unitOccupiedCells(unitById(target.unit_id)).some((cell) => area.has(positionKey(cell)));
   }
   if (movePathSelection(action)) return movePathCanComplete(action);
+  if (crowFormationSelection(action)) {
+    const target = stagedCrowFormationTargetId(action);
+    const selected = stagedCrowFormationRavenIds(action);
+    const available = action.preview?.raven_ids_by_target?.[target] || [];
+    return Boolean(target && (action.preview?.target_unit_ids || []).includes(target)
+      && selected.length === Number(crowFormationSelection(action).count)
+      && selected.every((id) => available.includes(id)));
+  }
   if (patternSelection(action)) return patternSelectionCanComplete(action);
   if (multiUnitSelection(action)) return multiUnitSelectionCanComplete(action);
   if (unitDirectionSelection(action)) {

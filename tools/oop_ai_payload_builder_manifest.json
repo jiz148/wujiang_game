@@ -1,0 +1,12 @@
+[
+  {"code": "excel_r024", "skills": ["royal_soldier"], "test_class": "HeroAICandidatePlanRoutingBehaviorTests"},
+  {"code": "excel_r025", "skills": ["agency_contract", "agency_borrowed_skill"], "test_class": "HeroAICandidatePlanRoutingBehaviorTests"},
+  {"code": "excel_r027", "skills": ["split"], "test_class": "HeroAICandidatePlanRoutingBehaviorTests"},
+  {"code": "excel_r033", "skills": ["lao_wave_bullet"], "test_class": "HeroAICandidatePlanRoutingBehaviorTests"},
+  {"code": "excel_r070", "skills": ["heaven_punishment"], "test_class": "HeroAICandidatePlanRoutingBehaviorTests"},
+  {"code": "excel_r022", "skills": ["mimic_skill"], "test_class": "HeroAICandidatePlanRoutingBehaviorTests"},
+  {"code": "excel_r252", "skills": ["ancient_fusion"], "test_class": "HeroAICandidatePlanRoutingBehaviorTests"},
+  {"code": "rock_god", "skills": ["rock_absorb", "rock_cannon"], "test_class": "HeroAICandidatePlanRoutingBehaviorTests"},
+  {"code": "undead_king_lina", "skills": ["crazy_sand"], "test_class": "HeroAICandidatePlanRoutingBehaviorTests"},
+  {"code": "element_hunter", "skills": ["earth_walker"], "test_class": "HeroAICandidatePlanRoutingBehaviorTests"}
+]

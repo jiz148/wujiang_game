@@ -2,17 +2,151 @@
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import replace
+from typing import Any, Mapping
+
+from wujiang.tactical.prediction import expected_numeric
+from wujiang.tactical.heroes.ai_policy import (AIReactionScoreContext,
+    AISkillScoreContext, HeroAIPolicy)
+from wujiang.tactical.rooms.ai_targets import living_hostile_combatants
 
 from wujiang.tactical.engine.core import (
     ActionError, ActionMiss, Battle, BattleFieldEffect, DamageContext, MoveContext,
-    Position, Skill, StatusEffect, Trait, Unit,
+    Position, Skill, Stats, StatusEffect, Trait, Unit,
 )
+from wujiang.tactical.heroes.hero_kit import HeroKit, register_hero_kit
 from wujiang.tactical.heroes.common import (
     match_payload_pattern, pattern_selection_preview, payload_position,
     payload_target_unit, positions_to_dict,
 )
-from wujiang.tactical.heroes.next_five import ALL_DIRECTIONS, apply_piercing_status_effect, remote_rectangle_patterns
+from wujiang.tactical.heroes.mechanics.next_five_effects import (
+    apply_piercing_status_effect,
+    remote_rectangle_patterns,
+)
+from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS
+
+
+@expected_numeric(independent=True)
+def storm_spirit_chain_score(battle: Battle, actor: Unit, payload: dict[str, Any]) -> float:
+    target = battle.units.get(str(payload.get("target_unit_id") or ""))
+    if (target is None or target.position is None or actor.position is None
+            or target.player_id == actor.player_id or target.magic_immunity
+            or target.direct_effects_blocked() or target.skill_non_damage_effects_blocked()):
+        return -1000.0
+    if target.has_status("雷电锁链封锁"):
+        return -45.0
+    active_skills = sum(skill.timing == "active" for skill in target.skills)
+    score = 12.0 + min(4, active_skills) * 11.0
+    if target.dodge_charges > 0:
+        score -= 40.0
+    if target.total_shields() > 0:
+        score += 14.0
+    if target.turn_ready:
+        score += 8.0
+    if actor.attacks_used >= actor.attack_actions_per_turn():
+        score += 20.0
+    score += min(20.0, max(0.0, target.stat("attack") - 2.0) * 5.0)
+    return score
+
+
+@expected_numeric(independent=True)
+def storm_spirit_dash_context_score(context: AISkillScoreContext) -> float:
+    battle, actor, payload = context.battle, context.actor, context.payload
+    if actor.position is None:
+        return -1000.0
+    try:
+        path = actor.get_skill("electronic_storm").path(battle, actor, payload)
+    except (ActionError, KeyError, ValueError, TypeError):
+        return -1000.0
+    distance = len(path) - 1
+    if distance > actor.current_mana:
+        return -1000.0
+    destination = path[-1]
+    role = context.hero_style()
+    position_gain = (context.move_score(destination, role)
+                     - context.move_score(actor.position, role))
+    # Movement utility is bounded: a full mana bar must not make tiny instant
+    # shuffles look better than an actual attack or a life-saving escape.
+    score = max(-80.0, min(100.0, position_gain)) - 18.0 - distance * 6.0
+    if distance >= 5:
+        seen: set[str] = set()
+        for target, _ in battle.path_crossing_events(actor, path):
+            if target.player_id == actor.player_id or target.unit_id in seen:
+                continue
+            seen.add(target.unit_id)
+            if (target.magic_immunity or target.direct_effects_blocked()
+                    or any(trait.name == "技能伤害免疫" for trait in target.traits)):
+                continue
+            damage = context.estimate_damage(target, actor.stat("attack"))
+            score += min(target.current_hp, damage) * 110.0
+            if damage >= target.current_hp - 1e-9 and damage > 0:
+                score += 25.0
+    if distance > 2 and actor.player_id == battle.active_player:
+        if actor.attacks_used >= actor.attack_actions_per_turn():
+            score += 45.0 if any(context.distance_to_position(enemy, destination) <= actor.targeting_range() + 1
+                                  for enemy in living_hostile_combatants(battle, actor.player_id)) else 0.0
+        else:
+            score += 9.0
+    return score
+
+
+@expected_numeric(independent=True)
+def storm_spirit_afterimage_context_score(context: AISkillScoreContext) -> float:
+    battle, actor, payload = context.battle, context.actor, context.payload
+    if actor.position is None:
+        return -1000.0
+    try:
+        first = actor.get_skill("afterimage").chosen_cell(battle, actor, payload)
+    except (ActionError, KeyError, ValueError, TypeError):
+        return -1000.0
+    dx, dy = first.x - actor.position.x, first.y - actor.position.y
+    score = -24.0
+    seen: set[str] = set()
+    for step in range(1, 4):
+        cell = actor.position.offset(dx * step, dy * step)
+        if not battle.in_bounds(cell):
+            break
+        for unit in battle.effect_units_at_cells([cell]):
+            if unit.unit_id == actor.unit_id or unit.unit_id in seen:
+                continue
+            seen.add(unit.unit_id)
+            damage = 0.0 if unit.magic_immunity else context.estimate_damage(unit, 3)
+            timing_weight = 1.0 if step == 1 else (0.45 if step == 2 else 0.25)
+            value = min(unit.current_hp, damage) * 100.0 * timing_weight
+            score += value if unit.player_id != actor.player_id else -value * 1.8
+    if actor.attacks_used >= actor.attack_actions_per_turn() and any(
+            battle.distance_between_units(actor, enemy) <= actor.targeting_range()
+            for enemy in living_hostile_combatants(battle, actor.player_id)):
+        score += 26.0
+    return score
+
+
+class StormSpiritAIPolicy(HeroAIPolicy):
+    contextual_skill_codes = frozenset({"electronic_storm", "afterimage"})
+    contextual_reaction_codes = frozenset({"electronic_storm"})
+    reaction_score_phase = "after_hidden_source"
+
+    def contextual_reaction_score(self, context: AIReactionScoreContext) -> float | None:
+        if context.code != "electronic_storm":
+            return None
+        score = storm_spirit_dash_context_score(context.skill_context("electronic_storm"))
+        destination = context.destination()
+        if destination is not None and context.actor.unit_id in context.queued_action.target_unit_ids:
+            if not context.destination_still_targeted(destination):
+                score += context.threat(context.actor)
+        return score
+
+    def contextual_skill_score(self, context: AISkillScoreContext) -> float | None:
+        code = str(context.action.get("code") or context.payload.get("skill_code") or "")
+        if code == "electronic_storm":
+            return storm_spirit_dash_context_score(context)
+        if code == "afterimage":
+            return storm_spirit_afterimage_context_score(context)
+        return None
+
+    def priority_skill_score(self, battle: Battle, actor: Unit, code: str,
+                             payload: dict) -> float | None:
+        return storm_spirit_chain_score(battle, actor, payload) if code == "lightning_chain" else None
 
 
 def _direction(start: Position, end: Position) -> tuple[int, int]:
@@ -123,6 +257,8 @@ def _resolve_storm_crossing(battle: Battle, actor: Unit, action: Any) -> None:
 
 
 class ElectronicStormSkill(Skill):
+    ai_nonhostile_throttle_exempt = True
+
     target_cells_are_geometry_only = True
     excludes_caster_from_effect = True
     excludes_allies_from_effect = True
@@ -287,6 +423,7 @@ class AfterimageField(BattleFieldEffect):
 
 
 class AfterimageSkill(Skill):
+    ai_enemy_impact_requirement = False
     target_cells_are_geometry_only = True
 
     def __init__(self) -> None:
@@ -430,3 +567,31 @@ class LightningChainSkill(Skill):
     def get_target_units_for_payload(self, battle: Battle, actor: Unit,
                                      payload: dict[str, Any]) -> list[Unit]:
         return [payload_target_unit(battle, payload)]
+
+
+class StormSpiritKit(HeroKit):
+    """Own R306's source fragments and locked initial mana ruling."""
+
+    code = "excel_r306"
+    ai_policy = StormSpiritAIPolicy()
+
+    def special_skill(self, fragment: Mapping[str, Any]) -> Skill | None:
+        name = fragment.get("name")
+        if name == "电子风暴":
+            return ElectronicStormSkill()
+        if name == "残影":
+            return AfterimageSkill()
+        if name == "雷电锁链":
+            return LightningChainSkill()
+        return None
+
+    def special_trait(self, fragment: Mapping[str, Any]) -> Trait | None:
+        if fragment.get("fragment") == "魔上限15":
+            return StormSpiritTrait()
+        return None
+
+    def base_stats(self, source_stats: Stats) -> Stats:
+        return replace(source_stats, mana=15.0)
+
+
+STORM_SPIRIT_KIT = register_hero_kit(StormSpiritKit())

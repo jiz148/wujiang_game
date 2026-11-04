@@ -83,7 +83,7 @@ class TendencyDecisionTests(unittest.TestCase):
 
     def test_skill_payload_uses_the_pattern_nearer_the_enemy(self) -> None:
         enemy = SimpleNamespace(alive=True, banished=False, player_id=2, position=SimpleNamespace(x=4, y=4))
-        actor = SimpleNamespace(unit_id="hero", player_id=1)
+        actor = SimpleNamespace(unit_id="hero", player_id=1, hero_code="ellie")
         battle = SimpleNamespace(units={"enemy": enemy})
         far = [{"x": 0, "y": 0}, {"x": 1, "y": 0}]
         near = [{"x": 3, "y": 4}, {"x": 4, "y": 4}]
@@ -105,7 +105,7 @@ class TendencyDecisionTests(unittest.TestCase):
 
     def test_skill_payload_keeps_the_late_pattern_that_covers_the_enemy(self) -> None:
         enemy = SimpleNamespace(alive=True, banished=False, player_id=2, position=SimpleNamespace(x=4, y=4))
-        actor = SimpleNamespace(unit_id="hero", player_id=1)
+        actor = SimpleNamespace(unit_id="hero", player_id=1, hero_code="ellie")
         battle = SimpleNamespace(units={"enemy": enemy})
         missed = [[{"x": index, "y": 0}] for index in range(12)]
         covering = [{"x": 4, "y": 4}]
@@ -126,7 +126,7 @@ class TendencyDecisionTests(unittest.TestCase):
 
     def test_skill_payload_uses_the_choice_nearer_the_enemy(self) -> None:
         enemy = SimpleNamespace(alive=True, banished=False, player_id=2, position=SimpleNamespace(x=0, y=4))
-        actor = SimpleNamespace(unit_id="hero", player_id=1)
+        actor = SimpleNamespace(unit_id="hero", player_id=1, hero_code="ellie")
         battle = SimpleNamespace(units={"enemy": enemy})
         east = [{"x": 5, "y": 0}]
         north = [{"x": 0, "y": 4}]
@@ -156,7 +156,7 @@ class TendencyDecisionTests(unittest.TestCase):
 
     def test_skill_payload_casts_a_bare_cell_outside_the_dash_list(self) -> None:
         enemy = SimpleNamespace(alive=True, banished=False, player_id=2, position=SimpleNamespace(x=4, y=4))
-        actor = SimpleNamespace(unit_id="hero", player_id=1)
+        actor = SimpleNamespace(unit_id="hero", player_id=1, hero_code="ellie")
         battle = SimpleNamespace(units={"enemy": enemy})
         code = "waypoint"
         self.assertNotIn(code, SAFE_CELL_SKILLS)
@@ -175,7 +175,7 @@ class TendencyDecisionTests(unittest.TestCase):
 
     def test_skill_payload_refuses_an_undrawn_pattern(self) -> None:
         enemy = SimpleNamespace(alive=True, banished=False, player_id=2, position=SimpleNamespace(x=1, y=1))
-        actor = SimpleNamespace(unit_id="hero", player_id=1)
+        actor = SimpleNamespace(unit_id="hero", player_id=1, hero_code="ellie")
         battle = SimpleNamespace(units={"enemy": enemy})
         for selection in ({"mode": "pattern_cells"}, {"mode": "pattern_cells", "patterns": []}):
             action = {
@@ -187,7 +187,7 @@ class TendencyDecisionTests(unittest.TestCase):
 
     def test_skill_payload_fills_a_listed_direction_toward_the_enemy(self) -> None:
         enemy = SimpleNamespace(alive=True, banished=False, player_id=2, position=SimpleNamespace(x=0, y=4))
-        actor = SimpleNamespace(unit_id="hero", player_id=1, position=SimpleNamespace(x=0, y=0))
+        actor = SimpleNamespace(unit_id="hero", player_id=1, hero_code="ellie", position=SimpleNamespace(x=0, y=0))
         battle = SimpleNamespace(units={"enemy": enemy})
         action = {
             "code": "push",
@@ -207,7 +207,7 @@ class TendencyDecisionTests(unittest.TestCase):
 
     def test_skill_payload_skips_when_a_required_direction_is_not_listed(self) -> None:
         enemy = SimpleNamespace(alive=True, banished=False, player_id=2, position=SimpleNamespace(x=1, y=1))
-        actor = SimpleNamespace(unit_id="hero", player_id=1, position=SimpleNamespace(x=0, y=0))
+        actor = SimpleNamespace(unit_id="hero", player_id=1, hero_code="ellie", position=SimpleNamespace(x=0, y=0))
         battle = SimpleNamespace(units={"enemy": enemy})
         action = {
             "code": "leap",
@@ -274,7 +274,7 @@ class TendencyDecisionTests(unittest.TestCase):
     def test_chain_reaction_dodges_away_from_the_hit(self) -> None:
         from wujiang.tactical.rooms.tendency.decide import choose_chain_reaction
 
-        reactor = SimpleNamespace(unit_id="hero", player_id=1, position=SimpleNamespace(x=1, y=1), current_mana=2)
+        reactor = SimpleNamespace(unit_id="hero", player_id=1, hero_code="ellie", position=SimpleNamespace(x=1, y=1), current_mana=2)
         enemy = SimpleNamespace(unit_id="enemy", player_id=2, position=SimpleNamespace(x=0, y=1))
         queued = SimpleNamespace(
             action_type="skill",
@@ -289,6 +289,7 @@ class TendencyDecisionTests(unittest.TestCase):
             units={"enemy": enemy, "hero": reactor},
             pending_chain=SimpleNamespace(queued_action=queued),
             unit_cells=lambda unit: [unit.position],
+            mounted_unit_for=lambda unit: None,
         )
         options = [{
             "action_code": "evasion",
@@ -305,7 +306,7 @@ class TendencyDecisionTests(unittest.TestCase):
     def test_chain_reaction_skips_evasion_that_cannot_leave_the_area(self) -> None:
         from wujiang.tactical.rooms.tendency.decide import choose_chain_reaction
 
-        reactor = SimpleNamespace(unit_id="hero", player_id=1, position=SimpleNamespace(x=1, y=1), current_mana=2)
+        reactor = SimpleNamespace(unit_id="hero", player_id=1, hero_code="ellie", position=SimpleNamespace(x=1, y=1), current_mana=2)
         queued = SimpleNamespace(
             action_type="skill",
             actor_id="enemy",
@@ -319,6 +320,7 @@ class TendencyDecisionTests(unittest.TestCase):
             units={},
             pending_chain=SimpleNamespace(queued_action=queued),
             unit_cells=lambda unit: [unit.position],
+            mounted_unit_for=lambda unit: None,
         )
         options = [{"action_code": "evasion", "preview": {"cells": [{"x": 2, "y": 1}]}}]
         payload = choose_chain_reaction(battle, reactor, options, "standard")

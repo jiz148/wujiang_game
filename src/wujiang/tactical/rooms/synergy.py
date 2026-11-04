@@ -6,6 +6,7 @@ from collections import Counter
 from typing import Any
 
 from wujiang.tactical.engine.core import Battle, DamageContext, StatusEffect
+from wujiang.tactical.prediction import direct_scoring
 
 
 CATEGORY_LABELS = {"role": "职业", "attribute": "属性", "race": "种族"}
@@ -67,6 +68,10 @@ class SynergyStatus(StatusEffect):
     def on_before_damage(self, battle: Battle, ctx: DamageContext) -> None:
         if (self.category != "attribute" or self.key != "暗" or
                 ctx.target is not self.owner or ctx.cancelled or ctx.cannot_evade or ctx.from_field_effect):
+            return
+        if direct_scoring():
+            from wujiang.tactical.direct_expectation import damage_chance
+            damage_chance(ctx, 1 - self.tier * .1)
             return
         rng = getattr(battle, "chess_rng", None) or random
         if rng.random() < self.tier * 0.1:

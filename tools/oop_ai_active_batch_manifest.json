@@ -1,0 +1,13 @@
+[
+  {"code": "excel_r259", "ally": "excel_r254", "skills": ["shield_charge"], "test_class": "NewBatch259260KnightKingBehaviorTests"},
+  {"code": "excel_r246", "ally": "excel_r239", "skills": ["hell_war_god"], "test_class": "NewBatch245246HellBehaviorTests"},
+  {"code": "excel_r239", "ally": "excel_r246", "skills": ["hell_shuffle"], "test_class": "NewBatch239243244HellBehaviorTests"},
+  {"code": "excel_r305", "ally": "excel_r221", "skills": ["electromagnetic_field"], "test_class": "NewBatch305NovaBehaviorTests"},
+  {"code": "excel_r221", "ally": "excel_r223", "skills": ["satellite_cannon"], "test_class": "NewBatch221222ElectronicDragonBehaviorTests"},
+  {"code": "excel_r193", "ally": "excel_r191", "skills": ["gladiator_soul"], "test_class": "SektoruBehaviorTests"},
+  {"code": "excel_r194", "ally": "excel_r193", "skills": ["battle_hurricane"], "test_class": "AlexanderBehaviorTests"},
+  {"code": "excel_r196", "ally": "excel_r197", "skills": ["earth_shatter"], "test_class": "NewBatch196197SpartacusBehaviorTests"},
+  {"code": "excel_r197", "ally": "excel_r196", "skills": ["summon_medium_stone"], "test_class": "NewBatch196197BigStoneBehaviorTests"},
+  {"code": "excel_r215", "ally": "excel_r219", "skills": ["flash_slash"], "test_class": "NewBatch215219UesugiBehaviorTests"},
+  {"code": "excel_r219", "ally": "excel_r215", "skills": ["bird_dash", "bird_dash_free", "bird_soul", "bird_soul_free"], "test_class": "NewBatch215219BirdBehaviorTests"}
+]

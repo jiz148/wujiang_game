@@ -1,0 +1,17 @@
+[
+  {"code": "excel_r321", "skills": ["black_night_shadow"], "test_class": "HeroAIAttackPowerRoutingBehaviorTests"},
+  {"code": "excel_r260", "skills": ["barbarian_axe"], "test_class": "HeroAIAttackPowerRoutingBehaviorTests"},
+  {"code": "excel_r029", "skills": ["deadly_bow"], "test_class": "HeroAIAttackPowerRoutingBehaviorTests"},
+  {"code": "fire_funeral", "skills": ["judgment_fire", "great_funeral"], "test_class": "HeroAIAttackPowerRoutingBehaviorTests"},
+  {"code": "excel_r093", "skills": ["kaiser_fist"], "test_class": "HeroAIAttackPowerRoutingBehaviorTests"},
+  {"code": "excel_r196", "skills": ["earth_shatter"], "test_class": "HeroAIAttackPowerRoutingBehaviorTests"},
+  {"code": "excel_r139", "skills": ["illumination_light"], "test_class": "HeroAIAttackPowerRoutingBehaviorTests"},
+  {"code": "excel_r136", "skills": ["true_blade_air_slash"], "test_class": "HeroAIAttackPowerRoutingBehaviorTests"},
+  {"code": "dragon_rider", "skills": ["dragon_slash"], "test_class": "HeroAIAttackPowerRoutingBehaviorTests"},
+  {"code": "excel_r033", "skills": ["lao_wave_bullet"], "test_class": "HeroAIAttackPowerRoutingBehaviorTests"},
+  {"code": "excel_r035", "skills": ["demon_blade"], "test_class": "HeroAIAttackPowerRoutingBehaviorTests"},
+  {"code": "excel_r047", "skills": ["hundred_bird_burial"], "test_class": "HeroAIAttackPowerRoutingBehaviorTests"},
+  {"code": "excel_r071", "skills": ["snow_avalanche"], "test_class": "HeroAIAttackPowerRoutingBehaviorTests"},
+  {"code": "rock_god", "skills": ["rock_cannon"], "test_class": "HeroAIAttackPowerRoutingBehaviorTests"},
+  {"code": "doomlight_dragon", "skills": ["apocalypse"], "test_class": "HeroAIAttackPowerRoutingBehaviorTests"}
+]

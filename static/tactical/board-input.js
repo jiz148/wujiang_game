@@ -7,7 +7,7 @@ import { keyboardHelpIsOpen, syncModalIsolation } from '../core/ui.js';
 import { closeProfileModal, profileModalVisible } from '../platform/auth.js';
 import { attackTargetIdAtCell, completeTutorialUnitSelection, explainInvalidBoardChoice, performAction } from '../tactical/room-api.js';
 import { clearActionSelection } from '../tactical/session.js';
-import { actionNeedsTarget, attackChoicePatternSelection, bodyDirectionSelection, currentPreview, movePathAnchorForClickedCell, movePathIndexForClickedCell, movePathSelection, multiUnitSelection, patternSelection, patternSelectionIsOrdered, reviveSelectionCells, reviveUnitCellSelection, sameCell, setStagedBodyCells, setStagedMovePath, setStagedMultiTargetIds, setStagedPatternCells, setStagedReviveCell, setStagedStatCells, setStagedUnitDirectionTargetId, stagedAttackActionPayload, stagedBodyCells, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, statCellRequired, statCellSelection, unitDirectionSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
+import { actionNeedsTarget, attackChoicePatternSelection, bodyDirectionSelection, crowFormationSelection, currentPreview, movePathAnchorForClickedCell, movePathIndexForClickedCell, movePathSelection, multiUnitSelection, patternSelection, patternSelectionIsOrdered, reviveSelectionCells, reviveUnitCellSelection, sameCell, setStagedBodyCells, setStagedCrowFormationRavenIds, setStagedCrowFormationTargetId, setStagedMovePath, setStagedMultiTargetIds, setStagedPatternCells, setStagedReviveCell, setStagedStatCells, setStagedUnitDirectionTargetId, stagedAttackActionPayload, stagedBodyCells, stagedCrowFormationRavenIds, stagedCrowFormationTargetId, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, statCellRequired, statCellSelection, unitDirectionSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
 import { positionKey, positionsToSet, selectedAction, targetIdsToSet } from '../tactical/vfx.js';
 
 export function onBoardClick(x, y, occupant) {
@@ -32,6 +32,7 @@ export function onBoardClick(x, y, occupant) {
       movePathSelection(action)
       || patternSelection(action)
       || multiUnitSelection(action)
+      || crowFormationSelection(action)
       || unitDirectionSelection(action)
       || statCellSelection(action)
       || bodyDirectionSelection(action)
@@ -192,6 +193,31 @@ export function onBoardClick(x, y, occupant) {
     } else {
       if (chosenIds.length >= maxTargets) return;
       setStagedMultiTargetIds([...chosenIds, occupant.id]);
+    }
+    render();
+    return;
+  }
+
+  if (crowFormationSelection(action)) {
+    if (!(occupant && canUseUnit)) {
+      explainInvalidBoardChoice(action, occupant);
+      return;
+    }
+    const target = stagedCrowFormationTargetId(action);
+    if (!target) {
+      if (!(action.preview?.target_unit_ids || []).includes(occupant.id)) return;
+      setStagedCrowFormationTargetId(occupant.id);
+    } else if (occupant.id === target) {
+      setStagedCrowFormationTargetId("");
+    } else {
+      const available = action.preview?.raven_ids_by_target?.[target] || [];
+      if (!available.includes(occupant.id)) return;
+      const chosen = stagedCrowFormationRavenIds(action);
+      if (chosen.includes(occupant.id)) {
+        setStagedCrowFormationRavenIds(chosen.filter((id) => id !== occupant.id));
+      } else if (chosen.length < Number(crowFormationSelection(action).count)) {
+        setStagedCrowFormationRavenIds([...chosen, occupant.id]);
+      }
     }
     render();
     return;
@@ -365,7 +391,8 @@ export function onBoardClick(x, y, occupant) {
     }
     performAction({
       type: "skill", unit_id: state.selectedUnitId, skill_code: action.code,
-      target_unit_id: state.stagedPayload.targetUnitId, x, y,
+      target_unit_id: state.stagedPayload.targetUnitId,
+      ...(action.code === "gentleman_duel" ? { dest_x: x, dest_y: y } : { x, y }),
     });
     return;
   }

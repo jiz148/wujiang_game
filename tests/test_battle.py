@@ -16,8 +16,18 @@ from wujiang.tactical.heroes.first_five import GreatFireFuneralField, MedusaSumm
 from wujiang.tactical.heroes.common import SlowStatus, StatModifierStatus  # noqa: E402
 from wujiang.tactical.heroes.next_five import BloodDanceLockStatus, ErasureCounterStatus, RockAbsorbFootprintStatus, SandstormWeatherEffect, StandardCloneSummon  # noqa: E402
 from wujiang.tactical.heroes.excel_roster import EXCEL_HERO_REGISTRY, MountainGodCounterStatus, WorldRootSummon  # noqa: E402
-from wujiang.tactical.heroes.registry import HERO_REGISTRY, RANDOM_HERO_BATTLE_MODE, RoomBattleEntry, create_battle, create_classic_battle, create_hero, create_room_battle, list_heroes  # noqa: E402
+from wujiang.tactical.heroes.registry import HERO_REGISTRY, RANDOM_HERO_BATTLE_MODE, RoomBattleEntry, create_battle as create_registry_battle, create_classic_battle, create_hero, create_room_battle, list_heroes  # noqa: E402
 from wujiang.tactical.rooms.ai import attack_payloads_for_action, build_attack_candidates, difficulty_profile, reaction_payloads_for_option, skill_payloads_for_action  # noqa: E402
+
+
+def create_battle(hero1_code, hero2_code, *, mode="classic"):
+    """Keep mechanics scenarios in input order with player one opening."""
+    if mode != RANDOM_HERO_BATTLE_MODE:
+        with mock.patch("wujiang.tactical.heroes.registry.opening_player_for_units", return_value=1), mock.patch(
+            "wujiang.tactical.heroes.registry.sort_units_for_classic", side_effect=list
+        ):
+            return create_registry_battle(hero1_code, hero2_code, mode=mode)
+    return create_registry_battle(hero1_code, hero2_code, mode=mode)
 
 
 def primary_hero(battle, player_id: int):
@@ -38,6 +48,56 @@ def resolve_pending_chain(battle) -> None:
 
 
 class BattleSmokeTests(unittest.TestCase):
+    def test_next_five_legacy_pickle_globals_resolve_to_migrated_objects(self) -> None:
+        import pickle
+        from wujiang.tactical.heroes.mechanics.clone_split import SplitSkill, StandardCloneSummon
+        from wujiang.tactical.heroes.mechanics.erasure_apostle import ErasureApostle
+        from wujiang.tactical.heroes.mechanics.masamune import ArcAttackTrait, Masamune
+        from wujiang.tactical.heroes.mechanics.chanter import Chanter
+        from wujiang.tactical.heroes.mechanics.blood_eater import BloodEater
+        from wujiang.tactical.heroes.mechanics.dragon_rider import DragonRider
+        from wujiang.tactical.heroes.mechanics.doomlight_dragon import DoomlightDragon
+        from wujiang.tactical.heroes.mechanics.element_hunter import ElementHunter
+        from wujiang.tactical.heroes.mechanics.jade import Jade
+        from wujiang.tactical.heroes.mechanics.li import ChainPullSkill, Li
+        from wujiang.tactical.heroes.mechanics.mana_recovery import NaturalManaRecoveryTrait
+        from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
+        from wujiang.tactical.heroes.mechanics.n import N
+        from wujiang.tactical.heroes.mechanics.rock_god import RockGod
+        from wujiang.tactical.heroes.mechanics.sandstorm import SandstormWeatherEffect
+        from wujiang.tactical.heroes.mechanics.undead_king_lina import UndeadKingLina
+        from wujiang.tactical.heroes.mechanics.next_five_effects import remote_rectangle_patterns
+        from wujiang.tactical.heroes.mechanics.mana_point_cost import ManaPointCostSkill
+        from wujiang.tactical.heroes.mechanics.soul_wraith import PassThroughMovementTrait, SoulWraith
+
+        for name, owner in {
+            "SplitSkill": SplitSkill,
+            "StandardCloneSummon": StandardCloneSummon,
+            "ErasureApostle": ErasureApostle,
+            "ArcAttackTrait": ArcAttackTrait,
+            "Masamune": Masamune,
+            "Chanter": Chanter,
+            "ChainPullSkill": ChainPullSkill,
+            "Li": Li,
+            "NaturalManaRecoveryTrait": NaturalManaRecoveryTrait,
+            "square_around_cells": square_around_cells,
+            "PassThroughMovementTrait": PassThroughMovementTrait,
+            "SoulWraith": SoulWraith,
+            "BloodEater": BloodEater,
+            "DragonRider": DragonRider,
+            "Jade": Jade,
+            "N": N,
+            "remote_rectangle_patterns": remote_rectangle_patterns,
+            "ManaPointCostSkill": ManaPointCostSkill,
+            "DoomlightDragon": DoomlightDragon,
+            "ElementHunter": ElementHunter,
+            "RockGod": RockGod,
+            "SandstormWeatherEffect": SandstormWeatherEffect,
+            "UndeadKingLina": UndeadKingLina,
+        }.items():
+            old_global = f"cwujiang.tactical.heroes.next_five\n{name}\n.".encode()
+            self.assertIs(pickle.loads(old_global), owner)
+
     def test_room_spawn_reserves_aaron_starting_mount_footprint(self) -> None:
         player1_entries = [
             RoomBattleEntry("strategy_garrison", 1, 1),
@@ -75,7 +135,7 @@ class BattleSmokeTests(unittest.TestCase):
         self.assertIn("strategy_cannon", strategy_codes)
         self.assertEqual(len(HERO_REGISTRY), 398)
         public_heroes = list_heroes()
-        self.assertEqual(len(public_heroes), 73)
+        self.assertEqual(len(public_heroes), 125)
         public_codes = {str(hero["code"]) for hero in public_heroes}
         self.assertIn("excel_r030", public_codes)
         self.assertIn("excel_r031", public_codes)
@@ -98,6 +158,33 @@ class BattleSmokeTests(unittest.TestCase):
             self.assertEqual(unit.hero_code, code)
             self.assertTrue(unit.name)
             self.assertTrue(unit.raw_skill_text or unit.raw_trait_text)
+
+    def test_excel_hero_kit_can_supply_attack_ai_policy(self) -> None:
+        from wujiang.tactical.heroes.ai_policy import HeroAIPolicy
+        from wujiang.tactical.heroes.excel_roster import EXCEL_HERO_SPECS, _hero_class_from_spec
+        from wujiang.tactical.heroes.hero_kit import hero_kit_for
+        from wujiang.tactical.rooms.ai import score_attack_payload
+
+        class FixedAttackPolicy(HeroAIPolicy):
+            def single_target_attack_bonus(self, battle, actor, target, payload, expected_damage):
+                return 7.0
+
+        policy = FixedAttackPolicy()
+        kit = hero_kit_for("excel_r020")
+        spec = next(spec for spec in EXCEL_HERO_SPECS if spec["code"] == "excel_r020")
+        with mock.patch.object(kit, "ai_policy", policy):
+            generated = _hero_class_from_spec(spec)
+        self.assertIs(generated.ai_policy, policy)
+
+        battle = create_battle("excel_r020", "bard")
+        actor, target = primary_hero(battle, 1), primary_hero(battle, 2)
+        actor.position, target.position = Position(3, 3), Position(4, 3)
+        payload = {"type": "attack", "unit_id": actor.unit_id, "target_unit_id": target.unit_id,
+                   "x": 4, "y": 3}
+        profile = difficulty_profile("standard")
+        baseline = score_attack_payload(battle, actor, payload, profile)
+        with mock.patch.object(type(actor), "ai_policy", policy):
+            self.assertAlmostEqual(score_attack_payload(battle, actor, payload, profile) - baseline, 7.0)
 
     def test_excel_roster_maps_common_skills_and_traits_without_special_overrides(self) -> None:
         oberon = create_hero("excel_r020", 1)
@@ -1440,6 +1527,7 @@ class BattleSmokeTests(unittest.TestCase):
 
     def test_ai_attack_candidates_respect_lina_attack_lock(self) -> None:
         battle = create_battle(["bard", "ellie"], "undead_king_lina")
+        battle.perform_action({"type": "end_turn"})
         bard = next(unit for unit in battle.hero_units(1) if unit.hero_code == "bard")
         ellie = next(unit for unit in battle.hero_units(1) if unit.hero_code == "ellie")
         lina = primary_hero(battle, 2)
@@ -5481,14 +5569,18 @@ class BattleSmokeTests(unittest.TestCase):
         with self.assertRaises(ActionError):
             battle.perform_action({"type": "attack", "unit_id": lina.unit_id, "target_unit_id": ellie.unit_id})
 
-    def test_lina_destroy_reward_resets_move_and_attacks_once_per_turn(self) -> None:
-        battle = create_battle("undead_king_lina", "bard")
+    def test_lina_destroy_reward_repeats_attack_reset_without_resetting_movement(self) -> None:
+        battle = create_battle("undead_king_lina", ["bard", "ellie"])
         lina = battle.player_units(1)[0]
-        bard = battle.player_units(2)[0]
+        bard = next(unit for unit in battle.player_units(2) if unit.hero_code == "bard")
+        ellie = next(unit for unit in battle.player_units(2) if unit.hero_code == "ellie")
         lina.move_used = True
+        lina.normal_move_actions_used = 1
+        lina.normal_move_steps_used = 2
         lina.attacks_used = 2
-        lina.current_mana = 3
+        lina.current_mana = 2
         bard.current_mana = 1.5
+        ellie.current_mana = 1
 
         battle.resolve_damage(
             DamageContext(
@@ -5501,7 +5593,20 @@ class BattleSmokeTests(unittest.TestCase):
             )
         )
 
-        self.assertFalse(lina.move_used)
+        self.assertTrue(lina.move_used)
+        self.assertEqual(lina.normal_move_actions_used, 1)
+        self.assertEqual(lina.normal_move_steps_used, 2)
+        self.assertEqual(lina.attacks_used, 0)
+        self.assertAlmostEqual(lina.current_mana, 3.5)
+
+        lina.attacks_used = 2
+        battle.resolve_damage(
+            DamageContext(source=lina, target=ellie, attack_power=10, is_skill=True,
+                          action_name="再次击破", tags={"skill"})
+        )
+        self.assertTrue(lina.move_used)
+        self.assertEqual(lina.normal_move_actions_used, 1)
+        self.assertEqual(lina.normal_move_steps_used, 2)
         self.assertEqual(lina.attacks_used, 0)
         self.assertAlmostEqual(lina.current_mana, 4.5)
 
@@ -5670,7 +5775,7 @@ class BattleSmokeTests(unittest.TestCase):
         attacker = next(unit for unit in battle.player_units(2) if unit.hero_code == "excel_r352")
         element.position = Position(1, 5)
         jade.position = Position(1, 3)
-        attacker.position = Position(2, 2)
+        attacker.position = Position(2, 5)
         element.current_mana = 5
         jade.current_mana = 0
 
@@ -6111,7 +6216,7 @@ class BattleSmokeTests(unittest.TestCase):
         roster1 = ["doomlight_dragon", "bard", "dark_human"]
         roster2 = ["rock_god", "elite_soldier", "ellie"]
 
-        classic_battle = create_battle(roster1, roster2)
+        classic_battle = create_registry_battle(roster1, roster2)
         with mock.patch("wujiang.tactical.heroes.registry.random.choice", side_effect=lambda seq: seq[-1]):
             random_battle = create_battle(roster1, roster2, mode=RANDOM_HERO_BATTLE_MODE)
 
@@ -7760,8 +7865,8 @@ class HeroBatchH12Tests(unittest.TestCase):
         self.assertIsNotNone(taunt)
         self.assertIsNotNone(ally.get_status("嘲讽之吼"))
         self.assertEqual(bard.shields, 0)
-        self.assertLess(bard.current_hp, 10)
-        self.assertLess(ally.current_hp, 10)
+        self.assertEqual(bard.current_hp, 10)
+        self.assertEqual(ally.current_hp, 10)
         taunt.on_owner_turn_start(battle)
         self.assertFalse(battle.attack_target_allowed(bard, ally)[0])
         self.assertTrue(battle.attack_target_allowed(bard, cat)[0])
@@ -8222,7 +8327,7 @@ class HeroBatchH12Tests(unittest.TestCase):
 
 class ClassicMultiHeroBattleTests(unittest.TestCase):
     def test_classic_multihero_turn_order_interleaves_sorted_side_lists(self) -> None:
-        battle = create_battle(
+        battle = create_registry_battle(
             ["dark_human", "fire_funeral", "bard"],
             ["undead_king_lina", "jade", "doomlight_dragon"],
         )
@@ -8231,39 +8336,37 @@ class ClassicMultiHeroBattleTests(unittest.TestCase):
 
         self.assertEqual(
             turn_order_codes,
-            ["undead_king_lina", "dark_human", "jade", "fire_funeral", "doomlight_dragon", "bard"],
+            ["bard", "doomlight_dragon", "dark_human", "undead_king_lina", "fire_funeral", "jade"],
         )
-        self.assertEqual(battle.current_turn_unit().hero_code, "undead_king_lina")
-        self.assertEqual(battle.active_player, 2)
+        self.assertEqual(battle.current_turn_unit().hero_code, "bard")
+        self.assertEqual(battle.active_player, 1)
 
     def test_destroyed_hero_slot_is_skipped_without_reordering(self) -> None:
-        battle = create_battle(
+        battle = create_registry_battle(
             ["dark_human", "fire_funeral", "bard"],
             ["undead_king_lina", "jade", "doomlight_dragon"],
         )
-        bard = next(unit for unit in battle.hero_units(1) if unit.hero_code == "bard")
-
-        battle.end_turn()
-        battle.end_turn()
-        battle.end_turn()
-        battle.end_turn()
-        battle.remove_unit(bard)
+        original_order = list(battle.turn_order_unit_ids)
+        doomed = battle.get_unit(original_order[-1])
+        for _ in range(len(original_order) - 2):
+            battle.end_turn()
+        battle.remove_unit(doomed)
         battle.end_turn()
 
-        self.assertIn(bard.unit_id, battle.turn_order_unit_ids)
-        self.assertEqual(battle.current_turn_unit().hero_code, "undead_king_lina")
+        self.assertEqual(battle.turn_order_unit_ids, original_order)
+        self.assertEqual(battle.current_turn_unit().unit_id, original_order[0])
         self.assertEqual(battle.round_number, 2)
         battle.end_turn()
-        self.assertEqual(battle.current_turn_unit().hero_code, "dark_human")
-        self.assertEqual(battle.active_player, 1)
+        self.assertEqual(battle.current_turn_unit().unit_id, original_order[1])
 
     def test_banished_hero_keeps_slot_and_returns_on_its_turn(self) -> None:
-        battle = create_battle(["ellie", "bard"], ["dark_human", "fire_funeral"])
+        battle = create_registry_battle(["ellie", "bard"], ["dark_human", "fire_funeral"])
         bard = next(unit for unit in battle.hero_units(1) if unit.hero_code == "bard")
         origin = bard.position
 
         battle.banish_unit(bard, 0)
-        battle.end_turn()
+        for _ in battle.turn_order_unit_ids:
+            battle.end_turn()
 
         self.assertEqual(battle.current_turn_unit().unit_id, bard.unit_id)
         self.assertFalse(bard.banished)
@@ -8271,7 +8374,10 @@ class ClassicMultiHeroBattleTests(unittest.TestCase):
         self.assertEqual(battle.to_public_dict()["input_player"], 1)
 
     def test_mount_only_acts_in_owner_hero_turn_bundle(self) -> None:
-        battle = create_battle(["masamune", "bard"], ["ellie"])
+        battle = create_registry_battle(["masamune", "bard"], ["ellie"])
+        while battle.current_turn_unit().hero_code != "masamune":
+            self.assertNotIn("motor_horse", {unit.hero_code for unit in battle.current_turn_bundle_units()})
+            battle.end_turn()
         current_bundle_codes = {getattr(unit, "hero_code", "") for unit in battle.current_turn_bundle_units()}
 
         self.assertEqual(battle.current_turn_unit().hero_code, "masamune")
@@ -8280,8 +8386,8 @@ class ClassicMultiHeroBattleTests(unittest.TestCase):
         battle.end_turn()
 
         next_bundle_codes = {getattr(unit, "hero_code", "") for unit in battle.current_turn_bundle_units()}
-        self.assertEqual(battle.current_turn_unit().hero_code, "ellie")
-        self.assertEqual(next_bundle_codes, {"ellie"})
+        self.assertEqual(battle.current_turn_unit().hero_code, "bard")
+        self.assertEqual(next_bundle_codes, {"bard"})
 
 
 if __name__ == "__main__":

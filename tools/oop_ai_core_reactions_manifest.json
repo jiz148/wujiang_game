@@ -1,0 +1,5 @@
+[
+  {"code": "excel_r256", "test_class": "NewBatch256257GiantShieldBehaviorTests"},
+  {"code": "excel_r328", "test_class": "NewBatch328329FlyingShipBehaviorTests"},
+  {"code": "excel_r198", "test_class": "HeroBatchH12AIDecisionTests"}
+]

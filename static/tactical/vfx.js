@@ -78,6 +78,18 @@ export function displayActions() {
   if (isGameOver()) return [];
   if (isDamageChoiceMode()) {
     const prompt = state.battle.pending_damage_choice;
+    if (prompt.kind === "gentleman_guard") {
+      return [
+        { code: "gentleman_guard_protect", name: "消耗一次绅士免伤", kind: "damage_choice",
+          target_unit_id: "protect", timing: "reaction", available: true,
+          description: "取消这次伤害；真身和全部分身共用每敌方武将回合的两次额度。",
+          preview: { cells: [], target_unit_ids: [], requires_target: false } },
+        { code: "gentleman_guard_decline", name: "保留免伤次数", kind: "damage_choice",
+          target_unit_id: "decline", timing: "reaction", available: true,
+          description: "承受这次伤害，保留额度应对后续打击。",
+          preview: { cells: [], target_unit_ids: [], requires_target: false } },
+      ];
+    }
     if (["hell_dragon_first", "hell_dragon_second", "hell_dragon_effect"].includes(prompt.kind)) {
       const stage = prompt.kind === "hell_dragon_first" ? "第一名" : prompt.kind === "hell_dragon_second" ? "第二名" : "死亡效果";
       const actions = (prompt.options || []).map((unitId) => ({
@@ -270,7 +282,7 @@ export function displayActions() {
   const visible = filterTutorialActions((bundle.actions.actions || []).filter((action) => {
     if (!action.available) return false;
     if (action.kind === "move" || action.kind === "attack") return true;
-    return action.timing === "active";
+    return action.timing === "active" || action.timing === "instant";
   }));
   return [...dragonActions, ...mergeAttackVariants(visible)];
 }

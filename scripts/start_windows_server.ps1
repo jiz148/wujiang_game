@@ -7,7 +7,8 @@ param(
     [switch]$LanOnly,
     [switch]$NoBrowser,
     [string]$PythonExe = "python",
-    [string]$CloudflaredExe = ""
+    [string]$CloudflaredExe = "",
+    [ValidateSet("direct", "legacy")][string]$AIScoring = "direct"
 )
 
 $ErrorActionPreference = "Stop"
@@ -236,6 +237,16 @@ if (-not (Test-Path $runPath)) {
     throw "Could not find run.py at $runPath"
 }
 
+if ($AIScoring -eq "direct") {
+    foreach ($builder in @("build_ai_native.py", "build_ai_prediction_native.py")) {
+        $buildOutput = & $PythonExe (Join-Path $projectRoot "tools\$builder") 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "AI acceleration preparation failed. $buildOutput"
+        }
+    }
+    Write-Host "AI acceleration ready."
+}
+
 $lanCandidates = @(Get-LanIpv4Candidates)
 $suggestedBaseUrl = ""
 if ($lanCandidates.Count -gt 0) {
@@ -337,7 +348,8 @@ if ($OpenFirewall) {
 $pythonArgs = @(
     $runPath,
     "--host", $BindHost,
-    "--port", $Port.ToString()
+    "--port", $Port.ToString(),
+    "--ai-scoring", $AIScoring
 )
 
 if ($PublicBaseUrl) {
@@ -346,6 +358,7 @@ if ($PublicBaseUrl) {
 
 Write-Host ""
 Write-Host "Starting Wujiang server..."
+Write-Host "Full AI scoring: $AIScoring (legacy remains available for comparison)."
 Write-Host "Local browser URL: http://127.0.0.1:$Port/"
 if ($PublicBaseUrl) {
     if ($useQuickTunnel) {

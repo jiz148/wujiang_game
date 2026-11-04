@@ -6,6 +6,7 @@ import { state, ui } from './core/state.js';
 import { initializeProfileState } from './platform/auth.js';
 import { initializeAuthState, refreshAuthSession, refreshRecentMatches } from './platform/home.js';
 import { hydrateStaticLabels, syncIdentityFromUrl } from './tactical/session.js';
+import { roomPollDelay } from './tactical/spectator-timing.js';
 
 // 界面整个由 JS 渲染，因此一次未捕获的异常就等于一块空白或一个卡住不动的按钮，
 // 玩家无从判断是网络问题还是程序缺陷。render() 又几乎被所有交互调用，它抛出的
@@ -60,8 +61,8 @@ window.addEventListener("DOMContentLoaded", async () => {
   }
 
   // 这不是 WebSocket。大厅和对局里别人的变化靠短轮询拉 /api/rooms/state。
-  // 房间列表没有挂在某一间房上，单独 4 秒拉一次。房内大厅 1.5 秒，对局 0.8 秒。
-  // 切到后台 5s。上一次还没回来就不发下一次，断线会逐步退避，避免把页面堵死。
+  // 自走棋观战读已提交帧，高倍速时最多每秒取五帧；普通对局保持原周期。
+  // 上一次还没回来就不发下一次，断线会逐步退避，避免把页面堵死。
   ui.pollHandle = window.setInterval(() => {
     if (ui.refreshInFlight) return;
     const now = Date.now();
@@ -71,15 +72,11 @@ window.addEventListener("DOMContentLoaded", async () => {
       refreshState({ preserveScreen: false });
       return;
     }
-    const inAutoChessRound = state.room?.mode === "autochess" &&
-      ["preparation", "battle"].includes(state.room?.autochess?.phase);
-    const delay = document.hidden
-      ? (inAutoChessRound ? 1500 : 5000)
-      : (ui.pollBackoffMs || (state.room?.status === "battle" || inAutoChessRound ? 800 : 1500));
+    const delay = roomPollDelay(state.room, document.hidden, ui.pollBackoffMs);
     if (now < ui.nextRoomPollAt) return;
     ui.nextRoomPollAt = now + delay;
     refreshState();
-  }, 400);
+  }, 100);
 
   document.addEventListener("visibilitychange", () => {
     ui.nextRoomPollAt = document.hidden ? Date.now() + 5000 : 0;

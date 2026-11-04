@@ -59,6 +59,19 @@ def main() -> int:
             f"design-archive={'yes' if code in documented else 'no'}; "
             f"hero-description={'yes' if code in explanation else 'no'}"
         )
+        # A shared name stem is a prompt to compare source rows, not proof that
+        # this exact hero is public. For example, 电子龙 and 电子龙。无限 differ.
+        family = spec["name"].split("。", 1)[0]
+        if len(family) >= 3:
+            related = [
+                f"{other['code']} {other['name']}"
+                for other in specs
+                if other["code"] != code
+                and other["code"] in public
+                and other["name"].split("。", 1)[0] == family
+            ]
+            if related:
+                print(f"  public same-name family (inspect identity): {', '.join(related)}")
         rejected |= existing
     print(f"Public Excel heroes: {len(public)}/{len(by_code)}; unimplemented: {len(by_code) - len(public)}")
     return 1 if rejected else 0

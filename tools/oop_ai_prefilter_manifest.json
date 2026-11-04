@@ -1,0 +1,5 @@
+[
+  {"code": "excel_r248", "skills": ["hell_dragon_fire"], "test_class": "NewBatch248HellDragonBehaviorTests"},
+  {"code": "excel_r252", "skills": ["ancient_arm"], "test_class": "NewBatch250252AncientBehaviorTests"},
+  {"code": "excel_r254", "skills": ["shield_lob"], "test_class": "NewBatch254255GiantShieldBehaviorTests"}
+]

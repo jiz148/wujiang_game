@@ -9,7 +9,7 @@ import { effectiveProfileName } from '../platform/auth.js';
 import { currentBattleLaunch, isCampaignBattleLaunch } from '../bridge/battle-launch.js';
 import { isRandomRoomMode, loadReplayStep, onActionClick, roomModeMeta, setArmyOrder, shouldShowLobbyPanel } from '../tactical/room-api.js';
 import { clearActionSelection } from '../tactical/session.js';
-import { actionLabel, actionLimitLabel, actionManaLabel, actionNeedsTarget, actionTierLabel, actionTimingLabel, actionTitle, bodyDirectionSelection, canCompleteTargetSelection, choicePatternSelection, currentPreview, fieldEffectMarker, fieldEffectsByCell, hasCancelableTargetSelection, movePathSelection, multiUnitSelection, normalizedPatternCells, patternSelection, patternSelectionCanComplete, randomRoomFallbackSummary, randomRoomRosterSize, reviveUnitCellSelection, stagedAttackVariantCode, stagedBodyCells, stagedBodyDirection, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, stagedUnitDirection, stagedUnitDirectionTargetId, statCellRequired, statCellSelection, unitDirectionSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
+import { actionLabel, actionLimitLabel, actionManaLabel, actionNeedsTarget, actionTierLabel, actionTimingLabel, actionTitle, bodyDirectionSelection, canCompleteTargetSelection, choicePatternSelection, crowFormationSelection, currentPreview, fieldEffectMarker, fieldEffectsByCell, hasCancelableTargetSelection, movePathSelection, multiUnitSelection, normalizedPatternCells, patternSelection, patternSelectionCanComplete, randomRoomFallbackSummary, randomRoomRosterSize, reviveUnitCellSelection, stagedAttackVariantCode, stagedBodyCells, stagedBodyDirection, stagedCrowFormationRavenIds, stagedCrowFormationTargetId, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, stagedUnitDirection, stagedUnitDirectionTargetId, statCellRequired, statCellSelection, unitDirectionSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
 import { actionByCode, actionWheelLayer, displayActions, fieldEffectDuration, fieldEffects, flushPendingArmyVfx, hoveredAction, hpRatio, manaDisplayClass, manaPipsMarkup, positionKey, positionsToSet, renderBattleVfx, selectedAction, trimNumber, tutorialState, unitBoundsRelativeToStage, unitStatusSummary } from '../tactical/vfx.js';
 
 export function renderScreens() {
@@ -185,6 +185,15 @@ function renderBoardAlert() {
       multiUnitSelection(action).prompt
         || `${chosenIds.length ? `已选择 ${chosenIds.length} 个目标。` : "请点击高亮单位来选择目标。"} 选好后可以点击“完成选择”，再次点击同一目标可取消。`,
     );
+    return;
+  }
+  if (action && crowFormationSelection(action)) {
+    const target = stagedCrowFormationTargetId(action);
+    const chosen = stagedCrowFormationRavenIds(action);
+    const need = Number(crowFormationSelection(action).count);
+    showBoardHint(actionTitle(action), target
+      ? `已选阵法目标；选择其周围 ${need} 只要牺牲的报信乌鸦（已选 ${chosen.length} 只），然后点击“完成选择”。再次点击目标可重选。`
+      : `先点击高亮的阵法目标，再选择其周围 ${need} 只报信乌鸦。`);
     return;
   }
 
@@ -586,6 +595,9 @@ export function renderBoard() {
   const aiPreviewKeys = positionsToSet(aiPreviewCells);
   const aiCurrentKey = aiPreviewCells.length ? positionKey(aiPreviewCells[aiPreviewCells.length - 1]) : "";
   const placementSize = Number(selectedAction()?.preview?.placement_size || 1);
+  const shipFootprint = selectedAction()?.preview?.ship_footprint;
+  const placementWidth = Number(shipFootprint?.width || placementSize);
+  const placementHeight = Number(shipFootprint?.height || placementSize);
   const boardWidth = state.battle.board.width;
   const eternalZone = state.room?.mode === "bp" && state.room?.bp?.special_modes?.some((mode) => mode.code === "eternal");
   const eternalLeft = Math.floor((boardWidth - 5) / 2);
@@ -630,7 +642,9 @@ export function renderBoard() {
       const cellLabels = [`第 ${y + 1} 行，第 ${x + 1} 列`];
       cellLabels.push(occupant ? `${occupant.name}，队伍 ${occupant.player_id}` : "空格");
       if (preview.cellKeys.has(key)) cellLabels.push("可选范围");
-      if (placementSize > 1 && preview.cellKeys.has(key)) cellLabels.push(`落点将占用 ${placementSize}×${placementSize} 格`);
+      if ((placementWidth > 1 || placementHeight > 1) && preview.cellKeys.has(key)) {
+        cellLabels.push(`落点将占用 ${placementWidth}×${placementHeight} 格`);
+      }
       if (occupant && preview.targetIds.has(occupant.id)) cellLabels.push("可选目标");
       if (unitOccupiedCells(selected).some((cellPosition) => cellPosition.x === x && cellPosition.y === y)) cellLabels.push("当前选择");
       if (cellEffects.length) cellLabels.push(`战场状态：${cellEffects.map((effect) => effect.name).join("、")}`);
@@ -669,11 +683,11 @@ export function renderBoard() {
     }
   }
 
-  if (placementSize > 1) {
+  if (placementWidth > 1 || placementHeight > 1) {
     const showPlacement = (anchor) => {
       for (const cell of cellAt) cell.classList.remove("is-footprint-destination");
-      for (let dy = 0; dy < placementSize; dy += 1) {
-        for (let dx = 0; dx < placementSize; dx += 1) {
+      for (let dy = 0; dy < placementHeight; dy += 1) {
+        for (let dx = 0; dx < placementWidth; dx += 1) {
           cellAt[(anchor.y + dy) * boardWidth + anchor.x + dx]?.classList.add("is-footprint-destination");
         }
       }
@@ -1044,15 +1058,13 @@ export function scheduleBoardOverlayRender() {
 
 function renderUnitHoverCard(unit) {
   const statuses = unitStatusSummary(unit).join(" · ") || "无";
-  const skills = (unit.skills || []).map((skill) => skill.name).filter(Boolean).join(" · ") || "无";
-  const traits = (unit.traits || []).map((trait) => trait.name).filter(Boolean).join(" · ") || "无";
+  const traits = unit.traits.map((trait) => trait.name).join(" · ") || "无";
   return `
     <strong>${unit.name}</strong>
     <p>${unit.role} · ${unit.attribute} / ${unit.race} · 玩家 ${unit.player_id}</p>
     <p>血 ${trimNumber(unit.hp)} / ${trimNumber(unit.max_hp)} · 魔 ${unit.unbounded_mana ? "∞" : `${trimNumber(unit.mana)} / ${trimNumber(unit.max_mana || unit.base_stats?.mana || unit.stats?.max_mana || unit.stats?.mana || unit.mana)}`} · 魔力点 ${trimNumber(unit.mana_points || unit.stats?.mana_points || 0)}</p>
     <p>盾 ${unit.total_shields} · 闪 ${unit.dodge_charges} · 攻 ${trimNumber(unit.stats.attack)} / 守 ${trimNumber(unit.stats.defense)}</p>
     <p>状态:${statuses}</p>
-    <p>技能:${skills}</p>
     <p>特性:${traits}</p>
   `;
 }
@@ -1073,10 +1085,8 @@ function chainQueuedActionSummary(chain) {
 export function chainQueuedActionPrompt(chain) {
   const summary = chainQueuedActionSummary(chain);
   const gravityPayload = chain?.queued_action?.payload;
-  const gravityResult = gravityPayload?.skill_code === "gravity_field"
-    && Array.isArray(gravityPayload.gravity_coin_values)
-    && [1, 2, 4, 8].includes(Number(gravityPayload.gravity_side))
-    ? `硬币 ${gravityPayload.gravity_coin_values.join("、")}，范围 ${gravityPayload.gravity_side}×${gravityPayload.gravity_side}；`
+  const gravityResult = typeof gravityPayload?.chain_prompt_prefix === "string"
+    ? gravityPayload.chain_prompt_prefix
     : "";
   if (summary && summary.startsWith("\u3010")) return `${gravityResult}${summary}`;
   const actionName = chain?.queued_action?.display_name || "\u539f\u52a8\u4f5c";
@@ -1239,28 +1249,6 @@ function unitMaxMana(unit) {
   return Number(unit.max_mana || unit.base_stats?.mana || unit.stats?.max_mana || unit.stats?.mana || unit.mana || 0);
 }
 
-function escapeCardText(value) {
-  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  }[char]));
-}
-
-function kitMarkup(title, items) {
-  const rows = (items || []).filter((item) => item && item.name);
-  if (!rows.length) {
-    return `<div class="statline"><strong>${escapeCardText(title)}</strong> 无</div>`;
-  }
-  const body = rows.map((item) => {
-    const desc = String(item.description || "").trim();
-    return `<div class="kit-row"><b>${escapeCardText(item.name)}</b>${desc ? `<small>${escapeCardText(desc)}</small>` : ""}</div>`;
-  }).join("");
-  return `<div class="kit"><div class="statline"><strong>${escapeCardText(title)}</strong></div>${body}</div>`;
-}
-
 export function renderSelectedCard() {
   const panel = $("selected-card");
   const unit = inspectedUnit();
@@ -1276,6 +1264,7 @@ export function renderSelectedCard() {
     statusEntries.unshift(`消失${unit.banish_turns_remaining > 0 ? `(${unit.banish_turns_remaining})` : ""}`);
   }
   const statuses = statusEntries.join(" · ") || "无";
+  const traits = (unit.traits || []).map((trait) => trait.name).join(" · ") || "无";
   const maxMana = unitMaxMana(unit);
   const hpPercent = Math.round(resourceRatio(unit.hp, unit.max_hp) * 100);
   const manaPercent = unit.unbounded_mana ? 100 : Math.round(resourceRatio(unit.mana, maxMana) * 100);
@@ -1319,8 +1308,9 @@ export function renderSelectedCard() {
       </div>
     </div>
     <div class="selected-card__section">
-      ${kitMarkup("技能", unit.skills)}
-      ${kitMarkup("特性", unit.traits)}
+      <div class="statline"><strong>特性</strong> ${traits}</div>
+      <div class="statline"><strong>原始技能</strong> ${unit.raw_skill_text || "无"}</div>
+      <div class="statline"><strong>原始特性</strong> ${unit.raw_trait_text || "无"}</div>
       ${unit.weather_effect_text ? `<div class="statline"><strong>天气效果</strong> ${unit.weather_effect_text}</div>` : ""}
     </div>
   `;
@@ -1629,6 +1619,8 @@ export function renderChainPanel() {
     const prompt = state.battle.pending_damage_choice;
     if (caption) caption.textContent = prompt.kind === "hell_dragon_first"
       ? "古龙阵亡：选择第一名己方地狱单位，或放弃献祭。"
+      : prompt.kind === "gentleman_guard"
+      ? `矮小绅士可取消【${prompt.action_name}】的 ${prompt.damage} 点伤害；本体与分身共享两次额度。`
       : prompt.kind === "hell_dragon_second"
       ? "古龙阵亡：选择第二名不同的己方地狱单位，或放弃献祭。"
       : prompt.kind === "hell_dragon_effect"
@@ -1809,10 +1801,6 @@ function bpSidePlayerName(teamId, room) {
 
 export function battleWinnerLabel(battle, room) {
   const winner = Number(battle?.winner || 0);
-  if (room?.forge?.play === "coop") {
-    if (winner === 1) return "合作通过";
-    if (winner === 2) return "对手";
-  }
   if (room?.mode === "bp") {
     const name = bpSidePlayerName(winner, room);
     if (name) return name;

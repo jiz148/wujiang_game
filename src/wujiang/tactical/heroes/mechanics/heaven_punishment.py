@@ -1,0 +1,286 @@
+"""R070 heaven punishment and skill disable."""
+
+from __future__ import annotations
+
+from typing import Any
+from wujiang.tactical.engine.core import ActionError
+from wujiang.tactical.engine.core import ActionMiss
+from wujiang.tactical.engine.core import Battle
+from wujiang.tactical.engine.core import DamageContext
+from wujiang.tactical.engine.core import HeroUnit
+from wujiang.tactical.engine.core import Position
+from wujiang.tactical.engine.core import Skill
+from wujiang.tactical.engine.core import Unit
+from wujiang.tactical.engine.core import StatusEffect
+from wujiang.tactical.heroes.common import match_payload_pattern
+from wujiang.tactical.heroes.common import pattern_selection_preview
+from wujiang.tactical.heroes.common import payload_target_unit
+from wujiang.tactical.heroes.ai_policy import AISkillCandidateContext, AISkillScoreContext
+from wujiang.tactical.heroes.mechanics.next_five_effects import apply_piercing_status_effect
+from wujiang.tactical.heroes.mechanics.next_five_effects import damage_followup_effect_applies
+from wujiang.tactical.heroes.mechanics.next_five_effects import remote_rectangle_patterns
+
+
+class SkillDisabledStatus(StatusEffect):
+    def __init__(self, skill_code: str, skill_name: str) -> None:
+        self.skill_code = skill_code
+        super().__init__(f"技能封印：{skill_name}", f"不能使用技能【{skill_name}】。", duration=None)
+
+    def blocks_skill_use(self, battle: Battle, actor: HeroUnit, skill: Skill) -> tuple[bool, str]:
+        owner = self.owner
+        if owner is not None and actor.unit_id == owner.unit_id and skill.code == self.skill_code:
+            return True, f"技能【{skill.name}】已被封印，不能使用。"
+        return False, ""
+
+
+class HeavenPunishmentSkill(Skill):
+    ai_candidate_requires_explicit_legality = True
+
+    def ai_empty_payload_filter_reason(self, context: AISkillCandidateContext, patterns: list) -> str | None:
+        for pattern in patterns:
+            cells = context.positions(pattern)
+            for target in self.affected_enemies(context.battle, context.actor, cells):
+                if any(skill.timing == "active"
+                       and (skill.max_uses_per_battle is None or skill.uses_this_battle < skill.max_uses_per_battle)
+                       and not any(getattr(status, "skill_code", None) == skill.code for status in target.statuses)
+                       for skill in self.public_active_skills(context.battle, target)):
+                    return None
+        return "no_sealable_public_skill" if patterns else None
+
+    def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
+        payload = context.payload
+        selected_code = str(payload.get("disabled_skill_code") or "")
+        target_id = payload.get("target_unit_id")
+        target = context.battle.get_unit(str(target_id)) if target_id else (targets[0] if targets else None)
+        if target is None or not selected_code:
+            return -120.0
+        selected = next((skill for skill in self.public_active_skills(context.battle, target)
+                         if skill.code == selected_code), None)
+        if selected is None or any(getattr(status, "skill_code", None) == selected_code for status in target.statuses):
+            return -120.0
+        if selected.max_uses_per_battle is not None and selected.uses_this_battle >= selected.max_uses_per_battle:
+            return -120.0
+        score = 32.0 if selected.cooldown_remaining > 0 else 55.0
+        if context.is_damaging_skill(selected_code) or context.shared.is_control_skill(selected_code):
+            score += 35.0
+        if context.shared.is_summon_skill(selected_code) or context.is_heal_skill(selected_code):
+            score += 24.0
+        if getattr(selected, "max_uses_per_battle", None) == 1 and getattr(selected, "uses_this_battle", 0) == 0:
+            score += 20.0
+        if selected.mana_cost > target.max_mana():
+            score -= 45.0
+        return score
+
+    def ai_effective_enemy_impact(self, battle, actor, payload, targets=None, shared=None, action=None):
+        if targets is None:
+            return None
+        return shared.score_skill_payload(battle, actor, action, payload,
+                                          shared.difficulty_profile("standard"), instant_only=False) > 0
+
+    def ai_hostile_target_impact(self, battle, actor, payload, target):
+        selected_code = str(payload.get("disabled_skill_code") or "")
+        return bool(selected_code) and any(
+            getattr(target_skill, "timing", None) == "active"
+            and target_skill.code == selected_code
+            and not any(getattr(status, "skill_code", None) == selected_code for status in target.statuses)
+            for target_skill in self.public_active_skills(battle, target)
+        )
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        targets = list(context.effect_units(self))
+        selected_code = str(payload.get("disabled_skill_code") or "")
+        target = battle.units.get(str(payload.get("target_unit_id") or ""))
+        if target is None or not selected_code:
+            return -1000.0
+        control_value = context.shared.skill_control_bonus(context, targets)
+        with context.probe_rollback():
+            before = {unit.unit_id: (unit.current_hp, unit.total_shields()) for unit in targets}
+            sealed_before = any(getattr(status, "skill_code", None) == selected_code for status in target.statuses)
+            try:
+                self.execute(battle, actor, payload)
+            except ActionError:
+                return -1000.0
+            score = 0.0
+            for unit in targets:
+                hp, shields = before[unit.unit_id]
+                value = max(0.0, hp - unit.current_hp) * 155.0 + max(0, shields - unit.total_shields()) * 20.0
+                if context.death_probability(unit) > 0:
+                    value += (80.0 * context.death_probability(unit) if context.direct_scoring() else 80.0)
+                score += value if unit.player_id != actor.player_id else -value * 1.35
+            sealed_after = any(getattr(status, "skill_code", None) == selected_code for status in target.statuses)
+            if sealed_after and not sealed_before:
+                score += max(0.0, control_value)
+        return score if score > 0 else -1000.0
+
+    target_unit_is_anchor = True
+
+    def ai_candidate_payloads(self, context: AISkillCandidateContext) -> list[dict[str, Any]]:
+        battle, actor, action = context.battle, context.actor, context.action
+        preview = action.get("preview", {}) or {}
+        selection = dict(preview.get("selection") or {})
+        allowed_ids = set(preview.get("target_unit_ids") or [])
+        payloads: list[dict[str, Any]] = []
+        for pattern in selection.get("patterns", []):
+            cells = context.positions(pattern)
+            cell_keys = {(cell.x, cell.y) for cell in cells}
+            for target in battle.enemy_units(actor.player_id):
+                if target.unit_id not in allowed_ids:
+                    continue
+                if not any((cell.x, cell.y) in cell_keys for cell in battle.unit_cells(target)):
+                    continue
+                for target_skill in self.public_active_skills(battle, target):
+                    if getattr(target_skill, "timing", None) != "active":
+                        continue
+                    if target_skill.max_uses_per_battle is not None and target_skill.uses_this_battle >= target_skill.max_uses_per_battle:
+                        continue
+                    if any(getattr(status, "skill_code", None) == target_skill.code for status in target.statuses):
+                        continue
+                    payloads.append(
+                        {
+                            "type": "skill",
+                            "unit_id": actor.unit_id,
+                            "skill_code": "heaven_punishment",
+                            "cells": context.geometry.positions_to_payload(cells),
+                            "target_unit_id": target.unit_id,
+                            "disabled_skill_code": target_skill.code,
+                        }
+                    )
+        return context.require_shared().dedupe_payloads(payloads)
+
+    def __init__(self) -> None:
+        super().__init__(
+            "heaven_punishment",
+            "天罚",
+            "普通技能：2轮一次；5*5双方普通伤害，另选其中一名敌人的一项公开主动技能施加破魔封印。",
+            cooldown_turns=2,
+            target_mode="cell",
+        )
+
+    def patterns(self, battle: Battle, actor: HeroUnit) -> list[list[Position]]:
+        return remote_rectangle_patterns(battle, actor, 5, 5)
+
+    def chosen_cells(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
+        return match_payload_pattern(payload, self.patterns(battle, actor))
+
+    @staticmethod
+    def public_active_skills(battle: Battle, unit: HeroUnit) -> list[Skill]:
+        source = unit
+        if unit.is_clone:
+            root_id = battle.controlling_hero_id(unit)
+            source = battle.units.get(root_id, unit)
+        return [skill for skill in source.skills if skill.timing == "active"]
+
+    def has_public_active_skill(self, battle: Battle, unit: HeroUnit) -> bool:
+        return bool(self.public_active_skills(battle, unit))
+
+    def can_use(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok or not payload:
+            return ok, reason
+        try:
+            cells = self.chosen_cells(battle, actor, payload)
+            target = self.choose_target(battle, actor, payload, cells)
+            self.choose_skill(battle, target, payload)
+        except ActionError as exc:
+            return False, str(exc)
+        return True, ""
+
+    def affected_enemies(self, battle: Battle, actor: HeroUnit, cells: list[Position]) -> list[HeroUnit]:
+        return [
+            unit
+            for unit in battle.units_at_cells(cells)
+            if unit.player_id != actor.player_id and self.has_public_active_skill(battle, unit)
+            and battle.unit_can_be_selected(unit, actor=actor)[0]
+        ]  # type: ignore[list-item]
+
+    def choose_target(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any], cells: list[Position]) -> HeroUnit:
+        enemies = self.affected_enemies(battle, actor, cells)
+        if not enemies:
+            if payload.get("queued_resolution"):
+                raise ActionMiss("【天罚】落在原定区域，没有可封印公开主动技能的敌方单位。")
+            raise ActionError("天罚区域内没有可封印公开主动技能的敌方单位。")
+        if not payload.get("target_unit_id"):
+            raise ActionError("天罚需要选择区域内的一名敌方单位。")
+        target = payload_target_unit(battle, payload)
+        if target.unit_id not in {unit.unit_id for unit in enemies}:
+            raise ActionError("指定目标不在天罚区域内，或没有可封印的公开主动技能。")
+        return target
+
+    def choose_skill(self, battle: Battle, target: HeroUnit, payload: dict[str, Any]) -> Skill:
+        active_skills = self.public_active_skills(battle, target)
+        if not active_skills:
+            raise ActionError("目标没有可封印的公开主动技能。")
+        selected = str(payload.get("disabled_skill_code") or "").strip()
+        if not selected:
+            raise ActionError("天罚需要选择目标当前公开的一项主动技能。")
+        for skill in active_skills:
+            if skill.code == selected:
+                return skill
+        raise ActionError("只能封印目标当前公开的主动技能。")
+
+    def execute(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> None:
+        cells = self.chosen_cells(battle, actor, payload)
+        selected_recipient = None
+        selected_skill = None
+        try:
+            target = self.choose_target(battle, actor, payload, cells)
+            selected_skill = self.choose_skill(battle, target, payload)
+            selected_recipient = battle.effect_recipient(target)
+        except ActionError:
+            if not payload.get("queued_resolution"):
+                raise
+            battle.log("【天罚】原定封印目标失效，没有可封印的公开主动技能；范围伤害仍在原定区域结算。")
+        for recipient in battle.effect_units(battle.units_at_cells(cells)):
+            ctx = battle.resolve_damage(DamageContext(
+                source=actor, target=recipient, attack_power=actor.stat("attack"), is_skill=True,
+                action_name="天罚", area_cell_hits=battle.unit_hit_count_for_cells(recipient, cells),
+                tags={"skill", "heaven_punishment"},
+            ))
+            if selected_recipient is not None and selected_skill is not None and recipient.unit_id == selected_recipient.unit_id and recipient.alive and damage_followup_effect_applies(ctx, allow_on_shield_break=True):
+                apply_piercing_status_effect(
+                    battle, actor, recipient, action_name="天罚封印",
+                    status=SkillDisabledStatus(selected_skill.code, selected_skill.name), is_skill=True,
+                    consume_shield=not ctx.shield_consumed,
+                    tags={"skill", "heaven_punishment"},
+                )
+
+    def ignores_shield_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> bool:
+        return True
+
+    def target_can_react_to_effect(self, battle: Battle, actor: HeroUnit, target: HeroUnit, payload: dict[str, Any]) -> bool:
+        selected = battle.units.get(str(payload.get("target_unit_id") or ""))
+        selected_id = battle.effect_recipient(selected).unit_id if selected is not None else None
+        return target.unit_id == selected_id or target.total_shields() == 0
+
+    def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
+        preview = pattern_selection_preview(self.patterns(battle, actor))
+        cell_keys = {(cell["x"], cell["y"]) for cell in preview["cells"]}
+        targets = [
+            unit.unit_id
+            for unit in battle.enemy_units(actor.player_id)
+            if not unit.is_stealthed() and self.has_public_active_skill(battle, unit)
+            and any((cell.x, cell.y) in cell_keys for cell in battle.unit_cells(unit))
+        ]
+        options = [
+            {"unit_id": unit.unit_id, "name": unit.name, "skills": [
+                {"code": skill.code, "name": skill.name}
+                for skill in self.public_active_skills(battle, unit)
+            ]}
+            for unit in battle.enemy_units(actor.player_id)
+            if unit.unit_id in targets and not unit.is_stealthed()
+        ]
+        preview.update({"target_unit_ids": targets, "secondary_cells": [], "requires_target": True,
+                        "heaven_punishment_targets": options})
+        return preview
+
+    def get_target_cells_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[Position]:
+        return self.chosen_cells(battle, actor, payload)
+
+    def get_target_units_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> list[HeroUnit]:
+        cells = self.chosen_cells(battle, actor, payload)
+        if payload.get("target_unit_id"):
+            return [self.choose_target(battle, actor, payload, cells)]
+        return self.affected_enemies(battle, actor, cells)
+
+

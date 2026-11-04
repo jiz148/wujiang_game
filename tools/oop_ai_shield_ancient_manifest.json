@@ -1,0 +1,11 @@
+[
+  {"code": "excel_r254", "ally": "excel_r255", "skills": ["shield_flat_shot", "shield_lob", "shield_raise"], "test_class": "NewBatch254255GiantShieldBehaviorTests"},
+  {"code": "excel_r255", "ally": "excel_r254", "skills": ["shield_raise", "shield_wall"], "test_class": "NewBatch254255GiantShieldBehaviorTests"},
+  {"code": "excel_r256", "ally": "excel_r254", "skills": ["shield_sword_dance", "shield_wall"], "test_class": "NewBatch256257GiantShieldBehaviorTests"},
+  {"code": "excel_r257", "ally": "excel_r254", "skills": ["shield_sweep", "shield_flat_shot", "shield_volley", "shield_raise", "shield_draw_blade"], "test_class": "NewBatch256257GiantShieldBehaviorTests"},
+  {"code": "excel_r249", "ally": "excel_r250", "skills": ["ancient_repair", "ancient_fusion"], "test_class": "NewBatch249251AncientBehaviorTests"},
+  {"code": "excel_r250", "ally": "excel_r249", "skills": ["ancient_jaw", "ancient_fusion"], "test_class": "NewBatch250252AncientBehaviorTests"},
+  {"code": "excel_r251", "ally": "excel_r249", "skills": ["ancient_rust", "ancient_fusion"], "test_class": "NewBatch249251AncientBehaviorTests"},
+  {"code": "excel_r252", "ally": "excel_r249", "skills": ["ancient_arm", "ancient_vigor", "ancient_fusion"], "test_class": "NewBatch250252AncientBehaviorTests"},
+  {"code": "excel_r253", "ally": "excel_r249", "skills": ["mechanical_horse", "ancient_cursed_rust", "ancient_fusion"], "test_class": "NewBatch253AncientBehaviorTests"}
+]

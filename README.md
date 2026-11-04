@@ -16,6 +16,9 @@ The two game domains must not import each other. See [docs/架构分层说明.md
 
 - Local single-machine run:
   - `python run.py`
+  - Both `python run.py` and `start_windows_server.bat` now default to the measured `expected-direct-measured-fast` profile: local expected contributions, a fair stealth/clone view, and reusable identity-checked probe snapshots. The Windows launcher prepares matching native helpers before starting. Four-worker saved-input comparisons beat legacy by about 40% on ordinary/equipment/summon samples and by 76%/92% on two dense Electronic/Hell late-turn samples; some small inputs remain slower. These are calculation measurements, with live play still to verify. See [the complete report](reports/full-ai-direct-reuse-20261022/complete-report.md).
+  - Legacy is preserved for manual AI-logic comparison: double-click `start_windows_server_legacy.bat`, pass `-AIScoring legacy` to the main Windows launcher, or use `python run.py --ai-scoring legacy`. Frozen old source and its unchanged rollback binary are also archived. The former full probability enumeration remains explicit `WUJIANG_AI_EXPECTATION_METHOD=enumerate` research; the direct server uses numeric expectations and shared probes. See [the scoring baseline](docs/完整AI期望评分与视角基线.md).
+  - Startup reports actual loaded native backends; the matching local build is required for native acceleration. Four workers do not mean four battles advance independently: board commits retain their serial order. See [the AI validation guide](docs/完整AI统一验证说明.md).
 - Tests (run from the repository root; `replays/` resolves relative to the working directory):
   - `python -m unittest discover -s tests`
   - `node tools/verify_frontend_modules.mjs` link-checks the frontend module graph.
