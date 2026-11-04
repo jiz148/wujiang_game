@@ -1,0 +1,12 @@
+[
+  {"code": "chanter", "test_class": "DevelopedHeroReviewR05BehaviorTests"},
+  {"code": "excel_r206", "test_class": "HeroBatchH12AIDecisionTests"},
+  {"code": "excel_r252", "test_class": "NewBatch250252AncientBehaviorTests"},
+  {"code": "excel_r248", "test_class": "NewBatch248HellDragonBehaviorTests"},
+  {"code": "excel_r238", "test_class": "NewBatch238240242HellBehaviorTests"},
+  {"code": "excel_r240", "test_class": "NewBatch238240242HellBehaviorTests"},
+  {"code": "excel_r242", "test_class": "NewBatch238240242HellBehaviorTests"},
+  {"code": "excel_r243", "test_class": "NewBatch239243244HellBehaviorTests"},
+  {"code": "excel_r244", "test_class": "NewBatch239243244HellBehaviorTests"},
+  {"code": "excel_r246", "test_class": "NewBatch245246HellBehaviorTests"}
+]

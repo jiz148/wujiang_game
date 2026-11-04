@@ -1,0 +1,5 @@
+[
+  {"code": "excel_r223", "ally": "excel_r221", "skills": ["electronic_fusion"], "test_class": "NewBatch223ElectronicWingBehaviorTests"},
+  {"code": "excel_r222", "ally": "excel_r221", "skills": ["electronic_repair"], "test_class": "NewBatch221222RepairFactoryBehaviorTests"},
+  {"code": "excel_r221", "ally": "excel_r223", "skills": ["satellite_cannon"], "test_class": "NewBatch221222ElectronicDragonBehaviorTests"}
+]

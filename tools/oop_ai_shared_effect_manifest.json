@@ -1,0 +1,14 @@
+[
+  {"code": "excel_r191", "skills": ["gladiator_claw"], "test_class": "NewGladiatorBehaviorTests"},
+  {"code": "excel_r193", "skills": ["water_wave_cannon"], "test_class": "SektoruBehaviorTests"},
+  {"code": "excel_r195", "skills": ["gladiator_gale"], "test_class": "NewGladiatorBehaviorTests"},
+  {"code": "excel_r188", "skills": ["vitality_blast"], "test_class": "DevelopedHeroReviewR18BehaviorTests"},
+  {"code": "excel_r239", "skills": ["hell_orb", "hell_orb_free"], "test_class": "NewBatch239243244HellBehaviorTests"},
+  {"code": "excel_r221", "skills": ["machine_gun", "missile"], "test_class": "NewBatch221222ElectronicDragonBehaviorTests"},
+  {"code": "excel_r223", "skills": ["machine_gun", "missile"], "test_class": "NewBatch223ElectronicWingBehaviorTests"},
+  {"code": "excel_r224", "skills": ["machine_gun", "electronic_laser"], "test_class": "DevelopedHeroReviewR23BehaviorTests"},
+  {"code": "excel_r225", "skills": ["missile"], "test_class": "DevelopedHeroReviewR22BehaviorTests"},
+  {"code": "excel_r277", "skills": ["missile"], "test_class": "NewBatch277290TianyuanCrowBehaviorTests"},
+  {"code": "excel_r305", "skills": ["machine_gun"], "test_class": "NewBatch305NovaBehaviorTests"},
+  {"code": "excel_r373", "skills": ["machine_gun", "missile"], "test_class": "NewBatch373InfinityBehaviorTests"}
+]

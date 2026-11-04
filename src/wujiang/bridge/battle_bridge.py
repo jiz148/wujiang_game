@@ -611,9 +611,10 @@ def room_state_with_strategy_sync(
     *,
     base_url: str | None,
     recovered: bool = False,
+    advance_due: bool = True,
 ) -> dict[str, Any]:
     record_finished_room_history(room)
-    state = room.serialize_state(player_token, base_url=base_url)
+    state = room.serialize_state(player_token, base_url=base_url, advance_due=advance_due)
     checkpoint = persist_strategy_battle_room(room)
     if checkpoint is not None:
         bind_campaign_launch(

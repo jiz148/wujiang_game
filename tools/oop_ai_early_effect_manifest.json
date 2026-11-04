@@ -1,0 +1,8 @@
+[
+  {"code": "excel_r035", "skills": ["demon_blade"], "test_class": "DevelopedHeroReviewR11AaronBehaviorTests"},
+  {"code": "excel_r036", "skills": ["punisher_heal", "sanctuary_banish", "sanctuary_judgment"], "test_class": "SecondRepairR12BehaviorTests"},
+  {"code": "excel_r037", "skills": ["nuclear_mutation", "gravity_field"], "test_class": "SecondRepairR12BehaviorTests"},
+  {"code": "excel_r047", "skills": ["hundred_bird_burial"], "test_class": "SecondRepairR13BehaviorTests"},
+  {"code": "excel_r056", "skills": ["remi_chaos", "summon_remi_bat"], "test_class": "SecondRepairR13BehaviorTests"},
+  {"code": "excel_r059", "skills": ["nian_large_dragon_breath", "nian_roar", "nian_jade_flash", "nian_dragon_dance"], "test_class": "SecondRepairR13BehaviorTests"}
+]

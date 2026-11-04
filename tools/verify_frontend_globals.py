@@ -26,7 +26,7 @@ BROWSER_GLOBALS = {
     "File", "FileReader", "FormData", "Function", "Headers", "Image", "Infinity",
     "Intl", "JSON", "Map", "Math", "NaN", "Number", "Object", "Promise", "Proxy",
     "Range", "Reflect", "RegExp", "Request", "Response", "Set", "String",
-    "Symbol", "TextDecoder", "TextEncoder", "URL", "URLSearchParams", "WeakMap",
+    "Symbol", "TextDecoder", "TextEncoder", "TypeError", "URL", "URLSearchParams", "WeakMap",
     "WeakSet", "WebSocket", "Worker", "alert", "atob", "btoa",
     "cancelAnimationFrame", "clearInterval", "clearTimeout", "confirm",
     "console", "crypto", "decodeURI", "decodeURIComponent", "document",

@@ -1,0 +1,5 @@
+[
+  {"code": "excel_r021", "skills": ["iaido_charge", "ghost_step", "time_stop", "focus_reset"], "test_class": "DevelopedHeroReviewR07SwordsmanBehaviorTests"},
+  {"code": "excel_r023", "skills": ["frey_quick_flash", "frey_god_stab", "frey_lion_spear"], "test_class": "DevelopedHeroReviewR08FreyBehaviorTests"},
+  {"code": "excel_r024", "skills": ["royal_soldier", "fried_inspire"], "test_class": "DevelopedHeroReviewR08FriedBehaviorTests"}
+]

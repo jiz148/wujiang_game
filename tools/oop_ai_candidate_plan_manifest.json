@@ -1,0 +1,260 @@
+[
+  {
+    "code": "blood_eater",
+    "skills": [
+      "sacrifice_ritual"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "chanter",
+    "skills": [
+      "drain_card",
+      "paralysis_card",
+      "poison_card"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "dragon_rider",
+    "skills": [
+      "dragon_slash",
+      "smoke_spray"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "erasure_apostle",
+    "skills": [
+      "descent_moment"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r020",
+    "skills": [
+      "world_seed"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r022",
+    "skills": [
+      "mimic_skill"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r023",
+    "skills": [
+      "frey_god_stab",
+      "frey_lion_spear",
+      "frey_quick_flash"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r024",
+    "skills": [
+      "royal_soldier"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r025",
+    "skills": [
+      "agency_borrowed_skill",
+      "agency_contract"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r032",
+    "skills": [
+      "morning_holy_light"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r033",
+    "skills": [
+      "lao_wave_bullet"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r094",
+    "skills": [
+      "interference",
+      "noise_wave"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r123",
+    "skills": [
+      "fuma_shuriken",
+      "fuma_trap"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r127",
+    "skills": [
+      "fantasy_move",
+      "rainbow_mirror"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r136",
+    "skills": [
+      "true_blade_air_slash"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r191",
+    "skills": [
+      "gladiator_claw"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r193",
+    "skills": [
+      "water_wave_cannon"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r194",
+    "skills": [
+      "battle_hurricane"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r195",
+    "skills": [
+      "gladiator_gale"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r196",
+    "skills": [
+      "earth_shatter"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r215",
+    "skills": [
+      "flash_slash"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r219",
+    "skills": [
+      "bird_dash",
+      "bird_dash_free",
+      "bird_soul",
+      "bird_soul_free"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r221",
+    "skills": [
+      "missile",
+      "satellite_cannon"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r222",
+    "skills": [
+      "electronic_repair"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r223",
+    "skills": [
+      "missile"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r225",
+    "skills": [
+      "missile"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r248",
+    "skills": [
+      "hell_dragon_fire"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r252",
+    "skills": [
+      "ancient_arm"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r254",
+    "skills": [
+      "shield_lob"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r262",
+    "skills": [
+      "great_feather_fan"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r263",
+    "skills": [
+      "absolute_zero"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r264",
+    "skills": [
+      "eagle_eye"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r277",
+    "skills": [
+      "missile"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "excel_r373",
+    "skills": [
+      "missile"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  },
+  {
+    "code": "jade",
+    "skills": [
+      "missile"
+    ],
+    "test_class": "DevelopedHeroReviewR03BehaviorTests"
+  }
+]

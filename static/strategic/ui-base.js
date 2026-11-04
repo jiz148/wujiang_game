@@ -2308,6 +2308,33 @@ export function createStrategyCityCommandCard(campaign, city, faction, canResume
     stack.append(defense);
   }
 
+  if (office?.office_type === "governor" && ownCity) {
+    const registration = createStrategyCommandSection("注册士兵", "把城市兵力编成可直接进入格子战的确切单位；组成由本城训练建筑确定。");
+    const registrationCount = document.createElement("select");
+    [1, 2, 3].forEach((count) => {
+      const option = document.createElement("option");
+      option.value = String(count);
+      option.textContent = `${count} 个单位`;
+      registrationCount.append(option);
+    });
+    registrationCount.value = "1";
+    const eligible = [];
+    const unlockedUnitTypes = strategyUnlockedRegisteredUnitTypes(faction);
+    if (unlockedUnitTypes.has("infantry") && Number(city.building_levels?.barracks || 0) > 0) eligible.push("步兵 100兵力/单位");
+    if (unlockedUnitTypes.has("archer") && Number(city.building_levels?.archery_range || 0) > 0) eligible.push("弓兵 140兵力/单位");
+    if (unlockedUnitTypes.has("cavalry") && Number(city.building_levels?.stables || 0) > 0) eligible.push("骑兵 180兵力/单位");
+    appendTextLine(registration, "strategy-meta", `可用训练设施：${eligible.join(" · ") || "无"}`);
+    appendTextLine(registration, "strategy-unit-ledger", `城内已注册：${strategyRegisteredUnitsLabel(campaign, city.registered_units)}`);
+    const register = document.createElement("button");
+    register.type = "button";
+    register.className = "primary";
+    register.textContent = "注册选定数量 · 1 军令";
+    register.disabled = state.strategyBusy || !canResume || orderLimitReached || !eligible.length || Number(city.resources?.troops || 0) < 100 || !strategyCanAffordCommand(campaign, faction, "register_city_soldiers", {}, city.id);
+    register.addEventListener("click", () => queueStrategyAction("register_city_soldiers", { city_id: city.id, unit_count: Number(registrationCount.value) }));
+    registration.append(createStrategyField("注册批次", registrationCount), register);
+    stack.append(registration);
+  }
+
   if (!ownCity) {
     appendTextLine(stack, "strategy-meta", "该城市不属于你的势力；请选择己方城市下达军令，或使用当前职位明确允许的外交、政治动作。");
   }

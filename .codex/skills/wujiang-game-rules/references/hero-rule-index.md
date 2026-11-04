@@ -1,5 +1,180 @@
 ﻿# Hero Rule Index
 
+- 2026-11-03 源表修订批：R290报信乌鸦与R324超级信鸦的同名鸦群效果不叠加；R225电子屏障龙光环仅护己方；R304柳交换无伤；R193剑斗之魂为一场一次大招且友方位移可重置；R325及通用分身召唤后随机换位或不换位。R197小石人、R328/R329飞龙船、R031驱散、R028狂风、R021鬼步各由对象自身持有新 AI 估值。N 的 BP 法师回满值采用原始初始魔；R064神光仅同步源文。设计修订见 `docs/武将设计思想.json` 与问题清单的设计思想页；动态整体验证待用户统一运行。
+
+- 2026-11-03 审计归因：R021鬼步与通用回避/撤步在后结算落点失效时已付费落空；R373超频导弹保留声明区域，通用保护与R304浮游炮掩护目标失效落空，R240系震开不强推禁动单位，R260战斧逐载荷验资。相应短局已复现修复，待用户统一全量审计。
+
+- 2026-11-02 专属 AI 效果归属：晨曦圣光特殊伤害、山神三准备技、百鸟葬/碧玉闪光/怒吼/混沌/龙舞的模拟后收益、乱音电波/神圣决斗/干扰/净魔的 R15 收益、范围命中额外价值、致命之弓等探针例外均由技能对象提供。猫叔怒吼/环形嘲讽分别由真实技能评分；红色蓄力、无限/武器传送、无限铠甲/法袍/飞龙宝珠由各技能组合攻击或防御准备规则。重力场的连锁提示前缀由 `GravityFieldSkill` 的服务端宣告元数据生成；前端读取通用字段。此次只做静态检查，行为待统一测试。
+
+- 2026-11-01 AI 技能评分归属：R056/R379/R030/R138/R264 的同名穿刺由各自策略估值，R326 远程穿刺和 R337 治疗保留专属策略；N、R118、R136、R113 的分身时机分别由本将策略决定。R373 超频、R329 飞龙船代施、老法师斗篷装备/解除由实际动态技能对象评分。命运飞踢、地狱瞬移、零崎冲刺、风魔追身、利娜狂沙、政宗飞跃各自通过 `ai_move_score` 调整通用位置评分；翼龙、量子分离、地狱犬、土行者和单双轮车的召唤评分由技能对象持有。治疗效果试算归治疗技能。上述对象化仅迁 AI 估值，不改战斗规则；170 个固定技能场景/396 评分及 35 将 1208 候选全等。
+
+- 2026-11-01 R320 渔夫花园恶魔：真实普攻后的公平硬币机制保持原样；AI 直接评分不掷真实硬币，由 `FisherAttackPolicy.attack_followup_bonus` 提供既有 18 点期望收益。R036 圣域放逐、R264 鹰眼、R326 虚荣巨影评分遇到龙坐骑区域普攻时，通过共享合法区域载荷评估未来机会；三个原种子有界短局不再报候选构造错误。
+
+- 2026-10-31 AI 有效性归属：R035 妖刀、R036 圣域两技、R037 核变/重力、R047 百鸟葬、R056 混沌、R059 年兽三技、R071 雪崩、R127 幻移、R136 空气斩、R137 吞噬、R139 照明、R143 三雷技、R158 地狱斩、R166 电风、R172 兵刺、R379 日斩，共 16 将 22 技能各持有 `ai_effective_impact_rule`。固定有效性探针/候选全等；R166 短局吞噬候选诊断差异待查，动作和状态相同。
+
+- 2026-10-31 AI 攻击力归属：R321 黑夜影、R260 野蛮斧、R029 致命弓、火葬两技、R093 凯撒拳、R196 地裂、R139 照明光、R136 空气斩、龙骑士龙斩、R033 波导弹、R035 妖刀、R047 百鸟葬、R071 雪崩、岩神岩炮、末日光龙启示录，共 15 将 16 技能各由 `Skill.ai_attack_power` 决定专属攻击力。中央 `skill_attack_power` 仅对象分发和通用默认；32 直接值、64 评分、35 将 1208 候选迁前迁后全等，15 将迁后短局通过。
+
+- 2026-10-30 AI 候选归属：R024 皇家士兵、R025 代行契约/借技、R027 分身、R070 天罚、R022 模仿、R252 古代融合、岩神吸收/炮、利娜狂沙、元素猎人土行者的候选由技能对象生成；R033 波导弹付费/免费载荷变体由本技能生成。共 10 将 12 技能代码；24 固定场景和逐将短局全等，132+111+384 项定向测试通过。新武将沿 `AISkillCandidateContext` 与窄共享构造协议扩展，不把专属分支写回中央 AI。
+
+- 2026-10-29 AI 候选计划：35 名公开武将的 43 技能拥有候选排序/去重声明；艾莉牵引、R325 决斗、抹杀使徒降临、R127 幻移/彩虹镜、R136 空气斩在技能对象生成目标和落点组合。R027 无常天气/侯鸟标记与分身行动顺序、R031 夏目风之语/驱散、R033 老法师之手的专属估值归对象；R248 地狱之火、R252 机械臂、R254 抛射的预筛选也归技能。所有迁前迁后固定场景及逐将短局全等；长测待 AI 段末。
+
+- 2026-10-29 AI R06/资源与 R03–R05：抹杀使徒 `premature_burial`/`erasure`/`descent_moment`/`extra_stealth`，龙骑士 `dragon_slash`/`smoke_spray`，岩神 `rock_absorb`/`rock_cannon`，末日光龙 `doom_light`/`apocalypse`，噬血 `blood_guard`/`blood_art`/`blood_dance`/`sacrifice_ritual`，咏唱者三牌/`magic_claw`，李 `chain_pull`/`whirlwind_attack` 的 AI 估值归所属对象；咏唱者三牌沿原技能类委托各自策略。40 场景/86 评分与七将短局/快照/发现全等，相关短测通过；全库长测待 AI 段末。
+
+- 2026-10-29 AI R021/R023/R024：剑客 `iaido_charge`/`ghost_step`/`time_stop`/`focus_reset`、芙蕾 `frey_quick_flash`/`frey_god_stab`/`frey_lion_spear`、弗里德 `fried_inspire`/`royal_soldier` 的专属估值归技能对象；芙蕾共用区域评分对象。18 场景/36 分值与三将短局/发现全等，68 项行为、111 项预测、384 项共享测试通过；长测待 AI 段末。
+
+- 2026-10-29 AI R17–R19：R127 幻想/彩虹镜、R136 真刀空气斩、R137 吞噬、R139 照明、R143 重锤/暴怒冲击/毁灭电击、R158 地狱之斩、R166 电风、R172 兵刺共十一技能评分归对象；重锤反应魔耗和电风封技机会收益归对应技能，R138 特殊穿刺/龙息保留原顺序。22 场景/78 分值及八将短局/发现全等，130 项相关行为、111 项预测、384 项共享测试通过；全库长测待 AI 段末。
+
+- 2026-10-29 AI 电子公式与旧分支：R223 融合、R222 维修的专属估值归技能，R036/R056/R059/R326 八个不可达旧分支删除，R037 重力场直达路径保留；维修有效/无效对照及四将旧分支固定见证、短局全等。预测契约随中央源码变更重建。
+
+- 2026-10-29 AI 电子融合动态评分：R223 `electronic_fusion`、宿主动态 `fusion_piercing_shot__*`/`electronic_unfuse__*` 与 R222 `electronic_repair` 归各自技能 `ai_priority_score`；破魔射击的永久能力代价及残血安全解除由动态技能自身判断。附着后 4 场景/12 分值和普通 6 场景/10 分值、三将短局/发现全等；长测待 AI 段末。
+
+- 2026-10-29 AI 三组续迁：R259/R246/R239/R305/R221/R193/R194/R196/R197/R215/R219，R035/R036/R037/R047/R056/R059，R032/R033/R071/R248/R264/R326/R379 共 24 将 35 个主动技能代码归所属技能 `ai_priority_score`。70 场景/168 分值、各将短局/快照/发现全等，重力场直达期望路径保留；AI 余 84 个顶层代码条件，长测待 AI 段末。
+
+- 2026-10-29 AI 共用效果对象：R191/R195 力爪/暴风、R193 水波炮、R188 元气爆破、R239 魔动球两档、R221/R223/R224/R305/R373 机枪、R221/R223/R225/R277/R373 导弹、R224 镭射使用各自技能 `ai_priority_score` 调 R17/R18 共用试算。十二将 34 场景/102 评分与短局/快照/发现全等，708 项短测通过。
+
+- 2026-10-29 AI 巨盾/古代机甲主动评分：R254–R257 八个巨盾技能代码、R249–R253 八个古代技能代码由各自规则技能 `ai_priority_score` 接管；通用分类和预览经上下文。九将 48 个技能场景、124 个评分及短局/快照/发现全等，537 项短测通过；长测待 AI 段末。
+
+- 2026-10-29 AI 鸟王/冰帝/野蛮人国王评分：R262 `great_feather_fan`/`poison_feather`，R263 `absolute_zero`/`floating_crane_city`，R260 `barbarian_gluttony`/`barbarian_axe`/`barbarian_harass`/`barbarian_harass_free` 归各技能 `ai_priority_score`；位移分类经上下文共享。23 组候选/评分/状态/RNG/ID 和三将短局/快照/发现全等，513 项短测通过；长测待 AI 段末。
+
+- 2026-10-29 AI 翼龙/雀皇主动评分：R323 `night_sky_party`、R290 `messenger_crow`/`crow_swap`/`great_crow_flock` 归各技能 `ai_priority_score`；空格普攻复用 `MessengerCrowSkill.position_score`。13 组候选/评分/状态/RNG/ID 和两将短局/快照/发现全等，517 项短测通过；长测待 AI 段末。
+
+- 2026-10-28 AI 柳/天元/火系主动评分：R304 `exchange`、R277 `tianyuan`/`tianyuan_breakthrough`、R322 `chimera`/`flame_password` 归各技能 `ai_priority_score`；共享上下文提供 R17 效果试算。17 组候选/评分/状态/RNG/ID 与三将短局/快照/发现全等，525 项短测通过；长测待 AI 段末。
+
+- 2026-10-28 AI 信鸦/绅士主动评分：R324 `super_messenger_crow` 与四阵、R325 `surprise_step`/`gentleman_duel` 归各技能 `ai_priority_score`；R324 本轮三阵门槛仍由本将策略先判断，外将借用技能继续通用评分。15 组候选/评分/状态/RNG/ID 和两将短局/快照/发现全等，522 项短测通过；长测待 AI 段末。
+
+- 2026-10-28 AI 船队主动评分：R328/R329 共用 `flying_dragon_ship`、R328 `departure_signal`、R329 `add_mana`/`defense_one`/`silver_signal_flare` 各归技能对象 `ai_priority_score`；共用召唤位置及敌人查询通过上下文。12 组候选/评分/状态/RNG/ID 与两将短局/快照/发现全等，506 项短测通过；长测待 AI 段末。
+
+- 2026-10-28 AI 共用护盾：通用魔墙/光墙/石墙/保护/离子/量子的共有评分归 `ShieldReactionScoring`；翡翠 `QuantumShieldSkill` 自评离子可替代时的机会成本，R225 `BarrierShieldAIPolicy` 仍优先。13 组固定候选/评分/状态/RNG/ID 与艾莉/翡翠/R328/R225/R304 短局/快照/发现全等，604 项短测通过；长测待 AI 段末。
+
+- 2026-10-28 AI 通用反应：免费 `block`/`counter` 由 `FreeReactionScoring` 估值，R256 范围第二击由 `GiantShieldSwordTrait.ai_counter_bonus` 补敌友净值；`evasion` 由 `PassiveEvasionSkill.ai_reaction_score` 估安全落点。9 组固定候选/评分/状态/RNG/ID 与 R256/R328/R198 短局/快照/发现全等，544 项短测通过；长测待 AI 段末。
+
+- 2026-10-28 AI 反应续迁：咏唱者 `card_transposition`、通用 `knockback` 与六将 `hell_pressure`/`hell_pressure_free`、R206 `boxer_block_counter` 的评分归各自技能；魔压复用震开对象方法，拳手用共享减伤/反噬服务。22 组固定候选/评分/状态/RNG/ID 与十将短局/快照/发现全等，含其他震开使用者共 640 项短测通过；长测待 AI 段末。
+
+- 2026-10-28 AI 防御反应续迁：R256/R259 `shield_bash`、R172 `beetle_armor_deploy`、普通精兵 `backstep_shot`、抹杀使徒 `shadow_counter` 的反应取舍归各自技能对象；装甲的下一轮机会成本由共享攻击窗口服务提供。9 组固定候选/评分/状态/RNG/ID 与五将短局/快照/发现全等，618 项短测通过；长测待 AI 段末。
+
+- 2026-10-28 AI 借技与随时反应：R025 `agency_borrowed_skill` 的内层复制递归评分、R021 `time_stop`/`ghost_step`、李 `foresight` 归各自技能 `ai_reaction_score`；时停主动/反应共用同一技能估值。6 组候选/评分/状态/RNG/ID 和三将短局/快照/发现全等，568 项短测通过；长测待 AI 段末。
+
+- 2026-10-28 AI 反应技能：R033 `lao_damage_stat_cancel` 的伤害/属性取舍、R031 `natsume_wind_wall` 的实际防护试算、R034 `floating_cannon_cover` 的受体威胁/牺牲炮成本归各自技能对象 `ai_reaction_score`。9 组候选/评分/状态/RNG/ID 与三将短局/快照/发现全等，553 项短测通过；全库和全公开审计待 AI 段末。
+
+- 2026-10-28 AI 反击/屏障：R326 `counter` 用基础普攻估值，R327/R337/R352 `counter` 用含后续效果估值；R225 `ion_shield`/`quantum_shield` 按真实防护收益和量子盾机会成本估值。四将反击归 `CounterReactionAIPolicy`，R225 屏障归 `BarrierShieldAIPolicy`，R337/R352 复合已有付费防护。12 个固定评分、五将短局/快照/发现全等，604 项定向短测通过；长测待 AI 段末。
+
+- 2026-10-28 AI 付费反应：R304/R337 `light_wall`、R322 `fire_wall`、R239/R247 `hell_wall`/`hell_wall_free`、R352 `evasion` 由各自 kit 配置 `PaidReactionAIPolicy`；共用通用付费反应试算，且维持不可见敌源门槛。15 个固定分值、六将短局/快照/发现全等，577 项定向短测通过；全库与全公开审计待 AI 段末。
+
+- 2026-10-28 AI 反应续迁：R306 `StormSpiritAIPolicy.contextual_reaction_score` 估电子风暴避开已声明攻击区域和反应位移；R192 `GladiatorRoarSkill.ai_reaction_score` 通过共享前后结算试算估咆哮改向。两者位于不可见敌源门槛之后，6 个固定评分及两将短局全等、520 项定向短测通过；全库/全公开长测待 AI 段末。
+
+- 2026-10-28 AI 反应评分：R373 `ElectronicInfinityAIPolicy.contextual_reaction_score` 估付费离子盾/机枪/导弹；R328/R329 的船代施 `ShipBorrowedSkill.ai_reaction_score` 估借用保护/光墙。共享上下文提供基础评分、威胁和几何，9 个固定分值及三将短局全等，520 项定向短测通过。全库和全公开长测待 AI 段末。
+
+- 2026-10-28 AI 候选框架：R373 `ElectronicInfinityAIPolicy` 管付费机枪/导弹区域候选与离子盾/区域反应；R257 `GiantShieldGunAreaSkill` 管扫射/排射区域短名单；R324 `CrowFormationSkill` 管阵法选鸦，`super_crow_sacrifice_value` 同归本将。技能对象入口保留复制使用者的候选行为。共用 `AISkillCandidateContext`、`AIReactionCandidateContext` 与几何服务，不反向导入 AI 大文件。8 组固定候选全等、526 项短测通过，长测待 AI 段末。
+
+- 2026-10-28 AI 第九批：R320 `FisherAttackPolicy` 接神风之戟重置估值；R321 `GardenDemonAIPolicy` 接黑夜魔影敌友多段估值；R306 `StormSpiritAIPolicy` 接电子风暴、残影与既有锁链估值。复杂技能共用 `AISkillScoreContext`，通用计算经类型化服务接口注入；原先轻量策略仍在同一 `HeroAIPolicy` 框架内。三将短局/快照及 10 个固定分值全等，521 项相关短测通过，阶段末长测待用户。
+
+- 2026-10-28 AI 第八批：R320 `FisherAttackPolicy` 估潜行威胁；R321 新 `GardenDemonAIPolicy` 估黑魔化/入魔；R324 `SuperCrowAttackPolicy` 管四阵本人轮三次上限；R306 新 `StormSpiritAIPolicy` 估雷电锁链，旧 AI 函数名保留兼容导入。共用敌人筛选归 `rooms/ai_targets.py`。四将短局/快照、10 个固定分值全等，532 项受影响测试通过；长测待 AI 段收尾。
+
+- 2026-10-28 AI 第七批：魂灵 `SoulWraithAttackPolicy.post_fast_move_score` 保持条件魔免/技能压力；利娜 `LinaAttackPolicy.sandstorm_score` 保持风沙本人恢复；吟游诗人 `StationaryRecoveryTrait.ai_move_departure_score` 保持原地回复离位成本。三将定向短局及 7 个固定分值全等，534 项受影响测试通过；预测契约已更新，全库与全公开长测待整段 AI 收尾。
+
+- 2026-10-27 AI 第六批：R139 索拉 `SolaHarvestAIPolicy` 与光环位置估值归 `mechanics/holy_sola.py`；R166 电击人 `ElectricWindAIPolicy`、自动电风落点及控制机会估值归 `mechanics/electric_wind.py`。共享移动评分只调用光环钩子；通用试算回滚抽到 `rooms/ai_probe.py` 且保持预测认证。两将快照/轨迹/发现、6 个分值及状态/RNG/ID 变化量全等，210 项相关行为/预测/倾向测试通过；长测待整段 AI 收尾。
+
+- 2026-10-27 AI 第五批：R303 昼行武者的快速模拟追猎候选归 `DaylightHunterAIPolicy`；R302 真红位移爆破估值函数和 `TrueRedAIPolicy` 归 `mechanics/true_red.py`；末日光主动传播及被攻击反噬评分归 `DoomlightAIPolicy`。三将快照/25 步轨迹/发现及六个固定候选和评分见证全等，真红旧编号消耗 62→62；150 项定向行为/预测测试通过，长测待整段 AI 收尾。
+
+- 2026-10-27 普攻协同 AI 第四批：R023 `FreyAttackPolicy`（真实吸血）、R027 `WuchangAttackPolicy`（非致死封锁）、R303 `DaylightHunterAIPolicy`（连续追猎与封技）、利娜 `LinaAttackPolicy`（合格击破回魔/后续攻击与执念锁定）各归本将机制模块。利娜可达后续攻击辅助归本将，其他 AI 直接复用。8 个固定分值和状态/RNG/ID 全等，四将快照/轨迹/发现全等，191 项受影响行为及预测测试通过；长测待整段 AI 收尾。
+
+- 2026-10-27 移动 AI 策略第三批：R328/R329 船员登船分别 +42/+62 的 `ShipCrewMovePolicy` 归 `flying_dragon_ship.py`；R303 昼行追猎 `DaylightHunterAIPolicy` 归 `mechanics/daylight_hunter.py`；R254/R255 巨盾相邻、盾墙保位 `GiantShieldMovePolicy` 归 `mechanics/giant_shield.py`。五将 kit 装配，快速模拟边界不变；快照/短轨迹/发现全等，138 项定向行为和预测测试通过。全库及全公开长测按新节奏在 AI 阶段收尾统一进行。
+
+- 2026-10-27 AI 策略第二批：R320 传奇渔人 `FisherAttackPolicy` 在 `fisher_garden_demon.py` 估普攻后硬币/击破成长；R324 超级信鸦 `SuperCrowAttackPolicy` 在 `super_crow.py` 估补鸦容量；R123 风魔 `FumaAIPolicy` 在 `mechanics/fuma.py` 估主动技能后回魔期望。均由本将 kit 装配，公式与短轨迹全等，676 项短测通过；本批全库/全公开审计待用户。
+
+- 2026-10-27 R127“幻想”与 R022 黑豹模仿：`FantasyMoveSkill.legal_destinations` 属于 `heroes/mechanics/black_cat.py` 的技能对象，原全格逐一寻路导致模仿候选预览卡顿；改一次可达格求解并保持原地形、占位及网格顺序。新旧落点、原失败对局前 19 步轨迹相同，修后短预算完成 25 步；584 项短测通过，完整审计失败场待用户复跑。
+
+- 2026-10-27 AI 攻击评分策略：李 `LiAttackPolicy`、抹杀使徒 `ErasureAttackPolicy`、N `NAttackPolicy`、魂灵 `SoulWraithAttackPolicy` 分归各自 `heroes/mechanics/` 模块，由武将类装配；后续 Excel 武将可通过 `HeroKit.ai_policy` 装配。共享 `score_attack_payload` 只调用对象钩子。七个固定分值、四将快照/轨迹/审计发现全等，短测通过，规则及评分数值未改；本批全库/全公开长测待用户。
+
+- 2026-10-27 OOP 最后四将位置迁移：元素猎人→`heroes/mechanics/element_hunter.py`，不死王莉娜→`undead_king_lina.py`，岩神→`rock_god.py`，末日光龙→`doomlight_dragon.py`；全场/局部沙尘和风沙技能归 `sandstorm.py`。四将快照、固定 AI 轨迹及审计发现全等；663 项相关短测通过，规则未改。`next_five.py` 仅旧存档兼容，迁后全库待用户。
+
+- 2026-10-27 OOP 第三批位置迁移：翡翠、N、噬血者、龙骑士分别归 `heroes/mechanics/jade.py`、`n.py`、`blood_eater.py`、`dragon_rider.py`；共享破魔/面积/魔点对象归 `next_five_effects.py`、`half_pierce.py`、`dragon_breath.py`、`declared_area.py`、`area_helpers.py`、`mana_point_cost.py`。八将快照、固定 AI 轨迹与审计发现全等；663 项相关短测通过，没有规则改动，迁后全库已绿。
+
+- 2026-10-27 OOP 第二批位置迁移：李、咒歌者、魂灵及其技能/特性对象分别归 `heroes/mechanics/li.py`、`chanter.py`、`soul_wraith.py`；共享几何和自然回魔归 `next_five_geometry.py`、`mana_recovery.py`。龙骑士、翡翠、岩神等间接使用者固定见证全等，没有规则改动。六将定向审计、606 项相关短测通过；迁后全库已绿。
+
+- 2026-10-27 OOP 位置迁移：政宗 `Masamune`/弧形攻击等归 `heroes/mechanics/masamune.py`（R06 的 `ArcAttackTrait` 也由该模块定义）；抹杀使徒 `ErasureApostle`/抹杀计数与状态归 `erasure_apostle.py`；共享状态替换和通用分身/分裂归 `status_replacement.py`、`clone_split.py`。`next_five.py` 仅保留这些旧全局名的兼容导出。两将公开/动作快照、各一场固定 AI 轨迹和审计发现迁前迁后相同；迁后全库复跑已绿。没有规则改动。
+
+- 2026-10-26 R06 销魂的死灵：`next_five.ArcAttackTrait.basic_attack_area_affects_allies` 明确返回假，弧形普攻只伤敌方；此前通用面积普攻默认真导致弧内友军真实受伤、AI 错扣友伤。新增修前红/修后绿行为场景，R06 33/33、战斗 336/336、预测 111/111；全库长测待用户。
+- 2026-10-26 R324 超级信鸦：四种飞鸦阵通过后续排队动作造成直接伤害；`CrowFormationSkill.directly_damages_on_use` 明确声明，BP“同情弱者”因此正确禁止攻击最高者施放。原源码关键词判断漏掉后续动作。修前两项专项红，修后 BP 模式 23/23、R324 13/13、预测 111/111；全库待用户。
+
+- 2026-10-26 R329 参谋“守+1”：`heroes/flying_dragon_ship.py::DefenseOneSkill.execute` 的目标范围/视线校验必须传 `action_name=self.name`。用户全库日志暴露缺参 `TypeError`，修后飞龙船行为 9/9、合并短测 629/629；全库复跑待用户完成。地狱系复活权不保已灭阵营存活，赛后待复活标记清除，旧场景按此修正；R239 不拥有 `hell_pressure`。
+
+- 2026-10-25 R022/R025 AI对象入口：`heroes/mechanics/mimic.py`与`agency.py`各自实现`Skill.effective_skill_for_payload`，让共享直达评分读取候选阶段的实际技能时机。R025旧候选缺少已宣告字段导致`KeyError: ''`，现候选可生成，固定对局的四条构建错误警告消失；R022固定轨迹全等。战斗336/336、预测111/111，完整全库仍红，见`reports/oop-ai-effective-skill-20261025/summary.md`。
+
+- 2026-10-25 OOP机制位置最终批：R023弗雷→`heroes/mechanics/frey.py`，R123风魔→`fuma.py`，R059年→`nian.py`，R166/R188电风→`electric_wind.py`，R224/R225屏障龙→`electronic_barrier.py`，R221–R223电子传送/聚变→`electronic_teleport.py`/`electronic_fusion.py`，R262鸟王→`bird_king.py`，R263冰帝→`ice_emperor.py`，R277天元→`tianyuan.py`，R291红铁锁→`iron_chain_red.py`，R302真红→`true_red.py`，R305后段电子→`electronic_guard.py`；庇护、零、猫、镜像、地形及太阳/狮身炮亦迁至同批对应模块。21将42场轨迹全等，总表无战场机制类。见`docs/武将OOP重构计划.md`。
+
+- 2026-10-25 OOP机制位置续迁：R029武装复制→`heroes/mechanics/weapon_copy.py`，R030聚变→`fusion_rush.py`，R070天罚→`heaven_punishment.py`，R094噪音/干扰→`noise_interference.py`，R326虚影→`vain_shadow.py`；角斗士族→`gladiator_core.py`、`sektoru.py`、`alexander.py`、`spartacus.py`、`gladiator_cooperation.py`，雷神/甲虫→`thor.py`/`beetle.py`，R219鸟魂→`bird_soul.py`，地狱族→`hell_core.py`、`hell_rebirth.py`、`hell_dog_hunter.py`、`hell_wargod.py`、`hell_dragon.py`。27将54场轨迹全等。见`docs/武将OOP重构计划.md`。
+
+- 2026-10-25 OOP机制位置续迁：R020世界种子/天锁→`heroes/mechanics/world_seed.py`/`heaven_lock.py`，R021居合/鬼步→`iaido.py`/`ghost_step.py`，R029致命弓→`deadly_bow.py`；R037核变/重力、R071雪崩、R093凯撒、R113净化/决斗、R136/R139圣壁/索拉、R047/R137次郎坊相关对象、R158武神封印/地狱斩、R187/R337天气、R056蕾米等另入对应独立模块。共19名kit直引；38场轨迹全等。完整清单及R029常量兼容修复见`docs/武将OOP重构计划.md`。
+
+- 2026-10-25 OOP机制位置：R026守护终曲及共用恢复/破魔/魔免对象→`heroes/mechanics/foundation.py`，R031夏目→`natsume.py`，R032亚伦独角兽→`aaron_unicorn.py`，R033老法师→`lao_mage.py`，R034浮游炮→`floating_cannon.py`，R035山神→`mountain_god.py`；R093/R120/R327直接引用相应共享对象。九将快照和18场轨迹前后全等，完整测试仍待验收。见`docs/武将OOP重构计划.md`。
+
+- 2026-10-24 OOP新增机制位置：R027→`heroes/mechanics/wuchang.py`，R028狂风→`fei_wang_gale.py`，R138→`nameless_messenger.py`，R327及R252共享红莲特性→`red_lotus.py`，R215→`uesugi.py`，R219位移→`bird_movement.py`，R264→`winged_leopard.py`。八将快照和16场轨迹前后全等；未迁的同将其他技能仍按现有kit装配，完整测试仍红。见`docs/武将OOP重构计划.md`。
+
+- 2026-10-24 OOP新增机制位置：R024→`heroes/mechanics/fried_soldier.py`，R142→`cat_taunt.py`，R197→`stone_people.py`，R198→`cycle_rider.py`，R206→`boxer.py`。各kit已直接装配，旧AI/测试所需总表别名保留；五将10场固定对局与快照前后逐字节相同，规则结算未改。见`docs/武将OOP重构计划.md`。
+
+- 2026-10-24 OOP机制位置索引：R022→`heroes/mechanics/mimic.py`，R025→`agency.py`；R249–R253→`ancient_mecha.py`；R254–R257→`giant_shield.py`，R259→`shield_knight.py`，R260→`barbarian_king.py`；R290→`messenger_crow.py`，R308→`demon_link.py`；R303→`daylight_hunter.py`，R352→`water_ninja.py`，R356→`rhino.py`，R379→`kiku.py`。R262/R263使用`piercing_control.py`。kit直接装配，旧总表仅保留现有测试/AI所需兼容导入；固定轨迹前后相同，完整测试红基线与AI/目标/引擎对象化仍待处理。见`docs/武将OOP重构计划.md`。
+
+- 2026-10-24 全公开武将装配索引：R020–R379已公开的107名源表武将均由`HeroKit`装配；原有R306/R320–R325/R373的专属kit保留，另99名在`heroes/kits/excel_rNNN.py`各有独立映射声明。旧`excel_roster.py`专属工厂及编号追加组件/属性分支删除；99名快照、198场固定对局轨迹和审计发现前后相同。其余18名公开武将仍由独立英雄类装配。`excel_roster.py`中的战斗机制类、三路AI及目标/前端行为尚待后续对象化，不把100%装配覆盖误称整体重构完成。
+
+- 2026-10-24 OOP装配续批：R322`flame_manager.FlameManagerKit`接火墙/奇美拉/火焰密码/火阵连击；R323`wyvern_raider.WyvernRaiderKit`接翼龙/夜空派对/位移追击、额外吸魔与开场乘骑及1×2占位；R324`super_crow.SuperCrowKit`接报信乌鸦、四阵及三项专属特性；R325`gentleman.GentlemanKit`接突现/绅士决斗、穿人造影/防身。六将旧专属工厂分支已删；R322–R325迁移前后公开/动作快照及8场AI对局轨迹逐字节相同，相关定向测试全过，规则结算与AI评分未改。完整回归红基线仍在。
+
+- 2026-10-24 OOP装配试点：`excel_r320`/传说的渔人的`GaleHalberdSkill`、`FisherStealthSkill`、`FisherGrowthTrait`映射迁至`fisher_garden_demon.py::LegendaryFisherKit`；`excel_r321`/苑魔的`BlackTransformationSkill`、`BlackNightShadowSkill`、`EnterDarknessSkill`、`GardenSkillFeastTrait`映射迁至同模块`GardenDemonKit`。`hero_kit.py`注册并由`excel_roster.py`分发；两将已隔离旧专属工厂且删除旧中心分支，公开/动作快照与各两场动态轨迹逐字节一致，规则及AI评分未改。R320审计有非本将R245占位动作错误，勿归责R320；完整回归红基线未关闭。
+
+- 2026-10-24 R373「离子盾」纯名源片段被标非通用，现与导弹同样在普通标记门禁前映射通用技能，恢复原被动及付1魔速度3超频入口。R329「银制的信号弹」保存Q002=b包含同名分身为目标，但通用分身受技能效果消散；只对真实加攻者记成功，三路AI考虑分身损失。合并专场原17项有3失败/错误，修正待用户复跑。
+
+- 2026-10-24 OOP装配进展：R306、R320–R325、R373共8/125公开武将使用本将kit。R306初始魔量由`StormSpiritKit.base_stats`，R373技能即时入口由`ElectronicInfinityKit.augment_skills`及本将属性装配；R320/R321/R322/R325用`FragmentMappedHeroKit`批量替换重复条件装配。四将逐字节快照及8场轨迹前后相同，44项相关测试通过；R373原有每场4条AI高信号未消失。完整unittest仍红，见`docs/武将OOP重构计划.md`。
+
+- 2026-10-24 共享队列作用域修复：范围普攻/场地限制不应读取船支援连锁变量；`passive_support_ship`调用搬回真实技能反应通过资格与载荷检查后、正式付费前，船首名合法支援者及刷新规则保留。完整AI王者的看破原堆栈、普通被动和船支援真实反应均有回归；5新项全过，必要维护61项过，不改R028/R328/R329设计或英雄验收数。见`reports/ai-queue-scope-fix-20261024/report.md`；没有改运行中的服务，重启后加载，legacy保留。
+
+- R373「电子龙。无限」（2026-10-24源锁静态实施）：7级光机甲勇者3/3/3/3/1，神速/光墙/机枪/导弹/离子盾及自然回魔沿通用。`heroes/electronic_infinity.py`逐技能增加额外1魔、速度3随时的可见入口，原费用与原技能次数/冷却不变，临时获得技能也可转换且失去时入口失效，固有特性封锁或真正失去时禁超频；当前魔0即时攻守速+2，付款后同次区域伤害按新攻。三路AI、网页入口及`NewBatch373InfinityBehaviorTests`八项场景已接，用户动态待跑。R221/R305不同源行仍保持各自实现。公开125/388、余263；下批R330/R331。
+
+- R328 团长/R329 参谋：`heroes/flying_dragon_ship.py` 共用飞龙船（2×3、同队一艘、多骑手、受体/跟随、被动支援名额与付费技能免费代施）；`excel_roster.py`专属工厂与公开名单；`engine/core.py`乘骑关系/占格；`rooms/ai.py`、`simple_ai.py`、`tendency/decide.py`三路行动；`static/core/net.js`与`static/tactical/battle-ui.js`预览；`tests/test_behavior.py::NewBatch328329FlyingShipBehaviorTests`。源设计 JSON/XLSX 已同步，静态实施待用户专场。当时公开124/388，余264。
+
+- 2026-10-24 身份与开发顺序：R221「电子龙」、R305「电子龙。新星」、R373「电子龙。无限」分别为不同源行且均已静态实施；R373由用户指定提前在R328/R329后接入。R330/R331接下来。候选门禁提示同名家族供人工核身份。
+
+- 2026-10-23 R253古代机械骑士诅咒的锈迹整技和独立后效均破魔，原声明与后效队列均向有盾目标保留连锁；`NewBatch324`跨将回归包含此场景。动态待用户跑。
+
+- 2026-10-23 破魔连锁补充：R324超级信鸦阵法声明标记“仅后续附效破魔”，逐段普通伤不穿盾，附效破魔段有盾仍可独立连锁，目标离原格不再收到后续空窗；R323强盗翼龙移动后穿人破魔减速的队列标记现保留有盾连锁。R118零崎移动后逐次连锁旧规则不变。AI普通段估伤仍按不破魔；新增静态场景待用户跑。
+
+- R324邪恶英雄。超级信鸦（2026-10-23源锁静态实施）：`heroes/super_crow.py`；本体与每鸦外邻敌速-1独立叠加、禁实际0费技能；本人轮手召前三次免费、后0.5魔。四阵15×15/15×25选双方受体且外邻需3/4/6/8只本将鸦，声明选恰N只先牺牲、逐段固定威力3伤，三角禁位移减速、四方禁攻/主动、八龙四本人轮禁所有行动与固有特性；只有控制附效破魔。本体零费技能无视魔免、一次事件破魔吸最多1魔；普攻/非手召主动后公开d6自动尽量补鸦。三路AI、网页双阶段目标/牺牲鸦选择及`NewBatch324`九项行为场景同步，静态检查完成，用户专场待跑。公开122/388，余266；R325用户报告10/10回归、3/3对局、0高信号。
+
+- R325矮小绅士（2026-10-23源设计锁定、静态实施）：`heroes/gentleman.py`。4级土灵体勇者3/3/4/1/2，回避、双普攻、穿人通用；突现零魔本人轮三次，先八向1格后垂线直走2格，实际穿敌前合法空格各造一分身，不随机与本体互换。绅士决斗0魔两本人轮一次范6无伤破魔，选目标外邻合法格瞬移；本体只受来源贴身生命伤害，敌方实际武将回合本体与本将全部分身共享两次可选免伤，免伤分身不毁。AI评路线、造影、落点和免伤保留；玩家预览/选择及敌方视角隐藏、`NewBatch325`十项定向场景同步，仅静态检查，用户专场待跑。公开121/388、未实现267。R322/R323用户专场10/10回归、6/6对局、0高信号；P1未用候选未证实为有效机会。
+
+- 2026-10-23 R322/R323静态实施：火焰管理人源表火、技能“炎”依通则同义，奇美拉外邻动态火+1/水-1、多只叠加；本人轮初锁7×7火族额外攻次，献祭现存奇美拉使本人与近域火族当轮普攻破魔。火墙仅有源名，以既有墙系1魔/速度2/本次1盾作明确中置信类比。强盗翼龙骑手开局已骑1×2翼龙，翼龙穿人破魔减速到目标下一本人轮末；骑手主动/随骑位移后的经过与外邻普攻独立排队，可被连锁，逐击攻+1并按实伤吸魔；夜空派对仅暂停同目标一次限制。战斗/AI/预览及`NewBatch322323`十项场景静态完成，动态待用户专场；新增2，公开120/388，余268。R320/R321用户固定目录12/12回归、6/6对局、0高信号。
+
+- 2026-10-23 共享换位性能不改英雄机制：`placement_queries.py`在direct查询内把当前占位折为阻挡集合，按完整几何输入在本次决策复用掩码，保全部合法格、排序、双身体/骑手检查和评分；未知代码/字段原路，真实结算/legacy不启用。10×10电子/地狱24单位11选项三轮省14.06/15.17%，14×14对照省33.83/40.31%；63维护、10direct输入72旧新调用及4legacy调用严格一致。扩展33项回归旧/新相同32过/1安德鲁旧断言失败，保留决策和证据、英雄验收计数不变。报告`reports/ai-damage-reuse-20261023/complete-report.md`；未操作服务，legacy保留。
+
+- 2026-10-23 共享性能续修，无武将机制或direct-v2评分变化：高倍速取消50ms固定等待并扣除本步计算/发布；原轮询及最终帧保留。位置逐行序列化删除，整批缓存保留；完整图/类型/原代码/RNG/身份一致才复用空发现证明。52维护、8direct输入72次旧新调用与4legacy调用对照过。三次暖普通-9.69%、地狱-2.21%、电子+0.17%（无明确改善）、合成24单位11选项换位-1–2%；慢换位未大幅解决。最初缺少原生组件的对比作废，见`reports/ai-position-pacing-20261023/complete-report.md`的同组件证据。未启停服务、legacy保留、英雄验收计数不变。
+
+- 2026-10-22 共享性能修复不改武将规则/direct-v2评分：提交边界发布观战帧，防后续AI占锁挡住完成动作；视角/心跳/版本失效/异常恢复同步。四板20+单位保存态核状态/RNG/编号，45短维护过；客户端倍率取帧/特效、旧队列取消与相关棋盘/记录更新。DirectSnapshot仅省重复分派/协议检查，完整守卫保留。见`reports/autochess-smooth-20261022`及期望评分基线；单次慢AI仍可能等，非四场整局验收，未操作当前服务，legacy保留。
+
+- 2026-10-22 共享AI优化不更改direct-v2公式或英雄机制：预演副本16份8MiB逐对象验证复用，静态组件/空通知C批量读取，动态子对象/能力/投射及未知协议回原。实测56fcb/最终配置c338999e8cc3e2ac/95；146定向过、21输入82调用候选分数/选择同旧direct且状态/RNG/ID保持，电子地狱各四场20+后段与木盾/便帽合成输入覆盖。4 worker三轮对legacy主四省39.02%、电子189省76.25%、地狱114省91.85%，部分小输入仍慢。按用户授权主启动默认direct，legacy独立入口/旧源码及原生包保留、四输入完整结果严格对旧源；没有启动或重启服务，手动AI逻辑/四场实战待测，无英雄验收数变化。详见full-ai-direct-reuse-20261022。
+
+- 2026-10-22 共享AI默认direct-v2按局部随机贡献直接期望，用户不要求完整随机连锁终局枚举；旧策略仅显式研究，新评分基线允许变化。真实英雄随机机制不变，隐身移除/分身真假隐藏保留，无单将设计/验收数量变化。数字评分撤额外概率包装；原探测保留、视角一次完整恢复防嵌套预览漏还原；木盾/未命中/格挡等算式加权，局部击杀奖励保概率、确定复活不误记必杀、便帽/纽带保可用率与一次性；未知随机明确报错。130维护与5项legacy定向通过，18输入56调用状态/RNG/ID与同策略重复候选/动作保持；电子/地狱各4场20+后段行动覆盖，非并行实战验收。源77e5ef33f77adf26/92，五输入稳定中位和省22.24%，召唤慢2.31%如实记录；启动链和旧原生不动，服务器legacy-measured-fast，无服务操作。详见期望基线首节和full-ai-direct-20261022/complete-report、summary/audit/源码归档。
+
+- 2026-10-22 无英雄机制/策略变动的共享结构修复f3d44c2c170116e1/90：源码指纹预建、原回滚共享、纯元数据省重复边界，范围依赖组保死亡/吸血/预付成本且276→109组，取消一次性组全场键；未知路径仍原完整期望，不均值化伤害、不截分支。行动字典可能回调后重读时保原复制，协议/坐标/RNG与8MiB预算保守失效。111维护3.107秒及9输入76调用候选分数/动作/状态/RNG/ID全等，稳定五中位和省14.14%、首次28.22%，普通/装备/地狱仍慢于legacy，无单将验收增加或四场流畅宣称。仅8/12秒短测，生产legacy-measured-fast不变、无服务操作；详见期望基线和structural-fix-20261022完整报告。
+
+- 2026-10-22 本次无英雄机制/评分源码变化，定位共享期望实现责任：普通零随机分叉仍有940查询/1257整图隔离；地狱276组中179未受后续范围波及，逐组重跑全场队列且302缓存零hit。稳定期望0.682/legacy0.146，单叶诊断仍0.628，额外0.66秒仅首次源码校验。不是期望值天然代价或隐身/分身问题；后续修共享边界/批基线/局部写集，不能删预付成本或用均值代替最终非线性收益。本次仅8秒因果调查，源码/服务器保持、无单将验收增加；见root-cause-20261022及期望基线首节。
+
+- 2026-10-22 共享期望准备整批优化：完整图序列化与原memo复用保世界/参数别名，RNG/冻结坐标/协议变化失效；空组件发现只在源码与类型版本证明下省略，未知回调逐次保留；纯评分组合去外层重复期望，原体、子期望和阈值位置不改。研究C保自定义恢复协议，memo/图/分布有界并联动逐出。无英雄设计/候选/正式结算变化，无单将验收增加；core/ai/旧C及服务器启动链与ce81一致，继续legacy-measured-fast。用户105851五组完成仍有legacy差距，不能宣称全面追平；本批限8/12秒验证、候选/状态/RNG/ID与源码报告见runtime-batch-20261022，不逐小改要求长测，非四场流畅验收。
+
+- 2026-10-22 共享期望候选完成短测ce81cd92d854fa6d/83：完整付费/后续按死亡扫击潜在依赖连通分组，组内完整计算吸血/叠层/传递死亡；防御准备合并原独立探测的完整分布后再算保命阈值。保正式机制/候选/最终收益，未知依赖/准备后单位集合不一致保联合，场地局面直接绕过避免额外回退成本。91维护3.356秒全过、27继承链可用；68/76/112实际单次1.15/1.28/1.78秒、历史省98.93/98.84/97.42%，电子三个约2.57/2.57/1.21秒基本持平。六条同选择、状态/RNG/ID保持，非四场验收；仅8/12秒硬上限短测，用户可扩大测量。legacy-measured-fast保留，无服务操作/单将验收增加，详见期望基线及shortcheck的complete-summary/audit和源码归档。
+
+- 2026-10-22 共享AI空Trait误拒绝已修，预检完整组件继承链；用户授权短测，79维护全过，实际68/76各一次1.13/1.25秒（历史107/110）、深10→1、状态/RNG/ID保持，不外推四场流畅。112首个大树定位通用r23_paid_skill_value及后续队列，依赖拆解待做。源2cf6eb18f06e1a49/83，正式英雄机制/服务器legacy不改，无验收计数增加；见期望基线及shortcheck记录。
+
+- 2026-10-22 分解接线用户012922结果：电子相邻版本同输入基本持平，地狱139/144秒变慢且零命中；误拒绝正式引擎方法别名、联合节点重复审查是共享预测框架缺陷，非任何英雄规则变化。已接受固定原方法同对象别名、保持未知/重绑拒绝，回退内部完成联合期望；计时前记录必要类支持。新增5共77维护未跑，仅静态/pyc/固定源核对，源ea83f8dc8576457a/83；无新动态收益或单将验收增加。服务器legacy-measured-fast及正式代码/C保留，无服务操作，详见期望评分与视角基线首节。
+
+- 2026-10-22 共享期望改为受审查area_damage目标边际最终收益，r21能证明局部才分解，未知依赖保联合；同目标随机/死亡/状态不提前平均，重叠目标全状态缓存复用，无单将机制/设计变动或验收增加。慢输入仅惰性pickle/AST核对，尚无新测速；新增14维护共72只写未跑。集中工具修多余新规则夹具与中断结果丢失；run/bat/PS1、正式引擎和旧原生保持legacy-measured-fast。见期望评分与视角基线.md。
+
+- 2026-10-21 共享期望准备工作独立原生候选：输入精确容器保存、无临时id数组逐引用图检查/恢复、终端短路与旧复制器复用；概率树/评分公式/视角规则/候选和动态发现保留，未撤190边界或消除地狱联合树。无英雄局部设计/规则变动，不增加单将验收。服务器仍legacy-measured-fast且原C024及启动文件不改、研究新模块不加载；独立C22ec严格编译/导出静态过，源7d9dbdd642a86b0b/82，新增16维护总58未跑。性能入口只测速，先电子地狱密集四场并按哈希追溯最新同输入历史；没有新收益/动态通过/服务操作，见期望评分与视角基线.md。
+
+- 2026-10-21 共享期望性能集中被用户停止：普通/装备较旧评分仍慢9.06/8.53倍，较上轮期望同输入省时60.30/58.89%不算实战合格，地狱/电子未跑。本轮诊断为宽边界的重复整图与闭包扫描，未改英雄/预测算法。用户明确授权服务器临时恢复旧随机/隐身/分身评分，run.py启动前固定legacy-measured-fast，已测行缓存/自适应/原生键和复制开、慢实验关、worker上限4仍非四场独立。离线期望研究保留，2接线测试只写未跑、Python/PS/源与原生哈希静态过，源476eee77c3cf19fe/79；未启动/重启服务，用户自行加载，不增加单将检查/验收计数。见期望评分与视角基线.md最新节。
+
+- 2026-10-21 共享期望性能回退修复：图快照逐引用校验复用、轻查询延后构键/重查询保全结果缓存；多目标防御的同一来袭按实际目标组共享完整联合结算，叶内算死亡/控制收益再各自求期望，观察随机/状态/编号不纯即回原树。无单将规则调整，不增加英雄验收计数；新源3e1854ea33fbf85a、42维护用例只写未跑，6文件与原公式/回退/正式引擎静态核对。下一步用户--prediction-repair-only四场密集地狱/电子代表慢请求，失败独立报告，不称已流畅。见完整AI期望评分与视角基线.md。
+
+- 2026-10-21 共享完整AI新基线expected-visible-v1：按用户三条指示，以有限结果收益期望代替随机样本，临时评分视角忽略敌方隐身单位并遮蔽敌方分身真假，保持真实战斗规则。涉及木盾等装备、格挡/随机属性/硬币/骰子/特殊模式概率的预测入口；黑夜影使用六点真实结算期望，保旧其他策略权重。入口tactical/prediction.py、rooms.ai.ai_enemy_view与概率边界；本次18文件静态过、24维护场景未动态，不增加单将验收计数。用户本次只测性能/记录新基线，不跑旧新等价与行为套件；见完整AI期望评分与视角基线.md。
+
 - 2026-10-19 地狱系魔压：源文=通用震开，付费与0魔免费均先加盾、再推周围可移动单位向外1格；继承同一`KnockbackSkill.react`。R243旧对局有实际推走敌人的证据；用户确认此次不推时敌方紧贴、身后空着，具体双方身份和连锁顺序待定位。新增正式连锁相邻空落点场景，静态检查，未更改原推移规则。
 
 - 2026-10-18 R249古代的工兵自走棋停滞：神速仍是通用一次付费、下一次普通移动+3的效果；观察到施放后无新增战报，不等于技能无限重复。大盘面自走棋AI原可在房间锁内无限等待进程预计算；快速模拟现跳过该可选并行而保持精确评分，普通模式有2秒进程等待边界和串行回退。工兵技能本身未改，静态场景已补，用户新局待验证。
@@ -352,9 +527,9 @@ Update this file whenever a hero, skill, trait, or durable gameplay rule changes
   - `excel_r172` / 甲虫装甲骑士: `beetle_spear` is a cooldown-2 front 5-cell current-attack skill. `beetle_full_force` is a start-phase toggle for attack +2, speed +2, defense -3. `beetle_armor_deploy` is a cooldown-2 passive reaction usable only when a hostile action affects the owner; it heals 1/4 and grants defense +3 plus no actions through the end of the owner's next turn.
   - `excel_r224` / 电子镭射龙: common Machine Gun and Ion Shield apply. `electronic_laser` is once per turn and damages a declared front 7-cell line. Direct basic-attack or damaging-skill contexts gain attack power +1 against a target whose current attack is lower; R224-Q001 answer `a` includes fixed direct skill loss but excludes independent field/weather damage. The unit has the rule-name alias `电子龙` without changing its displayed name.
   - `excel_r225` / 电子屏障龙: common Missile has a two-own-turn cooldown (one use every two rounds), unlike Jade's three-use window; Ion Shield and Quantum Shield retain their common rules. 2026-10-08 user clarification: this hero gets only -1 from its own aura, while direct basic-attack or damaging-skill damage from a source with lower current defense gets another -1 from its personal trait. Both apply for total -2 when eligible; field/weather damage gets only aura -1. Its dynamic full-footprint neighboring two-side aura reduces other recipients by 1, or 2 for mecha; same-name auras do not stack. R225-Q001 answer `a` includes fixed direct skill damage. The unit has the rule-name alias `电子龙`.
-  - `excel_r264` / 豹头人。飞翼: Fly Leap is free exact3 once per own turn and resets ordinary movement count/distance/public-use flag after its successful movement. `eagle_eye` has base cost 0.5 with the first use each turn free, selects a range-valid edge-truncated `2*3`/`3*2` area, deals no damage, and applies 3 owner-turn-end rounds of no basic attacks or active skills when defenses do not cancel the effect.
+  - `excel_r264` / 豹头人。飞翼: Fly Leap is free exact3 once per own turn and resets ordinary movement count/distance/public-use flag after its successful movement. `eagle_eye` has base cost 0.5 with the first use each turn free, selects a range-valid edge-truncated `2*3`/`3*2` area, deals no damage, and applies 3 owner-turn-end rounds of no basic attacks or active skills when defenses do not cancel the effect. 2026-10-20 investigation rechecked source264 and locked JSON/XLSX R21 row69 before battle/AI review; rules/scoring unchanged. User control-20261021-100052-369311 completed all 12 synthetic scenes with matching profiled replays: four-live-unit chess decisions took 1.15–1.20s (1.72–1.85s with 21 deaths), shared control opportunity scoring accounted for about 90% of each chess profile; normal policy additionally incurred deep move/leap planning. Nested times cannot be added; these are single-sample diagnostics, not optimization gains, original-match replays or full acceptance. Preserve refresh/friendly loss, RNG and both ID streams when optimizing pure subqueries; see docs/完整AI飞翼卡顿调查.md. No live server action or new algorithm change. 2026-10-21 opt-in shared query candidate extracts the unchanged attack reduction and reuses full-state pure reachability; all control/skill declarations, outer rollback, RNG and IDs remain. User validation-20261021-105502-869273 passed all 8 focused stages and 164 behavior tests, including exact ordered control candidates and state/RNG/ID comparisons. No-death control scenes reduced median time by 11.7–11.8% under normal policy and 5.9–8.9% under chess policy; retained deaths largely erased gains and made normal scenes 1.0–2.2% slower. Selected dense Hell/Electronic slow decisions had zero new-query hits; Electronic maximum remained 5.77s. Default remains off; full 43-stage acceptance and four-battle smoothness are not established. See docs/完整AI纯查询批次优化.md.
   - `excel_r126` / 太阳神: `solar_flame` is common Remote Dragon Breath under the source name 爆炎. `sphinx_cannon` is cooldown 2, deploys only in a legal surrounding cell, and summons range-7 artillery whose basic attack freely declares a remote edge-truncated `3*3` area rather than centering on a unit; because no side restriction is written, the area hits both sides, and its preview must expose both allied and enemy affected unit IDs. `solar_judgment` is a once-per-battle remote edge-truncated `10*10`, attack-power-6, half-piercing, magic-immunity-ignoring area that hits both sides. Both artillery fire and Judgment resolve unit damage first, then independently destroy terrain in the declared cells; an individual shield/evasion/immunity cancellation does not protect terrain, while whole-action cancellation prevents both. R126-Q001 defines terrain as both non-unit terrain (including board wall cells) and units explicitly treated as terrain; ordinary weather/fields are not terrain unless explicitly marked. The placement, free-area, and damage-then-terrain interpretations were design-inferred and locked on 2026-09-01 from the source/common rules and Solar God's artillery role, not from implementation. Judgment AI must discount enemies with a currently legal reaction that previews movement outside the locked area, and must hold the once-per-battle skill when projected allied defeats are equal to or greater than reliable enemy defeats.
-  - `excel_r142` / 猫叔: `cat_taunt_roar` is once per turn and deals current-attack piercing skill damage to every allied or enemy unit in the surrounding `7*7`; each surviving hit unit may only move on its next own turn until declaring a basic attack against Cat Uncle. A forced allied target is exposed as a legal basic-attack target by the general required-target contract. Any allied or enemy attack/skill affecting Cat Uncle costs its source 1 mana once per declared action, pulls it along a legal straight line to the closest reachable position toward Cat, and locks ordinary movement plus active skills for the current turn without cancelling the locked original action. Direct area damage also triggers the reaction even when no single-target validation ran. Deduplication uses the enclosing queued action's resolution token, not effect/action-name strings, so damage and follow-up effects from one declaration share one reaction while genuinely nested declared actions remain distinct.
+  - `excel_r142` / 猫叔: 2026-10-23 source row 142 explicitly adds `没有伤害`. `cat_taunt_roar` is a once-per-turn non-damaging piercing control skill affecting allied and enemy units in the surrounding `7*7` but excluding the caster. It breaks one shield layer without HP loss or damage callbacks; magic immunity and evasion still apply. Each effectively hit unit may only move on its next own turn until declaring a basic attack against Cat Uncle. A forced allied target is exposed as a legal basic-attack target by the general required-target contract. AI must score control, shield use, and friendly control cost without estimating attack damage. Any allied or enemy attack/skill affecting Cat Uncle costs its source 1 mana once per declared action, pulls it along a legal straight line to the closest reachable position toward Cat, and locks ordinary movement plus active skills for the current turn without cancelling the locked original action. Direct area damage also triggers the reaction even when no single-target validation ran. Deduplication uses the enclosing queued action's resolution token, not effect/action-name strings, so damage and follow-up effects from one declaration share one reaction while genuinely nested declared actions remain distinct.
   - `excel_r198` / 三轮车人: every completed basic-attack declaration adds one normal-move action for the current turn. `summon_bicycle` is cooldown 2, has no same-name field cap, and creates a Bicycle in a legal surrounding cell. Each Bicycle independently resets ordinary movement after a basic attack and may use `summon_unicycle` once per turn; each Unicycle also resets ordinary movement after a basic attack. Both enter unable to act and are ordinary nested summons: direct-summoner removal cascades only through its own branch.
   - `excel_r206` / 反击拳手: `ring_taunt` is once per turn and deals current-attack piercing skill damage to every allied or enemy unit in the surrounding eight cells. Each surviving hit unit with a basic-attack resource may only move on its next own turn until declaring a basic attack against Counter Boxer; allied forced targets are legal. The hero has ordinary Block/Counter plus optional `boxer_block_counter`, which adds defense +1 only for the current chain's next damage and immediately makes a basic-attack-style counter when the hostile speed-1 source is in range. Damaging counters trigger Attack Lifesteal; Pierce does not.
   - `excel_r291` / 机甲忍者。赤: `iron_chain_path` costs 0.5 mana after the first free use each turn, has no written per-turn cap, damages a front edge-truncated 5-cell line without friendly damage, and always pierces. The mandatory anchor is fixed before damage by scanning the declared line near-to-far: stable units of either side, terrain units, board walls, then explicitly terrain-marked fields. A legal move must stay within 5 cells on one straight path and end genuinely beside the saved anchor footprint; failure skips only movement. Only a non-terrain unit anchor grants +1 to Red's next direct damage against that unit in the current turn, even if the anchor dies during the line hit. R291-Q001 answer `a` makes the separate 1/2 attack/skill pierce roll backend-random once per declared action, public in logs, stored only in that action payload, and shared by every target of that action. The roll uses the public-event path so a stealthed target cannot suppress it. AI must score the forced anchor, actual landing exposure, and follow-up opportunity rather than line damage alone.
@@ -491,7 +666,7 @@ Update this file whenever a hero, skill, trait, or durable gameplay rule changes
 
 ### 不死王利娜 (`undead_king_lina`)
 
-- R03 reviewed 2026-09-10, static only: Crazy Sand cooldown is two own rounds; declared line/landing survive reactions, blocked landing retains current position, movement-disabled use is rejected. `pattern_destinations` provides full footprint to UI and AI. Rending/Wind Sand lock declared cells. Wind Sand expires after source's next own-start recovery; Sandstorm ticks only the affected unit's own end. Lock survives temporary absence; reset excludes field/periodic kills. AI prices lock commitment, eligible resets and weather net value. Consolidated tests pending.
+- R03 reviewed 2026-09-10, static only; 2026-10-24 source row 8 overrides the destroy reward: every qualifying kill by Lina's own attack or skill resets only her used basic-attack count and grants that target's remaining mana, with no per-turn trigger cap and no movement reset. Repeated kills may repeatedly restore her normal two-attack allowance; multiple kills in one area action grant mana per target but do not add attack allowances. Crazy Sand cooldown is two own rounds; declared line/landing survive reactions, blocked landing retains current position, movement-disabled use is rejected. `pattern_destinations` provides full footprint to UI and AI. Rending/Wind Sand lock declared cells. Wind Sand expires after source's next own-start recovery; Sandstorm ticks only the affected unit's own end. Lock survives temporary absence; reward excludes field/periodic kills. AI prices each eligible kill and actual in-range follow-up without assuming restored movement. Consolidated dynamic validation pending.
 - Stats: level 8, 刺客, 土, 灵体, 攻4 守4 速4 范3 魔5; occupies `2*2` and should render as one footprint-spanning board piece.
 - File: `src/wujiang/heroes/next_five.py`, class `UndeadKingLina`.
 - Skills:
@@ -505,7 +680,7 @@ Update this file whenever a hero, skill, trait, or durable gameplay rule changes
   - `AttackCountTrait(2)`: up to 2 basic attacks per turn.
   - `HalfPierceAttackTrait`: Lina's basic attacks half-pierce shields.
   - `AttackLockTrait`: basic-attack declaration locks the effective target until that target is destroyed. If the declared target is a mounted rider, mounted redirection makes the mount the locked target.
-  - `LinaDestroyRewardTrait`: once per turn; if Lina's own basic attack/skill destroys a hero or a unit with current defense >= 4, reset move/attacks and gain target's remaining current mana.
+  - `LinaDestroyRewardTrait`: every time Lina's own basic attack/skill destroys a hero or a unit with current defense >= 4, reset used attacks to zero and gain that target's remaining current mana; unlimited triggers per turn, with no reset of move resources.
   - `NoEnemyHealAuraTrait`: enemies within Lina's surrounding `7*7` cannot heal.
   - `LinaSandstormRecoveryTrait`: in Sandstorm and not stealthed, Lina gets natural recovery at own turn start.
 

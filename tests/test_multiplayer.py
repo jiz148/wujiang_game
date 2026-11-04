@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -29,6 +30,51 @@ from wujiang.platform.http.server import normalize_public_base_url  # noqa: E402
 
 class MultiplayerRoomTests(unittest.TestCase):
     def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        environment = mock.patch.dict("os.environ", {
+            "WUJIANG_AUTOCHESS_DIR": temporary.name,
+            "WUJIANG_REPLAY_RECORDING": "full",
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+        # These room scenarios exercise actions or visibility after a known opener.
+        # Initiative itself is exercised by the unpatched opening-rule scenario.
+        opening_player = {
+            "test_multi_seat_classic_room_enforces_seat_owned_control": 1,
+            "test_ai_seat_automatically_plays_its_active_turn": 2,
+            "test_ai_seat_uses_protection_reaction_instead_of_skipping": 1,
+            "test_ai_seat_uses_protection_reaction_when_attacked_by_stealthed_enemy": 1,
+            "test_ai_simulation_recovers_when_queued_actor_left_battlefield": 1,
+            "test_ai_simulation_recovers_when_staged_payload_becomes_illegal": 2,
+            "test_ai_seat_can_fire_instant_skill_during_enemy_turn": 1,
+            "test_active_units_only_show_current_turn_bundle_in_classic_multihero_mode": 2,
+            "test_player_can_reclaim_running_battle_seat_by_name_after_token_loss": 1,
+            "test_enemy_stealthed_units_are_hidden_from_viewer_state": 1,
+            "test_clone_label_is_only_visible_to_owner_view": 1,
+            "test_clone_truth_is_visible_to_allied_team_view_but_hidden_from_enemy_team": 1,
+            "test_enemy_view_cannot_identify_n_split_clones_by_mana_or_skill_text": 1,
+            "test_classic_room_can_start_with_human_spectator_seat_and_ai_only_rosters": 1,
+            "test_ai_only_room_progresses_incrementally_and_records_replay_steps": 1,
+            "test_ai_only_6v6_with_split_actor_prepares_without_enumerating_combinations": 2,
+        }.get(self._testMethodName)
+        if opening_player is not None:
+            initiative = mock.patch(
+                "wujiang.tactical.heroes.registry.opening_player_for_units",
+                return_value=opening_player,
+            )
+            initiative.start()
+            self.addCleanup(initiative.stop)
+        if self._testMethodName in {
+            "test_multi_seat_classic_room_enforces_seat_owned_control",
+            "test_clone_truth_is_visible_to_allied_team_view_but_hidden_from_enemy_team",
+        }:
+            order = mock.patch(
+                "wujiang.tactical.heroes.registry.sort_units_for_classic",
+                side_effect=lambda units: list(units),
+            )
+            order.start()
+            self.addCleanup(order.stop)
         self.registry = RoomRegistry()
 
     def advance_ai_step(self, room) -> int:
@@ -692,7 +738,8 @@ class MultiplayerRoomTests(unittest.TestCase):
         ):
             room.start_battle(host_token)
 
-        self.assertEqual(room.battle.active_player, 1)
+        # 等级从低到高排序：4级精兵先于5级火葬。
+        self.assertEqual(room.battle.active_player, 2)
 
     def test_active_units_only_show_current_turn_bundle_in_classic_multihero_mode(self) -> None:
         room, _, host_token = self.registry.create_room("Alice")

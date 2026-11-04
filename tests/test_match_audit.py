@@ -17,6 +17,9 @@ from wujiang.tactical.heroes.registry import create_battle, create_hero  # noqa:
 from wujiang.tools.match_audit import (  # noqa: E402
     FindingRecorder,
     action_diagnostic,
+    apply_decision,
+    is_blind_hidden_collision,
+    build_fallback_decision,
     build_turn_decision,
     parse_roster,
     record_candidate_gap,
@@ -66,6 +69,82 @@ def normalize_unit_ids(value):
 
 
 class MatchAuditToolTests(unittest.TestCase):
+    def test_empty_overclock_patterns_with_no_positive_impact_are_not_generation_warnings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = run_match_audit(
+                ["fire_funeral", "excel_r245"], ["excel_r325", "excel_r373"],
+                seed=20260854, max_steps=1, output_dir=Path(temp_dir),
+            )
+            findings = read_jsonl(result.findings_jsonl_path)
+        self.assertFalse(any(item["category"] == "ai_payload_generation_gap" for item in findings))
+
+    def test_hidden_placement_classifier_checks_every_cell_of_a_large_body(self) -> None:
+        from wujiang.tactical.engine.core import ActionError, Position, StatusEffect
+
+        battle = create_battle("bard", "n")
+        actor = battle.current_turn_unit()
+        enemy = next(unit for unit in battle.all_units() if unit.player_id != actor.player_id)
+        actor.position, enemy.position = Position(2, 3), Position(4, 3)
+        enemy.add_status(StatusEffect("隐身"))
+        target = create_hero("excel_r252", actor.player_id)
+        target.alive = False
+        battle.destroyed_units.append(target)
+        decision = {
+            "actor": {"id": actor.unit_id},
+            "payload": {"type": "skill", "unit_id": actor.unit_id,
+                        "skill_code": "electronic_repair", "revive_unit_id": target.unit_id,
+                        "x": 3, "y": 3},
+        }
+        self.assertTrue(is_blind_hidden_collision(
+            battle, decision, ActionError("该位置不能修复机甲武将。")))
+        enemy.statuses.clear()
+        self.assertFalse(is_blind_hidden_collision(
+            battle, decision, ActionError("该位置不能修复机甲武将。")))
+
+    def test_hidden_enemy_fly_leap_landing_is_audited_as_blind_collision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = run_match_audit(
+                ["excel_r326", "excel_r264"], ["excel_r033", "excel_r244"],
+                seed=20261996, max_steps=4, output_dir=Path(temp_dir),
+            )
+            findings = read_jsonl(result.findings_jsonl_path)
+        landing = [item for item in findings if item["step"] == 3 and
+                   item["category"] in {"blind_hidden_collision", "action_error"}]
+        self.assertEqual([(item["category"], item["severity"]) for item in landing],
+                         [("blind_hidden_collision", "info")])
+
+    def test_hidden_enemy_move_collision_is_recorded_as_information_only(self) -> None:
+        from wujiang.tactical.engine.core import Position, StatusEffect
+
+        for hidden in (True, False):
+            with self.subTest(hidden=hidden):
+                battle = create_battle("bard", "n")
+                actor = battle.current_turn_unit()
+                enemy = next(unit for unit in battle.all_units() if unit.player_id != actor.player_id)
+                actor.position, enemy.position = Position(2, 3), Position(3, 3)
+                if hidden:
+                    enemy.add_status(StatusEffect("隐身"))
+                decision = {
+                    "reason": "test_move", "actor": {"id": actor.unit_id},
+                    "payload": {"type": "move", "unit_id": actor.unit_id, "x": 3, "y": 3},
+                }
+                findings = FindingRecorder()
+                event = apply_decision(battle, decision, findings, 0)
+                self.assertFalse(event["success"])
+                self.assertEqual(findings.items[0]["category"],
+                                 "blind_hidden_collision" if hidden else "action_error")
+                self.assertEqual(findings.items[0]["severity"], "info" if hidden else "error")
+
+    def test_damage_fallback_uses_legal_target_choice_shape(self) -> None:
+        battle = create_battle("bard", "n")
+        actor = battle.current_turn_unit()
+        battle.pending_damage_choice = {
+            "unit_id": actor.unit_id, "kind": "rotation", "options": [actor.unit_id],
+        }
+        payload = build_fallback_decision(battle, "failed decision")["payload"]
+        self.assertEqual(payload["target_unit_id"], actor.unit_id)
+        self.assertNotIn("stat_name", payload)
+
     def test_design_profiles_accept_utf8_bom(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "design.json"
@@ -620,6 +699,8 @@ class MatchAuditToolTests(unittest.TestCase):
     def test_action_diagnostic_marks_repeat_utility_throttle_as_expected(self) -> None:
         battle = create_battle("erasure_apostle", "bard")
         apostle = next(unit for unit in battle.player_units(1) if not unit.is_summon)
+        battle.configure_turn_order([apostle.unit_id])
+        battle.start_current_turn()
         stealth = apostle.get_skill("stealth")
         stealth.uses_this_turn = 1
         action = next(
@@ -653,6 +734,8 @@ class MatchAuditToolTests(unittest.TestCase):
         battle.add_unit(horse, Position(6, 6))
         battle.set_mounted_state(panther, horse)
         panther.mana_points = 1
+        battle.configure_turn_order([panther.unit_id, bard.unit_id])
+        battle.start_current_turn()
         action = next(item for item in battle.action_snapshot_for(panther)["actions"] if item.get("code") == "mimic_skill")
 
         diagnostic = action_diagnostic(battle, panther, action, difficulty_profile("standard"), instant_only=False)

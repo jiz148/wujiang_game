@@ -1,0 +1,7 @@
+[
+  {"code": "ellie", "test_class": "DevelopedHeroReviewR01BehaviorTests"},
+  {"code": "jade", "test_class": "DevelopedHeroReviewR04BehaviorTests"},
+  {"code": "excel_r328", "test_class": "NewBatch328329FlyingShipBehaviorTests"},
+  {"code": "excel_r225", "test_class": "DevelopedHeroReviewR21BehaviorTests"},
+  {"code": "excel_r304", "test_class": "NewBatch304WillowBehaviorTests"}
+]

@@ -20,12 +20,6 @@ from wujiang.tactical.rooms.launch import make_launch_context
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.heroes.registry import create_battle
 from wujiang.tactical.heroes.registry import list_heroes
-from wujiang.tactical.trait_tiers import TraitTierError
-from wujiang.tactical.trait_tiers import set_trait_category
-from wujiang.tactical.custom_heroes import CustomHeroError
-from wujiang.tactical.custom_heroes import delete_custom_hero
-from wujiang.tactical.custom_heroes import list_custom_heroes
-from wujiang.tactical.custom_heroes import save_custom_hero
 from wujiang.tactical.rooms.history import historical_replay_payload
 from wujiang.tactical.rooms.history import record_finished_room_history
 from wujiang.tactical.rooms.multiplayer import DEFAULT_ROOM_MODE
@@ -55,74 +49,6 @@ def get_heroes(ctx: RequestContext) -> None:
             "onboarding": onboarding_payload(heroes),
         },
     )
-    return
-
-
-@get("/api/custom-heroes")
-def get_custom_heroes(ctx: RequestContext) -> None:
-    handler = ctx.handler
-    try:
-        heroes = list_custom_heroes()
-    except CustomHeroError as exc:
-        json_response(handler, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-        return
-    json_response(handler, HTTPStatus.OK, {"heroes": heroes})
-    return
-
-
-@get("/api/skills")
-def get_implemented_skills(ctx: RequestContext) -> None:
-    from wujiang.tactical.rooms.forge import public_catalog
-    handler = ctx.handler
-    json_response(handler, HTTPStatus.OK, {"skills": public_catalog()["skills"]})
-    return
-
-
-@get("/api/traits")
-def get_implemented_traits(ctx: RequestContext) -> None:
-    from wujiang.tactical.rooms.forge import public_catalog
-    handler = ctx.handler
-    json_response(handler, HTTPStatus.OK, {"traits": public_catalog()["traits"]})
-    return
-
-
-@post("/api/traits/category")
-def post_trait_category(ctx: RequestContext) -> None:
-    handler = ctx.handler
-    try:
-        category = set_trait_category(
-            str((ctx.payload or {}).get("name") or ""),
-            str((ctx.payload or {}).get("category") or ""),
-        )
-    except TraitTierError as exc:
-        json_response(handler, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-        return
-    from wujiang.tactical.rooms.forge import public_catalog
-    json_response(handler, HTTPStatus.OK, {"category": category, "traits": public_catalog()["traits"]})
-    return
-
-
-@post("/api/custom-heroes")
-def post_custom_hero(ctx: RequestContext) -> None:
-    handler = ctx.handler
-    try:
-        hero = save_custom_hero(ctx.payload)
-    except CustomHeroError as exc:
-        json_response(handler, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-        return
-    json_response(handler, HTTPStatus.OK, {"hero": hero, "heroes": list_custom_heroes()})
-    return
-
-
-@post("/api/custom-heroes/delete")
-def post_custom_hero_delete(ctx: RequestContext) -> None:
-    handler = ctx.handler
-    try:
-        delete_custom_hero(str((ctx.payload or {}).get("id") or ""))
-    except CustomHeroError as exc:
-        json_response(handler, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-        return
-    json_response(handler, HTTPStatus.OK, {"heroes": list_custom_heroes()})
     return
 
 
@@ -205,6 +131,7 @@ def get_rooms_state(ctx: RequestContext) -> None:
             auth_error_response(handler, exc)
             return
     recovered = False
+    restored_from_checkpoint = False
     try:
         room = ROOMS.get_room(room_id)
     except RoomError:
@@ -214,6 +141,7 @@ def get_rooms_state(ctx: RequestContext) -> None:
         try:
             room, _checkpoint = recover_strategy_battle_room(room_id, auth_user)
             recovered = True
+            restored_from_checkpoint = True
         except StrategyError as exc:
             json_response(
                 handler,
@@ -262,6 +190,7 @@ def get_rooms_state(ctx: RequestContext) -> None:
         player_token,
         base_url=request_base_url(handler),
         recovered=recovered,
+        advance_due=not restored_from_checkpoint,
     )
     if recovered and player_token:
         response["player_token"] = player_token
@@ -914,55 +843,6 @@ def post_rooms_bp_assign(ctx: RequestContext) -> None:
     _post_bp_room_action(ctx, "assign")
 
 
-@post("/api/rooms/forge/action")
-def post_rooms_forge_action(ctx: RequestContext) -> None:
-    handler = ctx.handler
-    payload = ctx.payload
-    room_id = str(payload.get("room_id") or "")
-    token = str(payload.get("player_token") or "")
-    action = str(payload.get("action") or "")
-    try:
-        room = ROOMS.get_room(room_id)
-        if room.mode != "skill_random":
-            raise RoomError("当前不是技能组合房间。")
-        if action == "limits":
-            room.set_forge_limits(
-                token,
-                payload.get("stat_cap"),
-                payload.get("point_cap"),
-                payload.get("loss_pay"),
-                payload.get("play"),
-                payload.get("promote_pay"),
-                payload.get("skill_fraction"),
-                payload.get("trait_fraction"),
-            )
-        elif action == "build":
-            room.update_forge_build(token, payload.get("team_id"), payload.get("build"))
-        elif action == "ready":
-            room.set_forge_ready(token, payload.get("team_id"), payload.get("ready"))
-        elif action == "team-ai":
-            room.set_forge_team_ai(token, payload.get("team_id"), payload.get("enabled"))
-        elif action == "return":
-            room.return_to_forge_editor(token)
-        elif action == "coop-again":
-            room.restart_forge_coop(token)
-        elif action == "ack-omen":
-            room.ack_forge_omen(token)
-        elif action == "ack-run":
-            room.ack_forge_run(token)
-        else:
-            raise RoomError("没有这个操作。")
-    except RoomError as exc:
-        error_payload: dict[str, Any] = {"error": str(exc)}
-        try:
-            error_payload["state"] = ROOMS.get_room(room_id).serialize_state(token, base_url=request_base_url(handler))
-        except RoomError:
-            pass
-        json_response(handler, HTTPStatus.BAD_REQUEST, error_payload)
-        return
-    json_response(handler, HTTPStatus.OK, room_state_with_strategy_sync(room, token, base_url=request_base_url(handler)))
-
-
 @post("/api/rooms/autochess/action")
 def post_rooms_autochess_action(ctx: RequestContext) -> None:
     handler = ctx.handler
@@ -1364,7 +1244,6 @@ def post_rooms_delete(ctx: RequestContext) -> None:
             str(room_id),
             player_token,
             owner_user_id=auth_user.user_id,
-            force=bool(payload.get("force")),
         )
     except RoomError as exc:
         json_response(handler, HTTPStatus.BAD_REQUEST, {"error": str(exc)})

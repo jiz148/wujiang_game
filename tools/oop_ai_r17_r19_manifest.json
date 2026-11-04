@@ -1,0 +1,10 @@
+[
+  {"code": "excel_r127", "skills": ["fantasy_move", "rainbow_mirror"], "test_class": "DevelopedHeroReviewR17BehaviorTests"},
+  {"code": "excel_r136", "skills": ["true_blade_air_slash"], "test_class": "DevelopedHeroReviewR17BehaviorTests"},
+  {"code": "excel_r137", "skills": ["undead_boy_devour"], "test_class": "DevelopedHeroReviewR17BehaviorTests"},
+  {"code": "excel_r139", "skills": ["illumination_light"], "test_class": "DevelopedHeroReviewR18BehaviorTests"},
+  {"code": "excel_r143", "skills": ["thor_heavy_hammer", "thor_rage_impact", "thor_destroy_lightning"], "test_class": "DevelopedHeroReviewR18BehaviorTests"},
+  {"code": "excel_r158", "skills": ["hell_slash"], "test_class": "DevelopedHeroReviewR19BehaviorTests"},
+  {"code": "excel_r166", "skills": ["electric_wind"], "test_class": "DevelopedHeroReviewR19BehaviorTests"},
+  {"code": "excel_r172", "skills": ["beetle_spear"], "test_class": "DevelopedHeroReviewR19BehaviorTests"}
+]

@@ -1,0 +1,5 @@
+[
+  {"code": "blood_eater", "skills": ["blood_guard", "blood_art", "blood_dance", "sacrifice_ritual"], "test_class": "DevelopedHeroReviewR03BehaviorTests"},
+  {"code": "chanter", "skills": ["paralysis_card", "poison_card", "drain_card", "magic_claw"], "test_class": "DevelopedHeroReviewR03BehaviorTests"},
+  {"code": "li", "skills": ["chain_pull", "whirlwind_attack"], "test_class": "DevelopedHeroReviewR03BehaviorTests"}
+]

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import secrets
+from wujiang.tactical.prediction import secrets
 from typing import Sequence
 
 from wujiang.tactical.engine.core import ActionError, Battle, BattleFieldEffect, DamageContext, HealContext, HeroUnit, Position, Skill, Unit
@@ -45,10 +45,16 @@ class BPSpecialModeEffect(BattleFieldEffect):
         self._stat_bonus: dict[str, dict[str, int]] = {}
         self._sympathy: dict[str, set[str]] = {}
         self._arena_order: dict[int, list[str]] = {}
+        self._mages_original_mana: dict[str, float] = {}
         self._pending_match_end: tuple[str, str] | None = None
 
     def initialize(self, battle: Battle) -> None:
         heroes = [unit for unit in battle.all_units() if real_hero(unit)]
+        if "mages" in self.codes:
+            for hero in heroes:
+                original = float(hero.base_stats.mana)
+                self._mages_original_mana[hero.unit_id] = original
+                hero.current_mana = original
         if "sympathy" in self.codes and heroes:
             for stat in ("attack", "defense", "speed", "attack_range"):
                 maximum = max(unit.stat(stat) for unit in heroes)
@@ -84,9 +90,18 @@ class BPSpecialModeEffect(BattleFieldEffect):
             return 10.0
         if "true_turn" in self.codes and stat_name == "attack_range":
             return float(max(battle.width, battle.height))
-        return value + self._stat_bonus.get(unit.unit_id, {}).get(stat_name, 0)
+        value += self._stat_bonus.get(unit.unit_id, {}).get(stat_name, 0)
+        return value + (1.0 if "attack_plus_one" in self.codes and stat_name == "attack" else 0.0)
+
+    def adjust_unit_targeting_range(self, battle: Battle, unit: Unit, value: int) -> int:
+        return max(battle.width, battle.height) if "true_turn" in self.codes else value
+
+    def blocks_unit_movement(self, battle: Battle, unit: Unit) -> bool:
+        return "true_turn" in self.codes
 
     def blocks_skill_use(self, battle: Battle, actor: Unit, skill: Skill) -> tuple[bool, str]:
+        if "true_turn" in self.codes and self._causes_movement(skill):
+            return True, "真回合制不能使用位移技能。"
         if "real_men" in self.codes and skill.timing != "active":
             return True, "真男人模式只能使用主动技能。"
         if "slow" in self.codes and real_hero(actor):
@@ -104,6 +119,9 @@ class BPSpecialModeEffect(BattleFieldEffect):
 
     @staticmethod
     def _deals_direct_damage(skill: Skill) -> bool:
+        declared = skill.directly_damages_on_use()
+        if declared is not None:
+            return declared
         # Classify the implemented skill operation, not prose that may describe
         # a later trigger, a defense against damage, or explicitly no damage.
         execute_code = getattr(type(skill).execute, "__code__", None)
@@ -422,7 +440,7 @@ class BPSpecialModeEffect(BattleFieldEffect):
             if (hero is not None and hero.alive and not hero.banished
                     and not hero.is_stealthed()
                     and not any(getattr(status, "grants_stealth", False) for status in hero.statuses)):
-                hero.current_mana = hero.max_mana()
+                hero.current_mana = self._mages_original_mana.get(hero.unit_id, float(hero.base_stats.mana))
 
     def on_round_complete(self, battle: Battle) -> None:
         if "eternal" not in self.codes:

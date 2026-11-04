@@ -1,0 +1,5 @@
+[
+  {"code": "excel_r031", "test_class": "DevelopedHeroReviewR10NatsumeBehaviorTests"},
+  {"code": "excel_r033", "test_class": "DevelopedHeroReviewR11LaoBehaviorTests"},
+  {"code": "excel_r034", "test_class": "DevelopedHeroReviewR11SakuraBehaviorTests"}
+]

@@ -400,6 +400,7 @@ class ArmyTurnTests(unittest.TestCase):
         battle.add_unit(keeper, Position(11, 7))
         battle.configure_turn_order([])
         battle.start_battle()
+        battle.set_army_order(1, "hold", "E", kind="cannon")
         cannon.siege_loaded = True
         victim_hp = victim.current_hp
         battle.end_turn()
@@ -632,6 +633,8 @@ class ArmyTurnTests(unittest.TestCase):
         self.assertGreater(step_to_front, stay_rear)
 
     def test_follow_anchor_refreshes_after_soldiers_advance(self) -> None:
+        from unittest import mock
+
         from wujiang.tactical.engine.core import Battle, Position
         from wujiang.tactical.rooms.ai import choose_turn_action, follow_anchor_state
 
@@ -649,9 +652,14 @@ class ArmyTurnTests(unittest.TestCase):
         soldier.position = Position(12, 4)
         stale = follow_anchor_state(battle, 1)[0]
         self.assertEqual((stale.x, stale.y), (first.x, first.y))
-        choose_turn_action(battle, hero, "standard")
-        updated = follow_anchor_state(battle, 1)[0]
-        self.assertGreater(updated.x, first.x)
+        observed = []
+        def record_anchor(current_battle, player_id):
+            state = follow_anchor_state(current_battle, player_id)
+            observed.append(state[0])
+            return state
+        with mock.patch("wujiang.tactical.rooms.ai.follow_anchor_state", side_effect=record_anchor):
+            choose_turn_action(battle, hero, "standard")
+        self.assertTrue(any(anchor is not None and anchor.x > first.x for anchor in observed))
 
     def test_follow_style_tracks_leading_soldiers_not_rear_cannons(self) -> None:
         from wujiang.tactical.engine.core import Battle, Position

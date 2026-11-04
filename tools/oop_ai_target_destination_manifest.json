@@ -1,0 +1,7 @@
+[
+  {"code": "ellie", "skills": ["mana_pull"], "test_class": "DevelopedHeroReviewR01BehaviorTests"},
+  {"code": "excel_r325", "skills": ["gentleman_duel"], "test_class": "DevelopedHeroReviewR03BehaviorTests"},
+  {"code": "erasure_apostle", "skills": ["descent_moment"], "test_class": "DevelopedHeroReviewR06BehaviorTests"},
+  {"code": "excel_r127", "skills": ["fantasy_move", "rainbow_mirror"], "test_class": "DevelopedHeroReviewR03BehaviorTests"},
+  {"code": "excel_r136", "skills": ["true_blade_air_slash"], "test_class": "DevelopedHeroReviewR03BehaviorTests"}
+]

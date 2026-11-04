@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 from wujiang.tactical.engine.core import ActionError, Battle, Position, QueuedAction, Unit
+from wujiang.tactical.heroes.ai_policy import AISkillCandidateContext, AIReactionCandidateContext
 from wujiang.tactical.heroes.registry import CLASSIC_BATTLE_MODE, create_battle
 from wujiang.tactical.rooms import ai as ai_policy
 
@@ -693,6 +694,20 @@ def action_diagnostic(
             return diag
         if kind == "skill":
             raw_payloads = ai_policy.skill_payloads_for_action(battle, actor, action)
+            if not raw_payloads and (filter_reason := getattr(getattr(actor, "ai_policy", None),
+                                                               "empty_payload_filter_reason", None)):
+                diag["expected_filter_reason"] = filter_reason(
+                    AISkillCandidateContext(battle, actor, action, ai_policy._SHARED_CANDIDATE_GEOMETRY),
+                    selection.get("patterns", []),
+                )
+            if not raw_payloads and not diag.get("expected_filter_reason"):
+                skill = actor.skill_map().get(code)
+                filter_reason = getattr(skill, "ai_empty_payload_filter_reason", None)
+                if callable(filter_reason):
+                    diag["expected_filter_reason"] = filter_reason(
+                        AISkillCandidateContext(battle, actor, action, ai_policy._SHARED_CANDIDATE_GEOMETRY),
+                        selection.get("patterns", []),
+                    )
             diagnostic_payloads = ai_policy.trim_skill_payloads_for_ai(battle, actor, raw_payloads, limit=64)
             selection_mode = str(selection.get("mode") or "")
             if code == "mimic_skill" and not raw_payloads:
@@ -776,6 +791,13 @@ def reaction_diagnostic(
         if isinstance(selection, dict):
             diag["required_cells"] = int(selection.get("required_cells") or 0)
         raw_payloads = ai_policy.reaction_payloads_for_option(battle, reactor, queued_action, option)
+        if not raw_payloads and (filter_reason := getattr(getattr(reactor, "ai_policy", None),
+                                                           "empty_payload_filter_reason", None)):
+            diag["expected_filter_reason"] = filter_reason(
+                AIReactionCandidateContext(battle, reactor, queued_action, option,
+                                           ai_policy._SHARED_CANDIDATE_GEOMETRY),
+                selection.get("patterns", []),
+            )
         legal_payloads = [
             payload
             for payload in raw_payloads
@@ -888,10 +910,25 @@ def record_candidate_gap(
 
 def build_fallback_decision(battle: Battle, summary: str) -> Optional[dict[str, Any]]:
     if battle.pending_damage_choice is not None:
-        unit = battle.get_unit(battle.pending_damage_choice["unit_id"])
+        pending = battle.pending_damage_choice
+        unit = battle.get_unit(pending["unit_id"])
+        target_choice_kinds = {
+            "rotation", "attack_swap", "formation", "optional_swap", "optional_placement",
+            "end_dash", "electronic_teleport", "hell_sacrifice", "hell_death_strike",
+            "hell_rescue", "hell_dragon_first", "hell_dragon_second",
+            "hell_dragon_effect", "gentleman_guard",
+        }
+        payload = {"type": "damage_choice", "unit_id": unit.unit_id}
+        if pending.get("kind") in target_choice_kinds:
+            options = pending.get("options") or []
+            if not options:
+                return None
+            payload["target_unit_id"] = options[0]
+        else:
+            payload["stat_name"] = "decline"
         return {
             "reason": "ai_damage_fallback", "phase": "damage", "actor": unit_ref(unit),
-            "payload": {"type": "damage_choice", "unit_id": unit.unit_id, "stat_name": "decline"},
+            "payload": payload,
             "summary": summary,
         }
     if battle.pending_chain is not None:
@@ -933,6 +970,50 @@ def build_fallback_decision(battle: Battle, summary: str) -> Optional[dict[str, 
     }
 
 
+def is_blind_hidden_collision(battle: Battle, decision: dict[str, Any], exc: Exception) -> bool:
+    """Identify a real move rejection caused solely by unseen enemy occupancy."""
+    payload = decision.get("payload") or {}
+    action_type = payload.get("type")
+    if not isinstance(exc, ActionError) or action_type not in {"move", "skill"}:
+        return False
+    if action_type == "move" and str(exc) != "目标位置已被占用。":
+        return False
+    if action_type == "skill" and str(exc) not in {
+        "该位置不能修复机甲武将。", "该位置不能作为献祭仪式的召唤落点。",
+        "分身位置不合法。", "飞跃必须选择恰好3格且完整身体可落地的位置。",
+    }:
+        return False
+    actor = unit_from_ref(battle, decision.get("actor"))
+    if actor is None or actor.position is None:
+        return False
+    try:
+        destinations = []
+        if payload.get("x") is not None and payload.get("y") is not None:
+            destinations.append(Position(int(payload["x"]), int(payload["y"])))
+        destinations.extend(Position(int(cell["x"]), int(cell["y"])) for cell in payload.get("cells", []))
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not destinations:
+        return False
+    placement_unit = actor
+    if payload.get("revive_unit_id"):
+        placement_unit = next((unit for unit in battle.destroyed_units
+                               if unit.unit_id == payload["revive_unit_id"]), actor)
+    blockers = [
+        unit
+        for destination in destinations
+        for cell in battle.unit_cells_at(placement_unit, destination)
+        for unit in battle.units_at(cell, ignore=actor)
+        if battle.blocks_position_for(unit, mover=placement_unit)
+    ]
+    if not (blockers and all(
+        unit.player_id != actor.player_id and unit.is_stealthed()
+        for unit in blockers
+    )):
+        return False
+    return True
+
+
 def apply_decision(
     battle: Battle,
     decision: dict[str, Any],
@@ -957,11 +1038,13 @@ def apply_decision(
     except Exception as exc:
         event["success"] = False
         event["error"] = f"{type(exc).__name__}: {exc}"
+        blind_hidden_collision = is_blind_hidden_collision(battle, decision, exc)
         findings.add(
-            severity="error",
-            category="action_error",
+            severity="info" if blind_hidden_collision else "error",
+            category="blind_hidden_collision" if blind_hidden_collision else "action_error",
             source=str(decision.get("reason") or "ai"),
-            message=f"Selected action failed during perform_action: {type(exc).__name__}: {exc}",
+            message=("Selected landing met an unseen stealthed enemy: " if blind_hidden_collision
+                     else "Selected action failed during perform_action: ") + f"{type(exc).__name__}: {exc}",
             step=step,
             actor=unit_from_ref(battle, decision.get("actor")),
             payload=decision.get("payload"),

@@ -7,8 +7,10 @@ from wujiang.tactical.engine.core import (
     Skill, Stats, StatusEffect, TargetContext, Trait, Unit,
 )
 from wujiang.tactical.heroes.base import AbstractHero
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext, PaidReactionAIPolicy
 from wujiang.tactical.heroes.common import LightWallSkill, payload_position, payload_target_unit, positions_to_dict
-from wujiang.tactical.heroes.next_five import square_around_cells
+from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_hero_kit
+from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
 
 def elemental_hero_family(battle: Battle, unit: Unit, attribute: str) -> bool:
@@ -21,7 +23,9 @@ def elemental_hero_family(battle: Battle, unit: Unit, attribute: str) -> bool:
         if parent is None:
             return False
         current = parent
-    return not current.is_summon and not current.is_clone and current.attribute == attribute
+    requested = "火" if attribute == "炎" else attribute
+    actual = "火" if current.attribute == "炎" else current.attribute
+    return not current.is_summon and not current.is_clone and actual == requested
 
 
 class FireWallSkill(LightWallSkill):
@@ -77,7 +81,7 @@ class ChimeraSummon(AbstractHero):
     hero_code = "flame_chimera"
     hero_name = "奇美拉"
     role = "召唤物"
-    attribute = "炎"
+    attribute = "火"
     race = "兽"
     level = 1
     base_stats = Stats(attack=1, defense=1, speed=3, attack_range=2, mana=0)
@@ -101,6 +105,31 @@ def own_chimeras(battle: Battle, actor: Unit) -> list[Unit]:
 
 
 class ChimeraSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        cell = context.destination()
+        if cell is None or actor.position is None or cell not in self.available_cells(battle, actor):
+            return -1000.0
+        cost = self.mana_cost_for_payload(battle, actor, payload)
+        score = 17.0 - cost * 27.0
+        for unit in battle.all_units():
+            if not unit.alive or unit.banished or unit.position is None:
+                continue
+            distance = context.distance_to_position(unit, cell)
+            if distance == 1:
+                if elemental_hero_family(battle, unit, "炎"):
+                    score += 21.0 if unit.player_id == actor.player_id else -25.0
+                elif elemental_hero_family(battle, unit, "水"):
+                    score += -23.0 if unit.player_id == actor.player_id else 19.0
+            if unit.player_id != actor.player_id and distance <= 4:
+                score += max(0.0, 5.0 - distance) * 6.0
+        if cost <= 0 and actor.position.distance_to(cell) <= 3:
+            score += 16.0
+        existing = [unit for unit in battle.player_units(actor.player_id)
+                    if unit.hero_code == "flame_chimera" and unit.summoner_id == actor.unit_id and unit.alive]
+        score -= len(existing) * (10.0 if cost > 0 else 3.0)
+        return score
+
     def __init__(self) -> None:
         super().__init__("chimera", "奇美拉", "1魔；每本人轮首只免费，选择外邻合法空格召唤奇美拉。",
                          mana_cost=1, target_mode="cell")
@@ -200,6 +229,36 @@ class FlamePasswordPierce(StatusEffect):
 class FlamePasswordSkill(Skill):
     requires_direct_unit_target_line = False
 
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        sacrificed = battle.units.get(str(payload.get("target_unit_id") or ""))
+        if sacrificed is None or sacrificed not in own_chimeras(battle, actor) or actor.position is None:
+            return -1000.0
+        beneficiaries = [unit for unit in battle.player_units(actor.player_id)
+                         if unit.alive and unit.position is not None and not unit.banished
+                         and (unit is actor or (battle.distance_between_units(actor, unit) <= 3
+                                                and elemental_hero_family(battle, unit, "炎")))]
+        value = 0.0
+        for ally in beneficiaries:
+            if ally.attacks_used >= ally.attack_actions_per_turn() or not ally.can_take_turn_actions(battle):
+                continue
+            if ally.has_status("火焰密码·普攻破魔"):
+                continue
+            for enemy in context.hostile_units():
+                if enemy.position is None or battle.distance_between_units(ally, enemy) > ally.targeting_range():
+                    continue
+                if enemy.total_shields() > 0:
+                    value += min(1, ally.attack_actions_per_turn() - ally.attacks_used) * 48.0
+                elif enemy.stat("defense") < ally.stat("attack"):
+                    value += 7.0
+        if value < 25.0:
+            return -1000.0
+        own_fire_aura = sum(1 for unit in battle.player_units(actor.player_id)
+                            if unit.position is not None and unit.alive
+                            and battle.distance_between_units(unit, sacrificed) == 1
+                            and elemental_hero_family(battle, unit, "炎"))
+        return value - 35.0 - own_fire_aura * 12.0
+
     def __init__(self) -> None:
         super().__init__("flame_password", "火焰密码", "破坏一只己方奇美拉，本轮本人与周围7×7炎属性友方普攻破魔。",
                          target_mode="unit")
@@ -246,3 +305,11 @@ class FlamePasswordSkill(Skill):
     def get_target_units_for_payload(self, battle: Battle, actor: Unit,
                                      payload: dict[str, Any]) -> list[Unit]:
         return [payload_target_unit(battle, payload)]
+
+
+FLAME_MANAGER_KIT = register_hero_kit(FragmentMappedHeroKit(
+    "excel_r322",
+    ai_policy=PaidReactionAIPolicy({"fire_wall"}, multi_target=True),
+    skills={"火墙": FireWallSkill, "奇美拉": ChimeraSkill, "火焰密码": FlamePasswordSkill},
+    traits={"每个进攻回合开始时当回合攻击次数增加周围7*7“炎”属性的武将和其召唤物的数量": FlameManagerAttackCountTrait},
+))
