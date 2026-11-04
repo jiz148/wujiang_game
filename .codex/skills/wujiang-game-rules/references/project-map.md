@@ -1,5 +1,9 @@
 # wujiang_game Project Map
 
+- 2026-11-03 四将规则复核：翡翠立场排除本人；昼行武者普攻伤害不破魔、附效破魔；安德鲁咆哮无伤；矮小绅士造影换位池为全场同一召唤者的己方现存分身。归属在 `mechanics/jade.py`、`daylight_hunter.py`、`gladiator_cooperation.py`、`heroes/gentleman.py`，公开原文在 `heroes/excel_roster_data.py`；源表 R192 由用户保存。
+
+- 2026-11-03 双特殊规则下世界之种 AI 评分可遇到存活但被放逐的友军：`Battle.player_units` 包含该单位，`Battle.unit_cells` 返回空。`rooms/ai_self_generic_scoring.py::world_seed_score` 的距离计算须给空占位默认远距离，避免 `min()` 崩溃；行为回归覆盖该场景，动态验收待用户统一运行。
+
 - 2026-11-03 BP特殊规则源表新增“攻+1”（所有单位攻+1），并修订“真回合制”为禁普通移动及位移技能、范覆盖全图。`rooms/special_modes.py` 为名单/展示源，`BPSpecialModeEffect` 持有战斗限制和全体加攻；范围最终覆盖通过 `BattleFieldEffect.adjust_unit_targeting_range` 窄接口，保留“同情弱者”范1优先。规则文档和行为场景同步，动态验收待用户统一执行。
 
 - 2026-11-03 自走棋金币结算：基础收入每轮+7，胜利+1，连胜第3场起+1/+2/+3/+4封顶，连败第3场起+1/+2封顶，利息每10存款+1最多3；取消扣对手血量对应的金币。点金手等装备专属产金保留。`rooms/autochess.py` 为结算归属，界面/文档/行为场景同步。文档仅用本项目名称，不引用外部游戏品牌；动态测试待用户统一执行。

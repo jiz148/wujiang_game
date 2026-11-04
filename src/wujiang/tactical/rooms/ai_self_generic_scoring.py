@@ -190,7 +190,7 @@ class AISelfAndGenericScoring:
         if not enemies:
             return -1000.0
         body = [anchor.offset(dx, dy) for dy in range(5) for dx in range(5)]
-        distance = lambda unit, cells: min(a.distance_to(b) for a in battle.unit_cells(unit) for b in cells)
+        distance = lambda unit, cells: min((a.distance_to(b) for a in battle.unit_cells(unit) for b in cells), default=999)
         nearest = min(distance(enemy, body) for enemy in enemies)
         score = 25.0 + max(0.0, 7.0 - nearest) * 6.0
         score += sum(16.0 for enemy in enemies if distance(enemy, body) <= 2)

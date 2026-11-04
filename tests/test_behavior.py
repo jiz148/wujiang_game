@@ -5764,6 +5764,24 @@ class AIDecisionBehaviorTests(unittest.TestCase):
         world_candidates = build_skill_candidates(battle, oberon, world_seed, profile, instant_only=False)
         self.assertTrue(any(candidate.payload.get("skill_code") == "world_seed" for candidate in world_candidates))
 
+    def test_ai_world_seed_scoring_ignores_banished_ally_without_board_cells(self) -> None:
+        battle = create_battle(["excel_r020", "bard"], "ellie")
+        battle.width = battle.height = 12
+        oberon = primary_hero(battle, 1)
+        ally = next(unit for unit in battle.player_units(1) if unit is not oberon)
+        oberon.position = Position(0, 0)
+        oberon.current_mana = 5
+        ally.banished = True
+        self.assertEqual(battle.unit_cells(ally), [])
+
+        profile = difficulty_profile("standard")
+        action = next(action for action in battle.action_snapshot_for(oberon)["actions"]
+                      if action.get("code") == "world_seed")
+        candidates = build_skill_candidates(battle, oberon, action, profile, instant_only=False)
+        self.assertTrue(candidates)
+        score = score_skill_payload(battle, oberon, action, candidates[0].payload, profile, instant_only=False)
+        self.assertIsInstance(score, (int, float))
+
     def test_ai_fei_wang_opens_stance_then_scores_gale_and_large_pierce(self) -> None:
         # Given Fei Wang has an enemy inside Gale and Large Pierce range
         battle = create_battle("excel_r028", "bard")
@@ -33998,6 +34016,7 @@ class AndrewBehaviorTests(unittest.TestCase):
         queued = self.attack(battle, enemy, ally)
         before = (andrew.current_hp, ally.current_hp, andrew.stat("defense"))
         andrew.get_skill("gladiator_roar").react(battle, andrew, {}, queued)
+        self.assertEqual((andrew.current_hp, ally.current_hp), before[:2])
         self.assertEqual(andrew.stat("defense"), before[2] + 1)
         battle.resolve_queued_action(queued)
         self.assertEqual(ally.current_hp, before[1])
@@ -39018,6 +39037,7 @@ class NewBatch303DaylightHunterBehaviorTests(unittest.TestCase):
     def test_piercing_seal_on_shield_refreshes_and_expires_after_victim_turn(self):
         battle, hunter, first, _ = self.fixture()
         first.temporary_shields = 1
+        self.assertFalse(battle.attack_ignores_shield(hunter, first))
         hp = first.current_hp
         battle.basic_attack(hunter, first)
         self.assertEqual(first.current_hp, hp)
@@ -39992,6 +40012,22 @@ class NewBatch325GentlemanBehaviorTests(unittest.TestCase):
         self.assertEqual(len(clones), 1)
         self.assertEqual((gentleman.position, clones[0].position), (Position(3, 0), Position(2, 2)))
 
+    def test_crossing_can_swap_with_an_existing_clone_anywhere_on_board(self):
+        from wujiang.tactical.heroes.mechanics.clone_split import StandardCloneSummon
+
+        battle, gentleman, _ = self.fixture()
+        existing = StandardCloneSummon(gentleman.player_id, gentleman)
+        battle.summon_unit(existing, Position(0, 4), summoner=gentleman)
+        with mock.patch("wujiang.tactical.heroes.mechanics.clone_split.random.choice",
+                        side_effect=[True, existing]) as choose:
+            gentleman.get_skill("surprise_step").execute(battle, gentleman, {"x": 3, "y": 0})
+        clones = [unit for unit in battle.player_units(1)
+                  if unit.is_clone and unit.summoner_id == gentleman.unit_id]
+        self.assertEqual(len(clones), 2)
+        self.assertEqual(set(choose.call_args_list[1].args[0]), set(clones))
+        self.assertEqual((gentleman.position, existing.position), (Position(0, 4), Position(3, 0)))
+        self.assertEqual(next(unit.position for unit in clones if unit is not existing), Position(2, 2))
+
     def test_normal_move_can_cross_two_enemies_and_multicell_body_once(self):
         battle = create_battle("excel_r325", ["elite_soldier", "bard"])
         gentleman = primary_hero(battle, 1)
@@ -40000,8 +40036,9 @@ class NewBatch325GentlemanBehaviorTests(unittest.TestCase):
         enemies[0].position, enemies[1].position = Position(3, 2), Position(5, 2)
         battle.configure_turn_order([gentleman.unit_id, enemies[0].unit_id, enemies[1].unit_id])
         battle.start_current_turn()
-        battle.move_unit(gentleman, Position(6, 2),
-                         path=[Position(x, 2) for x in range(3, 7)])
+        with mock.patch("wujiang.tactical.heroes.mechanics.clone_split.random.choice", return_value=False):
+            battle.move_unit(gentleman, Position(6, 2),
+                             path=[Position(x, 2) for x in range(3, 7)])
         self.assertEqual({unit.position for unit in battle.player_units(1) if unit.is_clone},
                          {Position(2, 2), Position(4, 2)})
 
@@ -40010,8 +40047,9 @@ class NewBatch325GentlemanBehaviorTests(unittest.TestCase):
         gentleman.position, giant.position = Position(2, 2), Position(3, 2)
         battle.configure_turn_order([gentleman.unit_id, giant.unit_id])
         battle.start_current_turn()
-        battle.move_unit(gentleman, Position(5, 2),
-                         path=[Position(3, 2), Position(4, 2), Position(5, 2)])
+        with mock.patch("wujiang.tactical.heroes.mechanics.clone_split.random.choice", return_value=False):
+            battle.move_unit(gentleman, Position(5, 2),
+                             path=[Position(3, 2), Position(4, 2), Position(5, 2)])
         self.assertEqual([unit.position for unit in battle.player_units(1) if unit.is_clone],
                          [Position(2, 2)])
 

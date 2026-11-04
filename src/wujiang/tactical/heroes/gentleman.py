@@ -343,7 +343,14 @@ class GentlemanGuardTrait(Trait):
 
 class GentlemanCrossingCloneTrait(Trait):
     def __init__(self) -> None:
-        super().__init__("穿人造影", "穿过敌方单位后，在进入其身体前的合法空格召唤一个分身，并随机决定是否与新分身换位。")
+        super().__init__("穿人造影", "穿过敌方单位后，在进入其身体前的合法空格召唤一个分身，并随机决定是否与全场一个本将分身换位。")
+
+    @staticmethod
+    def owned_clones(battle: Battle, owner: Unit) -> list[StandardCloneSummon]:
+        return [unit for unit in battle.player_units(owner.player_id)
+                if isinstance(unit, StandardCloneSummon) and unit.is_clone
+                and unit.summoner_id == owner.unit_id and unit.position is not None
+                and not unit.banished]
 
     def on_unit_moved(self, battle: Battle, ctx: MoveContext) -> None:
         owner = self.owner
@@ -359,10 +366,13 @@ class GentlemanCrossingCloneTrait(Trait):
                 battle.log_public_event(f"{owner.name} 穿过敌人，但前一格不能造影。", source=owner)
                 continue
             battle.summon_unit(clone, previous, summoner=owner)
-            exchanged = maybe_swap_new_clones(owner, [clone])
+            original_position = owner.position
+            clones = self.owned_clones(battle, owner)
+            exchanged = maybe_swap_new_clones(owner, clones)
+            exchanged_clone = next((unit for unit in clones if unit.position == original_position), clone) if exchanged else clone
             battle.log_public_event(f"{owner.name} 穿过敌方单位并留下分身"
                                     + ("，与分身换位。" if exchanged else "，本体留在原位。"),
-                                    source=owner, target=clone)
+                                    source=owner, target=exchanged_clone)
 
 
 GENTLEMAN_KIT = register_hero_kit(FragmentMappedHeroKit(
