@@ -7,7 +7,7 @@ from wujiang.tactical.heroes.mechanics.hell_core import (
     HellShuffleSkill,
     HellWallSkill,
 )
-from wujiang.tactical.heroes.mechanics.hell_rebirth import HellRebirthTrait
+from wujiang.tactical.heroes.mechanics.hell_rebirth import HellShuffleRebirthTrait
 
 
 def install(r) -> None:
@@ -20,7 +20,7 @@ def install(r) -> None:
             "地狱洗牌": HellShuffleSkill,
         },
         traits={
-            "此单位被技能破坏后，下个对方回合结束时以魔0的状态召唤到对方任意单位的周围，并且大招重置": lambda: HellRebirthTrait("excel_r239"),
+            "此单位被技能破坏后，下个对方回合结束时以魔0的状态召唤到对方任意单位的周围，并且大招重置": HellShuffleRebirthTrait,
         },
         extra_skill_factories=(lambda: HellOrbSkill(free=True), lambda: HellWallSkill(free=True),),
     ))

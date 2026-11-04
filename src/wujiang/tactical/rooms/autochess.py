@@ -25,14 +25,15 @@ from wujiang.tactical.rooms.synergy import CATEGORY_LABELS, SynergyStatus, syner
 class AutoChessConfig:
     initial_health: int = 30
     initial_gold: int = 10
-    base_income: int = 5
+    base_income: int = 7
     interest_step: int = 10
     interest_cap: int = 3
-    streak_reward_cap: int = 3
-    health_damage_reward_cap: int = 3
+    win_streak_reward_cap: int = 4
+    loss_streak_reward_cap: int = 2
     preparation_seconds: int = 90
     bench_capacity: int = 8
     shop_slots: int = 5
+    owned_shop_slot_chances: tuple[float, ...] = (0.20, 0.15, 0.10, 0.05, 0.01)
     reroll_cost: int = 2
     equipment_draw_cost: int = 10
     equipment_slots: int = 3
@@ -106,8 +107,9 @@ def hero_cost(level: int) -> int:
     return 1 + (29 * distance * distance + 80) // 81
 
 
-def owned_shop_chance(level: int) -> float:
-    return min(0.35, 0.05 * max(0, int(level) - 1))
+def streak_reward(streak: int, cap: int) -> int:
+    """A streak first pays on its third consecutive result."""
+    return min(cap, max(0, int(streak) - 2))
 
 
 def live_units(battle: Battle, side: int) -> list[Any]:
@@ -223,6 +225,7 @@ class ChessPlayer:
     eliminated: bool = False
     pieces: list[ChessPiece] = field(default_factory=list)
     shop: list[str | None] = field(default_factory=list)
+    last_shop_seed: int | None = None
     equipment_inventory: list[str] = field(default_factory=list)
     equipment_drawn_round: int = 0
 
@@ -296,24 +299,30 @@ class AutoChessState:
         return player
 
     def _draw_shop(self, player: ChessPlayer) -> list[str]:
+        player.last_shop_seed = secrets.randbits(128)
+        shop_rng = random.Random(player.last_shop_seed)
         catalog = hero_catalog()
         by_tier: list[list[str]] = [[] for _ in range(5)]
         for code, hero in catalog.items():
             # Shop odds retain their five native-level bands; prices are independent.
             by_tier[min(4, (max(1, int(hero["level"])) - 1) // 2)].append(code)
-        weights = [weight if by_tier[index] else 0
-                   for index, weight in enumerate(self.config.shop_weights[player.level - 1])]
-        if not any(weights):
+        if not any(by_tier):
             _error("当前没有可出售的公开武将。")
         owned = sorted({piece.code for piece in player.pieces if piece.code in catalog})
-        owned_chance = owned_shop_chance(player.level)
+        ordinary_by_tier = [[code for code in tier_codes if code not in owned] for tier_codes in by_tier]
+        weights = [weight if ordinary_by_tier[index] else 0
+                   for index, weight in enumerate(self.config.shop_weights[player.level - 1])]
+        ordinary_available = any(weights)
+        if not ordinary_available and not owned:
+            _error("当前没有可出售的公开武将。")
         result = []
-        for _ in range(self.config.shop_slots):
-            if owned_chance and owned and self.rng.random() < owned_chance:
-                result.append(self.rng.choice(owned))
+        for slot in range(self.config.shop_slots):
+            owned_chance = self.config.owned_shop_slot_chances[slot]
+            if owned and (not ordinary_available or shop_rng.random() < owned_chance):
+                result.append(shop_rng.choice(owned))
             else:
-                tier = self.rng.choices(range(5), weights=weights, k=1)[0]
-                result.append(self.rng.choice(by_tier[tier]))
+                tier = shop_rng.choices(range(5), weights=weights, k=1)[0]
+                result.append(shop_rng.choice(ordinary_by_tier[tier]))
         return result
 
     def start(self) -> None:
@@ -783,48 +792,41 @@ class AutoChessState:
                                if not match.mirror or loser_id == match.left else 0)
             result["actual_health_loss"] = dealt_to_player
             # The real player paired against a mirror keeps normal win income.
-            rewarded_damage = damage if match.mirror and loser_id != match.left else dealt_to_player
             if not match.mirror or winner_id == match.left:
-                outcomes[winner_id].append({"win": True, "damage_dealt": rewarded_damage,
-                                            "damage": 0})
+                outcomes[winner_id].append({"win": True, "damage": 0})
             if not match.mirror or loser_id == match.left:
-                outcomes[loser_id].append({"win": False, "damage_dealt": 0,
-                                           "damage": damage})
+                outcomes[loser_id].append({"win": False, "damage": damage})
         round_record = {"round": self.round_number, "matches": [], "players": {}}
         for match in self.matches:
             round_record["matches"].append({"left": match.left, "right": match.right,
                                             "mirror": match.mirror, **(match.result or {})})
         for seat_id, player_outcomes in outcomes.items():
             player = self.players[seat_id]
-            primary = player_outcomes[0] if player_outcomes else {"win": True, "damage_dealt": 0,
-                                                                   "damage": 0}
+            primary = player_outcomes[0] if player_outcomes else {"win": True, "damage": 0}
             if primary["win"]:
                 player.wins += 1
                 player.win_streak += 1
                 player.loss_streak = 0
                 victory_gold = 1
-                streak_gold = min(self.config.streak_reward_cap, player.win_streak)
-                health_damage_gold = min(self.config.health_damage_reward_cap,
-                                         primary["damage_dealt"])
+                streak_gold = streak_reward(player.win_streak, self.config.win_streak_reward_cap)
             else:
                 player.losses += 1
                 player.loss_streak += 1
                 player.win_streak = 0
-                victory_gold = health_damage_gold = 0
-                streak_gold = min(self.config.streak_reward_cap, player.loss_streak)
+                victory_gold = 0
+                streak_gold = streak_reward(player.loss_streak, self.config.loss_streak_reward_cap)
             # The workbook uses 100 base coins per shop gold.  Point Gold's
             # die therefore awards 1..player-count auto chess gold per copy.
             item_gold = sum(self.rng.randint(1, self.seat_count)
                             for piece in player.fielded()
                             for code in piece.equipment if code == "点金手")
-            gold_gain = victory_gold + streak_gold + health_damage_gold + item_gold
+            gold_gain = victory_gold + streak_gold + item_gold
             player.gold += gold_gain
             health_loss = min(max(0, player.health), sum(item["damage"] for item in player_outcomes))
             player.health -= health_loss
             round_record["players"][seat_id] = {"gold_gain": gold_gain,
                                                 "victory_gold": victory_gold,
                                                 "streak_gold": streak_gold,
-                                                "health_damage_gold": health_damage_gold,
                                                 "item_gold": item_gold,
                                                 "health_loss": health_loss,
                                                 "health": max(0, player.health)}
@@ -912,7 +914,7 @@ class AutoChessState:
                                           if code else {})} for index, code in enumerate(player.shop)],
                                "equipment_inventory": list(player.equipment_inventory),
                                "equipment_drawn_this_round": player.equipment_drawn_round == self.round_number,
-                               "owned_shop_chance": owned_shop_chance(player.level),
+                               "owned_shop_slot_chances": self.config.owned_shop_slot_chances,
                                "budget": self.config.level_budgets[player.level - 1],
                                "budget_used": self._budget_used(player),
                                "roster_capacity": self._roster_capacity(player, self.config.level_budgets[player.level - 1]),
@@ -936,6 +938,8 @@ class AutoChessState:
                                        "effect": item["effect"]} for code, item in EQUIPMENT_CATALOG.items()],
                 "config": {"preparation_seconds": self.config.preparation_seconds,
                            "base_income": self.config.base_income,
+                           "win_streak_reward_cap": self.config.win_streak_reward_cap,
+                           "loss_streak_reward_cap": self.config.loss_streak_reward_cap,
                            "interest_step": self.config.interest_step,
                            "interest_cap": self.config.interest_cap,
                            "level_costs": self.config.level_costs,

@@ -163,6 +163,13 @@ class ChanterCardFieldEffect(BattleFieldEffect):
 
 
 class ChanterCardSkill(Skill):
+    ai_nonhostile_throttle_exempt = True
+
+    def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
+        enemies = [unit for unit in targets if unit.player_id != context.actor.player_id]
+        return _CARD_AI_VALUES[self.card_type].control_bonus(context, enemies)
+
+    ai_enemy_impact_requirement = False
     ai_candidate_plan = RANKED_CANDIDATES
     ai_early_effect_score = True
     def ai_target_value(self, context: AISkillScoreContext, target: HeroUnit) -> float:
@@ -252,6 +259,9 @@ class ChanterCardSkill(Skill):
 
 
 class ParalysisCardAIValue:
+    def control_bonus(self, context: AISkillScoreContext, enemies: list[Unit]) -> float:
+        return len(enemies) * 32.0
+
     def score(self, context: AISkillScoreContext, target: HeroUnit) -> float:
         battle = context.battle
         covered = any(getattr(effect, "card_type", None) == "paralysis"
@@ -262,6 +272,10 @@ class ParalysisCardAIValue:
 
 
 class DrainCardAIValue:
+    def control_bonus(self, context: AISkillScoreContext, enemies: list[Unit]) -> float:
+        return sum(min(unit.current_mana, 1.0) * 35.0
+                   + context.hostile_value(unit) * 0.12 for unit in enemies)
+
     def score(self, context: AISkillScoreContext, target: HeroUnit) -> float:
         if is_mana_drain_immune(target):
             return 0.0
@@ -270,6 +284,9 @@ class DrainCardAIValue:
 
 
 class PoisonCardAIValue:
+    def control_bonus(self, context: AISkillScoreContext, enemies: list[Unit]) -> float:
+        return len(enemies) * 28.0 + sum(unit.current_hp * 18.0 for unit in enemies)
+
     def score(self, context: AISkillScoreContext, target: HeroUnit) -> float:
         with context.probe_rollback():
             ctx = context.battle.resolve_damage(DamageContext(
@@ -405,6 +422,10 @@ class MagicClawLockStatus(FlagStatus):
 
 
 class MagicClawSkill(Skill):
+    def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
+        return sum(unit.player_id != context.actor.player_id for unit in targets) * 30.0
+
+    ai_probe_hostile_effect = True
     ai_early_effect_score = True
     def ai_effect_score(self, context: AISkillScoreContext) -> float:
         battle, actor = context.battle, context.actor
@@ -517,6 +538,20 @@ class FormShiftStatus(StatusEffect):
 
 
 class FormShiftSkill(Skill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        actor, battle = context.actor, context.battle
+        enemies = [unit for unit in battle.enemy_units(actor.player_id)
+                   if unit.alive and unit.position is not None and not unit.banished]
+        before = context.best_attack_score()
+        with context.probe_rollback():
+            self.execute(battle, actor, {})
+            after = context.best_attack_score()
+        adjacent = any(context.shared.unit_distance(battle, actor, enemy) <= 1 for enemy in enemies)
+        cards = [effect for effect in battle.field_effects
+                 if getattr(effect, "owner_unit_id", None) == actor.unit_id and hasattr(effect, "card_type")]
+        return after + 25.0 if adjacent and after > before + 15.0 and (
+            len(cards) >= 2 or actor.current_hp <= 0.5 or actor.current_mana < 1.5) else -1000.0
+
     def __init__(self) -> None:
         super().__init__(
             "form_shift",

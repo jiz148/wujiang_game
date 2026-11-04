@@ -9,6 +9,7 @@ from wujiang.tactical.engine.core import DamageContext
 from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
+from wujiang.tactical.heroes.ai_red_preparation import RedAttackPreparationMixin
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
@@ -49,6 +50,9 @@ class InnerDimensionSwordStatus(StatusEffect):
 
 
 class InnerDimensionSwordSkill(Skill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.feiwang_stance_score(context)
+
     def __init__(self) -> None:
         super().__init__("inner_dimension_sword", "里次元大剑", "开关技能：每回合一次，仅回合开始使用；攻 +2，速 -2，普攻扩散。", max_uses_per_turn=1, target_mode="self")
 
@@ -111,6 +115,9 @@ class KingsInsightField(BattleFieldEffect):
 
 
 class KingsInsightSkill(Skill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.kings_insight_score(context)
+
     def __init__(self) -> None:
         super().__init__("kings_insight", "王者的看破", "普通技能：2 轮一次；本回合天气，非己方飞王使用被动技能血 -3/4，己方飞王魔 +2。", cooldown_turns=2, target_mode="self")
 
@@ -143,7 +150,17 @@ class WeaponTransferStatus(StatModifierStatus):
         super().__init__("武器传送", attack_delta=5, duration=1, tick_scope="any_turn_end", description="直到当前回合结束前攻 +5。")
 
 
-class WeaponTransferSkill(Skill):
+class WeaponTransferSkill(RedAttackPreparationMixin, Skill):
+    def ai_red_adjust_attack_plan(self, battle, actor, services, profile, after: float) -> float:
+        infinite = actor.skill_map().get("infinite")
+        if infinite is not None and infinite.can_use(battle, actor)[0]:
+            infinite.execute(battle, actor, {})
+            return max(after, services.red_attack_plan_value(battle, actor) - profile.once_per_battle_threshold)
+        return after
+
+    def ai_red_success_bonus(self) -> float:
+        return 25.0
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.red_preparation_score(context)
 
@@ -155,6 +172,22 @@ class WeaponTransferSkill(Skill):
 
 
 class RedChargeSkill(Skill):
+    def ai_red_preparation_score(self, battle, actor, services, profile) -> float:
+        if actor.mana_points >= getattr(actor, "max_mana_points", 5) or actor.direct_effects_blocked():
+            return -20.0
+        bow = actor.skill_map().get("deadly_bow")
+        best_before = best_after = -1000.0
+        if bow is not None and bow.can_use(battle, actor)[0]:
+            for direction in bow.DIRECTIONS:
+                payload = {"direction": direction}
+                best_before = max(best_before, services.deadly_bow_score(
+                    battle, actor, {"code": bow.code}, payload, profile))
+                with services.ai_probe_rollback(battle):
+                    actor.gain_mana_points(1)
+                    best_after = max(best_after, services.deadly_bow_score(
+                        battle, actor, {"code": bow.code}, payload, profile))
+        return max(28.0, best_after + 30.0) if best_after > best_before + 3 else 24.0
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.red_preparation_score(context)
 

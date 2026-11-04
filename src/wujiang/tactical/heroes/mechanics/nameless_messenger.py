@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import DamageContext
@@ -24,6 +25,14 @@ class MessengerDragonBreathSkill(DragonBreathSkill):
 
 
 class MessengerReincarnationSkill(Skill):
+    def ai_messenger_preparation_score(self, actor, opportunity: float) -> float:
+        if actor.current_mana > 1e-9 or actor.mana_points < 2:
+            return -10.0
+        return min(180.0, opportunity) + min(actor.max_mana(), 5.0) * 24.0
+
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.messenger_preparation_score(context)
+
     def __init__(self) -> None:
         super().__init__(
             "messenger_reincarnation",
@@ -71,6 +80,12 @@ class MessengerReincarnationSkill(Skill):
 
 
 class MessengerCreationSkill(Skill):
+    def ai_messenger_preparation_score(self, actor, opportunity: float) -> float:
+        return (35.0 if actor.current_mana <= 1e-9 and actor.mana_points >= 1 else 16.0) if actor.mana_points < 2 else -10.0
+
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.messenger_preparation_score(context)
+
     def __init__(self) -> None:
         super().__init__(
             "messenger_creation",

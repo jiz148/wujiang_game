@@ -190,6 +190,19 @@ class MovementSkillLockStatus(StatusEffect):
 
 
 class HundredBirdBurialSkill(Skill):
+    ai_simulated_control_status = "百鸟葬禁位移"
+
+    def ai_simulated_control_value(self, battle, actor, target, services) -> float:
+        return 24.0 * sum(skill_has_movement_effect(candidate) and not target.cannot_use_skills
+            and candidate.cooldown_remaining == 0 and candidate.mana_cost <= target.current_mana
+            and not any(component.blocks_skill_use(battle, target, candidate)[0] for component in target.iter_components())
+            for candidate in target.skills)
+
+    def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
+        return sum(24.0 + 18.0 * sum(skill_has_movement_effect(skill) for skill in unit.skills)
+                   for unit in targets if unit.player_id != context.actor.player_id
+                   and not unit.has_status("百鸟葬禁位移"))
+
     ai_effective_impact_rule = R13_IMPACT
     def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
         return actor.stat("attack") + 2.0

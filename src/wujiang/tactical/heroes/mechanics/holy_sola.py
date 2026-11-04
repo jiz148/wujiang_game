@@ -52,6 +52,8 @@ class SolaHarvestAIPolicy(HeroAIPolicy):
 
 
 class HolyWallSkill(LightWallSkill):
+    ai_paid_reaction_shield = False
+
     def __init__(self) -> None:
         super().__init__()
         self.code = "holy_wall"
@@ -137,6 +139,9 @@ class SolaHarvestAuraTrait(Trait):
 
 
 class IlluminationLightSkill(Skill):
+    def ai_ignores_shield_for_target(self, battle, actor, payload, target):
+        return target.attribute == "暗"
+
     ai_effective_impact_rule = R18_IMPACT
     def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
         return 4.0

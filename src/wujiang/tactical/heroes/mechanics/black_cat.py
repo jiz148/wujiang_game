@@ -24,6 +24,25 @@ from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_c
 
 
 class BlackCatPawSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        targets = list(context.effect_units(self))
+        if not any(unit.player_id != actor.player_id for unit in targets):
+            return -1000.0
+        with context.probe_rollback():
+            before = {unit.unit_id: (unit.current_hp, unit.current_mana, unit.total_shields()) for unit in targets}
+            before_mana = actor.current_mana
+            self.execute(battle, actor, payload)
+            score = (actor.current_mana - before_mana) * 18.0
+            for unit in targets:
+                hp, mana, shields = before[unit.unit_id]
+                value = max(0.0, hp - unit.current_hp) * 160.0 + max(0.0, mana - unit.current_mana) * 24.0
+                value += max(0, shields - unit.total_shields()) * 20.0
+                if context.death_probability(unit) > 0:
+                    value += (80.0 * context.death_probability(unit) if context.direct_scoring() else 80.0)
+                score += value if unit.player_id != actor.player_id else -value * 1.3
+        return score if score > 0 else -1000.0
+
     def __init__(self) -> None:
         super().__init__("black_cat_paw", "猫手", "普通技能：每回合最多 1 次；攻击周围单位，并附带破魔的吸魔效果。", max_uses_per_turn=1, target_mode="self")
 
@@ -116,6 +135,9 @@ class BlackCatFormStatus(StatusEffect):
 
 
 class BlackCatFormSkill(Skill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.cat_form_score(context)
+
     def __init__(self) -> None:
         super().__init__("black_cat_form", "化猫", "开关技能：每回合最多 1 次，仅可在回合开始时使用；开启/关闭化猫形态。", max_uses_per_turn=1, target_mode="self")
 
@@ -138,6 +160,9 @@ class BlackCatFormSkill(Skill):
 
 
 class FantasyMoveSkill(TargetDestinationCandidates, Skill):
+    def ai_hostile_target_impact(self, battle, actor, payload, target):
+        return payload.get("x") is not None and payload.get("y") is not None
+
     ai_effective_impact_rule = R17_IMPACT
     ai_candidate_plan = POSITIVE_RANKED_CANDIDATES
     def ai_priority_score(self, context: AISkillScoreContext) -> float:

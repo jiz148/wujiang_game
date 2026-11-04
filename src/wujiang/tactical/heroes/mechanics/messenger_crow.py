@@ -20,7 +20,7 @@ from wujiang.tactical.rooms.ai_targets import living_hostile_combatants
 
 class MessengerCrowAura(BattleFieldEffect):
     def __init__(self, crow_id: str) -> None:
-        super().__init__("报信乌鸦威压", "外邻敌方单位速-1至最低1，不能使用本次实际费用0的技能。")
+        super().__init__("报信乌鸦威压", "外邻敌方单位速-1至最低1，不能使用本次实际费用0的技能；同名效果不叠加。")
         self.crow_id = crow_id
         self.source_unit_id = crow_id
 
@@ -53,7 +53,7 @@ class MessengerCrowAura(BattleFieldEffect):
 
 class MessengerCrowAuraTrait(Trait):
     def __init__(self) -> None:
-        super().__init__("报信乌鸦威压", "外邻敌方速-1，不能使用本次不费魔的技能。")
+        super().__init__("报信乌鸦威压", "外邻敌方速-1，不能使用本次不费魔的技能；同名效果不叠加。")
         self.field: MessengerCrowAura | None = None
 
     def on_enter_battle(self, battle: Battle) -> None:
@@ -77,7 +77,7 @@ class MessengerCrowSummon(AbstractHero):
     level = 1
     base_stats = Stats(attack=1, defense=3, speed=5, attack_range=1, mana=0)
     raw_skill_text = ""
-    raw_trait_text = "飞行；外邻敌方速-1且不能使用不费魔技能"
+    raw_trait_text = "飞行；外邻敌方速-1且不能使用不费魔技能；效果不叠加"
 
     def __init__(self, player_id: int) -> None:
         super().__init__(player_id, is_summon=True)
@@ -130,7 +130,7 @@ class MessengerCrowSkill(Skill):
         return self.position_score(context.battle, context.actor, cell, mana_cost=0.5)
 
     def __init__(self) -> None:
-        super().__init__("messenger_crow", "报信乌鸦", "费0.5魔；选外邻合法空格召唤飞行报信乌鸦。",
+        super().__init__("messenger_crow", "报信乌鸦", "费0.5魔；选外邻合法空格召唤飞行报信乌鸦；威压效果不叠加。",
                          mana_cost=0.5, target_mode="cell")
 
     def available_cells(self, battle: Battle, actor: Unit) -> list[Position]:

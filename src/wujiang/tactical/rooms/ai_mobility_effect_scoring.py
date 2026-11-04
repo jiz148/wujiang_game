@@ -340,7 +340,7 @@ class AIMobilityEffectScoring:
                 if hostile and unit.alive and not pending and getattr(unit.get_status("毁灭电击"), "pending", False):
                     score += unit.normal_move_distance() * 4 + (0 if unit.is_clone else unit.attack_actions_per_turn() * 20)
                     score += min(30, sum(other.timing == "active" and other.mana_cost <= unit.current_mana for other in unit.skills) * 10)
-            if actor.hero_code == "excel_r138" and actor.mana_points > points:
+            if getattr(getattr(actor, "ai_policy", None), "ai_messenger_mana", False) and actor.mana_points > points:
                 score += 14.0 if points < 2 <= actor.mana_points else (3.0 if points < 4 else 0.0)
             if changed_enemy:
                 score += pressure

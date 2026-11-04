@@ -72,6 +72,7 @@ class SektoruMovedByAllyTrait(Trait):
         soul = next((skill for skill in owner.skills if skill.code == "gladiator_soul"), None)
         if soul is not None:
             soul.cooldown_remaining = 0
+            soul.uses_this_battle = 0
         battle.log_public_event(f"{owner.name} 受友方位移，攻魔各+1并重置剑斗之魂。",
                                 source=source, target=owner)
         chosen: set[str] = set()

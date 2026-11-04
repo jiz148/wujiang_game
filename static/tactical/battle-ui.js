@@ -1085,10 +1085,8 @@ function chainQueuedActionSummary(chain) {
 export function chainQueuedActionPrompt(chain) {
   const summary = chainQueuedActionSummary(chain);
   const gravityPayload = chain?.queued_action?.payload;
-  const gravityResult = gravityPayload?.skill_code === "gravity_field"
-    && Array.isArray(gravityPayload.gravity_coin_values)
-    && [1, 2, 4, 8].includes(Number(gravityPayload.gravity_side))
-    ? `硬币 ${gravityPayload.gravity_coin_values.join("、")}，范围 ${gravityPayload.gravity_side}×${gravityPayload.gravity_side}；`
+  const gravityResult = typeof gravityPayload?.chain_prompt_prefix === "string"
+    ? gravityPayload.chain_prompt_prefix
     : "";
   if (summary && summary.startsWith("\u3010")) return `${gravityResult}${summary}`;
   const actionName = chain?.queued_action?.display_name || "\u539f\u52a8\u4f5c";

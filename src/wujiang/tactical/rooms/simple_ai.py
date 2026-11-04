@@ -9,9 +9,16 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Optional
 
-from wujiang.tactical.engine.core import Battle, Position, Unit
+from wujiang.tactical.engine.core import ActionError, Battle, Position, Unit
 
 MOVE_LIMIT = 12
+
+
+def _ai_skill(actor: Unit, code: str) -> Any:
+    try:
+        return actor.get_skill(code)
+    except (ActionError, KeyError, ValueError):
+        return None
 
 
 def choose_turn_bundle_action(
@@ -24,7 +31,7 @@ def choose_turn_bundle_action(
         if not unit.can_take_turn_actions(battle):
             continue
         snapshot = battle.action_snapshot_for(unit)
-        if unit.hero_code == "excel_r373" and unit.current_mana > 0:
+        if getattr(getattr(unit, "ai_policy", None), "simple_prefer_instant", False) and unit.current_mana > 0:
             overclock = _skill_payload(battle, unit, snapshot, timing="instant")
             if overclock is not None:
                 return overclock, unit
@@ -43,7 +50,8 @@ def choose_turn_bundle_action(
 def choose_instant_action(battle: Battle, units: Iterable[Unit], difficulty: str) -> Optional[dict[str, Any]]:
     del difficulty
     ordered = list(units)
-    ordered.sort(key=lambda unit: unit.hero_code != "excel_r373")
+    ordered.sort(key=lambda unit: not getattr(
+        getattr(unit, "ai_policy", None), "simple_prefer_instant", False))
     for unit in ordered[:4]:
         snapshot = battle.action_snapshot_for(unit)
         payload = _skill_payload(battle, unit, snapshot, timing="instant")
@@ -59,7 +67,7 @@ def choose_chain_reaction(
     difficulty: str,
 ) -> Optional[dict[str, Any]]:
     del difficulty
-    if reactor.hero_code == "excel_r373" and battle.pending_chain is not None:
+    if getattr(getattr(reactor, "ai_policy", None), "simple_ion_reaction", False) and battle.pending_chain is not None:
         queued = battle.pending_chain.queued_action
         for option in options:
             code = str(option.get("action_code") or "")
@@ -78,7 +86,8 @@ def choose_chain_reaction(
                        "action_code": code, "target_unit_ids": [target_id]}
             if reactor.get_skill(code).can_react_with_payload(battle, reactor, queued, payload)[0]:
                 return payload
-    if reactor.hero_code in {"excel_r328", "excel_r329", "flying_dragon_ship_atlanta"}:
+    if (getattr(getattr(reactor, "ai_policy", None), "simple_ship_cover_reaction", False)
+            or getattr(reactor, "simple_ship_cover_reaction", False)):
         queued = battle.pending_chain.queued_action if battle.pending_chain is not None else None
         if queued is not None and not queued.payload.get("ignore_shield"):
             affected_ids = set(queued.target_unit_ids)
@@ -171,16 +180,13 @@ def _skill_payload(
     """
     seen = 0
     actions = list(snapshot.get("actions", []))
-    if actor.hero_code == "excel_r324":
-        priority = {"eight_dragon_crow_array": 0, "square_crow_array": 1,
-                    "hexagram_crow_array": 2, "triangle_crow_array": 3,
-                    "super_messenger_crow": 4}
-        actions.sort(key=lambda item: priority.get(str(item.get("code") or ""), 5))
-    if actor.hero_code in {"excel_r328", "excel_r329"}:
-        priority = {"flying_dragon_ship": 0, "departure_signal": 1,
-                    "dragon_breath": 2, "add_health": 2, "add_mana": 3,
-                    "chain_pull": 4, "defense_one": 5, "silver_signal_flare": 6}
-        actions.sort(key=lambda item: priority.get(str(item.get("code") or ""), 7))
+    policy = getattr(actor, "ai_policy", None)
+    rank = getattr(policy, "simple_skill_rank", None)
+    if callable(rank):
+        actions.sort(key=lambda item: rank(str(item.get("code") or "")))
+    else:
+        actions.sort(key=lambda item: getattr(
+            _ai_skill(actor, str(item.get("code") or "")), "tendency_priority_rank", 5))
     for action in actions:
         if action.get("kind") != "skill" or not action.get("available"):
             continue
@@ -188,26 +194,16 @@ def _skill_payload(
             continue
         if str(action.get("direction_mode") or "none") == "required":
             continue
-        repeatable_crow = actor.hero_code == "excel_r324" and str(action.get("code") or "") in {
-            "super_messenger_crow", "triangle_crow_array", "square_crow_array",
-            "hexagram_crow_array", "eight_dragon_crow_array"}
-        if action.get("max_uses_per_turn") is None and int(action.get("uses_this_turn") or 0) >= (3 if repeatable_crow else 1):
+        skill = _ai_skill(actor, str(action.get("code") or ""))
+        repeat_limit = getattr(skill, "simple_repeatable_limit", 1)
+        if action.get("max_uses_per_turn") is None and int(action.get("uses_this_turn") or 0) >= repeat_limit:
             continue
         seen += 1
-        if seen > (7 if actor.hero_code in {"excel_r328", "excel_r329", "flying_dragon_ship_atlanta"} else 4):
+        if seen > getattr(policy, "simple_skill_budget", getattr(actor, "simple_skill_budget", 4)):
             break
-        code = str(action.get("code") or "").rsplit("__", 1)[-1]
-        if code == "silver_signal_flare":
-            signal = actor.get_skill(str(action.get("code")))
-            signal = getattr(signal, "inner", signal)
-            targets = [unit for unit in signal.beneficiaries(battle, actor)
-                       if not unit.has_status("银制信号弹攻势")]
-            if any(unit.is_clone and not unit.direct_effects_blocked() for unit in targets):
-                continue
-            if not any(not unit.is_clone and battle.unit_belongs_to_current_turn(unit)
-                       and unit.attacks_used < unit.attack_actions_per_turn()
-                       for unit in targets):
-                continue
+        cast_check = getattr(getattr(skill, "inner", skill), "simple_ai_cast_useful", None)
+        if callable(cast_check) and not cast_check(battle, actor):
+            continue
         payload = _skill_from_preview(battle, actor, action)
         if payload is not None:
             return payload
@@ -219,7 +215,8 @@ def _skill_from_preview(battle: Battle, actor: Unit, action: dict[str, Any]) -> 
     mode = str(action.get("target_mode") or "none")
     listed = [str(item) for item in (preview.get("target_unit_ids") or [])]
     source_code = str(action.get("code") or "").rsplit("__", 1)[-1]
-    if actor.hero_code == "excel_r373" and source_code in {"machine_gun", "missile"}:
+    area_targeting = getattr(getattr(actor, "ai_policy", None), "simple_area_targeting", None)
+    if callable(area_targeting) and area_targeting(source_code):
         patterns = (preview.get("selection") or {}).get("patterns") or []
         ranked: list[tuple[float, list[Position]]] = []
         for pattern in patterns:
@@ -378,13 +375,11 @@ def _move_payload(battle: Battle, actor: Unit, snapshot: dict[str, Any]) -> Opti
 
 def _shortlist(battle: Battle, actor: Unit, cells: list[Position]) -> list[Position]:
     origin = actor.position
-    if actor.hero_code in {"excel_r328", "excel_r329"} and battle.mounted_unit_for(actor) is None:
-        from wujiang.tactical.heroes.flying_dragon_ship import allied_ship
-        ship = allied_ship(battle, actor.player_id)
-        if ship is not None:
-            boarding = [cell for cell in cells if cell in battle.unit_cells(ship)]
-            if boarding:
-                return boarding[:MOVE_LIMIT]
+    boarding = getattr(getattr(actor, "ai_policy", None), "tendency_boarding_destination", None)
+    if callable(boarding):
+        chosen = boarding(battle, actor, cells)
+        if chosen is not None:
+            return [chosen]
     enemies = _enemies(battle, actor.player_id)
     if origin is None or not enemies or len(cells) <= MOVE_LIMIT:
         return cells[:MOVE_LIMIT] or cells

@@ -40,6 +40,11 @@ class NianLargeDragonBreathSkill(DragonBreathSkill):
 
 
 class NianDragonDanceSkill(Skill):
+    ai_future_heal = True
+
+    def ai_simulation_after(self, battle, actor, queued, services, profile, saved, before, units) -> float:
+        return -20.0  # Preserve the two-round recovery when only a little mana is missing.
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r13_effect_score(self)
 
@@ -59,6 +64,18 @@ class NianSpiritPressureStatus(StatModifierStatus):
 
 
 class NianSpiritPressureSkill(Skill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        actor, battle = context.actor, context.battle
+        enemies = [unit for unit in battle.enemy_units(actor.player_id)
+                   if unit.alive and unit.position is not None and not unit.banished]
+        if actor.get_status("灵压") is not None or not enemies:
+            return -8.0
+        in_window = any(
+            context.shared.unit_distance(battle, actor, enemy) <= actor.targeting_range() + actor.normal_move_distance()
+            or context.shared.unit_distance(battle, actor, enemy) <= enemy.targeting_range() + enemy.normal_move_distance()
+            for enemy in enemies)
+        return 84.0 + context.profile.aggressive_bonus if in_window else -8.0
+
     def __init__(self) -> None:
         super().__init__("nian_spirit_pressure", "灵压", "大招：一场战斗一次；自身攻 +1、守 +1，持续 3 轮。", max_uses_per_battle=1, target_mode="self")
 
@@ -86,6 +103,17 @@ class NianRoarStatus(StatusEffect):
 
 
 class NianRoarSkill(Skill):
+    def ai_simulation_before(self, battle, actor, services):
+        protected = [unit for unit in battle.player_units(actor.player_id) if unit.alive and unit.unit_id != actor.unit_id]
+        return {unit.unit_id: services.r19_incoming_position_risk(battle, unit) for unit in protected}
+
+    def ai_simulation_after(self, battle, actor, queued, services, profile, saved, before, units) -> float:
+        if not any(unit.alive and unit.has_status("怒吼") and "怒吼" not in before[unit.unit_id][4]
+                   for unit in units):
+            return 0.0
+        return min(90.0, sum(max(0.0, risk - services.r19_incoming_position_risk(battle, battle.get_unit(unit_id)))
+                               for unit_id, risk in saved.items() if battle.units.get(unit_id) is not None))
+
     ai_effective_impact_rule = R13_IMPACT
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r13_effect_score(self)
@@ -162,6 +190,11 @@ class NianNoHealStatus(StatusEffect):
 
 
 class NianJadeFlashSkill(Skill):
+    ai_simulated_control_status = "碧玉闪光"
+
+    def ai_simulated_control_value(self, battle, actor, target, services) -> float:
+        return services.r13_recovery_value(battle, target)
+
     ai_effective_impact_rule = R13_IMPACT
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r13_effect_score(self)

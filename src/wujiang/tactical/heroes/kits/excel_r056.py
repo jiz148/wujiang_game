@@ -1,6 +1,7 @@
 """Source-preserving object assembly for excel_r056 / 蕾米."""
 
 from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_hero_kit
+from wujiang.tactical.heroes.ai_score_policies import RemiPiercePolicy
 from wujiang.tactical.heroes.mechanics.remi_bat import (
     RemiBatSkill,
     RemiChaosSkill,
@@ -11,6 +12,7 @@ from wujiang.tactical.heroes.mechanics.remi_bat import (
 def install(r) -> None:
     register_hero_kit(FragmentMappedHeroKit(
         "excel_r056",
+        ai_policy=RemiPiercePolicy(),
         skills={
             "混沌": RemiChaosSkill,
             "蝙蝠": RemiBatSkill,

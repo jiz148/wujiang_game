@@ -16,6 +16,7 @@ from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.engine.core import Unit
 from wujiang.tactical.heroes.base import AbstractHero
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import DashMoveSkill
 from wujiang.tactical.heroes.common import PassiveProtectionSkill
 from wujiang.tactical.heroes.common import ShensuSkill
@@ -102,6 +103,21 @@ class FreeShensuSkill(ShensuSkill):
 
 
 class MountedLeapSkill(DashMoveSkill):
+    def ai_move_score(self, context: AISkillScoreContext, base_score: float,
+                      destination: Position) -> float:
+        battle, actor = context.battle, context.actor
+        if actor.position is None:
+            return base_score
+        before = context.shared.masamune_attack_plan_value(context)
+        with context.shared.probe_rollback(battle):
+            battle.clear_mounted_state(actor)
+            actor.position = destination
+            followup = next((skill for skill in actor.skills if skill.code == "six_blade_style"), None)
+            if followup is not None and followup.can_use(battle, actor, {})[0]:
+                followup.execute(battle, actor, {})
+            after = context.shared.masamune_attack_plan_value(context)
+        return base_score + (min(100.0, after - before) - 40.0)
+
     def __init__(self) -> None:
         super().__init__(
             "mounted_leap",
@@ -156,6 +172,16 @@ class SixBladeStyleStatus(StatusEffect):
 
 
 class SixBladeStyleSkill(Skill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        actor, battle = context.actor, context.battle
+        before = context.shared.masamune_attack_plan_value(context)
+        before_score = context.best_attack_score()
+        with context.probe_rollback():
+            self.execute(battle, actor, {})
+            after = context.shared.masamune_attack_plan_value(context)
+            after_score = context.best_attack_score()
+        return max(before_score, after_score) + 25.0 if after > before + 1.0 else -1000.0
+
     def __init__(self) -> None:
         super().__init__(
             "six_blade_style",
@@ -180,6 +206,10 @@ class SixBladeStyleSkill(Skill):
 
 
 class HealMountSkill(Skill):
+    def ai_heal_score(self, context: AISkillScoreContext, healed: Unit) -> float:
+        mount = context.battle.mounted_unit_for(context.actor)
+        return context.shared.probed_heal_score(context, self, mount or context.actor)
+
     def __init__(self) -> None:
         super().__init__(
             "heal_mount",

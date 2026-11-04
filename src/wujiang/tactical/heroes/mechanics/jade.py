@@ -122,6 +122,8 @@ class JadeMachineGunSkill(DeclaredAreaSkillMixin, MachineGunSkill):
 
 
 class MissileAreaMixin(DeclaredAreaSkillMixin):
+    ai_area_bonus_codes = frozenset({"missile"})
+
     def patterns(self, battle: Battle, actor: HeroUnit) -> list[list[Position]]:
         return remote_rectangle_patterns(battle, actor, 2, 2)
 
@@ -226,6 +228,8 @@ class IonShieldSkill(MultiTargetChainShieldSkill):
 
 
 class LaserSkill(DeclaredAreaSkillMixin, Skill):
+    ai_area_bonus_codes = frozenset({"laser"})
+
     def __init__(self) -> None:
         super().__init__(
             "laser",
@@ -371,6 +375,12 @@ class QuantumShieldSkill(DelayedCooldownMultiTargetWallSkill):
 
 
 class MechEnhancementSkill(Skill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        return 38.0
+
+    def ai_heal_score(self, context: AISkillScoreContext, healed: Unit) -> float:
+        return context.shared.probed_heal_score(context, self, healed)
+
     def __init__(self) -> None:
         super().__init__(
             "mech_enhancement",
@@ -520,6 +530,20 @@ class StanceFieldEffect(BattleFieldEffect):
 
 
 class StanceSkill(Skill):
+    def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
+        return context.shared.field_skill_score(context)
+
+    ai_enemy_impact_requirement = False
+    def ai_field_score(self, battle: Battle, actor: Unit, targets: list[Unit], distance) -> float:
+        allies = [unit for unit in battle.player_units(actor.player_id)
+                  if unit.alive and unit.position is not None and not unit.banished]
+        enemies = [unit for unit in battle.enemy_units(actor.player_id)
+                   if unit.alive and unit.position is not None and not unit.banished]
+        nearby_allies = sum(1 for unit in allies if unit.unit_id != actor.unit_id
+                            and distance(battle, actor, unit) <= 3)
+        nearby_enemies = sum(1 for unit in enemies if distance(battle, actor, unit) <= 4)
+        return nearby_allies * 24.0 + nearby_enemies * 10.0 if nearby_allies else -1000.0
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.field_skill_score(context)
 

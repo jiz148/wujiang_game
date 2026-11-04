@@ -100,7 +100,7 @@ class WillowExchangeSkill(Skill):
         return value - 55.0
 
     def __init__(self) -> None:
-        super().__init__("exchange", "交换", "一场一次；破魔并与范内直线目标交换位置，多格身体取双方最近合法落点。",
+        super().__init__("exchange", "交换", "一场一次；没有伤害；破魔并与范内直线目标交换位置，多格身体取双方最近合法落点。",
                          max_uses_per_battle=1, target_mode="unit")
 
     def targets(self, battle: Battle, actor: Unit) -> list[Unit]:
@@ -139,7 +139,7 @@ class WillowExchangeSkill(Skill):
             return
         hostile = target.player_id != actor.player_id
         result = battle.validate_target(actor, target, action_name=self.name, is_skill=True,
-                                        is_hostile=hostile, ignore_shield=True,
+                                        is_hostile=hostile, ignore_shield=True, damage_target=False,
                                         resolve_defenses=False, record_effect_on_validation=False)
         if result.cancelled or target.skill_non_damage_effects_blocked():
             battle.log_public_event(result.reason or f"{target.name} 未受交换影响。", source=actor, target=target)
@@ -404,6 +404,7 @@ class GladiatorClawSkill(GladiatorSwapSkill):
 
 
 class GladiatorGaleSkill(GladiatorSwapSkill):
+    ai_enemy_impact_requirement = False
     ai_candidate_plan = RANKED_CANDIDATES
     def __init__(self) -> None:
         super().__init__(code="gladiator_gale", name="暴风", length=5, requires_damage=False, pierces=False)
@@ -434,6 +435,7 @@ class GladiatorSoulStatus(StatModifierStatus):
 
 
 class GladiatorSoulSkill(Skill):
+    ai_enemy_impact_requirement = False
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.paid_skill_value()
 
@@ -441,8 +443,8 @@ class GladiatorSoulSkill(Skill):
 
     def __init__(self) -> None:
         super().__init__("gladiator_soul", "剑斗之魂",
-                         "3本人轮冷却；周围双方其他单位攻和魔能力值各+1，持续受体3本人轮。",
-                         cooldown_turns=3, target_mode="self")
+                         "大招；周围双方其他单位攻和魔能力值各+1，持续受体3本人轮；受友方效果位移后重置。",
+                         max_uses_per_battle=1, target_mode="self")
 
     def affected_cells(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> list[Position]:
         if payload.get("queued_resolution") and "soul_cells" in payload:

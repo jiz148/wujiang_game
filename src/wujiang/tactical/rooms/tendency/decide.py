@@ -4,7 +4,7 @@ from __future__ import annotations
 import random
 from typing import Any, Iterable, Optional
 
-from wujiang.tactical.engine.core import Battle, Position, Unit
+from wujiang.tactical.engine.core import ActionError, Battle, Position, Unit
 from wujiang.tactical.rooms.tendency.log import record_decision
 from wujiang.tactical.rooms.tendency.situation import Situation, build_situation
 
@@ -80,6 +80,28 @@ def _is_companion(unit: Unit) -> bool:
     return bool(unit.is_summon or unit.is_clone or getattr(unit, "is_mount", False))
 
 
+def _skill_object(unit: Unit, code: str) -> Any:
+    get_skill = getattr(unit, "get_skill", None)
+    if get_skill is None:
+        return None
+    try:
+        return get_skill(code)
+    except (ActionError, KeyError, ValueError):
+        return None
+
+
+def _overclock_codes(unit: Unit, snapshot: dict[str, Any]) -> tuple[str, ...]:
+    ranked = []
+    for action in snapshot.get("actions", []):
+        if action.get("kind") != "skill" or not action.get("available"):
+            continue
+        code = str(action.get("code") or "")
+        order = getattr(_skill_object(unit, code), "tendency_overclock_order", None)
+        if order is not None:
+            ranked.append((order, code))
+    return tuple(code for _, code in sorted(ranked))
+
+
 def choose_turn_bundle_action(
     battle: Battle,
     units: Iterable[Unit],
@@ -95,9 +117,10 @@ def choose_turn_bundle_action(
     rng = random.Random()
     for unit in ordered:
         snapshot = battle.action_snapshot_for(unit)
-        if unit.hero_code == "excel_r373" and unit.current_mana > 0:
+        overclock_codes = _overclock_codes(unit, snapshot)
+        if overclock_codes and unit.current_mana > 0:
             overclock = _first_skill(battle, unit, snapshot,
-                                     ("infinity_instant__machine_gun", "infinity_instant__missile"),
+                                     overclock_codes,
                                      timing="instant", modes={"cell"})
             if overclock is not None:
                 return overclock, unit
@@ -126,12 +149,15 @@ def choose_turn_bundle_action(
 def choose_instant_action(battle: Battle, units: Iterable[Unit], difficulty: str) -> Optional[dict[str, Any]]:
     del difficulty
     ordered = list(units)
-    ordered.sort(key=lambda unit: unit.hero_code != "excel_r373")
+    ordered.sort(key=lambda unit: not any(
+        getattr(skill, "tendency_overclock_order", None) is not None
+        for skill in unit.action_skills()))
     for unit in ordered[:4]:
         snapshot = battle.action_snapshot_for(unit)
-        if unit.hero_code == "excel_r373":
+        overclock_codes = _overclock_codes(unit, snapshot)
+        if overclock_codes:
             payload = _first_skill(battle, unit, snapshot,
-                                   ("infinity_instant__machine_gun", "infinity_instant__missile"),
+                                   overclock_codes,
                                    timing="instant", modes={"cell"})
             if payload is not None:
                 return payload
@@ -213,7 +239,7 @@ def _reaction_payload(
     code = str(option.get("action_code") or "")
     source_code = code.rsplit("__", 1)[-1]
     preview = option.get("preview") or {}
-    if reactor.hero_code == "excel_r373" and source_code in {"machine_gun", "missile"}:
+    if getattr(_skill_object(reactor, code), "tendency_overclock_order", None) is not None:
         patterns = _selection_patterns(preview)
         if not patterns:
             return None
@@ -235,7 +261,7 @@ def _reaction_payload(
     listed = [str(unit_id) for unit_id in (preview.get("target_unit_ids") or [])]
     affected_ids = {str(item) for item in (getattr(queued, "target_unit_ids", None) or [])}
     mounted = battle.mounted_unit_for(reactor)
-    if reactor.hero_code == "flying_dragon_ship_atlanta" or (mounted is not None and mounted.allows_multiple_riders):
+    if getattr(reactor, "allows_multiple_riders", False) or (mounted is not None and mounted.allows_multiple_riders):
         affected_ids.update(unit.unit_id for unit in battle.effect_units_at_cells(getattr(queued, "target_cells", None) or []))
     covers_ally = any(unit_id in affected_ids for unit_id in listed)
     if not code or not (threatened or covers_ally):
@@ -420,18 +446,16 @@ def _first_skill(
         if action.get("kind") == "skill" and action.get("available") and str(action.get("timing") or "") == timing
     ]
     ordered = sorted(actions, key=lambda action: _skill_rank(action, preferred))
-    if actor.hero_code == "excel_r324":
-        crow_priority = {"eight_dragon_crow_array": 0, "square_crow_array": 1,
-                         "hexagram_crow_array": 2, "triangle_crow_array": 3,
-                         "super_messenger_crow": 4}
-        ordered.sort(key=lambda action: crow_priority.get(str(action.get("code") or ""), 5))
+    ordered.sort(key=lambda action: getattr(
+        _skill_object(actor, str(action.get("code") or "")), "tendency_priority_rank", 5))
     for action in ordered:
         code = str(action.get("code") or "")
-        if actor.hero_code == "excel_r324" and code in {
-            "eight_dragon_crow_array", "square_crow_array", "hexagram_crow_array",
-            "triangle_crow_array"} and sum(item.startswith("skill:") and
-            item.removeprefix("skill:") in {"eight_dragon_crow_array", "square_crow_array",
-            "hexagram_crow_array", "triangle_crow_array"} for item in actor.actions_taken_this_turn) >= 3:
+        skill = _skill_object(actor, code)
+        cast_group = getattr(skill, "tendency_cast_group", ())
+        cast_limit = getattr(skill, "tendency_cast_limit", None)
+        if cast_limit is not None and sum(
+                item.startswith("skill:") and item.removeprefix("skill:") in cast_group
+                for item in actor.actions_taken_this_turn) >= cast_limit:
             continue
         preview = action.get("preview") or {}
         if code in UNSAFE_SKILLS and not _selection_patterns(preview):
@@ -474,9 +498,8 @@ def _skill_payload(battle: Battle, actor: Unit, action: dict[str, Any]) -> Optio
 
     mode = str(action.get("target_mode") or "none")
     code = str(action.get("code") or "")
-    if actor.hero_code == "excel_r373" and code.startswith("infinity_instant__"):
-        if code.rsplit("__", 1)[-1] not in {"machine_gun", "missile"}:
-            return None
+    instant_skill = _skill_object(actor, code)
+    if getattr(instant_skill, "tendency_overclock_order", None) is not None:
         patterns = _selection_patterns(preview)
         ranked: list[tuple[float, list[Position]]] = []
         for pattern in patterns:
@@ -910,14 +933,11 @@ def _move(battle: Battle, actor: Unit, snapshot: dict[str, Any], *, away: bool) 
             break
     if not cells:
         return None
-    if actor.hero_code in {"excel_r328", "excel_r329"} and battle.mounted_unit_for(actor) is None:
-        from wujiang.tactical.heroes.flying_dragon_ship import allied_ship
-        ship = allied_ship(battle, actor.player_id)
-        if ship is not None:
-            boarding = [cell for cell in cells if cell in battle.unit_cells(ship)]
-            if boarding:
-                chosen = boarding[0]
-                return {"type": "move", "unit_id": actor.unit_id, "x": chosen.x, "y": chosen.y}
+    boarding = getattr(getattr(actor, "ai_policy", None), "tendency_boarding_destination", None)
+    if callable(boarding):
+        chosen = boarding(battle, actor, cells)
+        if chosen is not None:
+            return {"type": "move", "unit_id": actor.unit_id, "x": chosen.x, "y": chosen.y}
     if len(cells) > 12:
         cells = cells[:: max(1, len(cells) // 12)][:12]
     enemies = _focus_enemies(battle, actor)

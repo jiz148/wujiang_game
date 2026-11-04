@@ -8,7 +8,7 @@ from wujiang.tactical.engine.core import (
     ActionError, Battle, DamageContext, Position, Skill, Stats, Trait, Unit,
 )
 from wujiang.tactical.heroes.base import AbstractHero
-from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext, HeroAIPolicy
 from wujiang.tactical.heroes.common import payload_position, positions_to_dict
 from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
@@ -28,6 +28,21 @@ def stone_summon_anchors(battle: Battle, actor: Unit, stone: Unit) -> list[Posit
     return anchors
 
 
+class SmallStoneAIPolicy(HeroAIPolicy):
+    """Advance a slow summon toward an enemy when it cannot attack yet."""
+
+    def normal_move_candidate_score(self, battle: Battle, actor: Unit,
+                                    destination: Position, profile: Any,
+                                    score: float, shared: Any) -> float:
+        enemies = [unit for unit in battle.enemy_units(actor.player_id)
+                   if unit.alive and not unit.banished and unit.position is not None]
+        if not enemies or actor.position is None:
+            return score
+        before = min(battle.distance_between_units(actor, enemy) for enemy in enemies)
+        after = min(battle.unit_distance_to_cell(enemy, destination) for enemy in enemies)
+        return max(score, 2.0 + (before - after) * 12.0) if after < before else score
+
+
 class SmallStoneSummon(AbstractHero):
     hero_code = "small_stone"
     hero_name = "小石块人"
@@ -36,6 +51,7 @@ class SmallStoneSummon(AbstractHero):
     race = "石人"
     level = 1
     base_stats = Stats(attack=2, defense=4, speed=1, attack_range=1, mana=0)
+    ai_policy = SmallStoneAIPolicy()
 
     def __init__(self, player_id: int) -> None:
         super().__init__(player_id, is_summon=True)
@@ -48,6 +64,18 @@ class SmallStoneSummon(AbstractHero):
 
 
 class StoneOnEnemyAttackTrait(Trait):
+    def ai_spawn_penalty(self, battle: Battle, attacker: Unit) -> float:
+        owner = self.owner
+        if owner is None or not owner.alive:
+            return 0.0
+        child = self.summon_class(owner.player_id)
+        if not stone_summon_anchors(battle, owner, child):
+            return 0.0
+        likely_damage = battle.damage_rule.calculate_damage(attacker.stat("attack"), owner.stat("defense"))
+        if owner.total_shields() == 0 and likely_damage >= owner.current_hp:
+            return 0.0
+        return 28.0 if self.summon_class is MediumStoneSummon else 14.0
+
     def __init__(self, summon_class: type[AbstractHero]) -> None:
         super().__init__("石块受击裂变", "敌方普攻实际命中后尽可能在周围召唤下一层石块人。")
         self.summon_class = summon_class

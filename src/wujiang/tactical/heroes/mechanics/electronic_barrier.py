@@ -91,7 +91,7 @@ class ElectronicBarrierAuraField(BattleFieldEffect):
     def __init__(self, source_unit_id: str, source_player_id: int) -> None:
         self.source_unit_id = source_unit_id
         self.source_player_id = source_player_id
-        super().__init__("电子屏障光环", "自身受光环伤害 -1，其他双方单位 -1、机甲 -2；自身条件减伤可另加 -1，同名光环不叠加。")
+        super().__init__("电子屏障光环", "自身及周围己方单位受伤 -1，己方机甲 -2；自身条件减伤可另加 -1，同名光环不叠加。")
 
     def source(self, battle: Battle) -> HeroUnit | None:
         unit = battle.units.get(self.source_unit_id)
@@ -109,7 +109,9 @@ class ElectronicBarrierAuraField(BattleFieldEffect):
                     trait.apply_reduction(battle, ctx)
         position = getattr(ctx.target, "_resolution_actual_position", ctx.target.position)
         target_cells = battle.unit_cells_at(ctx.target, position) if position is not None else []
-        if "electronic_barrier_aura" in ctx.modifier_receipts or not set(target_cells).intersection(self.affected_cells(battle)):
+        if (ctx.target.player_id != self.source_player_id
+                or "electronic_barrier_aura" in ctx.modifier_receipts
+                or not set(target_cells).intersection(self.affected_cells(battle))):
             return
         is_barrier_owner = any(isinstance(effect, ElectronicBarrierAuraField) and effect.source(battle) is ctx.target
                                for effect in battle.field_effects)
@@ -134,7 +136,7 @@ class ElectronicBarrierAuraField(BattleFieldEffect):
 
 class ElectronicBarrierAuraTrait(Trait):
     def __init__(self) -> None:
-        super().__init__("电子屏障光环", "自身受光环伤害 -1，周围其他双方单位 -1、机甲 -2；自身条件减伤可另加 -1，同名光环不叠加。")
+        super().__init__("电子屏障光环", "自身及周围己方单位受伤 -1，己方机甲 -2；自身条件减伤可另加 -1，同名光环不叠加。")
 
     def on_enter_battle(self, battle: Battle) -> None:
         owner = self.owner

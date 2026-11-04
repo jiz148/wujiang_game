@@ -346,6 +346,13 @@ class DragonAreaAttackTrait(Trait):
 
 
 class DragonMountSummon(AbstractHero):
+    def ai_area_hit_bonus(self, battle: Battle, target: Unit, payload: dict[str, Any], rollback) -> float:
+        with rollback(battle):
+            defense, speed = target.stat("defense"), target.stat("speed")
+            battle.resolve_attack_damage(self, target, action_name="龙爪", payload=payload, tags={"area_attack"})
+            return (max(0.0, defense - target.stat("defense")) * 26.0
+                    + max(0.0, speed - target.stat("speed")) * 14.0)
+
     hero_code = "dragon_mount"
     hero_name = "龙"
     role = "坐骑"
@@ -486,6 +493,7 @@ class DragonSummonSkill(Skill):
 
 
 class DragonSlashSkill(SimulatedEffectDeltaScoring, DeclaredAreaSkillMixin, Skill):
+    ai_probe_hostile_effect = True
     def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
         return 5.0
 
@@ -651,6 +659,15 @@ class DragonSlashSkill(SimulatedEffectDeltaScoring, DeclaredAreaSkillMixin, Skil
 
 
 class DragonSmokeSkill(DeclaredAreaSkillMixin, Skill):
+    def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
+        return context.shared.field_skill_score(context)
+
+    ai_enemy_impact_requirement = False
+    def ai_field_score(self, battle: Battle, actor: Unit, targets: list[Unit], distance) -> float:
+        enemy_hits = sum(1 for unit in targets if unit.player_id != actor.player_id)
+        ally_hits = sum(1 for unit in targets if unit.player_id == actor.player_id)
+        return enemy_hits * 26.0 - ally_hits * 18.0 + 8.0
+
     ai_candidate_plan = RANKED_CANDIDATES
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.owned_effect_score(self)

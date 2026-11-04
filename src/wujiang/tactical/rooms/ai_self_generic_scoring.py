@@ -76,231 +76,20 @@ class AISelfAndGenericScoring:
     def __init__(self, services: AISelfAndGenericScoringServices) -> None:
         self.services = services
 
-    def self_buff_score(self, battle: Battle, actor: Unit, code: str, profile: DifficultyProfile) -> float:
-        enemies = [unit for unit in battle.enemy_units(actor.player_id) if unit.alive and unit.position is not None and not unit.banished]
-        if code in {"mountain_awakening", "mountain_god_muro", "mountain_escape"}:
-            return self.services.r12_preparation_score(battle, actor, code, profile)
-        if code == "red_heat":
-            active = actor.has_status("红热")
-            before = self.services.li_attack_plan_value(battle, actor)
-            with ai_probe_rollback(battle):
-                actor.get_skill(code).execute(battle, actor, {})
-                after = self.services.li_attack_plan_value(battle, actor)
-            half_hp_cost = actor.current_hp * 60.0 if not actor.magic_immunity and actor.total_shields() == 0 else 0.0
-            gain = after - before + (half_hp_cost if active else -half_hp_cost)
-            return 300.0 + gain if gain > 8.0 else -1000.0
-        if code == "essence":
-            if actor.has_status("精华"):
-                return -1000.0
-            before = self.services.li_attack_plan_value(battle, actor)
-            with ai_probe_rollback(battle):
-                actor.get_skill(code).execute(battle, actor, {})
-                after = self.services.li_attack_plan_value(battle, actor)
-            if after > before + 1.0:
-                return max(self.services.best_available_attack_score(battle, actor, profile), after) + 30.0
-            return min(2.0, max(0.0, actor.max_mana() - actor.current_mana)) * 24.0 - 12.0
-        if code == "stillness":
-            missing = max(0.0, actor.max_health - actor.current_hp)
-            threatened = any(self.services.distance_between_units(battle, actor, enemy) <= enemy.targeting_range() + enemy.normal_move_distance() for enemy in enemies)
-            if missing < 0.5 or actor.current_hp > 0.5 or not threatened:
-                return -1000.0
-            attack = self.services.best_available_attack_score(battle, actor, profile)
-            return min(0.5, missing) * 200.0 + 75.0 - min(100.0, attack * 0.5)
-        if code in {"messenger_reincarnation", "messenger_creation"}:
-            return self.services.messenger_preparation_score(battle, actor, code, profile)
-        if code == "beetle_full_force":
-            return self.services.r19_preparation_score(battle, actor, code, profile)
-        if code == "mountain_awakening":
-            counters = sum(1 for status in actor.statuses if status.name == "山神计数点")
-            if counters < 8:
-                return -8.0
-            used = [skill for skill in actor.skills if skill.max_uses_per_battle is not None and skill.uses_this_battle > 0]
-            return 120.0 + len(used) * 70.0 if used else -8.0
-        if code == "mountain_god_muro":
-            if actor.has_status("山神术。室王") or not enemies:
-                return -8.0
-            costly = sum(skill.mana_cost > 0 and skill.timing == "active" for skill in actor.skills)
-            return 75.0 + costly * 12.0 + (28.0 if actor.current_mana <= 1 else 0.0)
-        if code == "mountain_escape":
-            if actor.has_status("遁术。神山"):
-                return -8.0
-            missing = max(0.0, actor.max_health - actor.current_hp)
-            threatened = any(self.services.distance_between_units(battle, actor, enemy) <= enemy.targeting_range() + enemy.normal_move_distance() for enemy in enemies)
-            return missing * 130.0 + (65.0 if threatened else -25.0) if threatened or missing > 0.25 else -8.0
-        if code == "nian_spirit_pressure":
-            if actor.get_status("灵压") is not None or not enemies:
-                return -8.0
-            in_window = any(self.services.distance_between_units(battle, actor, enemy) <= actor.targeting_range() + actor.normal_move_distance()
-                            or self.services.distance_between_units(battle, actor, enemy) <= enemy.targeting_range() + enemy.normal_move_distance()
-                            for enemy in enemies)
-            return 84.0 + profile.aggressive_bonus if in_window else -8.0
-        if code == "black_cat_form":
-            return self.services.r14_cat_form_score(battle, actor, profile)
-        if code == "big_avalanche":
-            if battle.has_weather("大雪崩") or not enemies:
-                return -8.0
-            from wujiang.tactical.heroes.mechanics.avalanche import BigAvalancheWeatherEffect
-
-            net_value = 0.0
-            for unit in battle.all_units():
-                if not unit.alive or unit.banished or unit.position is None or unit.direct_effects_blocked():
-                    continue
-                ally = unit.player_id == actor.player_id
-                if BigAvalancheWeatherEffect.ice_eligible(battle, unit):
-                    value = 20.0 + min(3.0, unit.stat("speed")) * 4.0 if not unit.cannot_move and not unit.cannot_normal_move else 0.0
-                    net_value += value if ally else -value
-                    continue
-                usable_active = sum(
-                    skill.timing == "active"
-                    and not unit.cannot_use_skills
-                    and not getattr(skill, "locked", False)
-                    and skill.cooldown_remaining == 0
-                    and (skill.max_uses_per_battle is None or skill.uses_this_battle < skill.max_uses_per_battle)
-                    and skill.mana_cost <= unit.current_mana
-                    and not any(component.blocks_skill_use(battle, unit, skill)[0] for component in unit.iter_components())
-                    for skill in unit.skills
-                )
-                value = (0.0 if unit.cannot_move else min(4.0, unit.stat("speed")) * 9.0) + min(3, usable_active) * 15.0
-                net_value += -value if ally else value
-            avalanche = next((skill for skill in actor.skills if skill.code == "snow_avalanche"), None)
-            if avalanche is not None and not actor.cannot_use_skills and avalanche.cooldown_remaining <= 2:
-                net_value += 24.0
-            return 24.0 + net_value if net_value > 8.0 else -8.0
-        if code == "martial_god_seal":
-            if battle.effect_recipient(actor).has_status("魔界武神之印"):
-                return -8.0
-            return self.services.r19_preparation_score(battle, actor, code, profile)
-        if code == "pandemonium":
-            return self.services.r20_weather_cast_score(battle, actor, code, profile)
-        if code == "sky_sanctuary":
-            return self.services.r20_weather_cast_score(battle, actor, code, profile)
-        if code == "wetland_grassland":
-            return self.services.r20_weather_cast_score(battle, actor, code, profile)
-        if code == "floating_cannon_berserk":
-            from wujiang.tactical.heroes.mechanics.floating_cannon import FloatingCannonStatTrait, floating_cannons_for
-
-            cannons = floating_cannons_for(battle, actor)
-            if not cannons or not enemies:
-                return -8.0
-
-            protected: dict[str, Unit] = {}
-            for ally in battle.player_units(actor.player_id):
-                recipient = battle.effect_recipient(ally)
-                if not recipient.alive or recipient.position is None or recipient.banished:
-                    continue
-                if any(any(abs(cannon.position.x - cell.x) <= 3 and abs(cannon.position.y - cell.y) <= 3
-                           for cell in battle.unit_cells(recipient)) for cannon in cannons):
-                    protected[recipient.unit_id] = recipient
-            cover_value = max((min(160.0, self.services.r19_incoming_position_risk(battle, recipient)) * 0.5
-                               for recipient in protected.values()), default=0.0)
-
-            @expected_local(battle)
-            def array_value() -> float:
-                total = 0.0
-                berserk = actor.get_status("浮游炮狂暴化") is not None
-                for cannon in cannons:
-                    if not cannon.turn_ready or cannon.attacks_used >= cannon.attack_actions_per_turn():
-                        continue
-                    trait = next((item for item in cannon.traits if isinstance(item, FloatingCannonStatTrait)), None)
-                    if trait is None:
-                        continue
-                    if berserk:
-                        targets = [target for target in trait.nearest_targets(battle, cannon)
-                                   if trait.action_route(battle, cannon, target)[1]]
-                    else:
-                        targets = [target for target in enemies
-                                   if battle.attack_target_allowed(cannon, target, payload={"target_unit_id": target.unit_id})[0]]
-                    damage = max((estimate_attack_damage(battle, cannon, target, {}, attack_power=cannon.stat("attack"))
-                                  for target in targets), default=0.0)
-                    total += damage * max(0, cannon.attack_actions_per_turn() - cannon.attacks_used) * 45.0
-                    if berserk and not targets and any(trait.action_route(battle, cannon, target)[0]
-                                                    for target in trait.nearest_targets(battle, cannon)):
-                        total += 12.0
-                if not berserk:
-                    total += cover_value
-                return total
-
-            before = array_value()
-            with ai_probe_rollback(battle):
-                actor.get_skill(code).execute(battle, actor, {})
-                after = array_value()
-            gain = after - before
-            return 140.0 + gain if gain > 15.0 else -8.0
-        if code == "wuchang_mist":
-            return self.services.wuchang_mist_score(battle, actor, profile)
-        if code == "crystal_ball":
-            if actor.has_status("水晶球"):
-                return -1000.0
-            return 62.0 if any(self.services.distance_between_units(battle, actor, enemy) > actor.targeting_range() for enemy in enemies) else -8.0
-        if code == "water_wave":
-            if actor.has_status("水之波动"):
-                return -1000.0
-            return 120.0 if any(self.services.distance_between_units(battle, actor, enemy) <= actor.targeting_range() + 4 for enemy in enemies) else -8.0
-        if code == "headshot":
-            if actor.attacks_used >= actor.attack_actions_per_turn() or actor.has_status("爆头强化"):
-                return -1000.0
-            before = self.services.best_available_attack_score(battle, actor, profile)
-            with ai_probe_rollback(battle):
-                actor.get_skill("headshot").apply_to_self(battle, actor)
-                actor.performed_active_skill = True
-                after = self.services.best_available_attack_score(battle, actor, profile)
-            return after + 20.0 if after > before + 1.0 else -1000.0
-        if code == "six_blade_style":
-            before = self.services.masamune_attack_plan_value(battle, actor, profile)
-            before_score = self.services.best_available_attack_score(battle, actor, profile)
-            with ai_probe_rollback(battle):
-                actor.get_skill(code).execute(battle, actor, {})
-                after = self.services.masamune_attack_plan_value(battle, actor, profile)
-                after_score = self.services.best_available_attack_score(battle, actor, profile)
-            return max(before_score, after_score) + 25.0 if after > before + 1.0 else -1000.0
-        if code == "form_shift":
-            before = self.services.best_available_attack_score(battle, actor, profile)
-            with ai_probe_rollback(battle):
-                actor.get_skill(code).execute(battle, actor, {})
-                after = self.services.best_available_attack_score(battle, actor, profile)
-            adjacent = any(self.services.distance_between_units(battle, actor, enemy) <= 1 for enemy in enemies)
-            cards = [effect for effect in battle.field_effects if getattr(effect, "owner_unit_id", None) == actor.unit_id and hasattr(effect, "card_type")]
-            return after + 25.0 if adjacent and after > before + 15.0 and (len(cards) >= 2 or actor.current_hp <= 0.5 or actor.current_mana < 1.5) else -1000.0
-        if code == "into_darkness":
-            if actor.has_status("遁入黑暗"):
-                return -1000.0
-            targets = battle.action_snapshot_for(actor).get("attack_targets") or []
-            return 180.0 if targets and actor.attacks_used < actor.attack_actions_per_turn() else (38.0 if enemies else -8.0)
-        if code == "stealth":
-            return max(profile.action_threshold + 1.0, 34.0 if actor.current_hp <= 0.75 else 18.0)
-        if code == "harden":
-            return 28.0 if actor.current_hp <= 0.75 else 12.0
-        if code == "mech_enhancement":
-            return 38.0
-        if code == "n_skill":
-            if actor.mana_points < 1:
-                return -1000.0
-            if actor.current_mana < 1:
-                return 160.0
-            if actor.mana_points <= 2 and any(self.services.distance_between_units(battle, actor, enemy) <= enemy.normal_move_distance() + enemy.targeting_range() for enemy in enemies):
-                return -20.0
-            return 32.0
-        if code == "big_shensu" and getattr(actor, "hero_code", "") == "excel_r028":
-            return self.services.feiwang_shensu_score(battle, actor)
-        if code == "shensu" and actor.hero_code == "excel_r352":
-            return self.services.r22_ninja_shensu_score(battle, actor)
-        if code == "shensu" and actor.hero_code == "excel_r031":
-            return self.services.natsume_shensu_score(battle, actor)
-        if code == "shensu" and actor.hero_code == "excel_r030":
-            return self.services.fusion_preparation_score(battle, actor, code)
-        if code in {"shensu", "big_shensu"}:
-            enemies = [unit for unit in battle.enemy_units(actor.player_id) if unit.alive and unit.position is not None and not unit.banished]
-            if not enemies or actor.move_used:
-                return -6.0
-            nearest = min(self.services.distance_between_units(battle, actor, unit) for unit in enemies)
-            bonus = 10.0 if code == "big_shensu" else 0.0
-            return (30.0 + bonus) if nearest > actor.normal_move_distance() else (8.0 + bonus)
-        if code == "nuclear_rush":
-            return self.services.fusion_preparation_score(battle, actor, code)
-        if code == "inner_dimension_sword":
-            return self.services.feiwang_stance_score(battle, actor)
-        if code == "kings_insight":
-            return self.services.kings_insight_score(battle, actor, profile)
+    def self_buff_score(self, battle: Battle, actor: Unit, code: str, profile: DifficultyProfile,
+                        *, skill: Any = None, action: dict[str, Any] | None = None,
+                        payload: dict[str, Any] | None = None) -> float:
+        if skill is None:
+            try:
+                skill = actor.get_skill(code)
+            except (ActionError, KeyError, ValueError):
+                skill = None
+        scorer = getattr(skill, "ai_self_buff_score", None)
+        if scorer is not None:
+            score_action = action or {"code": code, "_skill_object": skill}
+            score_payload = payload or {"skill_code": code}
+            return scorer(self.services._skill_score_context(
+                battle, actor, score_action, score_payload, profile))
         return 10.0
 
 
@@ -315,26 +104,13 @@ class AISelfAndGenericScoring:
         targets: list[Unit],
         profile: DifficultyProfile,
     ) -> float:
-        allies = [unit for unit in battle.player_units(actor.player_id) if unit.alive and unit.position is not None and not unit.banished]
-        enemies = [unit for unit in battle.enemy_units(actor.player_id) if unit.alive and unit.position is not None and not unit.banished]
-        if code == "stance":
-            nearby_allies = sum(1 for unit in allies if unit.unit_id != actor.unit_id and self.services.distance_between_units(battle, actor, unit) <= 3)
-            nearby_enemies = sum(1 for unit in enemies if self.services.distance_between_units(battle, actor, unit) <= 4)
-            return nearby_allies * 24.0 + nearby_enemies * 10.0 if nearby_allies else -1000.0
-        if code == "great_holy_light":
-            nearby_enemies = sum(1 for unit in enemies if not unit.cannot_normal_move and self.services.distance_between_units(battle, actor, unit) <= 5)
-            if not nearby_enemies:
-                return -8.0
-            nearby_allies = sum(1 for unit in allies if self.services.distance_between_units(battle, actor, unit) <= 5)
-            return nearby_enemies * 16.0 + nearby_allies * 10.0
-        if code == "plant_growth":
-            enemy_hits = sum(1 for unit in targets if unit.player_id != actor.player_id and not unit.cannot_normal_move)
-            ally_hits = sum(1 for unit in targets if unit.player_id == actor.player_id and not unit.cannot_normal_move)
-            return enemy_hits * 24.0 - ally_hits * 28.0 - 8.0
-        if code == "smoke_spray":
-            enemy_hits = len([unit for unit in targets if unit.player_id != actor.player_id])
-            ally_hits = len([unit for unit in targets if unit.player_id == actor.player_id])
-            return enemy_hits * 26.0 - ally_hits * 18.0 + 8.0
+        try:
+            skill = actor.get_skill(code)
+        except (ActionError, KeyError, ValueError):
+            skill = None
+        scorer = getattr(skill, "ai_field_score", None)
+        if scorer is not None:
+            return scorer(battle, actor, targets, self.services.distance_between_units)
         return 6.0
 
 
@@ -392,7 +168,9 @@ class AISelfAndGenericScoring:
             if best > 0:
                 return best * (0.85 if ready else 0.4) - cost * 22.0
             distance = min((destination.distance_to(cell) for cell in targets), default=999)
-            waiting = sum(1 for unit in battle.all_units() if unit is not stone and unit.hero_code == "judgment_stone" and unit.summoner_id == actor.unit_id)
+            waiting = sum(1 for unit in battle.all_units()
+                          if unit is not stone and isinstance(unit, JudgmentStoneSummon)
+                          and unit.summoner_id == actor.unit_id)
             return (18.0 - distance - waiting * 15.0 - cost * 30.0) if distance <= 10 else -1000.0
 
 
@@ -530,7 +308,7 @@ class AISelfAndGenericScoring:
                 continue
             for candidate in self.services.skill_payloads_for_action(battle, actor, self.services.copied_skill_action(battle, actor, skill)):
                 try:
-                    value = self.services.gale_score(battle, actor, candidate, profile) if code == "gale" else self.services.skill_damage_score(battle, actor, skill, candidate, profile)
+                    value = skill.ai_kings_insight_score(battle, actor, candidate, self.services, profile)
                     if value < profile.action_threshold:
                         continue
                     collect_reactors(battle.build_queued_action(candidate))
@@ -552,7 +330,7 @@ class AISelfAndGenericScoring:
                 score += max(0.0, sum(unit.current_mana for unit in battle.hero_units(actor.player_id)) - before_mana) * 16.0
         # Non-Fei-Wang allies may need defenses against hostile counter effects in the same turn.
         for ally in battle.player_units(actor.player_id):
-            if getattr(ally, "hero_code", "") == "excel_r028" or ally.direct_effects_blocked():
+            if getattr(getattr(ally, "ai_policy", None), "is_feiwang", False) or ally.direct_effects_blocked():
                 continue
             if any(skill.timing in {"passive", "reaction"} and skill.can_use(battle, ally, {})[0] for skill in ally.skills):
                 if any(self.services.distance_between_units(battle, ally, enemy) <= enemy.targeting_range() for enemy in targets):
@@ -568,18 +346,25 @@ class AISelfAndGenericScoring:
         with ai_probe_rollback(battle):
             skill.execute(battle, actor, payload)
             score = -skill.mana_cost * 20.0
+            enemy_effect = False
             for unit in units:
                 alive, position, hidden, shields = before[unit.unit_id]
                 sign = 1.0 if unit.player_id != actor.player_id else -1.5
                 if alive and not unit.alive:
                     score += sign * (110.0 + self.services.hostile_unit_value(unit) * 0.3)
+                    enemy_effect |= sign > 0
                 if hidden and not unit.is_stealthed():
                     score += sign * 24.0
+                    enemy_effect |= sign > 0
                 score += sign * max(0, shields - unit.total_shields()) * 12.0
+                enemy_effect |= sign > 0 and shields > unit.total_shields()
                 if sign < 0 and position != unit.position and unit.alive:
                     score -= 12.0
-            score += (self.services.feiwang_attack_plan_value(battle, actor) - plan) * 1.3
-            return score
+                if sign > 0 and position != unit.position and unit.alive:
+                    enemy_effect = True
+            plan_gain = self.services.feiwang_attack_plan_value(battle, actor) - plan
+            score += plan_gain * 1.3
+            return score if enemy_effect and score > 0 else -1000.0
 
 
     def great_fire_funeral_score(self,
@@ -814,7 +599,8 @@ class AISelfAndGenericScoring:
         nearest = min(self.services.distance_to_position(battle, enemy, destination) for enemy in enemies)
         if nearest > 6:
             return -12.0
-        dogs = [unit for unit in battle.all_units() if unit.alive and not unit.banished and unit.hero_code == "hell_dog_summon"
+        from wujiang.tactical.heroes.mechanics.hell_dog_hunter import HellDogSummon
+        dogs = [unit for unit in battle.all_units() if unit.alive and not unit.banished and isinstance(unit, HellDogSummon)
                 and unit.summoner_id == actor.unit_id]
         ring = set(battle.neighbors(destination))
         blast_value = sum((1.0 if unit.player_id != actor.player_id else -1.4)
@@ -844,7 +630,7 @@ class AISelfAndGenericScoring:
         nearest = min(min(self.services.distance_to_position(battle, enemy, cell) for cell in occupied) for enemy in enemies)
         if nearest > 6:
             return -8.0
-        value = (20.0 if code == "summon_medium_stone" else 10.0) + max(0, 6 - nearest) * 7.0
+        value = (10.0 if getattr(skill, "small", False) else 20.0) + max(0, 6 - nearest) * 7.0
         allies = [unit for unit in battle.player_units(actor.player_id)
                   if unit is not actor and unit.position is not None and unit.alive and not unit.banished]
         for ally in allies:
@@ -858,18 +644,10 @@ class AISelfAndGenericScoring:
 
 
     def stone_attack_spawn_penalty(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> float:
-        from wujiang.tactical.heroes.mechanics.stone_people import MediumStoneSummon, SmallStoneSummon, stone_summon_anchors
         penalty = 0.0
         for target in self.services.attack_payload_enemy_targets(battle, actor, payload):
-            if target.hero_code not in {"excel_r197", "medium_stone"} or not target.alive:
-                continue
-            child = MediumStoneSummon(target.player_id) if target.hero_code == "excel_r197" else SmallStoneSummon(target.player_id)
-            if not stone_summon_anchors(battle, target, child):
-                continue
-            likely_damage = battle.damage_rule.calculate_damage(actor.stat("attack"), target.stat("defense"))
-            if target.total_shields() == 0 and likely_damage >= target.current_hp:
-                continue
-            penalty += 28.0 if target.hero_code == "excel_r197" else 14.0
+            penalty += sum(score(battle, actor) for component in target.traits
+                           if callable(score := getattr(component, "ai_spawn_penalty", None)))
         return penalty
 
 
@@ -885,8 +663,11 @@ def _require_service() -> AISelfAndGenericScoring:
     return _BOUND_SERVICE
 
 @expected_numeric(independent=True)
-def self_buff_score(battle: Battle, actor: Unit, code: str, profile: DifficultyProfile) -> float:
-    return _require_service().self_buff_score(battle, actor, code, profile)
+def self_buff_score(battle: Battle, actor: Unit, code: str, profile: DifficultyProfile,
+                    *, skill: Any = None, action: dict[str, Any] | None = None,
+                    payload: dict[str, Any] | None = None) -> float:
+    return _require_service().self_buff_score(battle, actor, code, profile,
+                                              skill=skill, action=action, payload=payload)
 
 
 @expected_numeric(independent=True)

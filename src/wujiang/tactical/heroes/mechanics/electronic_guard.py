@@ -67,6 +67,10 @@ class ElectronicGuardDragon(AbstractHero):
 
 
 class QuantumSeparationSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.quantum_separation_score(
+            context, context.shared.destination(context.payload))
+
     def __init__(self) -> None:
         super().__init__("quantum_separation", "量子分离",
                          "每本人回合一次；范内召唤电子守卫龙，本回合可行动，主人轮末破坏。",
@@ -158,6 +162,8 @@ class NovaChargeStatus(StatModifierStatus):
 
 
 class NovaManaReactionTrait(Trait):
+    ai_nova_payment_field = True
+
     def __init__(self) -> None:
         super().__init__("新星电荷", "7×7内敌方每次真正使用魔，攻守各+1至下一个本人回合结束。")
 

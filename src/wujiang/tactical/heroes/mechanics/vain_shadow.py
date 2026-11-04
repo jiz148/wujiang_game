@@ -47,6 +47,14 @@ class VainGiantShadowStatus(StatModifierStatus):
 
 
 class VainGiantShadowSkill(Skill):
+    ai_action_opportunity_excluded = True
+    ai_action_control_status = "虚荣巨影"
+    ai_action_control_requires_attack_pause = True
+
+    ai_enemy_impact_requirement = False
+    def ai_hostile_target_impact(self, battle, actor, payload, target):
+        return not target.cannot_attack and not target.has_status("虚荣巨影")
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.control_score(self)
 

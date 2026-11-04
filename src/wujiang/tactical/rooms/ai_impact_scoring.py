@@ -78,19 +78,10 @@ class AIImpactQueries:
         profile: DifficultyProfile,
     ) -> float:
         enemies = living_hostile_combatants(battle, unit.player_id)
-        if unit.hero_code in {"excel_r238", "excel_r239", "excel_r240", "excel_r242", "excel_r243", "excel_r244", "excel_r247", "excel_r248"}:
-            nearest_enemy = min((self.services.distance_to_position(battle, enemy, destination) for enemy in enemies), default=8)
-            effective_defense = 4.0 if unit.hero_code == "excel_r243" else unit.stat("defense")
-            danger = sum(max(0.0, enemy.stat("attack") - effective_defense + 1.0) * 12.0
-                         for enemy in enemies if self.services.distance_to_position(battle, enemy, destination)
-                         <= enemy.normal_move_distance() + enemy.targeting_range())
-            pressure = (22.0 if unit.hero_code in {"excel_r238", "excel_r243", "excel_r244"} else 13.0)
-            safety = 1.3 if unit.hero_code in {"excel_r242", "excel_r239", "excel_r247"} else 0.8
-            dog_space = (sum(battle.in_bounds(destination.offset(dx, dy))
-                             and battle.can_place_unit(unit, destination.offset(dx, dy), ignore=unit, mover=unit)
-                             for dx in (-1, 0, 1) for dy in (-1, 0, 1) if dx or dy)
-                         if unit.hero_code == "excel_r247" else 0)
-            return -nearest_enemy * pressure - danger * safety + dog_space * 3.0
+        for component in unit.traits:
+            scorer = getattr(component, "ai_respawn_destination_score", None)
+            if callable(scorer) and getattr(component, "respawn_ai_enabled", True):
+                return scorer(battle, unit, destination, enemies, self.services.distance_to_position)
         allies = [ally for ally in battle.player_units(unit.player_id) if ally.unit_id != unit.unit_id and ally.alive and ally.position is not None and not ally.banished]
         nearest_enemy = min((self.services.distance_to_position(battle, enemy, destination) for enemy in enemies), default=8)
         nearest_ally = min((self.services.distance_to_position(battle, ally, destination) for ally in allies), default=8)
@@ -186,24 +177,17 @@ class AIImpactQueries:
             _, copied, copied_payload, copied_action = context
             with actor.get_skill("agency_borrowed_skill").copying(actor, copied):
                 return self.services.skill_payload_requires_enemy_impact(battle, actor, copied_action, copied_payload)
-        if code in {"vain_giant_shadow", "gladiator_soul", "electronic_repair"}:
-            return False
-        if code == "gladiator_gale":
-            return False
-        if code == "migratory_bird_mark":
-            target = battle.units.get(str(payload.get("target_unit_id") or ""))
-            return target is not None and target.player_id != actor.player_id
+        try:
+            skill = self.services.skill_from_ai_action(actor, action, code)
+        except Exception:
+            skill = None
+        if skill is not None:
+            requirement = skill.ai_requires_enemy_impact(battle, actor, payload)
+            if requirement is not None:
+                return requirement
         if code in self.services.MOVE_SKILL_CODES or code in self.services.SUMMON_SKILL_CODES or code in self.services.HEAL_SKILL_CODES:
             return False
-        if code in {"fuma_trap", "paralysis_card", "poison_card", "drain_card", "descent_moment", "smoke_spray", "afterimage"}:
-            return False
-        if code == "weapon_copy":
-            return False
         if code in self.services.ALLY_BUFF_SKILL_CODES or code in self.services.SELF_BUFF_SKILL_CODES:
-            return False
-        if code in {"stance", "great_holy_light"}:
-            return False
-        if code == "great_funeral":
             return False
         if code in self.services.DAMAGING_SKILL_CODES or code in self.services.HOSTILE_EFFECT_SKILL_CODES:
             return True
@@ -211,13 +195,13 @@ class AIImpactQueries:
             return True
         if target_mode == "cell":
             try:
-                skill = self.services.skill_from_ai_action(actor, action, code)
+                skill = skill or self.services.skill_from_ai_action(actor, action, code)
                 if not self.services.skill_effect_units(battle, actor, skill, payload):
                     return True
             except Exception:
                 return True
         try:
-            skill = self.services.skill_from_ai_action(actor, action, code)
+            skill = skill or self.services.skill_from_ai_action(actor, action, code)
             return any(unit.player_id != actor.player_id for unit in self.services.skill_effect_units(battle, actor, skill, payload))
         except Exception:
             return False
@@ -230,13 +214,6 @@ class AIImpactQueries:
         payload: dict[str, Any],
     ) -> bool:
         code = str(action.get("code") or payload.get("skill_code") or "")
-        if code == "demon_link":
-            target = battle.units.get(str(payload.get("target_unit_id") or ""))
-            return bool(target is not None and target.player_id != actor.player_id
-                        and not target.magic_immunity and not target.skill_non_damage_effects_blocked()
-                        and target.dodge_charges <= 0)
-        if code in {"bird_dash", "bird_dash_free"}:
-            return self.services.r215219_skill_score(battle, actor, payload) > 0
         if code == "mimic_skill":
             context = self.services.mimic_payload_context(battle, actor, payload)
             if context is None:
@@ -255,60 +232,44 @@ class AIImpactQueries:
             skill = self.services.skill_from_ai_action(actor, action, code)
         except Exception:
             return False
-        if code == "ancient_cursed_rust":
-            from wujiang.tactical.heroes.mechanics.ancient_mecha import ancient_cursed_rust_targets
-
-            return any(target.player_id != actor.player_id and not target.magic_immunity
-                       and (target.total_shields() > 0 or target.dodge_charges > 0
-                            or not target.has_status("古代伤害适应·普攻"))
-                       for target in ancient_cursed_rust_targets(battle, skill.cells(battle, actor)))
+        owned_impact = skill.ai_effective_enemy_impact(battle, actor, payload, shared=self.services, action=action)
+        if owned_impact is not None:
+            return owned_impact
         impact_rule = getattr(skill, "ai_effective_impact_rule", None)
         if impact_rule is not None and impact_rule.phase == "before_targets":
             return impact_rule.has_impact(self.services._skill_score_context(
                 battle, actor, action, payload, self.services.difficulty_profile("standard")), skill)
         targets = [unit for unit in self.services.skill_effect_units(battle, actor, skill, payload) if unit.player_id != actor.player_id]
-        if code == "ancient_jaw":
-            return any(not target.magic_immunity and not target.skill_non_damage_effects_blocked()
-                       and target.dodge_charges <= 0 for target in targets)
+        owned_impact = skill.ai_effective_enemy_impact(battle, actor, payload, targets, self.services, action)
+        if owned_impact is not None:
+            return owned_impact
         if impact_rule is not None and impact_rule.phase == "after_targets":
             return impact_rule.has_impact(self.services._skill_score_context(
                 battle, actor, action, payload, self.services.difficulty_profile("standard")), skill)
-        if code == "kaiser_fist" and targets:
-            if self.services.kaiser_fist_score(battle, actor, skill, payload, self.services.difficulty_profile("standard")) > 0:
-                return True
-        if code in {"interference", "noise_wave", "purify_mana", "sacred_duel"}:
-            return self.services.reviewed_r15_effect_score(battle, actor, skill, payload, self.services.difficulty_profile("standard")) > 0
-        if code == "heaven_punishment":
-            return self.services.score_skill_payload(battle, actor, action, payload, self.services.difficulty_profile("standard"), instant_only=False) > 0
-        if code == "fuma_shuriken":
-            return self.services.reviewed_r16_damage_result(battle, actor, lambda: skill.execute(battle, actor, payload)) > 8.0
         if not targets:
             return False
         cells = self.services.skill_effect_cells(battle, actor, skill, payload)
-        if code == "gale":
-            return any(unit.is_summon or unit.is_clone or unit.position is not None for unit in targets)
         if code in self.services.HOSTILE_EFFECT_SKILL_CODES:
             for target in targets:
                 if self.services.hostile_skill_effect_target_has_impact(battle, actor, skill, payload, target):
                     return True
         if code in self.services.DAMAGING_SKILL_CODES:
             for target in targets:
-                if code == "undead_boy_devour":
+                raw_impact = skill.ai_raw_damage_for_impact(target)
+                if raw_impact is not None:
                     impact = probe_skill_raw_damage_impact(
                         battle,
                         actor,
                         skill,
                         target,
-                        raw_damage=round(target.current_hp / 2, 4),
-                        ignore_shield=True,
+                        raw_damage=raw_impact[0],
+                        ignore_shield=raw_impact[1],
                     )
                     if impact.changed_target or impact.damage > 0:
                         return True
                     continue
                 attack_power = self.services.skill_attack_power(battle, actor, skill, payload, target, cells)
-                ignore_shield = bool(skill.ignores_shield_for_payload(battle, actor, payload))
-                if code == "illumination_light":
-                    ignore_shield = target.attribute == "暗"
+                ignore_shield = skill.ai_ignores_shield_for_target(battle, actor, payload, target)
                 half_ignore_shield = bool(skill.half_ignores_shield_for_payload(battle, actor, payload))
                 impact = probe_skill_damage_impact(
                     battle,
@@ -334,47 +295,18 @@ class AIImpactQueries:
         target: Unit,
     ) -> bool:
         code = str(skill.code)
-        if code == "cat_taunt_roar":
-            if target.magic_immunity or target.direct_effects_blocked() or target.skill_non_damage_effects_blocked():
-                return False
-            if target.total_shields() > 0 or target.dodge_charges > 0 or target.is_clone:
-                return True
-            return not any(
-                str(getattr(status, "required_attack_target_id", "") or "") == actor.unit_id
-                and not bool(getattr(status, "requirement_satisfied", False))
-                for status in target.statuses
-            )
-        if code in {"sun_slash", "magnetic_wave", "magic_claw", "chain_pull", "premature_burial", "erasure", "dragon_slash", "eagle_eye"}:
+        owned_impact = skill.ai_hostile_target_impact(battle, actor, payload, target)
+        if owned_impact is not None:
+            return owned_impact
+        if skill.ai_probe_hostile_effect:
             with ai_probe_rollback(battle):
                 before = unit_impact_signature(target)
                 probe = dict(payload)
                 probe.update(skill.queued_payload_metadata(battle, actor, probe))
                 skill.execute(battle, actor, probe)
                 return unit_impact_signature(target) != before
-        if code == "heaven_punishment":
-            selected_code = str(payload.get("disabled_skill_code") or "")
-            return bool(selected_code) and any(
-                getattr(target_skill, "timing", None) == "active"
-                and target_skill.code == selected_code
-                and not any(getattr(status, "skill_code", None) == selected_code for status in target.statuses)
-                for target_skill in skill.public_active_skills(battle, target)
-            )
-        if code == "purify_mana":
-            return target.current_mana > 0 or target.total_shields() > 0
-        if code == "interference":
-            return target.is_clone or (target.is_summon and target.player_id != actor.player_id)
-        if code == "fantasy_move":
-            return payload.get("x") is not None and payload.get("y") is not None
-        if code == "vain_giant_shadow":
-            return not target.cannot_attack and not target.has_status("虚荣巨影")
-        if code == "heaven_lock":
-            return not target.has_status("天锁") and not target.cannot_normal_move and target.stat("speed") > 0 and not getattr(target, "world_seed_terrain", False)
-        if code in {"electric_wind", "snow_avalanche", "sacred_duel", "gale", "eagle_eye", "thor_destroy_lightning"}:
+        if skill.ai_always_hostile_effect:
             return True
-        if code in {"drain_mana", "large_drain_mana"} and target.current_mana <= 0 and target.total_shields() <= 0:
-            return False
-        if code == "erasure" and not any(status.name == "抹杀计数点" for status in target.statuses):
-            return False
         try:
             return probe_target_effect_impact(
                 battle,
@@ -384,7 +316,7 @@ class AIImpactQueries:
                 is_skill=True,
                 ignore_shield=bool(skill.ignores_shield_for_payload(battle, actor, payload)),
                 half_ignore_shield=bool(skill.half_ignores_shield_for_payload(battle, actor, payload)),
-                extra_effect_applies=lambda probe_target: self.services.hostile_skill_extra_effect_applies(code, probe_target),
+                extra_effect_applies=skill.ai_extra_effect_applies,
             )
         except Exception:
             return False
@@ -400,7 +332,9 @@ class AIImpactQueries:
 
     def payload_is_legal(self, battle: Battle, payload: dict[str, Any]) -> bool:
         try:
-            if payload.get("skill_code") == "gravity_field":
+            skill = (battle.get_unit(str(payload["unit_id"])).get_skill(str(payload["skill_code"]))
+                     if payload.get("skill_code") else None)
+            if skill is not None and skill.ai_legality_requires_rollback:
                 with ai_probe_rollback(battle):
                     battle.build_queued_action(payload)
             else:
@@ -442,10 +376,9 @@ class AIImpactQueries:
 
 
     def skill_effect_units(self, battle: Battle, actor: Unit, skill: Any, payload: dict[str, Any]) -> list[Unit]:
-        if skill.code == "ancient_cursed_rust":
-            from wujiang.tactical.heroes.mechanics.ancient_mecha import ancient_cursed_rust_targets
-
-            return ancient_cursed_rust_targets(battle, skill.get_target_cells_for_payload(battle, actor, payload))
+        owned_units = skill.ai_effect_units(battle, actor, payload)
+        if owned_units is not None:
+            return owned_units
         units: list[Unit] = []
         ignored = actor if skill.excludes_caster_from_effect else None
         def filter_units() -> list[Unit]:

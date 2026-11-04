@@ -168,6 +168,10 @@ class WindSandSkill(Skill):
 class CrazySandSkill(Skill):
     excludes_caster_from_effect = True
 
+    def ai_move_score(self, context: AISkillScoreContext, base_score: float,
+                      destination: Position) -> float:
+        return base_score + context.shared.skill_damage_score(context, self) - 15.0
+
     def ai_candidate_payloads(self, context: AISkillCandidateContext) -> list[dict[str, Any]]:
         preview = context.action.get("preview", {}) or {}
         return [{**context.base_payload, "cells": entry["pattern"],

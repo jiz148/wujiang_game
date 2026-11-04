@@ -1,6 +1,7 @@
 """Source-preserving object assembly for excel_r029 / 红衣."""
 
 from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_hero_kit
+from wujiang.tactical.heroes.ai_score_policies import RedAttackPolicy
 from wujiang.tactical.heroes.mechanics.weapon_copy import (
     InfiniteArmorSkill,
     InfiniteRobeSkill,
@@ -18,6 +19,7 @@ from wujiang.tactical.heroes.mechanics.inner_dimension import (
 def install(r) -> None:
     register_hero_kit(FragmentMappedHeroKit(
         "excel_r029",
+        ai_policy=RedAttackPolicy(),
         skills={
             "武器传送": WeaponTransferSkill,
             "蓄力": RedChargeSkill,

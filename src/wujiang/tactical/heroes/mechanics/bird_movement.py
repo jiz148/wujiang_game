@@ -48,6 +48,9 @@ class BirdSkillMoveBoostTrait(Trait):
 
 
 class BirdDashSkill(Skill):
+    def ai_effective_enemy_impact(self, battle, actor, payload, targets=None, shared=None, action=None):
+        return shared.r215219_skill_score(battle, actor, payload) > 0
+
     ai_candidate_plan = RANKED_CANDIDATES
     target_cells_are_geometry_only = True
 

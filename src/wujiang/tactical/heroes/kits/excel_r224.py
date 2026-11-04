@@ -1,6 +1,7 @@
 """Source-preserving object assembly for excel_r224 / 电子镭射龙."""
 
 from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_hero_kit
+from wujiang.tactical.heroes.ai_score_policies import DemonLineWindowPolicy
 from wujiang.tactical.heroes.mechanics.electronic_barrier import (
     ElectronicDragonNameTrait,
     ElectronicLaserDamageBonusTrait,
@@ -11,6 +12,7 @@ from wujiang.tactical.heroes.mechanics.electronic_barrier import (
 def install(r) -> None:
     register_hero_kit(FragmentMappedHeroKit(
         "excel_r224",
+        ai_policy=DemonLineWindowPolicy(),
         skills={
             "离子盾": r.IonShieldSkill,
             "镭射": ElectronicLaserSkill,

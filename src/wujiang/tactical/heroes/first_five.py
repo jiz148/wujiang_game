@@ -61,6 +61,20 @@ from wujiang.tactical.heroes.common import (
 
 
 class ManaPullSkill(TargetDestinationCandidates, Skill):
+    def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
+        return 20.0 if any(unit.player_id != context.actor.player_id for unit in targets) else 6.0
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        target_id = payload.get("target_unit_id")
+        targets = list(context.effect_units(self))
+        target = battle.get_unit(str(target_id)) if target_id else (targets[0] if targets else None)
+        if target is None or target.position is None or payload.get("dest_x") is None or payload.get("dest_y") is None:
+            return -1000.0
+        destination = Position(int(payload["dest_x"]), int(payload["dest_y"]))
+        change = context.move_score_for(target, destination) - context.move_score_for(target, target.position)
+        return change - 12.0 if target.player_id == actor.player_id else -change + (20.0 if not target.cannot_normal_move else 0.0) - 12.0
+
     ai_destination_fields = ("dest_x", "dest_y")
     def __init__(self) -> None:
         super().__init__(
@@ -135,6 +149,17 @@ class ManaPullSkill(TargetDestinationCandidates, Skill):
 
 
 class CurseSkill(Skill):
+    def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
+        return sum(unit.current_hp * 80.0 for unit in targets if unit.player_id != context.actor.player_id)
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        actor = context.actor
+        eligible = [unit for unit in context.effect_units(self)
+                    if unit.player_id != actor.player_id and not unit.has_status("诅咒")]
+        if actor.current_hp <= 0.5 or not eligible:
+            return -1000.0
+        return sum(unit.current_hp * 80.0 for unit in eligible) - 60.0 - (35.0 if actor.current_hp <= 0.75 else 0.0)
+
     def __init__(self) -> None:
         super().__init__("curse", "诅咒", "声明时支付固定0.5生命；目标每个己方回合开始时当前生命减半。", max_uses_per_battle=1, target_mode="enemy")
 
@@ -170,6 +195,29 @@ class CurseSkill(Skill):
 
 
 class ExperimentSkill(Skill):
+    def ai_ally_buff_score(self, context: AISkillScoreContext, target: Unit) -> float:
+        actor, battle = context.actor, context.battle
+        if target.has_status("实验倒计时") or target.position is None:
+            return -1000.0
+        enemies = [unit for unit in battle.enemy_units(actor.player_id)
+                   if unit.alive and unit.position is not None and not unit.banished
+                   and not bool(getattr(unit, "is_siege_structure", False))]
+        reachable = [unit for unit in enemies if context.shared.unit_distance(battle, target, unit)
+                     <= target.normal_move_distance() + target.targeting_range() + 4]
+        decisive = False
+        if len(enemies) == 1 and battle.unit_belongs_to_current_turn(target) and not target.cannot_attack and target.attacks_used < target.attack_actions_per_turn():
+            enemy = enemies[0]
+            if context.shared.unit_distance(battle, target, enemy) <= target.targeting_range() + 2:
+                attack = {"type": "attack", "unit_id": target.unit_id, "target_unit_id": enemy.unit_id}
+                ordinary = context.shared.attack_damage_at_power(battle, target, enemy, target.stat("attack"), attack)
+                boosted = context.shared.attack_damage_at_power(battle, target, enemy, target.stat("attack") + 2, attack)
+                decisive = ordinary < enemy.current_hp <= boosted
+        if not reachable or (not target.is_summon and target.current_hp > 0.5 and not decisive):
+            return -1000.0
+        missing_hp = max(0.0, target.max_health - target.current_hp)
+        target_value = context.shared.ally_value(target)
+        return 45.0 + missing_hp * 55.0 + min(3, len(reachable)) * 16.0 + (180.0 if decisive else 0.0) - (0.0 if target.is_summon else target_value * 0.25)
+
     def __init__(self) -> None:
         super().__init__("experiment", "实验", "令一名己方单位全能力 +2，目标自己的 3 轮后死亡。", max_uses_per_battle=1, target_mode="ally")
 
@@ -201,6 +249,15 @@ class ExperimentSkill(Skill):
 
 
 class CrystalBallSkill(Skill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        if actor.has_status("水晶球"):
+            return -1000.0
+        enemies = [unit for unit in battle.enemy_units(actor.player_id)
+                   if unit.alive and unit.position is not None and not unit.banished]
+        return (62.0 if any(context.shared.unit_distance(battle, actor, enemy) > actor.targeting_range()
+                            for enemy in enemies) else -8.0)
+
     def __init__(self) -> None:
         super().__init__("crystal_ball", "水晶球", "接下来 4轮目标范围变为全图。", max_uses_per_battle=1, target_mode="self")
 
@@ -282,6 +339,10 @@ class MedusaSkill(Skill):
 
 
 class ParalyzingGloveSkill(Skill):
+    def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
+        return (sum(context.hostile_value(unit) * 0.6 for unit in targets
+                    if unit.player_id != context.actor.player_id) + 45.0)
+
     def __init__(self) -> None:
         super().__init__(
             "paralyzing_glove",
@@ -341,6 +402,22 @@ class ParalyzingGloveSkill(Skill):
 class FateKickSkill(Skill):
     def __init__(self) -> None:
         super().__init__("fate_kick", "命运飞踢", "直线冲刺至多 4 格，再判定前方单位；硬币正面则自己消失 1轮，反面则目标消失 1轮。", cooldown_turns=2, target_mode="cell")
+
+    def ai_move_score(self, context: AISkillScoreContext, base_score: float,
+                      destination: Position) -> float:
+        battle, actor = context.battle, context.actor
+        if actor.position is None:
+            return base_score
+        dx, dy = destination.x - actor.position.x, destination.y - actor.position.y
+        if not (dx or dy):
+            return base_score
+        impact = destination.offset(0 if dx == 0 else (1 if dx > 0 else -1),
+                                    0 if dy == 0 else (1 if dy > 0 else -1))
+        target = battle.unit_at(impact) if battle.in_bounds(impact) else None
+        if target is None or target.player_id == actor.player_id:
+            return base_score
+        return (base_score + 0.5 * (context.shared.hostile_value(target) - context.shared.ally_value(actor))
+                - max(0, actor.attack_actions_per_turn() - actor.attacks_used) * 22.0)
 
     def can_use(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
         ok, reason = super().can_use(battle, actor, payload)
@@ -434,6 +511,15 @@ class FateKickSkill(Skill):
 
 
 class IntoDarknessSkill(Skill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        if actor.has_status("遁入黑暗"):
+            return -1000.0
+        targets = battle.action_snapshot_for(actor).get("attack_targets") or []
+        enemies = [unit for unit in battle.enemy_units(actor.player_id)
+                   if unit.alive and unit.position is not None and not unit.banished]
+        return 180.0 if targets and actor.attacks_used < actor.attack_actions_per_turn() else (38.0 if enemies else -8.0)
+
     def __init__(self) -> None:
         super().__init__(
             "into_darkness",
@@ -562,6 +648,9 @@ class GreatFireFuneralField(BattleFieldEffect):
 
 
 class GreatFireFuneralSkill(Skill):
+    ai_area_bonus_codes = frozenset({"great_funeral"})
+
+    ai_enemy_impact_requirement = False
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.great_funeral_score(context)
 
@@ -633,6 +722,8 @@ class GreatFireFuneralSkill(Skill):
 
 
 class JudgmentFireSkill(Skill):
+    ai_area_bonus_codes = frozenset({"judgment_fire"})
+
     def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
         return 6.0
 

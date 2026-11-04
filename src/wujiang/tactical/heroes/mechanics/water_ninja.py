@@ -8,11 +8,20 @@ from wujiang.tactical.prediction import random, direct_scoring
 from wujiang.tactical.engine.core import Battle, DamageContext, HeroUnit, Trait
 from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 from wujiang.tactical.heroes.mechanics.clone_split import StandardCloneSummon
+from wujiang.tactical.heroes.common import ShensuSkill
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
+
+
+class WaterNinjaShensuSkill(ShensuSkill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.ninja_shensu_score(context)
 
 
 class WaterNinjaCloneAfterAttackTrait(Trait):
+    ai_scores_clone_attack = True
+
     def __init__(self) -> None:
-        super().__init__("水忍分身", "每次普攻伤害结算后，在自身周围召唤 1 个分身，再随机与场上的一个自身分身交换位置。")
+        super().__init__("水忍分身", "每次普攻伤害结算后，在自身周围召唤 1 个分身，再随机决定是否与场上的一个自身分身交换位置。")
 
     def on_basic_attack_finished(
         self,
@@ -53,7 +62,10 @@ class WaterNinjaCloneAfterAttackTrait(Trait):
         if not clones:
             return
         if direct_scoring():
-            owner._ai_expected_positions = tuple((clone.position, 1 / len(clones)) for clone in clones)
+            owner._ai_expected_positions = ((real_position, 0.5), *(
+                (clone.position, 0.5 / len(clones)) for clone in clones))
+            return
+        if not random.choice((False, True)):
             return
         swap_clone = random.choice(sorted(clones, key=lambda unit: unit.unit_id))
         swap_position = swap_clone.position

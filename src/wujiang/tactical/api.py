@@ -131,6 +131,7 @@ def get_rooms_state(ctx: RequestContext) -> None:
             auth_error_response(handler, exc)
             return
     recovered = False
+    restored_from_checkpoint = False
     try:
         room = ROOMS.get_room(room_id)
     except RoomError:
@@ -140,6 +141,7 @@ def get_rooms_state(ctx: RequestContext) -> None:
         try:
             room, _checkpoint = recover_strategy_battle_room(room_id, auth_user)
             recovered = True
+            restored_from_checkpoint = True
         except StrategyError as exc:
             json_response(
                 handler,
@@ -188,6 +190,7 @@ def get_rooms_state(ctx: RequestContext) -> None:
         player_token,
         base_url=request_base_url(handler),
         recovered=recovered,
+        advance_due=not restored_from_checkpoint,
     )
     if recovered and player_token:
         response["player_token"] = player_token

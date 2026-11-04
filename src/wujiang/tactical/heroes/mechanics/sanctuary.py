@@ -114,6 +114,11 @@ class SkySanctuaryAuraTrait(Trait):
 
 
 class PunisherHealSkill(Skill):
+    ai_future_heal = True
+
+    def ai_r12_mana_weight(self, actor, unit) -> float:
+        return 42.0 if unit.player_id == actor.player_id and unit.unit_id != actor.unit_id else 22.0
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r12_effect_score(self)
 
@@ -180,6 +185,18 @@ class SanctuaryBanishStatus(StatusEffect):
 
 
 class SanctuaryBanishSkill(Skill):
+    ai_future_opportunity_excluded = True
+
+    def ai_r12_control_before(self, battle, actor, units, services, profile):
+        return {unit.unit_id: services.r12_future_banish_value(battle, unit, profile)
+                for unit in units if unit.player_id != actor.player_id and unit.alive}
+
+    def ai_r12_unit_bonus(self, battle, actor, unit, *, locked, control_before, services, profile) -> float:
+        if unit.alive and not locked and unit.has_status("圣殿放逐"):
+            return max(0.0, control_before.get(unit.unit_id, 0.0)
+                       - services.r12_future_banish_value(battle, unit, profile))
+        return 0.0
+
     ai_effective_impact_rule = R12_IMPACT
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r12_effect_score(self)

@@ -399,6 +399,17 @@ class GiantShieldSwordTrait(Trait):
     def grants_counter(self, battle: Battle, unit: Unit) -> bool:
         return self.owner is unit
 
+    def counter_reaction_presentation(self, battle: Battle, unit: Unit,
+                                      preview: dict[str, Any], description: str) -> tuple[dict[str, Any], str]:
+        if self.owner is not unit or unit.position is None:
+            return preview, description
+        cells = battle.neighbors(unit.position)
+        enriched = dict(preview)
+        enriched["secondary_cells"] = [cell.to_dict() for cell in cells]
+        enriched["secondary_target_unit_ids"] = [target.unit_id for target in
+                                                  battle.effect_units_at_cells(cells, ignore=unit)]
+        return enriched, "先反击来源，再攻击周围八格双方单位。"
+
     def ai_counter_bonus(self, context: AIReactionScoreContext) -> float:
         actor, battle = context.actor, context.battle
         if self.owner is not actor or actor.position is None:
@@ -581,6 +592,9 @@ class GiantShieldGunAreaSkill(GiantShieldLobSkill):
                 ranked.append((score, pattern))
         ranked.sort(key=lambda entry: entry[0], reverse=True)
         return [pattern for _, pattern in ranked[:24]]
+
+    def ai_empty_payload_filter_reason(self, context: AISkillCandidateContext, patterns: list) -> str | None:
+        return "no_positive_area_impact" if patterns and not self.ai_candidate_patterns(context, patterns) else None
 
     def __init__(self, *, volley: bool = False) -> None:
         Skill.__init__(self, "shield_volley" if volley else "shield_sweep", "排射" if volley else "扫射",

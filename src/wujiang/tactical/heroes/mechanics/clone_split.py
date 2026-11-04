@@ -19,6 +19,22 @@ from wujiang.tactical.prediction import expected_local
 from wujiang.tactical.prediction import random
 
 
+def maybe_swap_new_clones(actor: HeroUnit, clones: list["StandardCloneSummon"]) -> bool:
+    """Each summon has a chance to leave its source in place or exchange it."""
+    if not clones or actor.position is None:
+        return False
+    original = actor.position
+    if direct_scoring():
+        actor._ai_expected_positions = ((original, 0.5), *(
+            (clone.position, 0.5 / len(clones)) for clone in clones))
+        return False
+    if not random.choice((False, True)):
+        return False
+    chosen = random.choice(clones)
+    actor.position, chosen.position = chosen.position, original
+    return True
+
+
 class StandardCloneSummon(AbstractHero):
     hero_code = "standard_clone"
     hero_name = "分身"
@@ -67,6 +83,7 @@ class StandardCloneSummon(AbstractHero):
 
 class SplitSkill(Skill):
     clone_count = 3
+    ai_summon_base_bonus = 10.0
 
     def ai_clone_placement_enemies(self, battle: Battle, actor: HeroUnit) -> list[Unit]:
         return []
@@ -108,7 +125,7 @@ class SplitSkill(Skill):
         super().__init__(
             "split",
             "分身",
-            "普通技能：费 1.5 魔，每回合最多 1 次，在范内制造 3 个分身；本体本回合不能继续行动，分身登场当回合不能行动，并与新分身中的一个随机交换位置。",
+            "普通技能：费 1.5 魔，每回合最多 1 次，在范内制造 3 个分身；本体本回合不能继续行动，分身登场当回合不能行动，随机决定是否与一个新分身交换位置。",
             mana_cost=1.5,
             max_uses_per_turn=1,
             target_mode="cell",
@@ -167,7 +184,6 @@ class SplitSkill(Skill):
         if any(not battle.can_place_unit(self._clone_probe(actor), cell) for cell in destinations):
             battle.log(f"{actor.name} 的分身落点被占用，未能召唤。")
             return
-        original_position = actor.position
         clones: list[StandardCloneSummon] = []
         for destination in destinations:
             clone = self._clone_probe(actor)
@@ -175,13 +191,10 @@ class SplitSkill(Skill):
                 raise ActionError("分身位置已被占用。")
             battle.summon_unit(clone, destination, summoner=actor)
             clones.append(clone)
-        if direct_scoring():
-            actor._ai_expected_positions = tuple((clone.position, 1 / len(clones)) for clone in clones)
-        else:
-            swap_clone = random.choice(clones)
-            actor.position, swap_clone.position = swap_clone.position, original_position
+        exchanged = maybe_swap_new_clones(actor, clones)
         actor.turn_ready = False
-        battle.log(f"{actor.name} 使用分身制造了 {self.clone_count} 个分身，并与其中一个新分身交换了位置。")
+        battle.log(f"{actor.name} 使用分身制造了 {self.clone_count} 个分身，"
+                   + ("并与其中一个新分身交换了位置。" if exchanged else "本体留在原位。"))
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
         return {

@@ -297,6 +297,17 @@ class MageCloakEquipSkill(Skill):
     def __init__(self) -> None:
         super().__init__("equip_mage_cloak", "装备斗篷", "装备到范内一个法师单位上，斗篷保留原身份但暂不占格。", target_mode="unit")
 
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        target = battle.units.get(str(payload.get("target_unit_id") or ""))
+        if target is None or target.player_id != actor.player_id or target.position is None:
+            return -1000.0
+        nearby_enemy = any(
+            battle.distance_between_units(target, enemy) <= target.normal_move_distance() + target.targeting_range()
+            for enemy in context.shared.hostile_units(battle, actor)
+        )
+        return 26.0 + (24.0 if nearby_enemy else 0.0) + (15.0 if target.stat("speed") <= 3 else 0.0)
+
     def can_use(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
         ok, reason = super().can_use(battle, actor, payload)
         if not ok:
@@ -342,6 +353,20 @@ class MageCloakEquipSkill(Skill):
 class MageCloakDetachSkill(Skill):
     def __init__(self) -> None:
         super().__init__("detach_mage_cloak", "解除法师斗篷", "由装备者选择周围完整合法空格，原斗篷满血重新占格。", target_mode="cell")
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        status = actor.get_status("法师斗篷")
+        cloak = battle.units.get(getattr(status, "cloak_unit_id", "")) if status is not None else None
+        destination = context.shared.destination(context.payload)
+        if cloak is None or destination is None:
+            return -1000.0
+        recover = max(0.0, cloak.max_health - cloak.current_hp) * 70.0
+        reach = sum(
+            18.0 for enemy in context.shared.hostile_units(battle, actor)
+            if max(abs(destination.x - enemy.position.x), abs(destination.y - enemy.position.y)) <= cloak.targeting_range()
+        )
+        return recover + reach + context.shared.summon_position_score(battle, actor, destination) * 0.25 - 48.0
 
     def available_cells(self, battle: Battle, actor: HeroUnit) -> list[Position]:
         status = actor.get_status("法师斗篷")

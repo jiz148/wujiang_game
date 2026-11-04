@@ -1,6 +1,7 @@
 """Source-preserving object assembly for excel_r118 / 零崎."""
 
 from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_hero_kit
+from wujiang.tactical.heroes.ai_score_policies import ZeroSplitPolicy
 from wujiang.tactical.heroes.mechanics.zero_pass_through import (
     ZeroDashSkill,
     ZeroPassThroughManaTrait,
@@ -16,4 +17,5 @@ def install(r) -> None:
         traits={
             "穿人魔+0.5": ZeroPassThroughManaTrait,
         },
+        ai_policy=ZeroSplitPolicy(),
     ))

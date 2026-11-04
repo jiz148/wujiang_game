@@ -88,6 +88,70 @@ class CatTauntStatus(RequiredAttackStatus):
 
 
 class CatTauntRoarSkill(Skill):
+    def ai_taunt_control_score(self, battle, actor, payload, targets, services, profile) -> float:
+        enemies = [unit for unit in targets if unit.player_id != actor.player_id]
+        allies = [unit for unit in targets if unit.player_id == actor.player_id]
+        if not enemies:
+            return -20.0
+        score = 0.0
+        services.skill_effect_cells(battle, actor, self, payload)
+        for unit in enemies:
+            if unit.magic_immunity or unit.direct_effects_blocked() or unit.skill_non_damage_effects_blocked():
+                continue
+            if unit.total_shields() > 0:
+                score += 16.0
+            if unit.dodge_charges > 0:
+                score += 10.0
+                continue
+            if unit.is_clone:
+                score += services.hostile_unit_value(unit) * 0.45 + 70.0
+                continue
+            score += services.hostile_unit_value(unit) * 0.25
+            already_taunted = any(
+                str(getattr(status, "required_attack_target_id", "") or "") == actor.unit_id
+                and not bool(getattr(status, "requirement_satisfied", False))
+                for status in unit.statuses)
+            if already_taunted:
+                score -= 18.0
+                continue
+            active_skills = sum(1 for skill in unit.skills if getattr(skill, "timing", None) in {"active", "instant"})
+            incoming = services.estimate_damage(battle, actor, unit.stat("attack"))
+            score += 42.0 + unit.attack_actions_per_turn() * 16.0 + active_skills * 9.0
+            score += min(1.0, unit.current_mana) * 18.0 - incoming * 55.0
+        for unit in allies:
+            if unit.magic_immunity or unit.direct_effects_blocked() or unit.skill_non_damage_effects_blocked():
+                continue
+            if unit.total_shields() > 0:
+                score -= 16.0
+            if unit.dodge_charges > 0:
+                score -= 10.0
+                continue
+            if unit.is_clone:
+                score -= services.friendly_fire_penalty(unit)
+                continue
+            already_taunted = any(
+                str(getattr(status, "required_attack_target_id", "") or "") == actor.unit_id
+                and not bool(getattr(status, "requirement_satisfied", False))
+                for status in unit.statuses)
+            if not already_taunted:
+                active_skills = sum(1 for ally_skill in unit.skills
+                                    if getattr(ally_skill, "timing", None) in {"active", "instant"})
+                incoming = services.estimate_damage(battle, actor, unit.stat("attack"))
+                score -= 42.0 + unit.attack_actions_per_turn() * 16.0 + active_skills * 9.0
+                score -= incoming * 55.0
+        return score + profile.aggressive_bonus
+
+    def ai_hostile_target_impact(self, battle, actor, payload, target):
+        if target.magic_immunity or target.direct_effects_blocked() or target.skill_non_damage_effects_blocked():
+            return False
+        if target.total_shields() > 0 or target.dodge_charges > 0 or target.is_clone:
+            return True
+        return not any(
+            str(getattr(status, "required_attack_target_id", "") or "") == actor.unit_id
+            and not bool(getattr(status, "requirement_satisfied", False))
+            for status in target.statuses
+        )
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.taunt_control_score(context)
 

@@ -524,8 +524,10 @@ _SHIELD_REACTION_SCORING = ShieldReactionScoring()
 
 
 def _skill_score_context(battle: Battle, actor: Unit, action: dict[str, Any],
-                         payload: dict[str, Any], profile: DifficultyProfile) -> AISkillScoreContext:
-    return AISkillScoreContext(battle, actor, action, payload, profile, _SHARED_SKILL_SCORING)
+                         payload: dict[str, Any], profile: DifficultyProfile,
+                         *, instant_only: bool = False) -> AISkillScoreContext:
+    return AISkillScoreContext(battle, actor, action, payload, profile, _SHARED_SKILL_SCORING,
+                               instant_only=instant_only)
 
 
 @expected_numeric(independent=True)

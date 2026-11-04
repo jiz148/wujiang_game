@@ -73,6 +73,14 @@ class JiroboAfterAttackTrait(Trait):
 
 
 class JiroboFollowStepSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        actor = context.actor
+        destination = context.destination()
+        if destination is None or actor.position is None:
+            return -1000.0
+        gain = context.move_score_for(actor, destination) - context.move_score_for(actor, actor.position)
+        return gain + 8.0 if gain > 3.0 else -8.0
+
     def __init__(self) -> None:
         super().__init__(
             "jirobo_follow_step",
@@ -123,6 +131,9 @@ class JiroboFollowStepSkill(Skill):
 
 
 class DevourSkill(Skill):
+    def ai_raw_damage_for_impact(self, target):
+        return round(target.current_hp / 2, 4), True
+
     ai_effective_impact_rule = R17_IMPACT
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r17_effect_score(self)

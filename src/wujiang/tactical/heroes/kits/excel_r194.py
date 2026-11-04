@@ -1,6 +1,7 @@
 """Source-preserving object assembly for excel_r194 / 剑斗兽。亚历山大."""
 
 from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_hero_kit
+from wujiang.tactical.heroes.ai_score_policies import AlexanderAttackPolicy
 from wujiang.tactical.heroes.mechanics.alexander import (
     AlexanderAfterAttackSwapTrait,
     AlexanderHurricaneSkill,
@@ -13,6 +14,7 @@ from wujiang.tactical.heroes.mechanics.alexander import (
 def install(r) -> None:
     register_hero_kit(FragmentMappedHeroKit(
         "excel_r194",
+        ai_policy=AlexanderAttackPolicy(),
         skills={
             "战斗飓风": AlexanderHurricaneSkill,
         },

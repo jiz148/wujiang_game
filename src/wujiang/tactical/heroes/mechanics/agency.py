@@ -132,6 +132,20 @@ class AgencyAttachedStatus(StatusEffect):
 
 
 class AgencyBorrowedSkill(MimicSkill):
+    ai_nonhostile_throttle_exempt = False
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        copied_context = context.shared.agency_borrowed_payload_context(context)
+        if copied_context is None:
+            return -10.0
+        _, copied, copied_payload, copied_action = copied_context
+        if context.shared.is_self_buff_skill(copied.code):
+            return -1000.0
+        with self.copying(context.actor, copied):
+            if not copied.can_use(context.battle, context.actor, copied_payload)[0]:
+                return -1000.0
+            return context.shared.copied_skill_score(context, copied_action, copied_payload)
+
     ai_candidate_plan = RANKED_CANDIDATES
     ai_reaction_score_phase = "after_hidden_source"
 

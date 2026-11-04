@@ -306,7 +306,9 @@ class AILateTacticalScoring:
 
     def r22_attack_value(self, battle: Battle, actor: Unit, target: Unit, payload: dict[str, Any]) -> float:
         value = self.services.r21_attack_value(battle, actor, target, payload)
-        if actor.hero_code != "excel_r352" or value <= 0 or target.player_id == actor.player_id:
+        if (not any(getattr(component, "ai_scores_clone_attack", False)
+                    for component in actor.traits) or value <= 0
+                or target.player_id == actor.player_id):
             return value
         with ai_probe_rollback(battle):
             previous = {unit.unit_id for unit in battle.all_units()}
@@ -452,8 +454,9 @@ class AILateTacticalScoring:
     def r22_paid_reaction_score(self, battle: Battle, actor: Unit, queued: QueuedAction,
                                 payload: dict[str, Any], code: str) -> float:
         """Compatibility entry for callers using the previous scorer name."""
-        return self.services.paid_reaction_score(battle, actor, queued, payload, actor.get_skill(code),
-                                   code in {"light_wall", "fire_wall", "hell_wall", "hell_wall_free"})
+        skill = actor.get_skill(code)
+        return self.services.paid_reaction_score(
+            battle, actor, queued, payload, skill, skill.ai_paid_reaction_shield)
 
 
     def simulated_reaction_score(self, battle: Battle, actor: Unit, queued: QueuedAction,
@@ -503,8 +506,9 @@ class AILateTacticalScoring:
     def andrew_reaction_score(self, battle: Battle, actor: Unit, queued: QueuedAction,
                               payload: dict[str, Any], code: str) -> float:
         """Compatibility entry for callers using the previous scorer name."""
-        return self.services.simulated_reaction_score(battle, actor, queued, payload, actor.get_skill(code),
-                                        8.0 if code == "gladiator_roar" else 4.0)
+        skill = actor.get_skill(code)
+        return self.services.simulated_reaction_score(
+            battle, actor, queued, payload, skill, skill.ai_reaction_simulation_bonus)
 
 
 _BOUND_SERVICE: AILateTacticalScoring | None = None

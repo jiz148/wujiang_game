@@ -123,10 +123,10 @@ class DamageProbeService:
         ignore_shield: bool,
         half_ignore_shield: bool,
     ) -> DamageImpact:
-        hit_count = 1 if skill.code == "deadly_bow" else max(1, battle.unit_hit_count_for_cells(target, cells) if cells else 1)
+        hit_count = skill.ai_damage_probe_hit_count(battle, target, cells)
         adjusted_attack_power = max(0.0, float(attack_power) - max(0, hit_count - 1))
-        resolves_as_attack = str(skill.code) == "whirlwind_attack"
-        if str(skill.code) in {"complete_burn", "blizzard"}:
+        resolves_as_attack = skill.ai_damage_probe_resolves_as_attack
+        if skill.ai_damage_probe_shielded_damage:
             # Only the attached control pierces; the damage still stops at shields.
             ignore_shield = False
         target_tags = {"attack", "whirlwind"} if resolves_as_attack else {"skill", str(skill.code)}

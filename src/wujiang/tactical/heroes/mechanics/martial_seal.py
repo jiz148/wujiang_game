@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import HealContext
 from wujiang.tactical.engine.core import HeroUnit
@@ -31,6 +32,11 @@ class MartialGodSealStatus(StatusEffect):
 
 
 class MartialGodSealSkill(Skill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        if context.battle.effect_recipient(context.actor).has_status("魔界武神之印"):
+            return -8.0
+        return context.shared.r19_preparation_score(context)
+
     def __init__(self) -> None:
         super().__init__(
             "martial_god_seal",

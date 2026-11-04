@@ -305,42 +305,16 @@ class AIFormationScoring:
         score += self.services.fried_aura_position_value(battle, actor, destination)
         if move_policy is not None:
             score += move_policy.aura_move_score_bonus(battle, actor, destination)
-        if actor.hero_code in {"excel_r188", "excel_r224"}:
-            before = self.services.r20_line_window_value(battle, actor, profile)
-            with ai_probe_rollback(battle):
-                actor.position = destination
-                score += 0.75 * (self.services.r20_line_window_value(battle, actor, profile) - before)
-        if actor.hero_code == "excel_r225":
-            with ai_probe_rollback(battle):
-                actor.position = destination
-                score += self.services.r21_barrier_position_value(battle, actor)
-        if actor.hero_code == "excel_r264":
-            immediate = self.services.r21_winged_contact_value(battle, actor, allow_leap=False, allow_move=False)
-            with ai_probe_rollback(battle):
-                moved = destination != actor.position
-                actor.position = destination
-                if moved:
-                    actor.normal_move_actions_used = actor.normal_move_actions_per_turn()
-                    actor.normal_move_steps_used = actor.normal_move_distance()
-                score += 0.7 * max(0.0, self.services.r21_winged_contact_value(battle, actor) - immediate)
-        if actor.hero_code in {"excel_r327", "excel_r352"}:
-            with ai_probe_rollback(battle):
-                actor.position = destination
-                score += 0.8 * self.services.r22_contact_value(battle, actor, allow_move=False)
-                if actor.hero_code == "excel_r327":
-                    score -= self.services.r22_gazer_window_risk(battle, actor)
-        if actor.hero_code == "excel_r379" or actor.has_status("菊之遗击"):
+        if move_policy is not None and not getattr(move_policy, "late_position_adjustment", False):
+            score += move_policy.position_move_adjustment(
+                battle, actor, destination, profile, self.services)
+        if actor.has_status("菊之遗击") and not getattr(move_policy, "handles_kiku_movement", False):
             with ai_probe_rollback(battle):
                 actor.position = destination
                 score += 0.7 * self.services.r23_attack_plan_value(battle, actor) - 2.0 * self.services.natsume_unit_danger(battle, actor)
-        if actor.hero_code == "excel_r031":
-            with ai_probe_rollback(battle):
-                actor.position = destination
-                score += self.services.natsume_position_plan_value(battle, actor) - self.services.natsume_unit_danger(battle, actor)
-        if actor.hero_code == "excel_r030":
-            with ai_probe_rollback(battle):
-                actor.position = destination
-                score += self.services.fusion_attack_plan_value(battle, actor, allow_move=False) - self.services.fusion_position_risk(battle, actor)
+        if move_policy is not None and getattr(move_policy, "late_position_adjustment", False):
+            score += move_policy.position_move_adjustment(
+                battle, actor, destination, profile, self.services)
         if move_policy is not None:
             score += move_policy.late_move_score_bonus(battle, actor, destination, allies)
         return score

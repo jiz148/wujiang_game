@@ -277,7 +277,7 @@ function renderStatus(chess, me) {
     const interestStep = Number(chess.config?.interest_step || 10);
     const interestCap = Number(chess.config?.interest_cap ?? 3);
     const interest = Math.min(interestCap, Math.floor(Math.max(0, Number(me.gold || 0)) / interestStep));
-    gold.title = `金币 ${me.gold} · 当前存款预计下轮利息 +${interest}（每 ${interestStep} 金 +1，最多 +${interestCap}）`;
+    gold.title = `金币 ${me.gold} · 每轮基础 +${chess.config?.base_income ?? 7}；胜利 +1；连胜/连败从第 3 场起奖励，最多分别 +${chess.config?.win_streak_reward_cap ?? 4}/+${chess.config?.loss_streak_reward_cap ?? 2}；当前存款预计下轮利息 +${interest}（每 ${interestStep} 金 +1，最多 +${interestCap}）`;
     rowA.append(gold);
     rowA.append(statPill('health', me.health));
     const field = node('span', 'chess-status__field');
@@ -341,7 +341,7 @@ function renderStandings(chess) {
 
 function renderShop(chess, me, locked) {
   const section = node('section', 'autochess-shop');
-  section.append(node('p', 'meta-note', `武将价格随原生等级加速上涨（1/2/3/5/7…30金）；当前等级抽到已拥有武将的额外机会：${Math.round(Number(me.owned_shop_chance || 0) * 100)}%`));
+  section.append(node('p', 'meta-note', `武将价格随原生等级加速上涨（1/2/3/5/7…30金）；五个商店格抽到已拥有武将的机会依次为 ${(me.owned_shop_slot_chances || []).map(chance => `${Math.round(Number(chance) * 100)}%`).join('、')}`));
   const list = node('div', 'chess-shop-list');
   (me.shop || []).forEach((entry) => {
     if (!entry.code) {

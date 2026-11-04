@@ -35,6 +35,49 @@ class BoxerTauntStatus(RequiredAttackStatus):
 
 
 class RingTauntSkill(Skill):
+    def ai_taunt_control_score(self, battle, actor, payload, targets, services, profile) -> float:
+        enemies = [unit for unit in targets if unit.player_id != actor.player_id]
+        allies = [unit for unit in targets if unit.player_id == actor.player_id]
+        if not enemies:
+            return -20.0
+        score = 0.0
+        cells = services.skill_effect_cells(battle, actor, self, payload)
+        for unit in enemies:
+            if unit.magic_immunity:
+                continue
+            attack_power = services.skill_attack_power(battle, actor, self, payload, unit, cells)
+            damage = services.estimate_skill_damage(
+                battle, actor, self, payload, unit, attack_power,
+                cells=cells, ignore_shield=True, half_ignore_shield=False)
+            score += damage * 100.0 + services.hostile_unit_value(unit) * 0.45
+            if damage >= unit.current_hp - 1e-9:
+                score += 90.0
+                continue
+            already_taunted = any(
+                str(getattr(status, "required_attack_target_id", "") or "") == actor.unit_id
+                and not bool(getattr(status, "requirement_satisfied", False))
+                for status in unit.statuses)
+            if already_taunted:
+                score -= 18.0
+                continue
+            active_skills = sum(1 for skill in unit.skills if getattr(skill, "timing", None) in {"active", "instant"})
+            incoming = services.estimate_damage(battle, actor, unit.stat("attack"))
+            counter_damage = services.estimate_damage(battle, unit, actor.stat("attack"))
+            score += 42.0 + unit.attack_actions_per_turn() * 16.0 + active_skills * 9.0
+            score += counter_damage * 70.0 - incoming * 45.0
+        for unit in allies:
+            if unit.magic_immunity:
+                continue
+            attack_power = services.skill_attack_power(battle, actor, self, payload, unit, cells)
+            damage = services.estimate_skill_damage(
+                battle, actor, self, payload, unit, attack_power,
+                cells=cells, ignore_shield=True, half_ignore_shield=False)
+            score -= services.friendly_fire_penalty(unit) + damage * 120.0
+            if damage < unit.current_hp - 1e-9:
+                score -= unit.attack_actions_per_turn() * 22.0
+        score += len(enemies) * 10.0
+        return score + profile.aggressive_bonus
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.taunt_control_score(context)
 

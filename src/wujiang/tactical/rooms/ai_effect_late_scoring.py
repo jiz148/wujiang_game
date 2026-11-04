@@ -209,21 +209,12 @@ class AILateEffectScoring:
 
 
     def r15_control_value(self, battle: Battle, target: Unit, code: str) -> float:
-        from wujiang.tactical.heroes.mechanics.true_blade_bird import skill_has_movement_effect
+        from wujiang.tactical.heroes.mechanics.noise_interference import NoiseWaveSkill
+        from wujiang.tactical.heroes.mechanics.purify_duel import SacredDuelSkill
 
-        status_name = "乱音电波" if code == "noise_wave" else "神圣决斗"
-        if target.has_status(status_name):
-            return 0.0
-        useful = [skill for skill in target.skills
-                  if not target.cannot_use_skills and not getattr(skill, "locked", False) and skill.cooldown_remaining <= 0
-                  and (skill.max_uses_per_battle is None or skill.uses_this_battle < skill.max_uses_per_battle)
-                  and skill.mana_cost <= target.current_mana
-                  and not any(component.blocks_skill_use(battle, target, skill)[0] for component in target.iter_components())]
-        if code == "noise_wave":
-            slow = 14.0 if target.stat("speed") > 1 and not target.cannot_move and not target.cannot_normal_move else 0.0
-            return slow + 24.0 * sum(skill_has_movement_effect(skill) for skill in useful)
-        movement = 18.0 + min(5.0, target.stat("speed")) * 8.0 if not target.cannot_move and not target.cannot_normal_move else 0.0
-        return movement + 26.0 * sum(skill.timing == "active" for skill in useful)
+        # Historical public helper; the active score path already has the skill object.
+        skill = NoiseWaveSkill() if code == "noise_wave" else SacredDuelSkill()
+        return skill.ai_r15_control_value(battle, target)
 
 
     def reviewed_r15_effect_score(self,
@@ -233,9 +224,8 @@ class AILateEffectScoring:
         payload: dict[str, Any],
         profile: DifficultyProfile,
     ) -> float:
-        code = str(skill.code)
         targets = self.services.skill_effect_units(battle, actor, skill, payload)
-        control = {unit.unit_id: self.services.r15_control_value(battle, unit, code) for unit in targets} if code in {"noise_wave", "sacred_duel"} else {}
+        control = {unit.unit_id: skill.ai_r15_control_value(battle, unit) for unit in targets}
         with ai_probe_rollback(battle):
             before = {unit.unit_id: (unit.current_hp, unit.alive, unit.player_id, unit.current_mana,
                                     unit.total_shields(), self.services.hostile_unit_value(unit),
@@ -254,14 +244,9 @@ class AILateEffectScoring:
                 impact = lost_hp * 100.0 + (60.0 + value * 0.25 if destroyed else 0.0)
                 if unit is not None:
                     impact += max(0, shields - unit.total_shields()) * 14.0
-                    if code == "interference" and alive and unit.alive and player != actor.player_id and unit.player_id == actor.player_id:
-                        impact += 70.0 + value * 0.55
-                    if code == "purify_mana":
-                        impact += max(0.0, mana - unit.current_mana) * 34.0
-                    if code in {"noise_wave", "sacred_duel"}:
-                        status_name = "乱音电波" if code == "noise_wave" else "神圣决斗"
-                        if status_name not in statuses and unit.has_status(status_name):
-                            impact += control.get(unit_id, 0.0)
+                    impact += skill.ai_r15_post_effect_bonus(
+                        actor, unit, alive=alive, player=player, mana=mana,
+                        value=value, statuses=statuses, control=control.get(unit_id, 0.0))
                 score += impact if player != actor.player_id else -impact * 1.3
             return score + profile.aggressive_bonus if score > 0 else score - 100.0
 

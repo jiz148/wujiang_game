@@ -27,65 +27,80 @@ from wujiang.tactical.prediction import (ForecastRandom, forecasting_active, not
 # A later engine/trait edit disables this specialization until reviewed again.
 # Normalize CRLF so checkout line endings do not change the contract.
 _SOURCES = {
-    "wujiang.tactical.heroes.ai_policy": "01937ad02c1b90ec30b54b3dd6778f89fcb10367d79e2d6b9f795aa8d17a1bbc",
+    "wujiang.tactical.engine.battle_chain": "92423819da6af746a527b536ddcef63427566db4d899df4bd4dd121b310406b9",
+    "wujiang.tactical.engine.battle_combat": "2b441bd3cfe57a9374190717530ef11920831278430b86b6046a1437d4872262",
+    "wujiang.tactical.engine.battle_declarations": "f939f10eb72796e89124c06a74ce1b9e44caea2ff186d3aa67b5cc156888d6fd",
+    "wujiang.tactical.engine.battle_execution": "e7ba8e6f2a54080ec6467cbeffd9dddef18a30d7b3937be6a15057840f49227d",
+    "wujiang.tactical.engine.battle_geometry": "c6588645f7143a6bfe9641635fa07f517d51b3061681dbdc1dc9193bcd1ac542",
+    "wujiang.tactical.engine.battle_lifecycle": "5822c10d51c525b3e9c7069e59eaa44fd465a3840ac9d65d4328595faf08506e",
+    "wujiang.tactical.engine.battle_movement": "36e4a8c6f13e0f7428a1c6f271b96d31f8ecceebc53cc9032bc2eb3756b09c0c",
+    "wujiang.tactical.engine.battle_presentation": "e8023ba92e089249ab073b5718954e908cbc43f0dd7ea7cc4888dc02f123fe4b",
+    "wujiang.tactical.engine.battle_reactions": "14277aa960a6d8c74459b0c5116c1ebeeee77dc0515e853c8a6aef3be3374242",
+    "wujiang.tactical.engine.battle_turns": "465139922eca22200579af19f720cc4c3c96635dc23336894587ac196e64c5cc",
+    "wujiang.tactical.engine.battle_units": "9a1b5a90ca01c83b533af651e2566b7ff0737c7e0da595354be51c40b3fefbd2",
+    "wujiang.tactical.heroes.ai_policy": "0aae5235f35c4105ff1e82212ccd903250069e87d4ff995bce11ccf088ee9c55",
+    "wujiang.tactical.heroes.ai_score_policies": "2cb7b62e336c72b9634ef07a24e2a7d79a6df7a68687b0b4d0b01f62686c3cee",
     "wujiang.tactical.heroes.ai_candidate_plan": "1bf261a8aa847fc003b28a0f85bee138f94380f01f1985ca97cc70c5bb49742f",
-    "wujiang.tactical.heroes.ai_impact_rule": "140d7f361c10ac40335ed7239fe117a7f5ed3d19ed1884c0ae7bb9a67c8b1b86",
+    "wujiang.tactical.heroes.ai_impact_rule": "c60bb94e25b0bb3027ff01ee131e47d8cb2ae958cfe6ffee5471f42841ee3919",
+    "wujiang.tactical.heroes.ai_red_preparation": "243f07969473619d1b5d05602874287afc832cfd817aa2a2ce8a6f31c4be371d",
     "wujiang.tactical.heroes.mechanics.resource_effect_ai": "59fc73bb39add025fb6daaccb350f3fc8d44d21180bed23ed2a21bfa2580f729",
     "wujiang.tactical.heroes.mechanics.simulated_effect_ai": "a70f77084c36349c4b4b5e6eec747dd3104d8d8e65eddd7e0422462814875ad7",
-    "wujiang.tactical.heroes.electronic_infinity": "eb29844e2e3adecd803691cc1ad41fbb9714af34d1485960046a48b3c1456fc2",
-    "wujiang.tactical.heroes.flying_dragon_ship": "f10498fb3c4a07103106c07572aff229691357019ce0535f40ca1746566b1fd1",
+    "wujiang.tactical.heroes.electronic_infinity": "b7315f5acf742f4d70db796c7154569c3e3d0b64b0f29e2a6de63cb28d3260e4",
+    "wujiang.tactical.heroes.flying_dragon_ship": "3c65cda21dffcd3b0781d8dbd546180c0d1865c7227b8ff75a3afbc07ef866ce",
     "wujiang.tactical.heroes.flame_manager": "92956aea1ca8c55e17a56aefa653cf9a9b7ee276780abe9ccc0728d6770fa6fb",
-    "wujiang.tactical.heroes.gentleman": "4987f8afdf6cdb421ad4ccf4421a8be98ab890059557519d65f52188484aada8",
-    "wujiang.tactical.heroes.mechanics.ancient_mecha": "03203214ed4e6c994c1ffe765194983f2a6d617f3060656b9f530f2ff5b30db6",
-    "wujiang.tactical.heroes.mechanics.barbarian_king": "da0867685a69138b25b307e4a1bb25adffc80c8604b2e51a83eedd96440793cb",
+    "wujiang.tactical.heroes.gentleman": "8d55ebf288d432bed29a9ad6d91e89e04f3cfb59d1177481c14756774a226f54",
+    "wujiang.tactical.heroes.mechanics.ancient_mecha": "683d8083ae485bd89f0798d88d8584a00535792f7aab09f6fb3ea678e52c5e85",
+    "wujiang.tactical.heroes.mechanics.barbarian_king": "1dab8322831e21ebdb62f2cd103850d3f961f4c21fd36346510a532309ddc686",
     "wujiang.tactical.heroes.mechanics.bird_king": "0726df69c2835432ac2672bbd2264a60e0a7a0e483d8205740ed46519168b2ff",
-    "wujiang.tactical.heroes.mechanics.gladiator_cooperation": "3ebb6db2d6721efe1ff45971577f3a0578680ad3fefc8e910a71e35c2a867814",
-    "wujiang.tactical.heroes.mechanics.gladiator_core": "4fe667e092128a8276d3f506758a3b9c26ec7f26c0f20163648a08e4fd1590fb",
-    "wujiang.tactical.heroes.mechanics.electronic_barrier": "dfa6dde46527a9d104de2a1c158a5961f2fdde13eaccb726239cac5344dd72eb",
+    "wujiang.tactical.heroes.mechanics.gladiator_cooperation": "4407904263ff1400e665cb99d4e2365a261b8115d0dac16f5c03d35b61595ecb",
+    "wujiang.tactical.heroes.mechanics.gladiator_core": "6e90878195f212710f7e0c003da59392e405b878a521a6c6e24525126b208702",
+    "wujiang.tactical.heroes.mechanics.electronic_barrier": "292723ea22d86b28c6415361f8a6f97ed6ea038e8fdb21b442b0d180b21382f0",
     "wujiang.tactical.heroes.mechanics.hell_core": "c7dd2695244a55b342b9cec74d716fcef25a18e542004ef3b20298b0e014e13f",
-    "wujiang.tactical.heroes.mechanics.jade": "e3db7170500b7957290491dc6da1b1916b22fd1415ecb2626d7625322833d131",
-    "wujiang.tactical.heroes.mechanics.sanctuary": "825eafa3146713a62c438b7e971bb10d0b6cb8016b129893ae27381b1751d5f2",
-    "wujiang.tactical.heroes.mechanics.giant_shield": "6bb209e041f03d0eb2837ae1bc74a67ef5c99430b38942918ba26f3a4e929087",
+    "wujiang.tactical.heroes.mechanics.inner_dimension": "7f38a20759599410ed72454fb4a9224094686760f9cc0dc13580c1a6d476c0dd",
+    "wujiang.tactical.heroes.mechanics.jade": "b501431e5fd518ff0882e1f3f81ae8e7e3c4d22f917d6ec8d8b08a9bd68d3cbf",
+    "wujiang.tactical.heroes.mechanics.sanctuary": "e825791e765c33fc5a4bd910692c2e0f146dccda927759d32e8520c2b6947d6f",
+    "wujiang.tactical.heroes.mechanics.giant_shield": "38388036f9da989de09480212f7ce589dac5f603c2bbfa2e664ce255425f91bd",
     "wujiang.tactical.heroes.mechanics.ice_emperor": "b0d255bef145088bb9ce012b69b92a0e0f7a1ca2f33185210a33bcd9abf35ed0",
     "wujiang.tactical.heroes.mechanics.tianyuan": "70aee47dd4f36fb2100088c209361cb177dddf91d9691e140b745a46f343dc23",
-    "wujiang.tactical.heroes.mechanics.messenger_crow": "632958697ade8e72a6bc44770d773803e84f461a9d9ccfc4af2158c938653c71",
-    "wujiang.tactical.heroes.storm_spirit": "d388eeca89e67a6c228ce5ae74c99578f637fd97d214ee40e0708b63afcf8bab",
-    "wujiang.tactical.heroes.super_crow": "9d3978ed1af17ee970041f80b327851c3086109e5cef216c81765c7abde356d9",
-    "wujiang.tactical.heroes.wyvern_raider": "bfceea3825506de5f7e140d45f0ba637b4aab51909ef1869ee280f99d5e60264",
+    "wujiang.tactical.heroes.mechanics.messenger_crow": "2126662fab4627cf12a88d5d20ce751778c78fb2ff477dea358e978a3686d448",
+    "wujiang.tactical.heroes.mechanics.nuclear_gravity": "2bea0b01d61b44bf2de188d32873e07497c655cc1bff4767e40b9733d72063a8",
+    "wujiang.tactical.heroes.storm_spirit": "0ebde3287ded095e61ad08486c1f6fcc35a2ce973ff09441ebe1ceb0d0e067f3",
+    "wujiang.tactical.heroes.super_crow": "1a1e9d6b7b6b25b8d370b0d8c3b478ea864bec661637d6bd323481c1e8491a50",
+    "wujiang.tactical.heroes.wyvern_raider": "72b1f7d5b9ad3460c6743d0221d88e2a58cb5edf1459143f4d011ccd4c021ee9",
     "wujiang.tactical.rooms.ai_targets": "390f6e548aaa40d535c222017da79f50489dbd977e36222298718aae9bda6824",
     "wujiang.tactical.rooms.ai_skill_payloads": "9d92c3c5f11450607fd623a7e3e2a870c3fdd34ce575bb1b4f993b86e18eb0ac",
-    "wujiang.tactical.rooms.ai_decisions": "6261f7a2b03c052247d347eb961e256c92d809016d53967873dabefaad9ec33b",
-    "wujiang.tactical.rooms.ai_move_candidates": "13954937ee06932b5314a748ba1881cec21a6577e5490d47a01451c817408ba9",
-    "wujiang.tactical.rooms.ai_attack_candidates": "b561a6e6245728495e7008d472189e0632110015e8d28b91535b8907f5bae17f",
-    "wujiang.tactical.rooms.ai_skill_candidates": "3aed4b76f4ca98c97f02d994acb922ff86732d316b2af5d98e975429ee2cfc65",
+    "wujiang.tactical.rooms.ai_decisions": "6db793dad23f5826157029ff7e07b141c654f7003a1c09339859e28d9b4436a4",
+    "wujiang.tactical.rooms.ai_move_candidates": "04d0737ac9734a45ecfa0ec8987889848b93e3fdceed00a239cd15efce4e1c43",
+    "wujiang.tactical.rooms.ai_attack_candidates": "be63f28ac05e9a770b3647755cd688e969d99c0c85a18d2c1252a59bfa9ce871",
+    "wujiang.tactical.rooms.ai_skill_candidates": "55ff1d7509893b5441e10a8735e56cc415d482b3b7a20ad3bdfb0892fad428c4",
     "wujiang.tactical.rooms.ai_reaction_candidates": "aa8d471617f9a89d248f36461f7c9addede34193377f49062bc8333f44193841",
-    "wujiang.tactical.rooms.ai_damage_probes": "6873a0124b7af9bf4d067c8534a36dc3fb1d9a914e9e7f821dba130f03596ac6",
-    "wujiang.tactical.rooms.ai_attack_scoring": "1d2d61d1d588067ec3fca730aeed6ca085fdf77b20baa6dbf3120c4faf9094b6",
-    "wujiang.tactical.rooms.ai_effect_early_scoring": "d46bab462fe4ae460dbcde6663c001919d47a01314c77f8de5f97cccf9ac3268",
-    "wujiang.tactical.rooms.ai_effect_late_scoring": "52ebc248ef1f1c87d00989e7d4a068774603a59910e0558ecd193661b7e6acd2",
-    "wujiang.tactical.rooms.ai_formation_scoring": "290f16af9048ab68a2049567f978348386cc60490da3d1b3dd57d1a4a6bae487",
-    "wujiang.tactical.rooms.ai_impact_scoring": "243d1d352878b79af9bd3f1fa1b1579e6e9d988919627cbf35d0a6766d0bfef8",
-    "wujiang.tactical.rooms.ai_late_scoring": "767499d3080b629499bd2a266b607b1b40f7a4049f674b074cfd09e3d259f2ae",
-    "wujiang.tactical.rooms.ai_mobility_effect_scoring": "c9a30438b5f207179fe133d8f5772bc6d6bb04fe4c15cd2e397a7f0fd6a6ff5f",
-    "wujiang.tactical.rooms.ai_opportunity_scoring": "eda7fd4f1fd85adeeef8795ae4aed9646e9d0846ccfba3b381a5797fb0c37f4a",
-    "wujiang.tactical.rooms.ai_reaction_scoring": "5328820c9139044f5ff2c8a029f0850169ff2433bf6d6d4293e224fcc2eba8b1",
-    "wujiang.tactical.rooms.ai_self_generic_scoring": "b44fcfbcee87f299dd5e19081045db829b30e1c0bdefc3be9684365fa4097de9",
-    "wujiang.tactical.rooms.ai_skill_dispatch_scoring": "bd1c48bf27da1ccb9aef15412a878c629ec75df190d1fe13f75355a8bdf850a9",
-    "wujiang.tactical.rooms.ai_skill_entry_scoring": "3e1e9fb12219e8beb2a06c8b593c7b4ae99796deddae94642f3d28161c683440",
-    "wujiang.tactical.rooms.ai_support_scoring": "c744d2075e7e3741f9f7119e96544b9cbf60e2f121eff5f21cd37458ea46c844",
+    "wujiang.tactical.rooms.ai_damage_probes": "28d4e5eeb34d6318c99f1a1ccfcd6a9754356182e403d0281282bf737bc02b21",
+    "wujiang.tactical.rooms.ai_attack_scoring": "837e6e89e0104843afed88cbad97897062c09d2b4cd37b713f3d68b1fb6569bb",
+    "wujiang.tactical.rooms.ai_effect_early_scoring": "3658dd3609ed9368b1413378e251c0690cd2086c07ab8dc0c3f39f1330b930ac",
+    "wujiang.tactical.rooms.ai_effect_late_scoring": "3af23e1413d708332b12a34eee0f8ea8ff94600cd8794be40c33164346420e6e",
+    "wujiang.tactical.rooms.ai_formation_scoring": "c76eb46c0a8d6e7aa96ccee3652c94d7ea0d7ce79241f8edce454d27cfcbbb9d",
+    "wujiang.tactical.rooms.ai_impact_scoring": "332c35a25a34b509cb6d4c54cffed2e1b092254aa0ca1c5f26b824fc937de5a4",
+    "wujiang.tactical.rooms.ai_late_scoring": "6e303862f464be0d25f1c36816d059f91f9496c6cfbae5bdfd38cabb5b514719",
+    "wujiang.tactical.rooms.ai_mobility_effect_scoring": "b6c52c0ab6946841e89a0e20fac5e389ae0a00149d01e58fbbbb5ca345dc5fff",
+    "wujiang.tactical.rooms.ai_opportunity_scoring": "d4fda70d36a4ad8c85fe148e49665ec299d1d27fdd384eaaab34704c7af442f3",
+    "wujiang.tactical.rooms.ai_reaction_scoring": "ff3a4986ae85c91f0c52e089060fe0d430221c5970681a1cd1e811a6e8208c05",
+    "wujiang.tactical.rooms.ai_self_generic_scoring": "c2eb151b5a2a063a170f15de94a5e2eadae4b8e180e0fd8f03df835a591111b3",
+    "wujiang.tactical.rooms.ai_skill_dispatch_scoring": "4d21b8de13d09fc56fd8bd53f024c2f77bbf821316f77bbb711074e411bb87a5",
+    "wujiang.tactical.rooms.ai_skill_entry_scoring": "bab066667a90787749d15f9f7192220c188b43b1d853c8cb9ff1bac50808d744",
+    "wujiang.tactical.rooms.ai_support_scoring": "9157bc006b2ef2e3cd3399d35206cafb8e9f036036eb2074c272e206ae825372",
     "wujiang.tactical.rooms.ai_weather_scoring": "d82e16e73bf8be2db2441076e8dbaacca54868ef8b1e91f125b60f3d1ba5e917",
-    "wujiang.tactical.rooms.ai_room_services": "efe4dcf9417b25f6918a44cfa4fe5e85eaa15ceb2f02528ef05dd0643b4d20c5",
+    "wujiang.tactical.rooms.ai_room_services": "e12c061dc70f2d66b98a5b948c102624dfe45a1142ffaece05c0dce4054bffc8",
     "wujiang.tactical.rooms.ai_skill_catalog": "581b30515c308e3bc071ad15d6d1c42c0e718d4f9d82a189205011a5ecdcaf72",
     "wujiang.tactical.rooms.ai_types": "b0578a994f172e60aa47e388be5688b3afe064108fe867098deb516574e759dd",
     "wujiang.tactical.rooms.ai_probe": "72fba98cc9f2814dda6dfada6a9c0446358535c5da0c783f5381cfd40e682885",
-    "wujiang.tactical.engine.core": "08ddc2dab3cf88654d0453b4079fbaa589fba9babe53b8159b1f0ccf2e4f87ba",
-    "wujiang.tactical.heroes.common": "cc172a8a1469a714f13d8d03384e6bc76984a99bd5ba5dbf72dbfb0b5143d219",
+    "wujiang.tactical.engine.core": "d9ba0d6aae17f49897663a6ffdd2638d48800f7e4e1f0e296fc2051dc9487eda",
+    "wujiang.tactical.heroes.common": "c02240947e6550675d4a0292a87ef05ef5db953743e360dcb0cca7f8da88769e",
     "wujiang.tactical.heroes.excel_roster": "e32124761f4088d139db1407985b103419ba64d364c831f031cd6506d1898684",
-    "wujiang.tactical.heroes.mechanics.hell_rebirth": "888025e1a3cbd1f9e487990cdc321507dd47dbb3864484bc2163b8ac51230d0c",
-    "wujiang.tactical.heroes.mechanics.hell_dog_hunter": "b6f33c32a67245d1d7987533dfc3d8c18a1bc2a51ae69ed7161c19b87fa074ec",
-    "wujiang.tactical.heroes.mechanics.hell_dragon": "c64a9e76d1155b2436c4a095306e937c03e944191d37e371c00d2bec719f0726",
-    "wujiang.tactical.heroes.mechanics.hell_wargod": "269e3a860b9dce5d32c09eb4d268b851320b852fc5ad4f20ba1d03f1ef5a3f31",
-    "wujiang.tactical.heroes.mechanics.weapon_copy": "90eb236376dcc7272f3c68e8587de46e6671c2aa6589d69678e61f7c1c2ab019",
+    "wujiang.tactical.heroes.mechanics.hell_rebirth": "45bbacb070446b5d9065e750afb6385a4d8e92871d8d78606713abbe87c78dd5",
+    "wujiang.tactical.heroes.mechanics.hell_dog_hunter": "48081f03870d2bf4b79e4fd23a273a84f9007c848ad65a3b0e50b2486b9f5474",
+    "wujiang.tactical.heroes.mechanics.hell_dragon": "eb7d076b25869778f474d502686f951f098a102148f9b11e732b002e5de19f99",
+    "wujiang.tactical.heroes.mechanics.hell_wargod": "4de407e98305900f5ec72b777b426200f8f61e65f5e263af1966e5658d9ca3cc",
+    "wujiang.tactical.heroes.mechanics.weapon_copy": "85ce27597258b2a091146f5a3d786b8e65f17691948b1c14a300df085fe70ccf",
     "wujiang.tactical.rooms.equipment_effects": "4df3f0232e6d804921df4b5c789791ba178618d58688f27288353c2409dab83b",
     "wujiang.tactical.rooms.synergy": "6e650a65f2023ed76778e6e7e5c5c4202ed2a64b9e74dd1c9c1ebf653305a2b9",
 }
@@ -254,6 +269,9 @@ def engine_factor_support():
     """Inspect engine AND reviewed component hierarchies without a battle."""
     classes = {cls.__qualname__: cls for cls in
                (core.SummaryDamageRule, core.Battle, core.Unit, core.BattleComponent, core.StatusEffect)}
+    for cls in core.Battle.__mro__[1:]:
+        if cls is not object:
+            classes[cls.__module__ + "." + cls.__qualname__] = cls
     for module_name, methods in _LOCAL.items():
         module = importlib.import_module(module_name)
         for class_name in {name.split(".", 1)[0] for name in methods}:
@@ -288,8 +306,27 @@ def _component_type_contract(kind):
             or getattr(kind, "__getattr__", None) is not None):
         return False
     for cls in kind.__mro__:
-        if any(isinstance(value, property) and cls.__module__ != core.__name__ for value in vars(cls).values()):
-            return False
+        for name, value in vars(cls).items():
+            if not isinstance(value, property) or cls.__module__ == core.__name__:
+                continue
+            # Every subclass that retains this exact accessor reads False;
+            # the Assassin subclass shadows it with a reviewed True flag.
+            # Parameterized legacy traits can vary by hero code and stay out.
+            reviewed_rebirth_flag = (
+                cls.__module__ == "wujiang.tactical.heroes.mechanics.hell_rebirth"
+                and cls.__qualname__ == "HellRebirthTrait"
+                and name == "rebirth_enemy_anchors_only"
+                and value.fset is None and value.fdel is None
+                and _original(value.fget)
+                and (
+                    (kind is not cls and getattr(kind, name, None) is value)
+                    or (kind.__module__ == "wujiang.tactical.heroes.mechanics.hell_rebirth"
+                        and kind.__qualname__ == "HellAssassinRebirthTrait"
+                        and vars(kind).get(name) is True)
+                )
+            )
+            if not reviewed_rebirth_flag:
+                return False
     overridden = False
     for name in _HOOKS:
         function = getattr(kind, name, None)

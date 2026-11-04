@@ -19,6 +19,8 @@ from wujiang.tactical.heroes.mechanics.next_five_geometry import nearby_rectangl
 
 
 class DragonBreathSkill(Skill):
+    ai_area_bonus_codes = frozenset({"dragon_breath", "remote_dragon_breath"})
+
     excludes_caster_from_effect = True
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float:

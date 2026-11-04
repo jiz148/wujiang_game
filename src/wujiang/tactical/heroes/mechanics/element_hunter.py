@@ -146,6 +146,13 @@ class PlantGrowthFieldEffect(BattleFieldEffect):
 
 
 class RemoteAreaDamageSkill(Skill):
+    def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
+        status_name = getattr(self, "ai_control_status_name", None)
+        if status_name is None:
+            return 0.0
+        return sum(24.0 for unit in targets
+                   if unit.player_id != context.actor.player_id and not unit.has_status(status_name))
+
     def __init__(
         self,
         code: str,
@@ -238,6 +245,9 @@ def blizzard_status_factory() -> StatusEffect:
 
 
 class CompleteBurnSkill(RemoteAreaDamageSkill):
+    ai_damage_probe_shielded_damage = True
+
+    ai_control_status_name = "完全燃烧"
     def __init__(self) -> None:
         super().__init__(
             "complete_burn",
@@ -250,6 +260,9 @@ class CompleteBurnSkill(RemoteAreaDamageSkill):
 
 
 class BlizzardSkill(RemoteAreaDamageSkill):
+    ai_damage_probe_shielded_damage = True
+
+    ai_control_status_name = "暴风雪"
     def __init__(self) -> None:
         super().__init__(
             "blizzard",
@@ -309,6 +322,15 @@ class ThunderGodSkill(Skill):
         return {"cells": positions_to_dict(cells), "target_unit_ids": [], "secondary_cells": [], "requires_target": True}
 
 class WaterWaveSkill(Skill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        if actor.has_status("水之波动"):
+            return -1000.0
+        enemies = [unit for unit in battle.enemy_units(actor.player_id)
+                   if unit.alive and unit.position is not None and not unit.banished]
+        return (120.0 if any(context.shared.unit_distance(battle, actor, enemy)
+                             <= actor.targeting_range() + 4 for enemy in enemies) else -8.0)
+
     def __init__(self) -> None:
         super().__init__("water_wave", "水之波动", "普通技能：冷却 4轮，只能对自己使用；全能力 +1，持续 2轮，不回复当前魔。", cooldown_turns=4, target_mode="self")
 
@@ -376,6 +398,14 @@ class EarthWalkerCleanupStatus(StatusEffect):
 
 
 class PlantGrowthSkill(Skill):
+    def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
+        return context.shared.field_skill_score(context)
+
+    def ai_field_score(self, battle: Battle, actor: Unit, targets: list[Unit], distance) -> float:
+        enemy_hits = sum(1 for unit in targets if unit.player_id != actor.player_id and not unit.cannot_normal_move)
+        ally_hits = sum(1 for unit in targets if unit.player_id == actor.player_id and not unit.cannot_normal_move)
+        return enemy_hits * 24.0 - ally_hits * 28.0 - 8.0
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.field_skill_score(context)
 
@@ -500,6 +530,20 @@ class ElementHunter(AbstractHero):
 
 
 class EarthWalkerSkill(SplitSkill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        enemies = context.shared.hostile_units(battle, actor)
+        if actor.has_status("土行者") or not enemies:
+            return -1000.0
+        if context.shared.best_attack_score(battle, actor, context.profile) > 0:
+            return -1000.0
+        nearby = any(
+            context.shared.unit_distance(battle, actor, enemy)
+            <= enemy.normal_move_distance() + enemy.targeting_range()
+            for enemy in enemies
+        )
+        return 24.0 + max(0.0, actor.max_health - actor.current_hp) * 45.0 if nearby else -8.0
+
     def ai_clone_placement_enemies(self, battle: Battle, actor: HeroUnit) -> list[Unit]:
         return living_hostile_combatants(battle, actor.player_id)
 

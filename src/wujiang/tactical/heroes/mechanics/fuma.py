@@ -42,6 +42,10 @@ class FumaAIPolicy(HeroAIPolicy):
 
 
 class FumaPursuitSkill(Skill):
+    def ai_move_score(self, context: AISkillScoreContext, base_score: float,
+                      destination: Position) -> float:
+        return base_score + context.shared.fuma_pursuit_score(context, self)
+
     def __init__(self) -> None:
         super().__init__(
             "fuma_pursuit",
@@ -170,6 +174,7 @@ class FumaTrapEffect(BattleFieldEffect):
 
 
 class FumaTrapSkill(Skill):
+    ai_enemy_impact_requirement = False
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.fuma_trap_score(context)
 
@@ -206,6 +211,12 @@ class FumaTrapSkill(Skill):
 
 
 class FumaShurikenSkill(Skill):
+    def ai_effective_enemy_impact(self, battle, actor, payload, targets=None, shared=None, action=None):
+        if targets is None:
+            return None
+        return shared.reviewed_r16_damage_result(battle, actor,
+                                                   lambda: self.execute(battle, actor, payload)) > 8.0
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.fuma_shuriken_score(context)
 

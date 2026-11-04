@@ -15,6 +15,23 @@ from wujiang.tactical.heroes.common import payload_position
 class GhostStepSkill(DashMoveSkill):
     ai_reaction_score_phase = "after_hidden_source"
 
+    @staticmethod
+    def attackable_skill_targets(battle: Battle, actor: HeroUnit) -> set[str]:
+        reachable: set[str] = set()
+        for skill in actor.action_skills():
+            if skill.code == "ghost_step" or not (skill.directly_damages_on_use() or skill.ai_always_hostile_effect):
+                continue
+            try:
+                if not skill.can_use(battle, actor, {})[0]:
+                    continue
+                preview = skill.preview(battle, actor)
+            except ActionError:
+                continue
+            reachable.update(str(unit_id) for unit_id in preview.get("target_unit_ids", [])
+                             if (unit := battle.units.get(str(unit_id))) is not None
+                             and unit.player_id != actor.player_id)
+        return reachable
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.owned_effect_score(self)
 
@@ -23,15 +40,22 @@ class GhostStepSkill(DashMoveSkill):
         destination = context.destination()
         if destination is None or actor.position is None:
             return -1000.0
+        if battle.active_player != actor.player_id:
+            return -1000.0
         style = context.hero_style()
         gain = context.move_score(destination, style) - context.move_score(actor.position, style)
         before = context.best_attack_score()
+        before_skills = self.attackable_skill_targets(battle, actor)
         with context.probe_rollback():
             try:
                 self.execute(battle, actor, context.payload)
             except ActionError:
                 return -1000.0
-            gain += max(0.0, context.best_attack_score() - before)
+            attack_gain = context.best_attack_score() - before
+            new_skill_targets = self.attackable_skill_targets(battle, actor) - before_skills
+            if attack_gain <= 0 and not new_skill_targets:
+                return -1000.0
+            gain += max(0.0, attack_gain) + len(new_skill_targets) * 24.0
         return gain - 22.0 - (20.0 if actor.current_mana <= 1 else 0.0)
 
     def __init__(self) -> None:
@@ -57,13 +81,16 @@ class GhostStepSkill(DashMoveSkill):
             return False, "请选择合法鬼步落点。"
         return (True, "") if payload_position(payload) in battle.reachable_positions(actor, max_distance=2) else (False, "鬼步落点不可达。")
 
+    def declared_reaction_landing_valid(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> bool:
+        return not actor.cannot_move and payload_position(payload) in battle.reachable_positions(actor, max_distance=2)
+
     def reaction_preview(self, battle: Battle, actor: HeroUnit, queued_action: Any) -> dict[str, Any]:
         return self.preview(battle, actor)
 
     def ai_reaction_score(self, context: AIReactionScoreContext) -> float:
-        threat = context.threat(context.proxy_target())
+        threat = context.threat(context.actor)
         destination = context.destination()
-        if destination is None or context.destination_still_targeted(destination):
+        if threat <= 0 or destination is None or context.destination_still_targeted(destination):
             return -1000.0
         skill_context = context.skill_context(self.code)
         return threat + 4.0 + skill_context.move_score(destination,

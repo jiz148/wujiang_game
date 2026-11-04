@@ -1,12 +1,14 @@
 """Source-preserving object assembly for excel_r379 / 妖仙。菊."""
 
 from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_hero_kit
+from wujiang.tactical.heroes.ai_score_policies import KikuPiercePolicy
 from wujiang.tactical.heroes.mechanics.kiku import KikuAfterDeathTrait, SunSlashSkill
 
 
 def install(r) -> None:
     register_hero_kit(FragmentMappedHeroKit(
         "excel_r379",
+        ai_policy=KikuPiercePolicy(),
         skills={
             "斩技": SunSlashSkill,
         },

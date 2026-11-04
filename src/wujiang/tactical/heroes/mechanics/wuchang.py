@@ -105,6 +105,9 @@ class WuchangMistField(BattleFieldEffect):
 
 
 class WuchangMistSkill(Skill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.wuchang_mist_score(context)
+
     ai_early_effect_score = True
 
     def ai_effect_score(self, context: AISkillScoreContext) -> float:
@@ -128,6 +131,10 @@ class WuchangMistSkill(Skill):
 
 
 class MigratoryBirdMarkSkill(Skill):
+    def ai_requires_enemy_impact(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> bool:
+        target = battle.units.get(str(payload.get("target_unit_id") or ""))
+        return target is not None and target.player_id != actor.player_id
+
     ai_early_effect_score = True
 
     def ai_effect_score(self, context: AISkillScoreContext) -> float:

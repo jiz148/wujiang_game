@@ -258,21 +258,18 @@ class AIEarlyEffectScoring:
         payload: dict[str, Any],
         profile: DifficultyProfile,
     ) -> float:
-        code = str(skill.code)
         affected = self.services.skill_effect_units(battle, actor, skill, payload)
         score = 0.0
         cells = self.services.skill_effect_cells(battle, actor, skill, payload)
-        lina_reward = (next((trait for trait in actor.traits if trait.name == "击破重置"), None)
-                       if actor.hero_code == "undead_king_lina" else None)
+        lina_reward = next((trait for trait in actor.traits if trait.name == "击破重置"), None)
         lina_reward_kills: list[Unit] = []
         for unit in affected:
             if unit.player_id == actor.player_id:
                 score -= self.services.friendly_fire_penalty(unit)
                 continue
-            if code == "morning_holy_light":
-                if unit.attribute == "暗":
-                    score += min(5.0, unit.current_hp) * 100.0
-                score += self.services.hostile_unit_value(unit) * 0.5
+            special_score = skill.ai_damage_target_score(unit, self.services.hostile_unit_value(unit))
+            if special_score is not None:
+                score += special_score
                 continue
             attack_power = self.services.skill_attack_power(battle, actor, skill, payload, unit, cells)
             ignore_shield = bool(skill.ignores_shield_for_payload(battle, actor, payload))
@@ -304,8 +301,7 @@ class AIEarlyEffectScoring:
                 battle, actor, {unit.unit_id for unit in lina_reward_kills}
             ):
                 score += 55.0
-        if code in {"judgment_fire", "great_funeral", "laser", "missile", "machine_gun", "pierce", "hell_spear", "hell_spear_free", "hell_ranged_spear", "hell_ranged_spear_free", "large_pierce_plus", "remote_dragon_breath", "dragon_breath", "magnetic_wave", "whirlwind_attack"}:
-            score += len([unit for unit in affected if unit.player_id != actor.player_id]) * 18.0
+        score += len([unit for unit in affected if unit.player_id != actor.player_id]) * skill.ai_area_hit_bonus()
         if self.services.hero_style(actor) != "support":
             score += profile.aggressive_bonus
         return score
@@ -320,99 +316,18 @@ class AIEarlyEffectScoring:
         profile: DifficultyProfile,
         *,
         instant_only: bool,
+        skill: Any = None,
+        action: dict[str, Any] | None = None,
     ) -> float:
-        enemies = [unit for unit in targets if unit.player_id != actor.player_id]
-        if code == "magnetic_wave":
-            # The complete damage/control result is priced by magnetic_wave_score.
-            return 0.0
-        if code == "paralyzing_glove":
-            return sum(self.services.hostile_unit_value(unit) * 0.6 for unit in enemies) + 45.0
-        if code == "curse":
-            return sum(unit.current_hp * 80.0 for unit in enemies)
-        if code == "doom_light":
-            return len(enemies) * 32.0 + sum(unit.current_hp * 40.0 for unit in enemies)
-        if code in {"complete_burn", "blizzard"}:
-            status_name = "完全燃烧" if code == "complete_burn" else "暴风雪"
-            return sum(24.0 if not unit.has_status(status_name) else 0.0 for unit in enemies)
-        if code == "morning_holy_light":
-            return len(enemies) * 30.0 + sum(40.0 for unit in enemies if unit.attribute == "暗")
-        if code == "eagle_eye":
-            return sum(
-                42.0
-                + (0 if unit.cannot_attack else 24.0)
-                + sum(1 for skill in unit.skills if skill.timing == "active") * 12.0
-                for unit in enemies
-                if not unit.has_status("鹰眼")
-            )
-        if code == "hundred_bird_burial":
-            from wujiang.tactical.heroes.mechanics.true_blade_bird import skill_has_movement_effect
-            return sum(24.0 + 18.0 * sum(skill_has_movement_effect(skill) for skill in unit.skills)
-                       for unit in enemies if not unit.has_status("百鸟葬禁位移"))
-        if code == "snow_avalanche":
-            return sum(
-                52.0 + 9.0 * sum(skill.timing == "active" for skill in unit.skills)
-                for unit in enemies if not unit.has_status("雪崩") and unit.alive
-            )
-        if code == "thor_destroy_lightning":
-            return sum(54.0 for unit in enemies if unit.attribute != "雷" and not unit.has_status("毁灭电击"))
-        if code in {"drain_mana", "large_drain_mana"}:
-            return sum(min(unit.current_mana, 1.0) * 45.0 for unit in enemies)
-        if code == "mana_pull":
-            return 20.0 if enemies else 6.0
-        if code == "stance":
-            return self.services.field_skill_score(battle, actor, code, targets, profile)
-        if code == "plant_growth":
-            return self.services.field_skill_score(battle, actor, code, targets, profile)
-        if code == "smoke_spray":
-            return self.services.field_skill_score(battle, actor, code, targets, profile)
-        if code == "gale":
-            return self.services.gale_score(battle, actor, payload, profile)
-        if code == "heaven_lock":
-            target = self.services.primary_target_unit(battle, payload, targets)
-            if target is None or target.player_id == actor.player_id or target.has_status("天锁") or target.cannot_normal_move or target.stat("speed") <= 0:
-                return -1000.0
-            with ai_probe_rollback(battle):
+        if skill is None:
+            try:
                 skill = actor.get_skill(code)
-                try:
-                    skill.execute(battle, actor, payload)
-                except ActionError:
-                    return -1000.0
-                if not target.has_status("天锁"):
-                    return -1000.0
-            return 24.0 + min(6.0, target.stat("speed")) * 7.0 - 1.5 * 12.0
-        if code == "sun_slash":
-            return self.services.r23_sun_slash_score(battle, actor, actor.get_skill(code), payload)
-        if code == "heaven_punishment":
-            selected_code = str(payload.get("disabled_skill_code") or "")
-            target = self.services.primary_target_unit(battle, payload, targets)
-            if target is None or not selected_code:
-                return -120.0
-            from wujiang.tactical.heroes.mechanics.heaven_punishment import HeavenPunishmentSkill
-
-            selected = next((skill for skill in HeavenPunishmentSkill.public_active_skills(battle, target) if skill.code == selected_code), None)
-            if selected is None or any(getattr(status, "skill_code", None) == selected_code for status in target.statuses):
-                return -120.0
-            if selected.max_uses_per_battle is not None and selected.uses_this_battle >= selected.max_uses_per_battle:
-                return -120.0
-            score = 32.0 if selected.cooldown_remaining > 0 else 55.0
-            if selected_code in self.services.DAMAGING_SKILL_CODES or selected_code in self.services.CONTROL_SKILL_CODES:
-                score += 35.0
-            if selected_code in self.services.SUMMON_SKILL_CODES or selected_code in self.services.HEAL_SKILL_CODES:
-                score += 24.0
-            if getattr(selected, "max_uses_per_battle", None) == 1 and getattr(selected, "uses_this_battle", 0) == 0:
-                score += 20.0
-            if selected.mana_cost > target.max_mana():
-                score -= 45.0
-            return score
-        if code in {"paralysis_card", "poison_card", "drain_card", "magic_claw"}:
-            if code == "drain_card":
-                return sum(min(unit.current_mana, 1.0) * 35.0 + self.services.hostile_unit_value(unit) * 0.12 for unit in enemies)
-            if code == "poison_card":
-                return len(enemies) * 28.0 + sum(unit.current_hp * 18.0 for unit in enemies)
-            if code == "magic_claw":
-                return len(enemies) * 30.0
-            return len(enemies) * 32.0
-        return 0.0
+            except (ActionError, KeyError, ValueError):
+                return 0.0
+        context = self.services._skill_score_context(
+            battle, actor, action or {"code": code, "_skill_object": skill}, payload,
+            profile, instant_only=instant_only)
+        return skill.ai_control_bonus(context, list(targets))
 
 
     def drain_mana_score(self, battle: Battle, actor: Unit, targets: list[Unit], profile: DifficultyProfile) -> float:
@@ -434,7 +349,7 @@ class AIEarlyEffectScoring:
             active = 0.0
             if not target.cannot_use_skills:
                 for skill in target.skills:
-                    if skill.timing != "active" or skill.code in {"sanctuary_banish", "mountain_awakening"}:
+                    if skill.timing != "active" or skill.ai_future_opportunity_excluded:
                         continue
                     try:
                         if not skill.can_use(battle, target, {})[0]:
@@ -445,7 +360,7 @@ class AIEarlyEffectScoring:
                             unit.player_id != target.player_id for unit in self.services.skill_effect_units(battle, target, skill, payload)
                         ), reverse=True)
                         for payload in ranked[:6]:
-                            heals = skill.code in self.services.HEAL_SKILL_CODES | {"punisher_heal", "nian_dragon_dance"}
+                            heals = skill.code in self.services.HEAL_SKILL_CODES or skill.ai_future_heal
                             if heals:
                                 if not any(unit.player_id == target.player_id and unit.current_hp < unit.max_health and not unit.cannot_heal
                                            for unit in self.services.skill_effect_units(battle, target, skill, payload)):
@@ -464,10 +379,7 @@ class AIEarlyEffectScoring:
             units = list(battle.all_units())
             before = {unit.unit_id: (unit.current_hp, unit.current_mana, unit.alive, unit.total_shields(),
                                      unit.has_status("圣殿放逐")) for unit in units}
-            control_before = {}
-            if skill.code == "sanctuary_banish":
-                control_before = {unit.unit_id: self.services.r12_future_banish_value(battle, unit, profile)
-                                  for unit in units if unit.player_id != actor.player_id and unit.alive}
+            control_before = skill.ai_r12_control_before(battle, actor, units, self.services, profile)
             try:
                 queued = battle.build_queued_action({"type": "skill", "unit_id": actor.unit_id, **payload, "skill_code": skill.code})
                 if gravity_values is not None:
@@ -486,27 +398,24 @@ class AIEarlyEffectScoring:
             score = 0.0
             for unit in units:
                 hp, mana, alive, shields, locked = before[unit.unit_id]
-                mana_weight = 42.0 if skill.code == "punisher_heal" and unit.player_id == actor.player_id and unit.unit_id != actor.unit_id else 22.0
+                mana_weight = skill.ai_r12_mana_weight(actor, unit)
                 value = (hp - unit.current_hp) * 115.0 + (mana - unit.current_mana) * mana_weight
                 value += max(0, shields - unit.total_shields()) * 20.0
                 if alive and self.services.scored_death_probability(unit) > 0:
                     value += (90.0 * self.services.scored_death_probability(unit) if direct_scoring() else 90.0)
-                if skill.code == "sanctuary_banish" and unit.alive and not locked and unit.has_status("圣殿放逐"):
-                    value += max(0.0, control_before.get(unit.unit_id, 0.0)
-                                 - self.services.r12_future_banish_value(battle, unit, profile))
+                value += skill.ai_r12_unit_bonus(
+                    battle, actor, unit, locked=locked, control_before=control_before,
+                    services=self.services, profile=profile)
                 score += value if unit.player_id != actor.player_id else -value * (1.3 if hp > unit.current_hp else 1.0)
             return score
 
 
     def r12_effect_score(self, battle: Battle, actor: Unit, skill: Any, payload: dict[str, Any],
                          profile: DifficultyProfile) -> float:
-        if skill.code == "gravity_field":
-            if direct_scoring():
-                return self.services._score_skill_payload(battle, actor, {"code": skill.code}, payload, profile, instant_only=False)
-            branches = (([1, 1, 1], 1), ([2, 1, 1], 3), ([2, 2, 1], 3), ([2, 2, 2], 1))
-            score = sum(weight * self.services.r12_realized_effect_value(battle, actor, skill, payload, profile,
-                                                           gravity_values=values) for values, weight in branches) / 8.0
-        else:
+        score = skill.ai_r12_effect_override(battle, actor, payload, self.services, profile)
+        if score is not None and skill.ai_r12_direct_return and direct_scoring():
+            return score
+        if score is None:
             score = self.services.r12_realized_effect_value(battle, actor, skill, payload, profile)
         if score <= 0:
             return -1000.0
@@ -518,7 +427,7 @@ class AIEarlyEffectScoring:
     def r12_costly_window(self, battle: Battle, actor: Unit, profile: DifficultyProfile) -> float:
         best = 0.0
         for skill in actor.skills:
-            if skill.timing != "active" or skill.mana_cost <= 0 or skill.code in {"mountain_god_muro", "mountain_escape", "mountain_awakening"}:
+            if skill.timing != "active" or skill.mana_cost <= 0 or skill.ai_costly_window_excluded:
                 continue
             if skill.code not in self.services.DAMAGING_SKILL_CODES | self.services.HOSTILE_EFFECT_SKILL_CODES | self.services.HEAL_SKILL_CODES:
                 continue
@@ -546,50 +455,11 @@ class AIEarlyEffectScoring:
 
 
     def r12_preparation_score(self, battle: Battle, actor: Unit, code: str, profile: DifficultyProfile) -> float:
-        if code == "mountain_god_muro":
-            if actor.has_status("山神术。室王"):
-                return -8.0
-            before = self.services.r12_costly_window(battle, actor, profile)
-            with ai_probe_rollback(battle):
-                actor.get_skill(code).execute(battle, actor, {})
-                after = self.services.r12_costly_window(battle, actor, profile)
-            gain = max(0.0, after - before)
-            return max(profile.once_per_battle_threshold + 35.0, gain * 1.5 + 30.0) if gain > 0 else -8.0
-        if code == "mountain_escape":
-            if actor.has_status("遁术。神山"):
-                return -8.0
-            before_risk = self.services.r19_incoming_position_risk(battle, actor)
-            critically_low = actor.current_hp <= actor.max_health * 0.25
-            likely_lethal = before_risk >= actor.current_hp * 100.0 and before_risk > 0
-            if not critically_low and not likely_lethal:
-                return -1000.0
-            before_output = self.services.r19_attack_window_value(battle, actor, profile)
-            hp = actor.current_hp
-            with ai_probe_rollback(battle):
-                actor.get_skill(code).execute(battle, actor, {})
-                healing = max(0.0, actor.current_hp - hp)
-                after_risk = self.services.r19_incoming_position_risk(battle, actor)
-                after_output = self.services.r19_attack_window_value(battle, actor, profile)
-            gain = healing * 150.0 + max(0.0, before_risk - after_risk) * 1.3
-            gain += min(1.0, max(0.0, actor.max_mana() - actor.current_mana)) * 18.0
-            gain -= max(0.0, before_output - after_output) * 0.85
-            if likely_lethal:
-                return gain + 200.0 if gain > 14.0 else -8.0
-            # At critical HP without immediate lethal pressure, use available skills first.
-            return min(profile.once_per_battle_threshold + 5.0, gain - 14.0) if gain > 14.0 else -8.0
-        used = [skill for skill in actor.skills if skill.max_uses_per_battle == 1 and skill.uses_this_battle > 0]
-        if not used or sum(status.name == "山神计数点" for status in actor.statuses) < 8:
+        try:
+            skill = actor.get_skill(code)
+        except (ActionError, KeyError, ValueError):
             return -8.0
-        gain = 0.0
-        with ai_probe_rollback(battle):
-            for skill in used:
-                skill.uses_this_battle = 0
-                status = actor.get_status(skill.name)
-                if status is not None:
-                    actor.remove_status(status, battle)
-                if skill.code in {"mountain_god_muro", "mountain_escape"}:
-                    gain = max(gain, self.services.r12_preparation_score(battle, actor, skill.code, profile))
-        return gain + 30.0 if gain > 0 else -8.0
+        return skill.ai_preparation_score(battle, actor, self.services, profile)
 
 
     def r13_recovery_value(self, battle: Battle, target: Unit) -> float:
@@ -607,7 +477,7 @@ class AIEarlyEffectScoring:
             target.turn_ready = True
             battle.resolving_action = None
             for candidate in target.skills:
-                if candidate.code not in self.services.HEAL_SKILL_CODES | {"punisher_heal", "nian_dragon_dance"} or candidate.timing != "active":
+                if (candidate.code not in self.services.HEAL_SKILL_CODES and not candidate.ai_future_heal) or candidate.timing != "active":
                     continue
                 try:
                     if not candidate.can_use(battle, target, {})[0]:
@@ -652,23 +522,15 @@ class AIEarlyEffectScoring:
 
 
     def r13_effect_score(self, battle: Battle, actor: Unit, skill: Any, payload: dict[str, Any], profile: DifficultyProfile) -> float:
-        from wujiang.tactical.heroes.mechanics.true_blade_bird import skill_has_movement_effect
         with ai_probe_rollback(battle):
             units = list(battle.all_units())
             before = {unit.unit_id: (unit.current_hp, unit.current_mana, unit.alive, unit.total_shields(),
                                      {status.name for status in unit.statuses}) for unit in units}
-            control = {}
-            for unit in self.services.skill_effect_units(battle, actor, skill, payload):
-                if skill.code == "hundred_bird_burial":
-                    control[unit.unit_id] = 24.0 * sum(skill_has_movement_effect(candidate) and not unit.cannot_use_skills
-                        and candidate.cooldown_remaining == 0 and candidate.mana_cost <= unit.current_mana
-                        and not any(component.blocks_skill_use(battle, unit, candidate)[0] for component in unit.iter_components())
-                        for candidate in unit.skills)
-                elif skill.code == "nian_jade_flash":
-                    control[unit.unit_id] = self.services.r13_recovery_value(battle, unit)
-            protected = [unit for unit in battle.player_units(actor.player_id) if unit.alive and unit.unit_id != actor.unit_id]
-            risks = {unit.unit_id: self.services.r19_incoming_position_risk(battle, unit) for unit in protected} if skill.code == "nian_roar" else {}
-            mana_risk = self.services.r19_incoming_position_risk(battle, actor) if actor.hero_code == "excel_r056" and skill.mana_cost > 0 else 0.0
+            control = {unit.unit_id: skill.ai_simulated_control_value(battle, actor, unit, self.services)
+                       for unit in self.services.skill_effect_units(battle, actor, skill, payload)}
+            saved = skill.ai_simulation_before(battle, actor, self.services)
+            remi_mana_risk = getattr(getattr(actor, "ai_policy", None), "ai_mana_risk", False)
+            mana_risk = self.services.r19_incoming_position_risk(battle, actor) if remi_mana_risk and skill.mana_cost > 0 else 0.0
             try:
                 queued = battle.build_queued_action({"type": "skill", "unit_id": actor.unit_id, **payload, "skill_code": skill.code})
                 battle.pending_followup_actions.clear()
@@ -686,21 +548,13 @@ class AIEarlyEffectScoring:
                 hp, mana, alive, shields, statuses = before[unit.unit_id]
                 value = (hp - unit.current_hp) * 100.0 + (mana - unit.current_mana) * 18.0
                 value += max(0, shields - unit.total_shields()) * 20.0 + (80.0 if alive and not unit.alive else 0.0)
-                name = "百鸟葬禁位移" if skill.code == "hundred_bird_burial" else "碧玉闪光"
-                if unit.alive and name not in statuses and unit.has_status(name):
+                name = skill.ai_simulated_control_status
+                if name is not None and unit.alive and name not in statuses and unit.has_status(name):
                     value += control.get(unit.unit_id, 0.0)
                 score += value if unit.player_id != actor.player_id else -value * (1.3 if hp > unit.current_hp else 1.0)
-            if skill.code == "nian_roar" and any(unit.alive and unit.has_status("怒吼") and "怒吼" not in before[unit.unit_id][4] for unit in units):
-                score += min(90.0, sum(max(0.0, risk - self.services.r19_incoming_position_risk(battle, battle.get_unit(unit_id)))
-                                       for unit_id, risk in risks.items() if battle.units.get(unit_id) is not None))
-            if skill.code == "remi_chaos" and actor.alive:
-                old_position = battle.declared_source_position(queued.payload)
-                score += (self.services.score_move_destination(battle, actor, actor.position, self.services.hero_style(actor), profile)
-                          - self.services.score_move_destination(battle, actor, old_position, self.services.hero_style(actor), profile)) * 0.7
-            if actor.hero_code == "excel_r056" and actor.alive and actor.current_mana < 2 and skill.mana_cost > 0:
+            score += skill.ai_simulation_after(battle, actor, queued, self.services, profile, saved, before, units)
+            if remi_mana_risk and actor.alive and actor.current_mana < 2 and skill.mana_cost > 0:
                 score -= min(80.0, max(0.0, self.services.r19_incoming_position_risk(battle, actor) - mana_risk))
-            if skill.code == "nian_dragon_dance":
-                score -= 20.0  # Preserve the two-round recovery when only a little mana is missing.
             if score <= 0:
                 return -1000.0
             if skill.max_uses_per_battle == 1 and score < profile.once_per_battle_threshold:
@@ -716,7 +570,9 @@ class AIEarlyEffectScoring:
                 skill.execute(battle, actor, dict(payload))
             except (ActionError, KeyError, ValueError):
                 return -1000.0
-            summon = next((unit for unit in battle.all_units() if unit.unit_id not in original and unit.hero_code == "remi_bat"), None)
+            from wujiang.tactical.heroes.mechanics.remi_bat import RemiBatSummon
+            summon = next((unit for unit in battle.all_units()
+                           if unit.unit_id not in original and isinstance(unit, RemiBatSummon)), None)
             if summon is None or not summon.can_take_turn_actions(battle):
                 return -1000.0
             output = self.services.r19_attack_window_value(battle, summon, profile)
@@ -834,8 +690,12 @@ def skill_control_bonus(
     profile: DifficultyProfile,
     *,
     instant_only: bool,
+    skill: Any = None,
+    action: dict[str, Any] | None = None,
 ) -> float:
-    return _require_service().skill_control_bonus(battle, actor, code, payload, targets, profile, instant_only=instant_only)
+    return _require_service().skill_control_bonus(
+        battle, actor, code, payload, targets, profile,
+        instant_only=instant_only, skill=skill, action=action)
 
 
 @expected_numeric(independent=True)

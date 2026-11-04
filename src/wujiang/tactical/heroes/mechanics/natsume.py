@@ -19,9 +19,15 @@ from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import TargetContext
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.heroes.common import payload_target_unit
+from wujiang.tactical.heroes.common import ShensuSkill
 from wujiang.tactical.heroes.common import payload_target_units
 from wujiang.tactical.heroes.common import positions_to_dict
 from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
+
+
+class NatsumeShensuSkill(ShensuSkill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.natsume_shensu_score(context)
 
 
 def _natsume_active_score(skill: Skill, context: AISkillScoreContext) -> float:
@@ -329,6 +335,23 @@ class NatsumeWindWallSkill(Skill):
 
 class NatsumeDispelSkill(Skill):
     ai_early_effect_score = True
+    ai_enemy_impact_requirement = False
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        enemy = ally = 0
+        for unit in self.affected_units(battle, actor):
+            if not self.has_purge_effect(unit) or not self.target_can_react_to_effect(battle, actor, unit, context.payload):
+                continue
+            if unit.player_id == actor.player_id:
+                ally += 1
+            else:
+                enemy += 1
+        ordinary = self.ai_effect_score(context)
+        if enemy < 2:
+            return ordinary
+        mana_gain = min(enemy + ally, max(0.0, actor.max_mana() - actor.current_mana))
+        return max(ordinary, enemy * 65.0 - ally * 85.0 + mana_gain * 18.0)
 
     def __init__(self) -> None:
         super().__init__("natsume_dispel", "驱散", "普通技能：每回合1次、0魔；固定声明周围11×11，双方召唤物/分身破坏，隐身解除；每个实际受影响受体回复1魔。", max_uses_per_turn=1, target_mode="self")

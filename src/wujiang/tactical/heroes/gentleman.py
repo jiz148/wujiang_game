@@ -11,7 +11,7 @@ from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.ai_candidate_plan import TargetDestinationCandidates
 from wujiang.tactical.heroes.common import payload_position, payload_target_unit, positions_to_dict
 from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_hero_kit
-from wujiang.tactical.heroes.mechanics.clone_split import StandardCloneSummon
+from wujiang.tactical.heroes.mechanics.clone_split import StandardCloneSummon, maybe_swap_new_clones
 
 
 _DIRECTIONS = ((-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1))
@@ -343,7 +343,7 @@ class GentlemanGuardTrait(Trait):
 
 class GentlemanCrossingCloneTrait(Trait):
     def __init__(self) -> None:
-        super().__init__("穿人造影", "穿过敌方单位后，在进入其身体前的合法空格召唤一个分身。")
+        super().__init__("穿人造影", "穿过敌方单位后，在进入其身体前的合法空格召唤一个分身，并随机决定是否与新分身换位。")
 
     def on_unit_moved(self, battle: Battle, ctx: MoveContext) -> None:
         owner = self.owner
@@ -359,7 +359,10 @@ class GentlemanCrossingCloneTrait(Trait):
                 battle.log_public_event(f"{owner.name} 穿过敌人，但前一格不能造影。", source=owner)
                 continue
             battle.summon_unit(clone, previous, summoner=owner)
-            battle.log_public_event(f"{owner.name} 穿过敌方单位并留下分身。", source=owner, target=clone)
+            exchanged = maybe_swap_new_clones(owner, [clone])
+            battle.log_public_event(f"{owner.name} 穿过敌方单位并留下分身"
+                                    + ("，与分身换位。" if exchanged else "，本体留在原位。"),
+                                    source=owner, target=clone)
 
 
 GENTLEMAN_KIT = register_hero_kit(FragmentMappedHeroKit(

@@ -234,6 +234,11 @@ class ThorDestroyedLightningStatus(H1AllActionLockStatus):
 
 
 class ThorDestroyLightningSkill(ThorLineDamageSkill):
+    def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
+        return sum(54.0 for unit in targets if unit.player_id != context.actor.player_id
+                   and unit.attribute != "雷" and not unit.has_status("毁灭电击"))
+
+    ai_always_hostile_effect = True
     def __init__(self) -> None:
         super().__init__(
             "thor_destroy_lightning",

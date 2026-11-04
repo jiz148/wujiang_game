@@ -7,7 +7,7 @@ from typing import Any, Iterator
 
 from wujiang.tactical.engine.core import ActionError, Battle, QueuedAction, Skill, Trait, Unit
 from wujiang.tactical.heroes.ai_policy import (AIReactionCandidateContext,
-    AIReactionScoreContext, AISkillCandidateContext, HeroAIPolicy)
+    AIReactionScoreContext, AISkillCandidateContext, AISkillScoreContext, HeroAIPolicy)
 from wujiang.tactical.heroes.hero_kit import HeroKit, register_hero_kit
 
 
@@ -30,6 +30,12 @@ class ElectronicInfinityAIPolicy(HeroAIPolicy):
     """Keep paid instant candidates tied to their source skill's target model."""
 
     contextual_reaction_prefixes = ("infinity_instant__",)
+    simple_ion_reaction = True
+    simple_prefer_instant = True
+
+    @staticmethod
+    def simple_area_targeting(source_code: str) -> bool:
+        return source_code in {"machine_gun", "missile"}
 
     def contextual_reaction_score(self, context: AIReactionScoreContext) -> float | None:
         if not context.code.startswith("infinity_instant__"):
@@ -74,6 +80,12 @@ class ElectronicInfinityAIPolicy(HeroAIPolicy):
             return None
         return [pattern for _, pattern, _ in self._ranked_patterns(context, patterns)]
 
+    def empty_payload_filter_reason(self, context: AISkillCandidateContext | AIReactionCandidateContext,
+                                    patterns: list) -> str | None:
+        if context.code.startswith("infinity_instant__") and patterns and not self._ranked_patterns(context, patterns):
+            return "no_positive_area_impact"
+        return None
+
     def reaction_candidate_payloads(self, context: AIReactionCandidateContext) -> list[dict] | None:
         if not context.code.startswith("infinity_instant__"):
             return None
@@ -103,6 +115,29 @@ def _source_as_instant(source: Skill) -> Iterator[None]:
 
 class InfinityInstantSkill(Skill):
     """A visible second declaration mode; the original skill owns every quota."""
+
+    @property
+    def tendency_overclock_order(self) -> int | None:
+        return {"machine_gun": 0, "missile": 1}.get(self.source.code)
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        if self.source.code not in {"machine_gun", "missile"}:
+            return -1000.0  # No value from an off-turn movement buff or an empty temporary shield.
+        actor = context.actor
+        previous_mana = actor.current_mana
+        try:
+            # The paid conversion changes the attack before the same skill resolves.
+            object.__setattr__(actor, "current_mana", max(
+                0.0, previous_mana - self.mana_cost_for_payload(context.battle, actor, context.payload)))
+            score = context.shared.nested_skill_score(
+                context,
+                {**context.action, "code": self.source.code, "_skill_object": self.source},
+                {**context.payload, "skill_code": self.source.code},
+                instant_only=False,
+            )
+        finally:
+            object.__setattr__(actor, "current_mana", previous_mana)
+        return score + (14.0 if previous_mana > 0 and actor.stat("defense") <= 4 else 4.0) - 26.0
 
     def __init__(self, source: Skill) -> None:
         super().__init__(
@@ -230,7 +265,9 @@ class InfinityInstantSkill(Skill):
 
     def queued_reaction_payload_metadata(self, battle: Battle, actor: Unit,
                                          payload: dict[str, Any]) -> dict[str, Any]:
-        return self.source.queued_reaction_payload_metadata(battle, actor, payload)
+        declared = (self.source.queued_payload_metadata(battle, actor, payload)
+                    if self.source.timing not in {"passive", "reaction"} else {})
+        return {**declared, **self.source.queued_reaction_payload_metadata(battle, actor, payload)}
 
     def ignores_shield_for_payload(self, battle: Battle, actor: Unit,
                                    payload: dict[str, Any]) -> bool:

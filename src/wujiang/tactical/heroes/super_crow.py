@@ -60,7 +60,7 @@ def _adjacent_cells(battle: Battle, unit: Unit) -> list[Position]:
 
 class SuperCrowAura(BattleFieldEffect):
     def __init__(self, owner_id: str) -> None:
-        super().__init__("超级信鸦威压", "本体或报信乌鸦外邻敌速-1；禁止本次实付0魔的技能。")
+        super().__init__("超级信鸦威压", "本体或报信乌鸦外邻敌速-1；多只报信乌鸦效果不叠加；禁止本次实付0魔的技能。")
         self.owner_id = owner_id
         self.source_unit_id = owner_id
 
@@ -85,6 +85,15 @@ class SuperCrowAura(BattleFieldEffect):
 
     def modify_unit_stat(self, battle: Battle, unit: Unit, stat_name: str, value: float) -> float:
         if stat_name == "speed" and self.covers(battle, unit):
+            source = self.source(battle)
+            if source is not None and source.hero_code == "super_messenger_crow":
+                first = next((effect for effect in battle.field_effects
+                              if isinstance(effect, SuperCrowAura)
+                              and (crow := effect.source(battle)) is not None
+                              and crow.hero_code == "super_messenger_crow"
+                              and effect.covers(battle, unit)), None)
+                if first is not self:
+                    return value
             return max(1.0, value - 1.0)
         return value
 
@@ -97,7 +106,7 @@ class SuperCrowAura(BattleFieldEffect):
 
 class SuperCrowAuraTrait(Trait):
     def __init__(self) -> None:
-        super().__init__("超级信鸦威压", "外邻敌速-1并禁实付0魔技能；多只来源分别叠加。")
+        super().__init__("超级信鸦威压", "外邻敌速-1并禁实付0魔技能；多只报信乌鸦效果不叠加。")
         self.field: SuperCrowAura | None = None
 
     def on_enter_battle(self, battle: Battle) -> None:
@@ -120,7 +129,7 @@ class SuperMessengerCrow(AbstractHero):
     level = 1
     base_stats = Stats(attack=1, defense=3, speed=5, attack_range=1, mana=0)
     raw_skill_text = ""
-    raw_trait_text = "飞行；外邻敌速-1，不能使用实付0魔技能"
+    raw_trait_text = "飞行；外邻敌速-1，效果不叠加，不能使用实付0魔技能"
 
     def __init__(self, player_id: int) -> None:
         super().__init__(player_id, is_summon=True)
@@ -193,6 +202,9 @@ class SuperCrowFreeSkillTrait(Trait):
 
 
 class SuperCrowSummonSkill(Skill):
+    tendency_priority_rank = 4
+    simple_repeatable_limit = 3
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float | None:
         if context.actor.hero_code != "excel_r324":
             return None
@@ -218,7 +230,7 @@ class SuperCrowSummonSkill(Skill):
         return setup + pressure - cost * 34.0 - (20.0 if not adjacent else 0.0)
 
     def __init__(self) -> None:
-        super().__init__("super_messenger_crow", "报信乌鸦", "每本人轮前三次免费，之后每次费0.5魔；外邻召一只飞行乌鸦。",
+        super().__init__("super_messenger_crow", "报信乌鸦", "每本人轮前三次免费，之后每次费0.5魔；外邻召一只飞行乌鸦，威压效果不叠加。",
                          mana_cost=0.5, target_mode="cell")
 
     def mana_cost_for_payload(self, battle: Battle, actor: Unit,
@@ -302,6 +314,18 @@ class CrowFormationStatus(StatusEffect):
 
 
 class CrowFormationSkill(Skill):
+    tendency_cast_group = frozenset({
+        "eight_dragon_crow_array", "square_crow_array",
+        "hexagram_crow_array", "triangle_crow_array",
+    })
+    tendency_cast_limit = 3
+    simple_repeatable_limit = 3
+
+    @property
+    def tendency_priority_rank(self) -> int:
+        return {"eight_dragon_crow_array": 0, "square_crow_array": 1,
+                "hexagram_crow_array": 2, "triangle_crow_array": 3}.get(self.code, 5)
+
     requires_direct_unit_target_line = False
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float | None:

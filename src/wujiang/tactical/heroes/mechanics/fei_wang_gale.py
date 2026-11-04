@@ -8,10 +8,29 @@ from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
+from wujiang.tactical.engine.core import Unit
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import positions_to_dict
 
 
 class GaleSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.gale_score(context)
+
+    def ai_kings_insight_score(self, battle, actor, payload, services, profile) -> float:
+        return services.gale_score(battle, actor, payload, profile)
+
+    def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
+        return context.shared.gale_score(context)
+
+    ai_always_hostile_effect = True
+    def ai_effective_enemy_impact(self, battle: Battle, actor: Unit, payload: dict[str, Any],
+                                  targets: list[Unit] | None = None, shared: Any = None,
+                                  action: dict[str, Any] | None = None) -> bool | None:
+        if targets is None:
+            return None
+        return any(unit.is_summon or unit.is_clone or unit.position is not None for unit in targets)
+
     selection_cells_are_effect_cells = False
     DIRECTIONS = {"east": (1, 0), "west": (-1, 0), "south": (0, 1), "north": (0, -1)}
 

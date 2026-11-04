@@ -31,6 +31,17 @@ def allied_ship(battle: Battle, player_id: int) -> Unit | None:
 class ShipCrewMovePolicy(HeroAIPolicy):
     """Prefer boarding the allied ship before the crew is mounted."""
 
+    simple_ship_cover_reaction = True
+    simple_skill_budget = 7
+    _simple_skill_priority = {
+        "flying_dragon_ship": 0, "departure_signal": 1,
+        "dragon_breath": 2, "add_health": 2, "add_mana": 3,
+        "chain_pull": 4, "defense_one": 5, "silver_signal_flare": 6,
+    }
+
+    def simple_skill_rank(self, code: str) -> int:
+        return self._simple_skill_priority.get(code, 7)
+
     def __init__(self, boarding_bonus: float) -> None:
         self.boarding_bonus = boarding_bonus
 
@@ -40,6 +51,15 @@ class ShipCrewMovePolicy(HeroAIPolicy):
             return 0.0
         ship = allied_ship(battle, actor.player_id)
         return self.boarding_bonus if ship is not None and destination in battle.unit_cells(ship) else 0.0
+
+    def tendency_boarding_destination(self, battle: Battle, actor: Unit,
+                                      cells: list[Position]) -> Position | None:
+        if battle.mounted_unit_for(actor) is not None:
+            return None
+        ship = allied_ship(battle, actor.player_id)
+        if ship is None:
+            return None
+        return next((cell for cell in cells if cell in battle.unit_cells(ship)), None)
 
 
 class ShipCrewAttackTrait(Trait):
@@ -57,6 +77,8 @@ class ShipCrewAttackTrait(Trait):
 
 class FlyingDragonShip(AbstractHero):
     hero_code = SHIP_CODE
+    simple_ship_cover_reaction = True
+    simple_skill_budget = 7
     hero_name = "飞龙船。亚特兰大"
     role = "召唤物"
     attribute = ""
@@ -119,6 +141,14 @@ _SHIP_PLACEMENT_PROBES = {player_id: FlyingDragonShip(player_id) for player_id i
 
 
 class ShipBorrowedSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.nested_skill_score(
+            context,
+            {**context.action, "code": self.inner.code, "_skill_object": self.inner},
+            context.payload,
+            instant_only=context.instant_only,
+        )
+
     def ai_reaction_score(self, context: AIReactionScoreContext) -> float | None:
         if self.source_skill.code not in {"protection", "light_wall"}:
             return None
@@ -225,6 +255,8 @@ class ShipBorrowedSkill(Skill):
 
 
 class FlyingDragonShipSkill(Skill):
+    ai_enemy_impact_requirement = False
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         battle, actor = context.battle, context.actor
         if allied_ship(battle, actor.player_id) is not None:
@@ -459,6 +491,14 @@ class DefenseOneSkill(Skill):
 
 
 class SilverSignalFlareSkill(Skill):
+    def simple_ai_cast_useful(self, battle: Battle, actor: Unit) -> bool:
+        targets = [unit for unit in self.beneficiaries(battle, actor)
+                   if not unit.has_status("银制信号弹攻势")]
+        if any(unit.is_clone and not unit.direct_effects_blocked() for unit in targets):
+            return False
+        return any(not unit.is_clone and battle.unit_belongs_to_current_turn(unit)
+                   and unit.attacks_used < unit.attack_actions_per_turn() for unit in targets)
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         battle, actor = context.battle, context.actor
         targets = [unit for unit in self.beneficiaries(battle, actor)

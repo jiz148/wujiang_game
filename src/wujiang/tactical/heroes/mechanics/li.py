@@ -73,6 +73,7 @@ class LiAreaScoring:
 
 
 class ChainPullSkill(LiAreaScoring, Skill):
+    ai_probe_hostile_effect = True
     def ai_position_bonus(self, context: AISkillScoreContext, unit: Unit,
                           sign: float, position: Position | None) -> float:
         if unit.position == position or unit.position is None:
@@ -176,6 +177,10 @@ class ChainPullSkill(LiAreaScoring, Skill):
 
 
 class WhirlwindAttackSkill(LiAreaScoring, Skill):
+    ai_damage_probe_resolves_as_attack = True
+
+    ai_area_bonus_codes = frozenset({"whirlwind_attack"})
+
     def __init__(self) -> None:
         super().__init__(
             "whirlwind_attack",
@@ -224,6 +229,17 @@ class RedHeatStatus(StatModifierStatus):
 
 
 class RedHeatSkill(Skill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        actor, battle = context.actor, context.battle
+        active = actor.has_status("红热")
+        before = context.shared.li_attack_plan_value(context)
+        with context.probe_rollback():
+            self.execute(battle, actor, {})
+            after = context.shared.li_attack_plan_value(context)
+        half_hp_cost = actor.current_hp * 60.0 if not actor.magic_immunity and actor.total_shields() == 0 else 0.0
+        gain = after - before + (half_hp_cost if active else -half_hp_cost)
+        return 300.0 + gain if gain > 8.0 else -1000.0
+
     def __init__(self) -> None:
         super().__init__(
             "red_heat",
@@ -293,6 +309,18 @@ class EssenceAttackStatus(StatusEffect):
 
 
 class EssenceSkill(Skill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        actor, battle = context.actor, context.battle
+        if actor.has_status("精华"):
+            return -1000.0
+        before = context.shared.li_attack_plan_value(context)
+        with context.probe_rollback():
+            self.execute(battle, actor, {})
+            after = context.shared.li_attack_plan_value(context)
+        if after > before + 1.0:
+            return max(context.best_attack_score(), after) + 30.0
+        return min(2.0, max(0.0, actor.max_mana() - actor.current_mana)) * 24.0 - 12.0
+
     def __init__(self) -> None:
         super().__init__(
             "essence",
@@ -451,6 +479,18 @@ class StillnessStatus(StatusEffect):
 
 
 class StillnessSkill(Skill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        actor, battle = context.actor, context.battle
+        enemies = [unit for unit in battle.enemy_units(actor.player_id)
+                   if unit.alive and unit.position is not None and not unit.banished]
+        missing = max(0.0, actor.max_health - actor.current_hp)
+        threatened = any(context.shared.unit_distance(battle, actor, enemy)
+                         <= enemy.targeting_range() + enemy.normal_move_distance() for enemy in enemies)
+        if missing < 0.5 or actor.current_hp > 0.5 or not threatened:
+            return -1000.0
+        attack = context.best_attack_score()
+        return min(0.5, missing) * 200.0 + 75.0 - min(100.0, attack * 0.5)
+
     def __init__(self) -> None:
         super().__init__(
             "stillness",

@@ -337,6 +337,7 @@ class ElectronicFusionDetachSkill(Skill):
 
 
 class ElectronicRepairSkill(Skill):
+    ai_enemy_impact_requirement = False
     ai_candidate_plan = RANKED_CANDIDATES
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         battle, actor, payload = context.battle, context.actor, context.payload

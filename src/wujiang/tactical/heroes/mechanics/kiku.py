@@ -27,6 +27,10 @@ class PassiveSkillLockStatus(StatusEffect):
 
 
 class SunSlashSkill(Skill):
+    def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
+        return context.sun_slash_score(self)
+
+    ai_probe_hostile_effect = True
     ai_effective_impact_rule = SUN_SLASH_IMPACT
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.sun_slash_score(self)

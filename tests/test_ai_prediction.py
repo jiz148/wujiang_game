@@ -1,8 +1,14 @@
 """New scoring semantics. Written for maintenance; performance entry skips tests."""
 import pickle
 import random
+import sys
 import unittest
+from pathlib import Path
 from unittest import mock
+
+SRC = Path(__file__).resolve().parents[1] / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 from wujiang.tactical.prediction import (random as prediction_random, expected_numeric,
     prediction_session, prediction_rules, prediction_observer, outcomes, sum_distributions,
@@ -1281,6 +1287,16 @@ class FullAIPredictionBehaviorTests(unittest.TestCase):
         self.assertIn("wujiang.tactical.engine.core.Trait", support)
         self.assertIn("wujiang.tactical.heroes.mechanics.hell_rebirth.HellRebirthTrait", support)
         self.assertTrue(all(support.values()), support)
+
+    def test_rebound_rebirth_flag_disables_area_factorization(self):
+        from wujiang.tactical.heroes.mechanics.hell_rebirth import HellRebirthTrait
+        battle, source, targets, queued = self.area_fixture(
+            codes=["excel_r246", "excel_r244", "excel_r247"]
+        )
+        with mock.patch.object(HellRebirthTrait, "rebirth_enemy_anchors_only", True):
+            _, stats = self.area_scores(battle, source, targets, queued, factors=True)
+        self.assertGreater(stats.get("factorization_rejected_callback", 0), 0)
+        self.assertEqual(stats.get("factorized_utility_queries", 0), 0)
 
     def test_added_method_on_audited_empty_trait_class_is_rejected(self):
         from wujiang.tactical import prediction_factors as factors

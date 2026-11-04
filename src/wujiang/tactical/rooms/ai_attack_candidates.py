@@ -56,7 +56,7 @@ class AttackCandidateBuilder:
                               and battle.units[str(payload["target_unit_id"])].player_id == actor.player_id
                               and self.services.red_attack_value(battle, actor, payload) > 0)
             natsume_support = self.services.natsume_support_attack_score(battle, actor, payload) > 0
-            if not copied_support and not natsume_support and actor.hero_code != "n" and self.services.allied_attack_heal_score(battle, actor, payload) <= 0 and not self.services.attack_payload_has_effective_enemy_impact(battle, actor, payload) and not self.services.attack_payload_satisfies_required_target(
+            if not copied_support and not natsume_support and not getattr(actor, "ai_allied_attack_exception", False) and self.services.allied_attack_heal_score(battle, actor, payload) <= 0 and not self.services.attack_payload_has_effective_enemy_impact(battle, actor, payload) and not self.services.attack_payload_satisfies_required_target(
                 battle,
                 actor,
                 payload,

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from typing import Any
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
+from wujiang.tactical.prediction import expected_local
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import DamageContext
@@ -40,6 +42,12 @@ class HellDogSummon(AbstractHero):
 
 
 class HellDogSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        destination = context.shared.destination(context.payload)
+        if destination is None:
+            return -1000.0
+        return context.shared.hell_dog_summon_score(context, destination)
+
     def __init__(self) -> None:
         super().__init__("hell_dog", "地狱犬", "花1魔在本体周围合法空格召唤攻3守3速4、魔免的地狱犬。",
                          mana_cost=1, target_mode="cell")
@@ -90,6 +98,25 @@ class HellTeleportSkill(Skill):
     def __init__(self) -> None:
         super().__init__("hell_teleport", "瞬移", "大招：每场一次，瞬移到全场任意完整合法空格；不造成伤害。",
                          max_uses_per_battle=1, target_mode="cell")
+
+    def ai_move_score(self, context: AISkillScoreContext, base_score: float,
+                      destination: Position) -> float:
+        battle, actor = context.battle, context.actor
+        enemies = context.shared.hostile_units(battle, actor)
+
+        @expected_local(battle)
+        def danger_at(cell: Position) -> float:
+            return sum(
+                max(0.0, enemy.stat("attack") - actor.stat("defense") + 1.0) * 15.0
+                for enemy in enemies if enemy.position is not None
+                and context.shared.distance_to_position(battle, enemy, cell)
+                <= enemy.normal_move_distance() + enemy.targeting_range()
+            )
+
+        if actor.position is None:
+            return -1000.0
+        avoided = danger_at(actor.position) - danger_at(destination)
+        return base_score + avoided * (1.7 if actor.current_hp <= 0.5 else 0.9) - 42.0
 
     def available_cells(self, battle: Battle, actor: Unit) -> list[Position]:
         if actor.position is None or actor.cannot_move or getattr(actor, "standable_terrain", False):
@@ -146,6 +173,34 @@ def resolve_hell_dog_death_burst(battle: Battle, actor: Unit, queued_action: Any
 
 
 class HellSnowRebirthTrait(HellRebirthTrait):
+    respawn_safety = 1.3
+    respawn_dog_space = True
+    ai_shuffle_value = 85.0
+
+    def ai_shuffle_rebirth_value(self, battle: Battle, actor) -> float:
+        owner = self.owner
+        if owner is None:
+            return self.ai_shuffle_value
+        dogs = [unit for unit in battle.all_units()
+                if unit.alive and not unit.banished and unit.position is not None
+                and isinstance(unit, HellDogSummon) and unit.summoner_id == owner.unit_id]
+        value = self.ai_shuffle_value
+        for dog in dogs:
+            ring = set(battle.neighbors(dog.position))
+            for unit in battle.effect_units_at_cells(list(ring)):
+                if unit.unit_id in {owner.unit_id, dog.unit_id}:
+                    continue
+                impact = min(unit.current_hp, battle.damage_rule.calculate_damage(3, unit.stat("defense"))) * 100.0
+                value += impact if unit.player_id != actor.player_id else -impact
+        return value - len(dogs) * 28.0
+
+    def ai_hell_death_effect_value(self, battle: Battle) -> float:
+        owner = self.owner
+        if owner is None:
+            return 35.0
+        return 35.0 + 28.0 * sum(body.alive and body.summoner_id == owner.unit_id
+                                 for body in battle.all_units())
+
     def __init__(self) -> None:
         super().__init__("excel_r247")
         self.name = "地狱犬群再临"
@@ -210,6 +265,16 @@ def resolve_hell_hunter_rescue(battle: Battle, actor: Unit, queued_action: Any) 
 
 
 class HellHunterRescueTrait(HellRebirthTrait):
+    respawn_ai_enabled = False
+    ai_shuffle_value = 112.0
+
+    def ai_hell_death_effect_value(self, battle: Battle) -> float:
+        owner = self.owner
+        if owner is None:
+            return 35.0
+        return 35.0 + 55.0 * sum(body.player_id == owner.player_id and "地狱" in body.name
+                                 and not body.alive for body in battle.destroyed_units)
+
     requires_damage_choice = True
 
     def __init__(self) -> None:

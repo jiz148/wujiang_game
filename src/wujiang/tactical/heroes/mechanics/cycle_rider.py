@@ -8,6 +8,7 @@ from wujiang.tactical.engine.core import (
     ActionError, Battle, DamageContext, HeroUnit, Position, Skill, Stats, Trait,
 )
 from wujiang.tactical.heroes.base import AbstractHero
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import payload_position, positions_to_dict
 from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
 
@@ -61,6 +62,12 @@ class UnicycleSummon(AbstractHero):
 
 
 class SummonUnicycleSkill(Skill):
+    def ai_open_space_score(self, adjacent_open: int) -> float:
+        return adjacent_open * 1.5
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.cycle_summon_score(context, context.shared.destination(context.payload))
+
     def __init__(self) -> None:
         super().__init__(
             "summon_unicycle",
@@ -116,6 +123,12 @@ class BicycleSummon(AbstractHero):
 
 
 class SummonBicycleSkill(Skill):
+    def ai_open_space_score(self, adjacent_open: int) -> float:
+        return adjacent_open * 5.0 - (80.0 if adjacent_open == 0 else 0.0)
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.cycle_summon_score(context, context.shared.destination(context.payload))
+
     def __init__(self) -> None:
         super().__init__(
             "summon_bicycle",

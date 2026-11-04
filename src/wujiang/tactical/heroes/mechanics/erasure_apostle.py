@@ -123,6 +123,7 @@ class ExtraStealthSkill(Skill):
 
 
 class PrematureBurialSkill(Skill):
+    ai_probe_hostile_effect = True
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.owned_effect_score(self)
 
@@ -225,6 +226,10 @@ class PrematureBurialSkill(Skill):
 
 
 class ErasureSkill(SimulatedEffectDeltaScoring, Skill):
+    def ai_extra_effect_applies(self, target):
+        return any(status.name == "抹杀计数点" for status in target.statuses)
+
+    ai_probe_hostile_effect = True
     ai_effect_base_score = -12.0
 
     def ai_effect_targets(self, context: AISkillScoreContext) -> list[Unit]:
@@ -344,6 +349,7 @@ class DescentMomentAttackStatus(StatusEffect):
 
 
 class DescentMomentSkill(TargetDestinationCandidates, Skill):
+    ai_enemy_impact_requirement = False
     ai_candidate_plan = RANKED_CANDIDATES
     ai_destination_fields = ("dest_x", "dest_y")
     def ai_priority_score(self, context: AISkillScoreContext) -> float:

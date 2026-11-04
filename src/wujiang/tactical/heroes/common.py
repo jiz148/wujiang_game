@@ -856,6 +856,19 @@ class SelfBuffSkill(Skill):
 
 
 class ShensuSkill(SelfBuffSkill):
+    def ai_fusion_preparation_blocked(self, actor: Unit) -> bool:
+        return self.code == "shensu" and (actor.move_used or actor.cannot_move or actor.cannot_normal_move)
+
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        actor, battle = context.actor, context.battle
+        enemies = [unit for unit in battle.enemy_units(actor.player_id)
+                   if unit.alive and unit.position is not None and not unit.banished]
+        if not enemies or actor.move_used:
+            return -6.0
+        nearest = min(context.shared.unit_distance(battle, actor, unit) for unit in enemies)
+        bonus = 10.0 if self.code == "big_shensu" else 0.0
+        return (30.0 + bonus) if nearest > actor.normal_move_distance() else (8.0 + bonus)
+
     def __init__(self) -> None:
         super().__init__(
             "shensu",
@@ -1305,6 +1318,8 @@ class MagicWallSkill(MultiTargetChainShieldSkill):
 
 
 class LightWallSkill(MultiTargetChainShieldSkill):
+    ai_paid_reaction_shield = True
+
     shield_amount = 1
 
     def __init__(self) -> None:
@@ -1359,6 +1374,16 @@ class StoneWallSkill(MultiTargetChainShieldSkill):
 
 
 class DrainManaSkill(Skill):
+    def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
+        return sum(min(unit.current_mana, 1.0) * 45.0
+                   for unit in targets if unit.player_id != context.actor.player_id)
+
+    def ai_extra_effect_applies(self, target):
+        return target.current_mana > 0
+
+    def ai_hostile_target_impact(self, battle, actor, payload, target):
+        return False if target.current_mana <= 0 and target.total_shields() <= 0 else None
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.drain_mana_score(context)
 
@@ -1390,6 +1415,9 @@ class DrainManaSkill(Skill):
 
 
 class HardenSkill(SelfBuffSkill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        return 28.0 if context.actor.current_hp <= 0.75 else 12.0
+
     def __init__(self) -> None:
         super().__init__(
             "harden",
@@ -1423,6 +1451,11 @@ class HardenSkill(SelfBuffSkill):
 
 
 class PierceSkill(Skill):
+    ai_area_bonus_codes = frozenset({
+        "pierce", "hell_spear", "hell_spear_free", "hell_ranged_spear",
+        "hell_ranged_spear_free", "large_pierce_plus",
+    })
+
     def __init__(self) -> None:
         super().__init__(
             "pierce",
@@ -1548,7 +1581,7 @@ class KnockbackSkill(Skill):
         return True, ""
 
     def outward_destination(self, battle: Battle, actor: HeroUnit, unit: HeroUnit) -> Position | None:
-        if actor.position is None or unit.position is None:
+        if actor.position is None or unit.position is None or unit.cannot_move:
             return None
         if (getattr(unit, "standable_terrain", False)
                 or getattr(unit, "attached_to_unit_id", None)
@@ -1607,15 +1640,20 @@ class KnockbackSkill(Skill):
             destination = self.outward_destination(battle, center, unit)  # type: ignore[arg-type]
             if destination is None:
                 continue
-            battle.move_unit(
-                unit,
-                destination,
-                via_skill=True,
-                triggered_by_reaction=True,
-                max_distance=1,
-                tags={"knockback"},
-                forced=True,
-            )
+            try:
+                battle.move_unit(
+                    unit,
+                    destination,
+                    via_skill=True,
+                    triggered_by_reaction=True,
+                    max_distance=1,
+                    tags={"knockback"},
+                    forced=True,
+                )
+            except ActionError as exc:
+                if str(exc) not in {"找不到可行的移动路径。", "目标位置已被占用。"}:
+                    raise
+                battle.log(f"{unit.name} 的震开位移因路径失效而落空。")
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
         return {
@@ -1639,6 +1677,8 @@ class KnockbackSkill(Skill):
 
 
 class MachineGunSkill(Skill):
+    ai_area_bonus_codes = frozenset({"machine_gun"})
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r18_effect_score(self)
 
@@ -1718,6 +1758,17 @@ class MachineGunSkill(Skill):
 
 
 class HeadshotSkill(SelfBuffSkill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        actor, battle = context.actor, context.battle
+        if actor.attacks_used >= actor.attack_actions_per_turn() or actor.has_status("爆头强化"):
+            return -1000.0
+        before = context.best_attack_score()
+        with context.probe_rollback():
+            self.apply_to_self(battle, actor)
+            actor.performed_active_skill = True
+            after = context.best_attack_score()
+        return after + 20.0 if after > before + 1.0 else -1000.0
+
     def __init__(self) -> None:
         super().__init__(
             "headshot",
@@ -1743,6 +1794,12 @@ class HeadshotSkill(SelfBuffSkill):
 
 
 class DefendTwiceSkill(Skill):
+    def ai_ally_buff_score(self, context: AISkillScoreContext, target: Unit) -> float:
+        if any(status.name == "守*2" and getattr(status, "source_unit_id", None) == context.actor.unit_id
+               for status in target.statuses):
+            return -1000.0
+        return context.shared.ally_value(target) * 0.4 + 18.0
+
     def __init__(self) -> None:
         super().__init__(
             "defend_twice",
@@ -1803,6 +1860,9 @@ class DefendTwiceSkill(Skill):
 
 
 class HealSkill(Skill):
+    def ai_heal_score(self, context: AISkillScoreContext, healed: Unit) -> float:
+        return context.shared.probed_heal_score(context, self, healed)
+
     def __init__(self) -> None:
         super().__init__(
             "heal",
@@ -1835,6 +1895,11 @@ class HealSkill(Skill):
 
 
 class BaptismSkill(Skill):
+    def ai_ally_buff_score(self, context: AISkillScoreContext, target: Unit) -> float:
+        if target.magic_immunity or target.race != "人类":
+            return -1000.0
+        return context.shared.ally_value(target) * 0.35 + 10.0
+
     def __init__(self) -> None:
         super().__init__(
             "baptism",
@@ -1859,6 +1924,14 @@ class BaptismSkill(Skill):
 
 
 class ChantSkill(Skill):
+    def ai_ally_buff_score(self, context: AISkillScoreContext, target: Unit) -> float:
+        reserve = max(4.0, max((float(getattr(skill, "mana_point_cost", 0) or 0)
+                                for skill in target.skills), default=0.0))
+        if (target.player_id == context.actor.player_id
+                and context.shared.has_mana_point_skill(target) and target.mana_points < reserve):
+            return 55.0 + context.shared.ally_value(target) * 0.25
+        return -1000.0
+
     def __init__(self) -> None:
         super().__init__(
             "chant",
@@ -1959,6 +2032,19 @@ class GreatHolyLightField(BattleFieldEffect):
 
 
 class GreatHolyLightSkill(SelfBuffSkill):
+    ai_enemy_impact_requirement = False
+    def ai_field_score(self, battle: Battle, actor: Unit, targets: list[Unit], distance) -> float:
+        enemies = [unit for unit in battle.enemy_units(actor.player_id)
+                   if unit.alive and unit.position is not None and not unit.banished]
+        nearby_enemies = sum(1 for unit in enemies if not unit.cannot_normal_move
+                             and distance(battle, actor, unit) <= 5)
+        if not nearby_enemies:
+            return -8.0
+        allies = [unit for unit in battle.player_units(actor.player_id)
+                  if unit.alive and unit.position is not None and not unit.banished]
+        nearby_allies = sum(1 for unit in allies if distance(battle, actor, unit) <= 5)
+        return nearby_enemies * 16.0 + nearby_allies * 10.0
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.field_skill_score(context)
 
@@ -2010,7 +2096,8 @@ class PassiveProtectionSkill(MultiTargetChainShieldSkill):
     def react(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any], queued_action: QueuedAction) -> None:
         proxy_target = battle.reaction_proxy_target(actor, queued_action)
         if proxy_target is None:
-            raise ActionError("当前动作没有影响到自己。")
+            battle.log(f"{actor.name} 的【保护】因之前的连锁移走了受影响目标而落空。")
+            return
         self.apply_shields(battle, actor, [proxy_target])  # type: ignore[list-item]
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
@@ -2061,6 +2148,9 @@ class PassiveEvasionSkill(Skill):
             actor, max_distance=1, exact_distance=1, straight_only=True, ignore_units=True,
         )
         return sorted(cells, key=lambda cell: (cell.y, cell.x))
+
+    def declared_reaction_landing_valid(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> bool:
+        return payload_position(payload) in self.evade_cells(battle, actor)
 
     def can_react_to(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> tuple[bool, str]:
         ok, reason = super().can_react_to(battle, actor, queued_action)
@@ -2175,6 +2265,9 @@ class BackstepShotSkill(Skill):
             return []
         cells = battle.reachable_positions(actor, max_distance=2, exact_distance=2, straight_only=True, ignore_units=True)
         return sorted(cells, key=lambda cell: (cell.y, cell.x))
+
+    def declared_reaction_landing_valid(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any]) -> bool:
+        return payload_position(payload) in self.retreat_cells(battle, actor)
 
     def counter_target_after_retreat(
         self,
@@ -2294,6 +2387,10 @@ class BackstepShotSkill(Skill):
 
 
 class StealthSkill(SelfBuffSkill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        return max(context.profile.action_threshold + 1.0,
+                   34.0 if context.actor.current_hp <= 0.75 else 18.0)
+
     def __init__(self) -> None:
         super().__init__("stealth", "隐身", "普通技能：费 1.5 魔，仅己方可见，直到自己第一次普攻或使用技能后解除。", mana_cost=1.5)
 

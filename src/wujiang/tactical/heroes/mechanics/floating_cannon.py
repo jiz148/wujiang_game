@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from wujiang.tactical.heroes.ai_policy import AIReactionScoreContext
+    from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
+from wujiang.tactical.prediction import expected_local
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import DamageContext
@@ -259,6 +261,56 @@ class FloatingCannonsSkill(Skill):
 
 
 class FloatingCannonBerserkSkill(Skill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        enemies = [unit for unit in battle.enemy_units(actor.player_id)
+                   if unit.alive and unit.position is not None and not unit.banished]
+        cannons = floating_cannons_for(battle, actor)
+        if not cannons or not enemies:
+            return -8.0
+        protected = {}
+        for ally in battle.player_units(actor.player_id):
+            recipient = battle.effect_recipient(ally)
+            if not recipient.alive or recipient.position is None or recipient.banished:
+                continue
+            if any(any(abs(cannon.position.x - cell.x) <= 3 and abs(cannon.position.y - cell.y) <= 3
+                       for cell in battle.unit_cells(recipient)) for cannon in cannons):
+                protected[recipient.unit_id] = recipient
+        cover_value = max((min(160.0, context.shared.incoming_position_risk(battle, recipient)) * 0.5
+                           for recipient in protected.values()), default=0.0)
+
+        @expected_local(battle)
+        def array_value() -> float:
+            total = 0.0
+            berserk = actor.get_status("浮游炮狂暴化") is not None
+            for cannon in cannons:
+                if not cannon.turn_ready or cannon.attacks_used >= cannon.attack_actions_per_turn():
+                    continue
+                trait = next((item for item in cannon.traits if isinstance(item, FloatingCannonStatTrait)), None)
+                if trait is None:
+                    continue
+                if berserk:
+                    targets = [target for target in trait.nearest_targets(battle, cannon)
+                               if trait.action_route(battle, cannon, target)[1]]
+                else:
+                    targets = [target for target in enemies
+                               if battle.attack_target_allowed(cannon, target, payload={"target_unit_id": target.unit_id})[0]]
+                damage = max((context.attack_damage(cannon, target) for target in targets), default=0.0)
+                total += damage * max(0, cannon.attack_actions_per_turn() - cannon.attacks_used) * 45.0
+                if berserk and not targets and any(trait.action_route(battle, cannon, target)[0]
+                                                for target in trait.nearest_targets(battle, cannon)):
+                    total += 12.0
+            if not berserk:
+                total += cover_value
+            return total
+
+        before = array_value()
+        with context.probe_rollback():
+            self.execute(battle, actor, {})
+            after = array_value()
+        gain = after - before
+        return 140.0 + gain if gain > 15.0 else -8.0
+
     def __init__(self) -> None:
         super().__init__("floating_cannon_berserk", "浮游炮狂暴化", "开关技能：仅可在回合开始时使用；切换浮游炮狂暴化。", max_uses_per_turn=1, target_mode="self")
 
@@ -380,7 +432,8 @@ class FloatingCannonCoverSkill(Skill):
     def react(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any], queued_action: Any) -> None:
         ok, reason = self.can_react_with_payload(battle, actor, queued_action, payload)
         if not ok:
-            raise ActionError(reason)
+            battle.log(f"{actor.name} 的【浮游炮掩护】因之前的连锁使掩护条件失效而落空。")
+            return
         ids = payload.get("target_unit_ids") or []
         target = battle.effect_recipient(battle.get_unit(str(payload.get("target_unit_id") or ids[0])))
         cannon_id = str(payload.get("cannon_unit_id") or (ids[1] if len(ids) > 1 else ""))

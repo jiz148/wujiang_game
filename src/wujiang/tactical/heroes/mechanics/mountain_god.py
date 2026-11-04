@@ -171,6 +171,21 @@ class UnlimitedManaTemporaryStatus(StatusEffect):
 
 
 class MountainGodMuroSkill(Skill):
+    ai_costly_window_excluded = True
+
+    def ai_preparation_score(self, battle, actor, services, profile) -> float:
+        if actor.has_status("山神术。室王"):
+            return -8.0
+        before = services.r12_costly_window(battle, actor, profile)
+        with services.ai_probe_rollback(battle):
+            self.execute(battle, actor, {})
+            after = services.r12_costly_window(battle, actor, profile)
+        gain = max(0.0, after - before)
+        return max(profile.once_per_battle_threshold + 35.0, gain * 1.5 + 30.0) if gain > 0 else -8.0
+
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.r12_preparation_score(context)
+
     def __init__(self) -> None:
         super().__init__("mountain_god_muro", "山神术。室王", "大招：一场战斗一次；魔无限，持续 4 轮。", max_uses_per_battle=1, target_mode="self")
 
@@ -212,6 +227,33 @@ class MountainEscapeStatus(StatModifierStatus):
 
 
 class MountainEscapeSkill(Skill):
+    ai_costly_window_excluded = True
+
+    def ai_preparation_score(self, battle, actor, services, profile) -> float:
+        if actor.has_status("遁术。神山"):
+            return -8.0
+        before_risk = services.r19_incoming_position_risk(battle, actor)
+        critically_low = actor.current_hp <= actor.max_health * 0.25
+        likely_lethal = before_risk >= actor.current_hp * 100.0 and before_risk > 0
+        if not critically_low and not likely_lethal:
+            return -1000.0
+        before_output = services.r19_attack_window_value(battle, actor, profile)
+        hp = actor.current_hp
+        with services.ai_probe_rollback(battle):
+            self.execute(battle, actor, {})
+            healing = max(0.0, actor.current_hp - hp)
+            after_risk = services.r19_incoming_position_risk(battle, actor)
+            after_output = services.r19_attack_window_value(battle, actor, profile)
+        gain = healing * 150.0 + max(0.0, before_risk - after_risk) * 1.3
+        gain += min(1.0, max(0.0, actor.max_mana() - actor.current_mana)) * 18.0
+        gain -= max(0.0, before_output - after_output) * 0.85
+        if likely_lethal:
+            return gain + 200.0 if gain > 14.0 else -8.0
+        return min(profile.once_per_battle_threshold + 5.0, gain - 14.0) if gain > 14.0 else -8.0
+
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.r12_preparation_score(context)
+
     def __init__(self) -> None:
         super().__init__("mountain_escape", "遁术。神山", "大招：一场战斗一次；守 +2，血满，不能移动，每回合魔 +1，持续 6 轮。", max_uses_per_battle=1, target_mode="self")
 
@@ -226,6 +268,27 @@ class MountainEscapeSkill(Skill):
 
 
 class MountainAwakeningSkill(Skill):
+    ai_future_opportunity_excluded = True
+    ai_costly_window_excluded = True
+
+    def ai_preparation_score(self, battle, actor, services, profile) -> float:
+        used = [skill for skill in actor.skills if skill.max_uses_per_battle == 1 and skill.uses_this_battle > 0]
+        if not used or sum(status.name == "山神计数点" for status in actor.statuses) < 8:
+            return -8.0
+        gain = 0.0
+        with services.ai_probe_rollback(battle):
+            for skill in used:
+                skill.uses_this_battle = 0
+                status = actor.get_status(skill.name)
+                if status is not None:
+                    actor.remove_status(status, battle)
+                if isinstance(skill, (MountainGodMuroSkill, MountainEscapeSkill)):
+                    gain = max(gain, skill.ai_preparation_score(battle, actor, services, profile))
+        return gain + 30.0 if gain > 0 else -8.0
+
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.r12_preparation_score(context)
+
     def __init__(self) -> None:
         super().__init__("mountain_awakening", "山神术。觉醒", "清空 8 个山神计数点，重置所有大招。", target_mode="self")
 

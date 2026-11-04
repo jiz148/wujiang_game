@@ -159,6 +159,8 @@ class GladiatorRoarStatus(StatModifierStatus):
 
 
 class GladiatorRoarSkill(Skill):
+    ai_reaction_simulation_bonus = 8.0
+
     ai_reaction_score_phase = "after_hidden_source"
 
     def ai_reaction_score(self, context: AIReactionScoreContext) -> float:

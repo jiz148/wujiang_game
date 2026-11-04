@@ -70,6 +70,18 @@ class NuclearMutationSkill(Skill):
 
 
 class GravityFieldSkill(Skill):
+    ai_r12_direct_return = True
+
+    def ai_r12_effect_override(self, battle, actor, payload, services, profile):
+        if services.direct_scoring():
+            return services._score_skill_payload(
+                battle, actor, {"code": self.code}, payload, profile, instant_only=False)
+        branches = (([1, 1, 1], 1), ([2, 1, 1], 3), ([2, 2, 1], 3), ([2, 2, 2], 1))
+        return sum(weight * services.r12_realized_effect_value(
+            battle, actor, self, payload, profile, gravity_values=values)
+            for values, weight in branches) / 8.0
+
+    ai_legality_requires_rollback = True
     ai_effective_impact_rule = R12_IMPACT
     def ai_priority_score(self, context: AISkillScoreContext) -> float | None:
         if direct_scoring():
@@ -112,7 +124,9 @@ class GravityFieldSkill(Skill):
         if getattr(battle, "_forecasting_action", False) or getattr(battle, "_ai_probe_active", False):
             return {"gravity_results_logged": False}
         values = [2 if random.random() < 0.5 else 1 for _ in range(3)]
-        return {"gravity_coin_values": values, "gravity_side": values[0] * values[1] * values[2], "gravity_results_logged": False}
+        side = values[0] * values[1] * values[2]
+        return {"gravity_coin_values": values, "gravity_side": side, "gravity_results_logged": False,
+                "chain_prompt_prefix": f"硬币 {'、'.join(str(value) for value in values)}，范围 {side}×{side}；"}
 
     def on_owner_action_declared(self, battle: Battle, action_type: str, payload: dict[str, Any]) -> None:
         if (action_type == "skill" and payload.get("skill_code") == self.code

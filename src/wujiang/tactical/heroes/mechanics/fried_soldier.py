@@ -30,6 +30,8 @@ class FriedInspireStatus(StatusEffect):
 
 
 class FriedInspireSkill(Skill):
+    ai_nonhostile_throttle_exempt = True
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.owned_effect_score(self)
 

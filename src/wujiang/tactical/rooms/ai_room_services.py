@@ -42,6 +42,7 @@ from wujiang.tactical.rooms.ai_types import AICandidate, DifficultyProfile, diff
 
 class _SharedSkillScoringServices(Protocol):
     """Named dependencies used by this policy adapter."""
+    ally_unit_value: Callable[..., Any]
     ai_reachable_positions: Callable[..., Any]
     best_available_attack_score: Callable[..., Any]
     best_move_destination_score: Callable[..., Any]
@@ -81,7 +82,39 @@ class _SharedSkillScoringServices(Protocol):
     solar_judgment_score: Callable[..., Any]
     taunt_control_score: Callable[..., Any]
     field_skill_score: Callable[..., Any]
+    gale_score: Callable[..., Any]
     drain_mana_score: Callable[..., Any]
+    fusion_pierce_score: Callable[..., Any]
+    r22_heal_score: Callable[..., Any]
+    mimic_payload_context: Callable[..., Any]
+    agency_borrowed_payload_context: Callable[..., Any]
+    score_skill_payload: Callable[..., Any]
+    skill_control_bonus: Callable[..., Any]
+    zero_dash_score: Callable[..., Any]
+    fuma_pursuit_score: Callable[..., Any]
+    skill_damage_score: Callable[..., Any]
+    masamune_attack_plan_value: Callable[..., Any]
+    wyvern_resummon_score: Callable[..., Any]
+    nova_quantum_separation_score: Callable[..., Any]
+    hell_dog_summon_score: Callable[..., Any]
+    cycle_summon_score: Callable[..., Any]
+    distance_between_units: Callable[..., Any]
+    r12_preparation_score: Callable[..., Any]
+    messenger_preparation_score: Callable[..., Any]
+    r19_preparation_score: Callable[..., Any]
+    r14_cat_form_score: Callable[..., Any]
+    r20_weather_cast_score: Callable[..., Any]
+    wuchang_mist_score: Callable[..., Any]
+    fusion_preparation_score: Callable[..., Any]
+    feiwang_stance_score: Callable[..., Any]
+    kings_insight_score: Callable[..., Any]
+    li_attack_plan_value: Callable[..., Any]
+    r19_incoming_position_risk: Callable[..., Any]
+    has_mana_point_skill: Callable[..., Any]
+    feiwang_shensu_score: Callable[..., Any]
+    r22_ninja_shensu_score: Callable[..., Any]
+    natsume_shensu_score: Callable[..., Any]
+    build_zero_crossing_move_candidates: Callable[..., Any]
     r14_snow_avalanche_score: Callable[..., Any]
     r215219_skill_score: Callable[..., Any]
     r21_control_score: Callable[..., Any]
@@ -197,6 +230,9 @@ class _SharedSkillScoring:
     def hostile_value(self, target: Unit) -> float:
         return self.services.hostile_unit_value(target)
 
+    def ally_value(self, target: Unit) -> float:
+        return self.services.ally_unit_value(target)
+
     def friendly_penalty(self, target: Unit) -> float:
         return self.services.friendly_fire_penalty(target)
 
@@ -259,7 +295,7 @@ class _SharedSkillScoring:
         return self.services.guardian_finale_score(context.battle, context.actor, context.profile)
 
     def magnetic_wave_score(self, context: AISkillScoreContext) -> float:
-        return self.services.magnetic_wave_score(context.battle, context.actor, context.skill(context.action["code"]), context.payload)
+        return self.services.magnetic_wave_score(context.battle, context.actor, context.skill(context.code), context.payload)
 
     def judgment_stone_score(self, context: AISkillScoreContext) -> float:
         return self.services.judgment_stone_score(context.battle, context.actor, context.payload, context.profile)
@@ -268,13 +304,13 @@ class _SharedSkillScoring:
         return self.services.world_seed_score(context.battle, context.actor, context.payload, context.profile)
 
     def kaiser_fist_score(self, context: AISkillScoreContext) -> float:
-        return self.services.kaiser_fist_score(context.battle, context.actor, context.skill(context.action["code"]), context.payload, context.profile)
+        return self.services.kaiser_fist_score(context.battle, context.actor, context.skill(context.code), context.payload, context.profile)
 
     def fuma_trap_score(self, context: AISkillScoreContext) -> float:
         return self.services.fuma_trap_score(context.battle, context.actor, context.payload, context.profile)
 
     def fuma_shuriken_score(self, context: AISkillScoreContext) -> float:
-        skill = context.skill(context.action["code"])
+        skill = context.skill(context.code)
         return self.services.reviewed_r16_damage_result(
             context.battle, context.actor,
             lambda: skill.execute(context.battle, context.actor, context.payload),
@@ -284,10 +320,10 @@ class _SharedSkillScoring:
         return self.services.friendly_mirror_score(context.battle, context.actor, context.profile)
 
     def great_funeral_score(self, context: AISkillScoreContext) -> float:
-        return self.services.great_fire_funeral_score(context.battle, context.actor, context.skill(context.action["code"]), context.payload, context.profile)
+        return self.services.great_fire_funeral_score(context.battle, context.actor, context.skill(context.code), context.payload, context.profile)
 
     def wind_sand_score(self, context: AISkillScoreContext) -> float:
-        skill = context.skill(context.action["code"])
+        skill = context.skill(context.code)
         if not list(context.effect_units(skill)):
             return -1000.0
         return (self.services.skill_damage_score(context.battle, context.actor, skill, context.payload, context.profile)
@@ -300,35 +336,210 @@ class _SharedSkillScoring:
         return self.services.weapon_copy_score(context.battle, context.actor, context.payload, context.profile)
 
     def red_preparation_score(self, context: AISkillScoreContext) -> float:
-        return self.services.red_preparation_score(context.battle, context.actor, context.action["code"], context.profile)
+        return self.services.red_preparation_score(context.battle, context.actor, context.code, context.profile)
 
     def deadly_bow_score(self, context: AISkillScoreContext) -> float:
         return self.services.deadly_bow_score(context.battle, context.actor, context.action, context.payload, context.profile)
 
     def iron_chain_path_score(self, context: AISkillScoreContext) -> float:
-        return self.services.iron_chain_path_score(context.battle, context.actor, context.skill(context.action["code"]), context.payload, context.profile)
+        return self.services.iron_chain_path_score(context.battle, context.actor, context.skill(context.code), context.payload, context.profile)
 
     def sphinx_cannon_score(self, context: AISkillScoreContext) -> float:
         return self.services.sphinx_cannon_score(context.battle, context.actor, context.payload)
 
     def solar_judgment_score(self, context: AISkillScoreContext) -> float:
-        return self.services.solar_judgment_score(context.battle, context.actor, context.skill(context.action["code"]), context.payload, context.profile)
+        return self.services.solar_judgment_score(context.battle, context.actor, context.skill(context.code), context.payload, context.profile)
 
     def taunt_control_score(self, context: AISkillScoreContext) -> float:
-        skill = context.skill(context.action["code"])
+        skill = context.skill(context.code)
         targets = context.effect_units(skill)
         return self.services.taunt_control_score(
-            context.battle, context.actor, skill, context.payload, context.action["code"], targets, context.profile)
+            context.battle, context.actor, skill, context.payload, context.code, targets, context.profile)
 
     def field_skill_score(self, context: AISkillScoreContext) -> float:
-        skill = context.skill(context.action["code"])
+        skill = context.skill(context.code)
         targets = context.effect_units(skill)
-        return self.services.field_skill_score(context.battle, context.actor, context.action["code"], targets, context.profile)
+        return self.services.field_skill_score(context.battle, context.actor, context.code, targets, context.profile)
+
+    def gale_score(self, context: AISkillScoreContext) -> float:
+        return self.services.gale_score(context.battle, context.actor, context.payload, context.profile)
+
+    def is_control_skill(self, code: str) -> bool:
+        return code in CONTROL_SKILL_CODES
+
+    def is_summon_skill(self, code: str) -> bool:
+        return code in SUMMON_SKILL_CODES
 
     def drain_mana_score(self, context: AISkillScoreContext) -> float:
-        skill = context.skill(context.action["code"])
+        skill = context.skill(context.code)
         targets = context.effect_units(skill)
         return self.services.drain_mana_score(context.battle, context.actor, targets, context.profile)
+
+    def fusion_pierce_score(self, context: AISkillScoreContext) -> float:
+        return self.services.fusion_pierce_score(context.battle, context.actor, context.payload)
+
+    def wetland_heal_score(self, context: AISkillScoreContext) -> float:
+        return self.services.r22_heal_score(
+            context.battle, context.actor, context.skill("heal"), context.payload)
+
+    def mimic_payload_context(self, context: AISkillScoreContext) -> Any:
+        return self.services.mimic_payload_context(context.battle, context.actor, context.payload)
+
+    def agency_borrowed_payload_context(self, context: AISkillScoreContext) -> Any:
+        return self.services.agency_borrowed_payload_context(context.battle, context.actor, context.payload)
+
+    def copied_skill_score(self, context: AISkillScoreContext, action: dict, payload: dict) -> float:
+        return self.nested_skill_score(context, action, payload, instant_only=context.instant_only)
+
+    def nested_skill_score(self, context: AISkillScoreContext, action: dict,
+                           payload: dict, *, instant_only: bool) -> float:
+        return self.services.score_skill_payload(context.battle, context.actor, action, payload,
+                                                 context.profile, instant_only=instant_only)
+
+    def is_self_buff_skill(self, code: str) -> bool:
+        return code in SELF_BUFF_SKILL_CODES
+
+    def skill_control_bonus(self, context: AISkillScoreContext,
+                            targets: Iterable[Unit]) -> float:
+        return self.services.skill_control_bonus(
+            context.battle, context.actor, context.code, context.payload,
+            targets, context.profile, instant_only=context.instant_only,
+            skill=context.skill(context.code), action=context.action)
+
+    def zero_dash_score(self, context: AISkillScoreContext, skill: Any) -> float:
+        return self.services.zero_dash_score(context.battle, context.actor, skill, context.payload)
+
+    def fuma_pursuit_score(self, context: AISkillScoreContext, skill: Any) -> float:
+        return self.services.fuma_pursuit_score(
+            context.battle, context.actor, skill, context.payload, context.profile)
+
+    def skill_damage_score(self, context: AISkillScoreContext, skill: Any) -> float:
+        return self.services.skill_damage_score(
+            context.battle, context.actor, skill, context.payload, context.profile)
+
+    def masamune_attack_plan_value(self, context: AISkillScoreContext) -> float:
+        return self.services.masamune_attack_plan_value(
+            context.battle, context.actor, context.profile)
+
+    def wyvern_resummon_score(self, context: AISkillScoreContext) -> float:
+        return self.services.wyvern_resummon_score(context.battle, context.actor, context.profile)
+
+    def quantum_separation_score(self, context: AISkillScoreContext,
+                                 destination: Position | None) -> float:
+        return self.services.nova_quantum_separation_score(
+            context.battle, context.actor, destination, context.profile)
+
+    def hell_dog_summon_score(self, context: AISkillScoreContext,
+                              destination: Position) -> float:
+        return self.services.hell_dog_summon_score(context.battle, context.actor, destination)
+
+    def cycle_summon_score(self, context: AISkillScoreContext,
+                           destination: Position | None) -> float:
+        return self.services.cycle_summon_score(
+            context.battle, context.actor, context.code, destination, context.profile)
+
+    def unit_distance(self, battle: Battle, source: Unit, target: Unit) -> int:
+        return self.services.distance_between_units(battle, source, target)
+
+    def profitable_alternative_skill(self, context: AISkillScoreContext,
+                                     codes: frozenset[str], threshold: float) -> bool:
+        battle, actor, profile = context.battle, context.actor, context.profile
+        for other in actor.skills:
+            if other.code not in codes or not other.can_use(battle, actor, {})[0]:
+                continue
+            action = self.services.copied_skill_action(battle, actor, other)
+            for payload in self.services.skill_payloads_for_action(battle, actor, action):
+                if self.services.score_skill_payload(
+                    battle, actor, action, payload, profile, instant_only=False) > threshold:
+                    return True
+        return False
+
+    def profitable_zero_dash(self, context: AISkillScoreContext) -> bool:
+        battle, actor, profile = context.battle, context.actor, context.profile
+        dash = actor.get_skill("zero_dash")
+        if not dash.can_use(battle, actor, {})[0]:
+            return False
+        action = self.services.copied_skill_action(battle, actor, dash)
+        return any(self.services.zero_dash_score(battle, actor, dash, payload) > profile.action_threshold
+                   for payload in self.services.skill_payloads_for_action(battle, actor, action))
+
+    def profitable_zero_crossing_move(self, context: AISkillScoreContext) -> bool:
+        battle, actor, profile = context.battle, context.actor, context.profile
+        if actor.position is None or actor.remaining_normal_move_distance(battle) <= 0:
+            return False
+        return any(candidate.score > profile.action_threshold for candidate in
+                   self.services.build_zero_crossing_move_candidates(
+                       battle, actor, self.services.hero_style(actor), profile))
+
+    def probed_heal_score(self, context: AISkillScoreContext,
+                          skill: Any, healed: Unit) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        with ai_probe_rollback(battle):
+            before_hp = healed.current_hp
+            before_defense = healed.stat("defense")
+            skill.execute(battle, actor, payload)
+            gain = healed.current_hp - before_hp
+            defense_gain = healed.stat("defense") - before_defense
+        return (gain * 200.0 + max(0.0, defense_gain) * 24.0
+                + (50.0 if gain > 0 and healed.current_hp <= 0.5 else 0.0)
+                if gain > 0 or defense_gain > 0 else -1000.0)
+
+    def r12_preparation_score(self, context: AISkillScoreContext) -> float:
+        return self.services.r12_preparation_score(
+            context.battle, context.actor, context.code, context.profile)
+
+    def messenger_preparation_score(self, context: AISkillScoreContext) -> float:
+        return self.services.messenger_preparation_score(
+            context.battle, context.actor, context.code, context.profile)
+
+    def r19_preparation_score(self, context: AISkillScoreContext) -> float:
+        return self.services.r19_preparation_score(
+            context.battle, context.actor, context.code, context.profile)
+
+    def cat_form_score(self, context: AISkillScoreContext) -> float:
+        return self.services.r14_cat_form_score(
+            context.battle, context.actor, context.profile)
+
+    def weather_cast_score(self, context: AISkillScoreContext) -> float:
+        return self.services.r20_weather_cast_score(
+            context.battle, context.actor, context.code, context.profile)
+
+    def wuchang_mist_score(self, context: AISkillScoreContext) -> float:
+        return self.services.wuchang_mist_score(
+            context.battle, context.actor, context.profile)
+
+    def fusion_preparation_score(self, context: AISkillScoreContext) -> float:
+        return self.services.fusion_preparation_score(
+            context.battle, context.actor, context.code)
+
+    def feiwang_stance_score(self, context: AISkillScoreContext) -> float:
+        return self.services.feiwang_stance_score(context.battle, context.actor)
+
+    def kings_insight_score(self, context: AISkillScoreContext) -> float:
+        return self.services.kings_insight_score(
+            context.battle, context.actor, context.profile)
+
+    def li_attack_plan_value(self, context: AISkillScoreContext) -> float:
+        return self.services.li_attack_plan_value(context.battle, context.actor)
+
+    def incoming_position_risk(self, battle: Battle, unit: Unit) -> float:
+        return self.services.r19_incoming_position_risk(battle, unit)
+
+    def has_mana_point_skill(self, unit: Unit) -> bool:
+        return self.services.has_mana_point_skill(unit)
+
+    def attack_damage_at_power(self, battle: Battle, source: Unit,
+                               target: Unit, power: float, payload: dict) -> float:
+        return estimate_attack_damage(battle, source, target, payload, attack_power=power)
+
+    def feiwang_shensu_score(self, context: AISkillScoreContext) -> float:
+        return self.services.feiwang_shensu_score(context.battle, context.actor)
+
+    def ninja_shensu_score(self, context: AISkillScoreContext) -> float:
+        return self.services.r22_ninja_shensu_score(context.battle, context.actor)
+
+    def natsume_shensu_score(self, context: AISkillScoreContext) -> float:
+        return self.services.natsume_shensu_score(context.battle, context.actor)
 
     def r13_bat_score(self, battle: Battle, actor: Unit, skill: Any,
                       payload: dict, profile: DifficultyProfile) -> float:

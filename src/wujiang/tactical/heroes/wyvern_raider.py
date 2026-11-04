@@ -89,6 +89,13 @@ class WyvernRideableTrait(Trait):
 
 
 class WyvernMount(AbstractHero):
+    def ai_normal_move_candidate_score(self, battle: Battle, destination: Position,
+                                       profile: Any, score: float, shared: Any) -> float:
+        route = battle.find_path(self, destination,
+                                 max_distance=self.remaining_normal_move_distance(battle),
+                                 use_movement_cost=True)
+        return score + shared.wyvern_move_score(battle, self, route)
+
     hero_code = "raider_wyvern"
     hero_name = "翼龙"
     role = "坐骑"
@@ -142,6 +149,9 @@ class WyvernMountedStartTrait(Trait):
 
 
 class WyvernSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.wyvern_resummon_score(context)
+
     def __init__(self) -> None:
         super().__init__("wyvern", "翼龙", "重召并骑上自己的翼龙；真毁后隔一本人轮才可重召。", target_mode="self")
 

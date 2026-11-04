@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import DamageContext
@@ -12,9 +13,15 @@ from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.heroes.common import positions_to_dict
+from wujiang.tactical.heroes.common import ShensuSkill
 from wujiang.tactical.heroes.mechanics.deadly_bow import DeadlyBowSkill
 from wujiang.tactical.heroes.mechanics.next_five_geometry import position_key
 from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_cells
+
+
+class FusionShensuSkill(ShensuSkill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.fusion_preparation_score(context)
 
 
 class FusionCircleAttackTrait(Trait):
@@ -138,6 +145,9 @@ class NuclearRushStatus(StatusEffect):
 
 
 class NuclearRushSkill(Skill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.fusion_preparation_score(context)
+
     def __init__(self) -> None:
         super().__init__("nuclear_rush", "核冲", "开关技能：回合开始使用；攻 +1，普攻攻击4格并尝试移动到第5格；实际开关后魔力点 +1（最多6）。", max_uses_per_turn=1, target_mode="self")
 

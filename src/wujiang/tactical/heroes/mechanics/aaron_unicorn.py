@@ -15,6 +15,7 @@ from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import Stats
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Trait
+from wujiang.tactical.engine.core import Unit
 from wujiang.tactical.heroes.base import AbstractHero
 from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import StatModifierStatus
@@ -181,6 +182,14 @@ class AaronDestroyedSummonPendingStatus(StatusEffect):
 
 
 class MorningHolyLightSkill(Skill):
+    def ai_damage_target_score(self, target: Unit, hostile_value: float) -> float:
+        damage = min(5.0, target.current_hp) * 100.0 if target.attribute == "暗" else 0.0
+        return damage + hostile_value * 0.5
+
+    def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
+        enemies = [unit for unit in targets if unit.player_id != context.actor.player_id]
+        return len(enemies) * 30.0 + sum(40.0 for unit in enemies if unit.attribute == "暗")
+
     ai_candidate_plan = RANKED_CANDIDATES
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.morning_holy_light_score(self)

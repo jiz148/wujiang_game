@@ -9,6 +9,7 @@ from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import DamageContext
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
+from wujiang.tactical.heroes.ai_red_preparation import RedDefensePreparationMixin
 from wujiang.tactical.engine.core import TargetContext
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.engine.core import Unit
@@ -18,6 +19,7 @@ from wujiang.tactical.heroes.mechanics.weapon_copy import PhysicalImmunityStatus
 from wujiang.tactical.heroes.mechanics.declared_area import DeclaredAreaSkillMixin
 from wujiang.tactical.heroes.mechanics.dragon_breath import DragonBreathSkill
 from wujiang.tactical.heroes.mechanics.next_five_effects import remote_rectangle_patterns
+from wujiang.tactical.heroes.mechanics.hell_rebirth import HellRespawnScoreMixin
 
 
 class HellDragonBreathSkill(DragonBreathSkill):
@@ -79,7 +81,7 @@ class FlyingDragonOrbStatus(PhysicalImmunityStatus):
         super().on_before_damage(battle, ctx)
 
 
-class FlyingDragonOrbSkill(Skill):
+class FlyingDragonOrbSkill(RedDefensePreparationMixin, Skill):
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.red_preparation_score(context)
 
@@ -91,8 +93,12 @@ class FlyingDragonOrbSkill(Skill):
         actor.add_status(FlyingDragonOrbStatus())
 
 
-class HellDragonSacrificeTrait(Trait):
+class HellDragonSacrificeTrait(HellRespawnScoreMixin, Trait):
+    def ai_hell_death_effect_value(self, battle: Battle) -> float:
+        return 35.0
+
     requires_damage_choice = True
+    grants_hell_dragon_return = True
 
     def __init__(self) -> None:
         super().__init__("古龙献祭再临", "真死亡后可技能破坏两名己方地狱单位，只放行一名死亡效果，之后任意时间于原格满状态复活。")
@@ -111,7 +117,13 @@ class HellDragonSacrificeTrait(Trait):
 
     def on_hell_dragon_destroyed(self, battle: Battle) -> None:
         owner = self.owner
-        if owner is None or owner.unit_id in battle.hell_dragon_return_cells:
+        if (owner is None or owner.is_clone or owner.is_summon
+                or getattr(owner, "_hell_dragon_death_handled", False)):
+            return
+        owner._hell_dragon_death_handled = True
+        if getattr(owner, "_suppress_hell_forced_skill_death", False):
+            return
+        if owner.unit_id in battle.hell_dragon_return_cells:
             return
         candidates = self.sacrifice_candidates(battle)
         if len(candidates) < 2:
@@ -163,5 +175,12 @@ class HellDragonSacrificeTrait(Trait):
         else:
             battle.log_public_event(f"{owner.name} 未能真正破坏两名目标，未取得复活权。", target=owner)
         battle.check_win_condition()
+
+    def on_restored_body(self, battle: Battle) -> None:
+        owner = self.owner
+        if owner is None:
+            return
+        owner._hell_dragon_death_handled = False
+        battle.hell_dragon_return_cells.pop(owner.unit_id, None)
 
 

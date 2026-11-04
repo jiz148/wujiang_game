@@ -118,46 +118,23 @@ class AISupportScoring:
         opportunity = self.services.messenger_refill_opportunity(battle, actor, profile)
         if opportunity <= 0:
             return -10.0
-        if code == "messenger_creation":
-            return (35.0 if actor.current_mana <= 1e-9 and actor.mana_points >= 1 else 16.0) if actor.mana_points < 2 else -10.0
-        if actor.current_mana > 1e-9 or actor.mana_points < 2:
-            return -10.0
-        return min(180.0, opportunity) + min(actor.max_mana(), 5.0) * 24.0
+        return actor.get_skill(code).ai_messenger_preparation_score(actor, opportunity)
 
 
-    def ally_buff_score(self, battle: Battle, actor: Unit, code: str, target: Unit, profile: DifficultyProfile) -> float:
-        target_value = self.services.ally_unit_value(target)
-        missing_hp = max(0.0, target.max_health - target.current_hp)
-        if code == "experiment":
-            if target.has_status("实验倒计时") or target.position is None:
-                return -1000.0
-            enemies = living_hostile_combatants(battle, actor.player_id)
-            reachable = [unit for unit in enemies if self.services.distance_between_units(battle, target, unit) <= target.normal_move_distance() + target.targeting_range() + 4]
-            decisive = False
-            if len(enemies) == 1 and battle.unit_belongs_to_current_turn(target) and not target.cannot_attack and target.attacks_used < target.attack_actions_per_turn():
-                enemy = enemies[0]
-                if self.services.distance_between_units(battle, target, enemy) <= target.targeting_range() + 2:
-                    attack = {"type": "attack", "unit_id": target.unit_id, "target_unit_id": enemy.unit_id}
-                    ordinary = estimate_attack_damage(battle, target, enemy, attack, attack_power=target.stat("attack"))
-                    boosted = estimate_attack_damage(battle, target, enemy, attack, attack_power=target.stat("attack") + 2)
-                    decisive = ordinary < enemy.current_hp <= boosted
-            if not reachable or (not target.is_summon and target.current_hp > 0.5 and not decisive):
-                return -1000.0
-            # A healthy core hero's forced death is not a free positive buff.
-            return 45.0 + missing_hp * 55.0 + min(3, len(reachable)) * 16.0 + (180.0 if decisive else 0.0) - (0.0 if target.is_summon else target_value * 0.25)
-        if code == "defend_twice":
-            if any(status.name == "守*2" and getattr(status, "source_unit_id", None) == actor.unit_id for status in target.statuses):
-                return -1000.0
-            return target_value * 0.4 + 18.0
-        if code == "baptism":
-            if target.magic_immunity or target.race != "人类":
-                return -1000.0
-            return target_value * 0.35 + 10.0
-        if code == "chant":
-            reserve = max(4.0, max((float(getattr(skill, "mana_point_cost", 0) or 0) for skill in target.skills), default=0.0))
-            if target.player_id == actor.player_id and self.services.has_mana_point_skill(target) and target.mana_points < reserve:
-                return 55.0 + target_value * 0.25
-            return -1000.0
+    def ally_buff_score(self, battle: Battle, actor: Unit, code: str, target: Unit, profile: DifficultyProfile,
+                        *, skill: Any = None, action: dict[str, Any] | None = None,
+                        payload: dict[str, Any] | None = None) -> float:
+        if skill is None:
+            try:
+                skill = actor.get_skill(code)
+            except (ActionError, KeyError, ValueError):
+                skill = None
+        scorer = getattr(skill, "ai_ally_buff_score", None)
+        if scorer is not None:
+            score_action = action or {"code": code, "_skill_object": skill}
+            score_payload = payload or {"skill_code": code, "target_unit_id": target.unit_id}
+            return scorer(self.services._skill_score_context(
+                battle, actor, score_action, score_payload, profile), target)
         return 12.0
 
 
@@ -462,7 +439,7 @@ class AISupportScoring:
         skill = actor.get_skill(code)
         if not skill.can_use(battle, actor)[0] or actor.direct_effects_blocked():
             return -1000.0
-        if code == "shensu" and (actor.move_used or actor.cannot_move or actor.cannot_normal_move):
+        if skill.ai_fusion_preparation_blocked(actor):
             return -1000.0
         before = self.services.fusion_attack_plan_value(battle, actor)
         cost = skill.mana_cost_for_payload(battle, actor, {})
@@ -617,65 +594,7 @@ class AISupportScoring:
 
     def red_preparation_score(self, battle: Battle, actor: Unit, code: str, profile: DifficultyProfile) -> float:
         skill = actor.get_skill(code)
-        if code == "red_charge":
-            if actor.mana_points >= getattr(actor, "max_mana_points", 5) or actor.direct_effects_blocked():
-                return -20.0
-            bow = actor.skill_map().get("deadly_bow")
-            best_before = best_after = -1000.0
-            if bow is not None and bow.can_use(battle, actor)[0]:
-                for direction in bow.DIRECTIONS:
-                    payload = {"direction": direction}
-                    best_before = max(best_before, self.services.deadly_bow_score(battle, actor, {"code": bow.code}, payload, profile))
-                    with ai_probe_rollback(battle):
-                        actor.gain_mana_points(1)
-                        best_after = max(best_after, self.services.deadly_bow_score(battle, actor, {"code": bow.code}, payload, profile))
-            return max(28.0, best_after + 30.0) if best_after > best_before + 3 else 24.0
-        if code in {"infinite_armor", "infinite_robe", "flying_dragon_orb"}:
-            if (code in {"infinite_armor", "flying_dragon_orb"} and (actor.physical_immunity or actor.has_status("无限铠甲") or actor.has_status("飞龙宝珠"))
-                    or code == "infinite_robe" and actor.magic_immunity):
-                return -20.0
-            if forecasting_active() and not direct_scoring():
-                try:
-                    with ai_probe_rollback(battle):
-                        expected = self.services._red_expected_defense_value(battle, actor, skill, code)
-                    if expected is not None:
-                        return expected
-                except UnstableObservation:
-                    note("defense_convolution_unsafe_inspection")
-            def exposure():
-                result = 0.0
-                for enemy in living_hostile_combatants(battle, actor.player_id):
-                    distance = self.services.distance_between_units(battle, actor, enemy)
-                    if code in {"infinite_armor", "flying_dragon_orb"}:
-                        if not enemy.cannot_attack and distance <= enemy.targeting_range() + enemy.normal_move_distance():
-                            result += estimate_attack_damage(battle, enemy, actor, {}, attack_power=enemy.stat("attack")) * enemy.attack_actions_per_turn()
-                    elif distance <= max(5, enemy.targeting_range()) + enemy.normal_move_distance() and not enemy.cannot_use_skills:
-                        for incoming in enemy.skills:
-                            if (incoming.code in self.services.DAMAGING_SKILL_CODES and incoming.cooldown_remaining == 0
-                                    and (incoming.max_uses_per_battle is None or incoming.uses_this_battle < incoming.max_uses_per_battle)
-                                    and enemy.current_mana >= incoming.mana_cost):
-                                result += estimate_skill_damage(battle, enemy, incoming, {}, actor, enemy.stat("attack"), cells=[],
-                                                                ignore_shield=incoming.ignores_shield_for_payload(battle, enemy, {}),
-                                                                half_ignore_shield=False)
-                return result
-            before = exposure()
-            with ai_probe_rollback(battle):
-                skill.execute(battle, actor, {})
-                saved = max(0.0, before - exposure())
-            return saved * 130.0 + (90.0 if saved >= actor.current_hp and saved > 0 else 0.0) - 35.0
-        before = self.services.red_attack_plan_value(battle, actor)
-        with ai_probe_rollback(battle):
-            skill.execute(battle, actor, {})
-            after = self.services.red_attack_plan_value(battle, actor)
-            if code == "weapon_transfer":
-                infinite = actor.skill_map().get("infinite")
-                if infinite is not None and infinite.can_use(battle, actor)[0]:
-                    infinite.execute(battle, actor, {})
-                    after = max(after, self.services.red_attack_plan_value(battle, actor) - profile.once_per_battle_threshold)
-        gain = after - before
-        if gain <= 4:
-            return -20.0
-        return after + (25.0 if code == "weapon_transfer" else 10.0) - (25.0 if code == "infinite" else 0.0)
+        return skill.ai_red_preparation_score(battle, actor, self.services, profile)
 
 
     def _red_exposure_distribution(self, battle: Battle, actor: Unit, code: str):
@@ -685,10 +604,11 @@ class AISupportScoring:
         # their finite distributions. Keep attack-count multiplication INSIDE each
         # term, just as in the original exposure loop.
         terms = []
+        physical = actor.get_skill(code).ai_red_defense_physical
         with stable_observations(battle):
             for enemy in living_hostile_combatants(battle, actor.player_id):
                 distance = self.services.distance_between_units(battle, actor, enemy)
-                if code in {"infinite_armor", "flying_dragon_orb"}:
+                if physical:
                     if not enemy.cannot_attack and distance <= enemy.targeting_range() + enemy.normal_move_distance():
                         terms.append((enemy, None, enemy.stat("attack"), enemy.attack_actions_per_turn(), False))
                 elif distance <= max(5, enemy.targeting_range()) + enemy.normal_move_distance() and not enemy.cannot_use_skills:
@@ -759,12 +679,10 @@ class AISupportScoring:
         if payload.get("type") != "skill":
             return 1.0
         skill = actor.get_skill(str(payload.get("skill_code") or ""))
-        if skill.code == "mimic_skill":
-            context = self.services.mimic_payload_context(battle, actor, payload)
-            skill = context[1] if context is not None else skill
-        elif skill.code == "agency_borrowed_skill":
-            context = self.services.agency_borrowed_payload_context(battle, actor, payload)
-            skill = context[1] if context is not None else skill
+        try:
+            skill = skill.effective_skill_for_payload(battle, actor, payload)
+        except (ActionError, KeyError, TypeError, ValueError):
+            pass
         return 0.5 if skill.timing == "active" else 1.0
 
 
@@ -864,8 +782,11 @@ def messenger_preparation_score(battle: Battle, actor: Unit, code: str, profile:
 
 
 @expected_numeric(independent=True)
-def ally_buff_score(battle: Battle, actor: Unit, code: str, target: Unit, profile: DifficultyProfile) -> float:
-    return _require_service().ally_buff_score(battle, actor, code, target, profile)
+def ally_buff_score(battle: Battle, actor: Unit, code: str, target: Unit, profile: DifficultyProfile,
+                    *, skill: Any = None, action: dict[str, Any] | None = None,
+                    payload: dict[str, Any] | None = None) -> float:
+    return _require_service().ally_buff_score(battle, actor, code, target, profile,
+                                               skill=skill, action=action, payload=payload)
 
 
 def guardian_finale_opportunities(battle: Battle, actor: Unit) -> tuple[float, float, float, bool]:

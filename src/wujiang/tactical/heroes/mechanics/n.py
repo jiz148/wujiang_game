@@ -26,12 +26,28 @@ import math
 
 
 class NAttackPolicy(HeroAIPolicy):
+    def summon_skill_score(self, context: AISkillScoreContext) -> float | None:
+        if context.code != "split":
+            return None
+        battle, actor = context.battle, context.actor
+        if context.shared.best_attack_score(battle, actor, context.profile) > 0:
+            return -1000.0
+        nearby = any(
+            context.shared.unit_distance(battle, actor, enemy)
+            <= enemy.normal_move_distance() + enemy.targeting_range()
+            for enemy in context.shared.hostile_units(battle, actor)
+        )
+        return 22.0 if nearby and actor.current_mana >= 2.5 else -20.0
+
     def single_target_attack_bonus(self, battle: Battle, actor: Unit, target: Unit,
                                    payload: dict[str, Any], expected_damage: float) -> float:
         return 18.0 + (20.0 if actor.current_mana < 1 else 0.0)
 
 
 class MagneticWaveSkill(DeclaredAreaSkillMixin, ManaPointCostSkill):
+    ai_area_bonus_codes = frozenset({"magnetic_wave"})
+
+    ai_probe_hostile_effect = True
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.magnetic_wave_score(context)
 
@@ -90,6 +106,22 @@ class MagneticWaveSkill(DeclaredAreaSkillMixin, ManaPointCostSkill):
         return battle.units_at_cells(self.chosen_cells(battle, actor, payload))  # type: ignore[return-value]
 
 class NSkill(ManaPointCostSkill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        if actor.mana_points < 1:
+            return -1000.0
+        if actor.current_mana < 1:
+            return 160.0
+        enemies = [unit for unit in battle.enemy_units(actor.player_id)
+                   if unit.alive and unit.position is not None and not unit.banished]
+        if actor.mana_points <= 2 and any(
+            context.shared.unit_distance(battle, actor, enemy)
+            <= enemy.normal_move_distance() + enemy.targeting_range()
+            for enemy in enemies
+        ):
+            return -20.0
+        return 32.0
+
     def __init__(self) -> None:
         super().__init__(
             "n_skill",
@@ -170,6 +202,8 @@ class NManaGuardTrait(Trait):
 
 
 class N(AbstractHero):
+    ai_allied_attack_exception = True
+
     hero_code = "n"
     ai_policy = NAttackPolicy()
     hero_name = "N"

@@ -198,6 +198,13 @@ class WorldRootSummon(AbstractHero):
 
 
 class JudgmentStoneSummon(AbstractHero):
+    def ai_normal_move_candidate_score(self, battle: Battle, destination: Position,
+                                       profile: Any, score: float, shared: Any) -> float | None:
+        if not any(unit.player_id != self.player_id for unit in battle.units_at(destination)):
+            return score
+        collision = shared.judgment_stone_collision_move_score(battle, self, destination, profile)
+        return collision if collision > 0 else None
+
     hero_code = "judgment_stone"
     hero_name = "审判之石"
     role = "召唤物"
@@ -308,6 +315,8 @@ def alive_world_root_numbers(battle: Battle, seed_or_summoner: HeroUnit) -> set[
 
 
 class JudgmentStoneSkill(Skill):
+    ai_nonhostile_throttle_exempt = True
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.judgment_stone_score(context)
 

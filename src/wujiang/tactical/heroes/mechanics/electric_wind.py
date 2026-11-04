@@ -124,6 +124,7 @@ def front_rectangle_patterns(battle: Battle, actor: HeroUnit, depth: int, width:
 
 
 class ElectricWindSkill(Skill):
+    ai_always_hostile_effect = True
     ai_effective_impact_rule = R19_IMPACT
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r19_effect_score(self)

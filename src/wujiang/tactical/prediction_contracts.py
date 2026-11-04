@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import sys
 
-CONTRACT_DIGEST = "ce3ac099a756f4833ac8e527976cf5b38aa7d831fc2ea083b471c351131c806b"
+CONTRACT_DIGEST = "e27163a20ce6125a32f6a31b838fbdbc9579e20f409db95299894793bf88e833"
 
 
 @lru_cache(maxsize=1)

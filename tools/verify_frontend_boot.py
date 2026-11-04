@@ -70,13 +70,15 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
-def wait_for_port(port: int, timeout: float = 20.0) -> bool:
+def wait_for_port(port: int, timeout: float = 20.0, process: subprocess.Popen | None = None) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         with contextlib.closing(socket.socket()) as sock:
             sock.settimeout(0.5)
             if sock.connect_ex(("127.0.0.1", port)) == 0:
                 return True
+        if process is not None and process.poll() is not None:
+            return False
         time.sleep(0.2)
     return False
 
@@ -139,11 +141,12 @@ def main() -> int:
     debug_port = free_port()
     profile = Path(tempfile.mkdtemp(prefix="wujiang-boot-"))
 
+    server_output = tempfile.TemporaryFile(mode="w+t", encoding="utf-8")
     server = subprocess.Popen(
         [sys.executable, "run.py", "--port", str(app_port)],
         cwd=ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=server_output,
+        stderr=subprocess.STDOUT,
     )
     chrome = subprocess.Popen(
         [
@@ -163,8 +166,12 @@ def main() -> int:
 
     page = None
     try:
-        if not wait_for_server_ready(app_port):
-            print("FAIL: 服务未能启动")
+        if not wait_for_server_ready(app_port, server):
+            print(f"FAIL: 服务未能启动（进程退出码：{server.poll()}）")
+            server_output.seek(0)
+            output = server_output.read().strip()
+            if output:
+                print("\n".join(output.splitlines()[-30:]))
             return 1
 
         page = connect(debug_port)
@@ -574,11 +581,12 @@ def main() -> int:
         for process in (chrome, server):
             with contextlib.suppress(subprocess.TimeoutExpired):
                 process.wait(timeout=10)
+        server_output.close()
         shutil.rmtree(profile, ignore_errors=True)
 
 
-def wait_for_server_ready(port: int) -> bool:
-    return wait_for_port(port)
+def wait_for_server_ready(port: int, process: subprocess.Popen | None = None) -> bool:
+    return wait_for_port(port, process=process)
 
 
 def resolve(value: str) -> Path:

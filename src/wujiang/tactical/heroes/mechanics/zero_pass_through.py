@@ -9,12 +9,17 @@ from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.engine.core import Trait
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import payload_position
 from wujiang.tactical.heroes.mechanics.remi_bat import _payload_direction
 from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS
 
 
 class ZeroDashSkill(Skill):
+    def ai_move_score(self, context: AISkillScoreContext, base_score: float,
+                      destination: Position) -> float:
+        return base_score + context.shared.zero_dash_score(context, self)
+
     def __init__(self) -> None:
         super().__init__(
             "zero_dash",

@@ -245,14 +245,15 @@ class AIDecisionCoordinator:
             if (recipient.magic_immunity or recipient.total_shields() > 0 or recipient.dodge_charges > 0
                     or recipient.skill_non_damage_effects_blocked()):
                 continue
-            if recipient.hero_code not in {"excel_r238", "excel_r240", "excel_r242"}:
+            future_gain = next((gain for component in recipient.traits
+                                if callable(score := getattr(component, "ai_sacrifice_gain", None))
+                                if (gain := score()) is not None), None)
+            if future_gain is None:
                 continue
             if not any(enemy.alive for enemy in living_hostile_combatants(battle, unit.player_id)):
                 continue
             immediate_loss = (recipient.current_hp * 125.0 + recipient.stat("attack") * 14.0
                               + (35.0 if recipient.turn_ready else 0.0))
-            future_gain = (115.0 if recipient.hero_code == "excel_r238" else
-                           105.0 if recipient.hero_code == "excel_r240" else 0.0)
             if recipient.current_mana > 0:
                 future_gain -= recipient.current_mana * 12.0
             score = future_gain - immediate_loss
@@ -267,22 +268,8 @@ class AIDecisionCoordinator:
 
         @expected_local(battle)
         def death_effect_value(target: Unit) -> float:
-            code = target.hero_code
-            value = 35.0 if code in {"excel_r238", "excel_r239", "excel_r240", "excel_r242",
-                                      "excel_r243", "excel_r244", "excel_r245", "excel_r246",
-                                      "excel_r247", "excel_r248"} else 0.0
-            if code == "excel_r245":
-                value += 55.0 * sum(body.player_id == target.player_id and "地狱" in body.name
-                                      and not body.alive for body in battle.destroyed_units)
-            elif code == "excel_r247":
-                value += 28.0 * sum(body.alive and body.summoner_id == target.unit_id
-                                      for body in battle.all_units())
-            elif code in {"excel_r244", "excel_r246"} and target.position is not None:
-                nearby = battle.units_at_cells(battle.neighbors(target.position))
-                value += 22.0 * sum(body.alive and body.player_id != target.player_id for body in nearby)
-                value -= 30.0 * sum(body.alive and body.player_id == target.player_id
-                                      and body.unit_id != target.unit_id for body in nearby)
-            return value
+            return next((score(battle) for component in target.traits
+                         if callable(score := getattr(component, "ai_hell_death_effect_value", None))), 0.0)
 
         @expected_local(battle)
         def loss(target: Unit) -> float:
@@ -360,8 +347,8 @@ class AIDecisionCoordinator:
                     continue
             score = (120.0 + target.stat("attack") * 18.0 + target.stat("defense") * 10.0
                      + target.targeting_range() * 6.0)
-            if target.hero_code in {"excel_r238", "excel_r240", "excel_r242", "excel_r243", "excel_r244", "excel_r246"}:
-                score += 30.0
+            score += max((bonus() for component in target.traits
+                          if callable(bonus := getattr(component, "ai_hell_rescue_bonus", None))), default=0.0)
             if score > best[0]:
                 best = (score, str(unit_id))
         return {"type": "damage_choice", "unit_id": unit.unit_id, "target_unit_id": best[1]}

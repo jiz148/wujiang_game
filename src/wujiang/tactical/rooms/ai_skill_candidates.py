@@ -86,7 +86,7 @@ class SkillCandidateBuilder:
         selection_mode = str((action.get("preview", {}) or {}).get("selection", {}).get("mode") or "")
         for payload in payloads:
             generated_from_preview = bool(payload.get("cells")) and selection_mode in {"pattern_cells", "choice_pattern", ""}
-            needs_explicit_legality = code in {"heaven_punishment"}
+            needs_explicit_legality = skill.ai_candidate_requires_explicit_legality
             if (needs_explicit_legality or not generated_from_preview) and not self.services.payload_is_legal(battle, payload):
                 continue
             if self.should_throttle_unlimited_nonhostile_skill(battle, actor, action, payload):
@@ -155,7 +155,7 @@ class SkillCandidateBuilder:
             skill = self.services.skill_from_ai_action(actor, action, str(action.get("code") or payload.get("skill_code") or ""))
         except Exception:
             return False
-        if skill.code in {"blood_art", "sacrifice_ritual", "paralysis_card", "poison_card", "drain_card", "judgment_stone", "mimic_skill", "fried_inspire", "eagle_eye", "electronic_storm"}:
+        if skill.ai_nonhostile_throttle_exempt:
             return False
         if getattr(skill, "max_uses_per_turn", None) is not None:
             return False

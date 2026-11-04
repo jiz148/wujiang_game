@@ -89,6 +89,19 @@ def resolve_hell_war_god_death_sweep(battle: Battle, actor: Unit, queued_action:
 
 
 class HellWarGodRebirthTrait(HellRebirthTrait):
+    respawn_ai_enabled = False
+    ai_rescue_bonus = True
+    ai_shuffle_value = 105.0
+
+    def ai_hell_death_effect_value(self, battle: Battle) -> float:
+        owner = self.owner
+        if owner is None or owner.position is None:
+            return 35.0
+        nearby = battle.units_at_cells(battle.neighbors(owner.position))
+        return (35.0 + 22.0 * sum(body.alive and body.player_id != owner.player_id for body in nearby)
+                - 30.0 * sum(body.alive and body.player_id == owner.player_id
+                             and body.unit_id != owner.unit_id for body in nearby))
+
     def __init__(self) -> None:
         super().__init__("excel_r246")
         self.name = "武神再临"
@@ -156,6 +169,11 @@ class HellWarGodRebirthTrait(HellRebirthTrait):
 
 
 class HellSikaSacrificeTrait(HellRebirthTrait):
+    respawn_safety = 1.3
+    ai_sacrifice_future_gain = 0.0
+    ai_rescue_bonus = True
+    ai_shuffle_value = 70.0
+
     requires_damage_choice = True
 
     def __init__(self) -> None:

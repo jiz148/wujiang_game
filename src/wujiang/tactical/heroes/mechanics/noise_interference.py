@@ -14,6 +14,7 @@ from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
 from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
+from wujiang.tactical.heroes.ai_impact_rule import ReviewedR15ImpactMixin
 from wujiang.tactical.heroes.common import StatModifierStatus
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
@@ -45,7 +46,21 @@ class NoiseWaveStatus(StatModifierStatus):
         return False, ""
 
 
-class NoiseWaveSkill(Skill):
+class NoiseWaveSkill(ReviewedR15ImpactMixin, Skill):
+    def ai_r15_control_value(self, battle: Battle, target: HeroUnit) -> float:
+        if target.has_status("乱音电波"):
+            return 0.0
+        useful = [skill for skill in target.skills
+                  if not target.cannot_use_skills and not getattr(skill, "locked", False) and skill.cooldown_remaining <= 0
+                  and (skill.max_uses_per_battle is None or skill.uses_this_battle < skill.max_uses_per_battle)
+                  and skill.mana_cost <= target.current_mana
+                  and not any(component.blocks_skill_use(battle, target, skill)[0] for component in target.iter_components())]
+        slow = 14.0 if target.stat("speed") > 1 and not target.cannot_move and not target.cannot_normal_move else 0.0
+        return slow + 24.0 * sum(skill_has_movement_effect(skill) for skill in useful)
+
+    def ai_r15_post_effect_bonus(self, actor, unit, *, alive, player, mana, value, statuses, control):
+        return control if "乱音电波" not in statuses and unit.has_status("乱音电波") else 0.0
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r15_effect_score(self)
 
@@ -109,7 +124,15 @@ class NoiseWaveSkill(Skill):
         return True
 
 
-class InterferenceSkill(Skill):
+class InterferenceSkill(ReviewedR15ImpactMixin, Skill):
+    def ai_r15_post_effect_bonus(self, actor, unit, *, alive, player, mana, value, statuses, control):
+        if alive and unit.alive and player != actor.player_id and unit.player_id == actor.player_id:
+            return 70.0 + value * 0.55
+        return 0.0
+
+    def ai_hostile_target_impact(self, battle, actor, payload, target):
+        return target.is_clone or (target.is_summon and target.player_id != actor.player_id)
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r15_effect_score(self)
 

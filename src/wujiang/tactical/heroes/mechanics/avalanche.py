@@ -63,6 +63,12 @@ class BigAvalancheWeatherEffect(BattleFieldEffect):
 
 
 class SnowAvalancheSkill(Skill):
+    def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
+        return sum(52.0 + 9.0 * sum(skill.timing == "active" for skill in unit.skills)
+                   for unit in targets if unit.player_id != context.actor.player_id
+                   and not unit.has_status("雪崩") and unit.alive)
+
+    ai_always_hostile_effect = True
     ai_effective_impact_rule = SNOW_AVALANCHE_IMPACT
     def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
         return actor.stat("attack") + (1.0 if battle.has_weather("大雪崩") else 0.0)
@@ -128,6 +134,38 @@ class SnowAvalancheSkill(Skill):
 
 
 class BigAvalancheSkill(Skill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        battle, actor = context.battle, context.actor
+        enemies = [unit for unit in battle.enemy_units(actor.player_id)
+                   if unit.alive and unit.position is not None and not unit.banished]
+        if battle.has_weather("大雪崩") or not enemies:
+            return -8.0
+        net_value = 0.0
+        for unit in battle.all_units():
+            if not unit.alive or unit.banished or unit.position is None or unit.direct_effects_blocked():
+                continue
+            ally = unit.player_id == actor.player_id
+            if BigAvalancheWeatherEffect.ice_eligible(battle, unit):
+                value = 20.0 + min(3.0, unit.stat("speed")) * 4.0 if not unit.cannot_move and not unit.cannot_normal_move else 0.0
+                net_value += value if ally else -value
+                continue
+            usable_active = sum(
+                skill.timing == "active"
+                and not unit.cannot_use_skills
+                and not getattr(skill, "locked", False)
+                and skill.cooldown_remaining == 0
+                and (skill.max_uses_per_battle is None or skill.uses_this_battle < skill.max_uses_per_battle)
+                and skill.mana_cost <= unit.current_mana
+                and not any(component.blocks_skill_use(battle, unit, skill)[0] for component in unit.iter_components())
+                for skill in unit.skills
+            )
+            value = (0.0 if unit.cannot_move else min(4.0, unit.stat("speed")) * 9.0) + min(3, usable_active) * 15.0
+            net_value += -value if ally else value
+        avalanche = next((skill for skill in actor.skills if skill.code == "snow_avalanche"), None)
+        if avalanche is not None and not actor.cannot_use_skills and avalanche.cooldown_remaining <= 2:
+            net_value += 24.0
+        return 24.0 + net_value if net_value > 8.0 else -8.0
+
     def __init__(self) -> None:
         super().__init__(
             "big_avalanche",

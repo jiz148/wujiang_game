@@ -11,6 +11,7 @@ from wujiang.tactical.engine.core import DamageContext
 from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
+from wujiang.tactical.heroes.ai_red_preparation import RedAttackPreparationMixin, RedDefensePreparationMixin
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import TargetContext
 from wujiang.tactical.engine.core import Trait
@@ -42,6 +43,7 @@ class WeaponCopyStatus(StatusEffect):
 
 
 class WeaponCopySkill(Skill):
+    ai_enemy_impact_requirement = False
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.weapon_copy_score(context)
 
@@ -172,7 +174,10 @@ class GlobalAttackStatus(StatusEffect):
                 "secondary_cells": [], "requires_target": True, "cell_targeted_attack": True}
 
 
-class InfiniteSkill(Skill):
+class InfiniteSkill(RedAttackPreparationMixin, Skill):
+    def ai_red_success_bonus(self) -> float:
+        return -15.0
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.red_preparation_score(context)
 
@@ -198,7 +203,7 @@ class PhysicalImmunityStatus(StatusEffect):
             ctx.reason = f"{self.owner.name} 物免。"
 
 
-class InfiniteArmorSkill(Skill):
+class InfiniteArmorSkill(RedDefensePreparationMixin, Skill):
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.red_preparation_score(context)
 
@@ -209,7 +214,9 @@ class InfiniteArmorSkill(Skill):
         actor.add_status(PhysicalImmunityStatus())
 
 
-class InfiniteRobeSkill(Skill):
+class InfiniteRobeSkill(RedDefensePreparationMixin, Skill):
+    ai_red_defense_physical = False
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.red_preparation_score(context)
 

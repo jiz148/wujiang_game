@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from wujiang.tactical.engine.core import Battle, DamageContext, Skill, Trait, Unit
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import (
     StatModifierStatus, payload_target_unit, positions_to_dict,
 )
@@ -112,6 +113,31 @@ class DemonLinkSourceStatus(StatModifierStatus):
 
 
 class DemonLinkSkill(Skill):
+    def ai_effective_enemy_impact(self, battle: Battle, actor: Unit, payload: dict[str, Any],
+                                  targets: list[Unit] | None = None, shared: Any = None,
+                                  action: dict[str, Any] | None = None) -> bool:
+        target = battle.units.get(str(payload.get("target_unit_id") or ""))
+        return bool(target is not None and target.player_id != actor.player_id
+                    and not target.magic_immunity and not target.skill_non_damage_effects_blocked()
+                    and target.dodge_charges <= 0)
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        target = battle.units.get(str(payload.get("target_unit_id") or ""))
+        if target is None or target.player_id == actor.player_id or target.magic_immunity or target.dodge_charges > 0:
+            return -1000.0
+        if target.skill_non_damage_effects_blocked():
+            return -1000.0
+        if any(status.name == "恶魔链接·来源" and getattr(status, "target_unit_id", None) == target.unit_id
+               and getattr(status, "ending_turn_number", None) is None for status in actor.statuses):
+            return -1000.0
+        distance = battle.distance_between_units(actor, target)
+        duration = max(0, 4 - distance)
+        return (22.0 + min(3.0, target.stat("attack")) * 8.0
+                + min(3.0, target.stat("speed")) * 8.0
+                + duration * 4.0 + (12.0 if not target.is_summon and not target.is_clone else 0.0)
+                - (18.0 if target.stat("attack") <= 1 or target.stat("speed") <= 1 else 0.0))
+
     def __init__(self) -> None:
         super().__init__("demon_link", "恶魔链接", "2轮冷却、破魔；命中后逐本人轮吸取目标攻速，离距或降至0后一轮消失。",
                          cooldown_turns=2, target_mode="unit")

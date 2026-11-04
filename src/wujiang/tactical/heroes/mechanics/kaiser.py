@@ -13,6 +13,11 @@ from wujiang.tactical.heroes.common import payload_target_unit
 
 
 class KaiserFistSkill(Skill):
+    def ai_effective_enemy_impact(self, battle, actor, payload, targets=None, shared=None, action=None):
+        if targets and shared.kaiser_fist_score(battle, actor, self, payload, shared.difficulty_profile("standard")) > 0:
+            return True
+        return None
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.kaiser_fist_score(context)
 

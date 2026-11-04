@@ -110,6 +110,10 @@ def doomlight_ai_healing_value(context: AISkillScoreContext, score: float,
 
 
 class DoomLightSkill(ResourceEffectScoring, Skill):
+    def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
+        enemies = [unit for unit in targets if unit.player_id != context.actor.player_id]
+        return len(enemies) * 32.0 + sum(unit.current_hp * 40.0 for unit in enemies)
+
     def ai_after_effect_score(self, context: AISkillScoreContext, score: float,
                               new_doom_damage: float) -> float | None:
         if new_doom_damage == 0:

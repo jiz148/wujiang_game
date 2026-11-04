@@ -76,6 +76,18 @@ class EagleEyeStatus(StatusEffect):
 
 
 class EagleEyeSkill(DeclaredAreaSkillMixin, Skill):
+    ai_nonhostile_throttle_exempt = True
+
+    ai_action_opportunity_excluded = True
+    ai_action_control_status = "鹰眼"
+
+    def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
+        return sum(42.0 + (0 if unit.cannot_attack else 24.0)
+                   + sum(1 for skill in unit.skills if skill.timing == "active") * 12.0
+                   for unit in targets if unit.player_id != context.actor.player_id
+                   and not unit.has_status("鹰眼"))
+
+    ai_probe_hostile_effect = True
     ai_candidate_plan = RANKED_CANDIDATES
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.control_score(self)

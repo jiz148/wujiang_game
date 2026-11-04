@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from typing import Any
+from wujiang.tactical.engine.core import ActionError, Unit
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Skill
@@ -64,6 +66,26 @@ class HeavenLockStatus(FlagStatus):
 
 
 class HeavenLockSkill(Skill):
+    def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        target_id = payload.get("target_unit_id")
+        target = battle.get_unit(str(target_id)) if target_id else (targets[0] if targets else None)
+        if (target is None or target.player_id == actor.player_id or target.has_status("天锁")
+                or target.cannot_normal_move or target.stat("speed") <= 0):
+            return -1000.0
+        with context.probe_rollback():
+            try:
+                self.execute(battle, actor, payload)
+            except ActionError:
+                return -1000.0
+            if not target.has_status("天锁"):
+                return -1000.0
+        return 24.0 + min(6.0, target.stat("speed")) * 7.0 - 1.5 * 12.0
+
+    def ai_hostile_target_impact(self, battle, actor, payload, target):
+        return (not target.has_status("天锁") and not target.cannot_normal_move
+                and target.stat("speed") > 0 and not getattr(target, "world_seed_terrain", False))
+
     def __init__(self) -> None:
         super().__init__("heaven_lock", "天锁", "普通技能：费 1.5 魔；选定场上一个单位，在之后第二个对方回合开始时使其 3 轮无法移动。", mana_cost=1.5, target_mode="unit")
         self.requires_direct_unit_target_line = False

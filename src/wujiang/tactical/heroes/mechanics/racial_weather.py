@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.engine.army import is_army_soldier
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import BattleFieldEffect
@@ -155,6 +156,9 @@ class SimpleGlobalWeatherEffect(RacialWeatherEffect):
 
 
 class WeatherUltimateSkill(Skill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.weather_cast_score(context)
+
     def __init__(
         self,
         code: str,

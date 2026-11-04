@@ -32,6 +32,20 @@ from wujiang.tactical.heroes.mechanics.mana_point_cost import ManaPointCostSkill
 
 
 class RecoverManaSkill(Skill):
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        target_id = payload.get("target_unit_id")
+        targets = list(context.effect_units(self))
+        target = battle.get_unit(str(target_id)) if target_id else (targets[0] if targets else None)
+        if target is None or target.player_id != actor.player_id:
+            return -1000.0
+        cost = self.mana_cost_for_payload(battle, actor, payload)
+        available = target.current_mana - (cost if target.unit_id == actor.unit_id else 0.0)
+        gained = min(1.0, max(0.0, target.max_mana() - available))
+        if gained <= 0 or (target.unit_id == actor.unit_id and gained <= cost):
+            return -1000.0
+        return gained * 48.0 - cost * 18.0
+
     def __init__(self) -> None:
         super().__init__(
             "recover_mana",
@@ -69,6 +83,8 @@ class RecoverManaSkill(Skill):
 
 
 class MagicShieldSkill(LightWallSkill):
+    ai_paid_reaction_shield = False
+
     def __init__(self) -> None:
         super().__init__()
         self.code = "magic_shield"
@@ -211,6 +227,8 @@ class BloodRiteAttackStatus(StatModifierStatus):
 
 
 class BloodArtSkill(BloodSupportScoring, Skill):
+    ai_nonhostile_throttle_exempt = True
+
     def ai_attack_opportunity(self, context: AISkillScoreContext, target: HeroUnit) -> float:
         return context.best_attack_score() if target is context.actor else 0.0
 
@@ -343,6 +361,8 @@ class BloodDanceSkill(BloodSupportScoring, Skill):
 
 
 class SacrificeRitualSkill(ManaPointCostSkill):
+    ai_nonhostile_throttle_exempt = True
+
     ai_candidate_plan = RANKED_CANDIDATES
     ai_early_effect_score = True
     def ai_effect_score(self, context: AISkillScoreContext) -> float:

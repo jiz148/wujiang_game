@@ -9,7 +9,7 @@ from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import MoveContext
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Trait
-from wujiang.tactical.heroes.ai_policy import HeroAIPolicy
+from wujiang.tactical.heroes.ai_policy import AISkillScoreContext, HeroAIPolicy
 from wujiang.tactical.heroes.common import DashMoveSkill
 from wujiang.tactical.heroes.common import positions_to_dict
 from wujiang.tactical.heroes.mechanics.tianyuan import resolve_true_red_move_blast
@@ -45,6 +45,11 @@ class TrueRedAIPolicy(HeroAIPolicy):
     def move_candidate_score_bonus(self, battle: Battle, actor: HeroUnit,
                                    destination: Position) -> float:
         return true_red_blast_score(battle, actor, destination)
+
+    def move_skill_score_bonus(self, context: AISkillScoreContext,
+                               destination: Position) -> float:
+        return true_red_blast_score(context.battle, context.actor, destination) + (
+            3.0 if context.code.startswith("true_red_free_") else 0.0)
 
 
 class TrueRedMovementTrait(Trait):

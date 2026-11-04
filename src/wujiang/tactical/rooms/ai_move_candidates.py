@@ -75,8 +75,10 @@ class MoveCandidateBuilder:
         role = self.services.hero_style(actor)
         current_score = self.services.score_move_destination(battle, actor, actor.position, role, profile) if actor.position is not None else 0.0
         candidates: list[self.services.AICandidate] = []
-        if getattr(actor, "hero_code", "") == "excel_r118":
-            candidates.extend(self.build_zero_crossing_move_candidates(battle, actor, role, profile))
+        move_policy = getattr(actor, "ai_policy", None)
+        if move_policy is not None:
+            candidates.extend(move_policy.extra_normal_move_candidates(
+                battle, actor, role, profile, self))
         cells = self.services.preview_positions(action.get("preview", {}).get("cells"))
         if getattr(battle, "fast_ai_simulation", False):
             cells = self.fast_move_shortlist(battle, actor, cells, role)
@@ -85,28 +87,19 @@ class MoveCandidateBuilder:
             if not self.services.payload_is_legal(battle, payload):
                 continue
             score = self.services.score_move_destination(battle, actor, cell, role, profile) - current_score - 1.0
-            move_policy = getattr(actor, "ai_policy", None)
             if move_policy is not None:
                 score += move_policy.move_candidate_score_bonus(battle, actor, cell)
-            if actor.hero_code == "raider_wyvern":
-                try:
-                    route = battle.find_path(actor, cell, max_distance=actor.remaining_normal_move_distance(battle),
-                                             use_movement_cost=True)
-                except ActionError:
-                    continue
-                score += self.services.wyvern_move_score(battle, actor, route)
-            if actor.hero_code == "excel_r118":
-                try:
-                    path = battle.find_path(actor, cell, max_distance=actor.remaining_normal_move_distance(battle), use_movement_cost=True)
-                    score += self.services.zero_path_effect_score(battle, actor, path)
-                except ActionError:
-                    continue
-            if actor.hero_code == "excel_r120":
-                score = self.services.blind_paid_move_score(battle, actor, cell, profile)
-            if getattr(actor, "hero_code", "") == "judgment_stone" and any(unit.player_id != actor.player_id for unit in battle.units_at(cell)):
-                score = self.services.judgment_stone_collision_move_score(battle, actor, cell, profile)
-                if score <= 0:
-                    continue
+            try:
+                if move_policy is not None:
+                    score = move_policy.normal_move_candidate_score(
+                        battle, actor, cell, profile, score, self.services)
+                unit_scorer = getattr(actor, "ai_normal_move_candidate_score", None)
+                if callable(unit_scorer) and score is not None:
+                    score = unit_scorer(battle, cell, profile, score, self.services)
+            except ActionError:
+                continue
+            if score is None:
+                continue
             candidates.append(self.services.AICandidate(payload=payload, score=score, summary=f"move:{cell.x},{cell.y}"))
         return candidates
 

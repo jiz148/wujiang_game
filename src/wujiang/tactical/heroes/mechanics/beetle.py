@@ -8,6 +8,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from wujiang.tactical.heroes.ai_policy import AIReactionScoreContext
+    from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.rooms.ai_probe import ai_probe_rollback
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import HealContext
@@ -39,6 +40,9 @@ class BeetleFullForceStatus(StatModifierStatus):
 
 
 class BeetleFullForceSkill(Skill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.r19_preparation_score(context)
+
     def __init__(self) -> None:
         super().__init__("beetle_full_force", "全力攻击", "开关技能：仅回合开始使用；攻 +2、速 +2、守 -3。", max_uses_per_turn=1, target_mode="self")
 

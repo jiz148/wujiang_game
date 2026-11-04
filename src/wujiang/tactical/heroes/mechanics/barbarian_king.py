@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from wujiang.tactical.engine.core import (
-    ActionError, Battle, DamageContext, HealContext, Position, Skill,
+    ActionError, Battle, DamageContext, HealContext, Position, QueuedAction, Skill,
     StatusEffect, Trait, Unit,
 )
 from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
@@ -16,6 +16,7 @@ from wujiang.tactical.heroes.common import (
 from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS
 
 class BarbarianAxeSkill(Skill):
+    ai_candidate_requires_explicit_legality = True
     def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
         return actor.stat("attack") - (1.0 if payload.get("choice_code") == "weak" else 0.0)
 
@@ -217,5 +218,10 @@ class BarbarianWildmanTrait(Trait):
             else:
                 ctx.raw_damage = max(0.0, ctx.raw_damage - 2)
             ctx.modifier_receipts.add("barbarian_wildman_reduction")
+
+    def blocks_target_reaction(self, battle: Battle, reactor: Unit,
+                               queued_action: QueuedAction) -> bool:
+        return (reactor.name == "野人" and queued_action.action_type in
+                {"attack", "skill", "skill_effect"})
 
 

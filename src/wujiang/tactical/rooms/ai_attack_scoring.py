@@ -50,6 +50,7 @@ class AIAttackScoringServices(Protocol):
     reviewed_attack_synergy: Callable[..., Any]
     scored_kill_probability: Callable[..., Any]
     attack_payloads_for_action: Callable[..., Any]
+    probe_attack_damage_impact: Callable[..., Any]
 
 
 class AIAttackScoring:
@@ -185,37 +186,33 @@ class AIAttackScoring:
                 return -1000.0
             return self.services.messenger_crow_position_score(battle, actor, Position(int(payload["x"]), int(payload["y"])),
                                                  mana_cost=0.0) - 9.0
-        if actor.hero_code == "excel_r056":
-            return self.services.r13_attack_value(battle, actor, payload)
-        if actor.hero_code == "excel_r379" or payload.get("attack_variant") == "kiku_legacy":
-            return self.services.r23_attack_value(battle, actor, payload)
-        if payload.get("target_unit_id"):
-            target = battle.units.get(str(payload["target_unit_id"]))
-            if target is not None and (actor.hero_code in {"excel_r327", "excel_r337", "excel_r352"}
-                                      or battle.effect_recipient(target).hero_code == "excel_r327"):
-                return self.services.r22_attack_value(battle, actor, target, payload)
-        if actor.hero_code in {"excel_r225", "excel_r264", "excel_r326"} and payload.get("target_unit_id"):
-            return self.services.r21_attack_value(battle, actor, battle.get_unit(str(payload["target_unit_id"])), payload)
+        attack_policy = getattr(actor, "ai_policy", None)
         target = battle.units.get(str(payload.get("target_unit_id") or ""))
-        if actor.hero_code in {"excel_r187", "excel_r188", "excel_r224"} and target is not None and target.player_id != actor.player_id:
-            power = battle.basic_attack_preview_power(actor, payload)
-            impact = probe_attack_damage_impact(battle, actor, target, payload, attack_power=power)
-            value = min(target.current_hp, impact.damage) * 100.0
-            if self.services.scored_kill_probability(impact.damage, target.current_hp - 1e-9) > 0:
-                value += 90.0 * self.services.scored_kill_probability(impact.damage, target.current_hp - 1e-9)
-            elif impact.changed_target and impact.damage <= 0:
-                value += 20.0
-            from wujiang.tactical.heroes.mechanics.racial_weather import weather_race_eligible
-            if value > 0 and not actor.direct_effects_blocked() and weather_race_eligible(actor, "恶魔") and battle.unit_in_weather("万魔殿", actor):
-                value += 0.5 * min(max(0.0, target.current_hp - impact.damage), impact.damage) * 100.0
-            return value - 4.0
+        if attack_policy is not None:
+            early = attack_policy.early_attack_score(battle, actor, target, payload, profile, self.services)
+            if early is not None:
+                return early
+        if payload.get("attack_variant") == "kiku_legacy":
+            return self.services.r23_attack_value(battle, actor, payload)
+        if target is not None:
+            target_policy = getattr(battle.effect_recipient(target), "ai_policy", None)
+            if target_policy is not None:
+                incoming = target_policy.incoming_attack_score_override(
+                    battle, actor, target, payload, profile, self.services)
+                if incoming is not None:
+                    return incoming
+        if attack_policy is not None:
+            scored = attack_policy.target_attack_score(battle, actor, target, payload, profile, self.services)
+            if scored is not None:
+                return scored
         if target is not None and target.player_id == actor.player_id and any(component.name == "风壁赠予" for component in actor.iter_components()):
             return self.services.natsume_support_attack_score(battle, actor, payload)
-        if actor.hero_code == "excel_r030":
-            return self.services.fusion_attack_value(battle, actor, payload)
-        if actor.hero_code == "excel_r029" or actor.has_status("无限") or actor.has_status("武装复制"):
+        if attack_policy is not None:
+            scored = attack_policy.late_attack_score(battle, actor, target, payload, profile, self.services)
+            if scored is not None:
+                return scored
+        if actor.has_status("无限") or actor.has_status("武装复制"):
             return self.services.red_attack_value(battle, actor, payload)
-        attack_policy = getattr(actor, "ai_policy", None)
         if not payload.get("target_unit_id"):
             resolved_payload = battle.resolved_basic_attack_payload(actor, payload)
             cells = battle.payload_positions(resolved_payload, "attack_cells")
@@ -247,11 +244,9 @@ class AIAttackScoring:
                 score += min(target.current_hp, expected_damage) * 100.0
                 if attack_policy is not None:
                     score += attack_policy.area_hit_bonus(battle, actor, target, expected_damage, area_state)
-                if actor.hero_code == "dragon_mount":
-                    with ai_probe_rollback(battle):
-                        defense, speed = target.stat("defense"), target.stat("speed")
-                        battle.resolve_attack_damage(actor, target, action_name="龙爪", payload=resolved_payload, tags={"area_attack"})
-                        score += max(0.0, defense - target.stat("defense")) * 26.0 + max(0.0, speed - target.stat("speed")) * 14.0
+                area_hit_bonus = getattr(actor, "ai_area_hit_bonus", None)
+                if callable(area_hit_bonus):
+                    score += area_hit_bonus(battle, target, resolved_payload, ai_probe_rollback)
                 if self.services.scored_kill_probability(expected_damage, target.current_hp - 1e-9) > 0:
                     score += 95.0 * self.services.scored_kill_probability(expected_damage, target.current_hp - 1e-9)
                 score += self.services.hostile_unit_value(target) * 0.65
@@ -262,9 +257,13 @@ class AIAttackScoring:
                 score += profile.aggressive_bonus
             return score
         target = battle.get_unit(str(payload["target_unit_id"]))
-        if actor.has_status("里次元大剑") or getattr(actor, "hero_code", "") == "excel_r028":
-            if target.player_id != actor.player_id:
+        if target.player_id != actor.player_id:
+            if actor.has_status("里次元大剑"):
                 return self.services.feiwang_attack_value(battle, actor, target, payload)
+            if attack_policy is not None:
+                scored = attack_policy.single_attack_score(battle, actor, target, payload, profile, self.services)
+                if scored is not None:
+                    return scored
         if target.player_id == actor.player_id and battle.allied_basic_heal_amount(actor, target) > 0:
             return self.services.allied_attack_heal_score(battle, actor, payload)
         attack_power = battle.basic_attack_preview_power(actor, payload)
@@ -300,8 +299,8 @@ class AIAttackScoring:
         score += self.services.reviewed_attack_synergy(battle, actor, target, expected_damage)
         if attack_policy is not None:
             score += attack_policy.attack_followup_bonus(battle, actor, target, payload, expected_damage)
-        if actor.hero_code == "excel_r194":
-            score += self.services.alexander_expected_swap_value(battle, actor)
+        if attack_policy is not None:
+            score += attack_policy.final_attack_bonus(battle, actor, target, payload, self.services)
         return score
 
 

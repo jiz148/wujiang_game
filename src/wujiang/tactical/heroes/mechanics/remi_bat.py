@@ -43,6 +43,13 @@ class RemiBatSummon(AbstractHero):
 
 
 class RemiChaosSkill(Skill):
+    def ai_simulation_after(self, battle, actor, queued, services, profile, saved, before, units) -> float:
+        if not actor.alive:
+            return 0.0
+        old_position = battle.declared_source_position(queued.payload)
+        return (services.score_move_destination(battle, actor, actor.position, services.hero_style(actor), profile)
+                - services.score_move_destination(battle, actor, old_position, services.hero_style(actor), profile)) * 0.7
+
     ai_effective_impact_rule = R13_IMPACT
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r13_effect_score(self)

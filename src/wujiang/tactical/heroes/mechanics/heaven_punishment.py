@@ -10,11 +10,12 @@ from wujiang.tactical.engine.core import DamageContext
 from wujiang.tactical.engine.core import HeroUnit
 from wujiang.tactical.engine.core import Position
 from wujiang.tactical.engine.core import Skill
+from wujiang.tactical.engine.core import Unit
 from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import payload_target_unit
-from wujiang.tactical.heroes.ai_policy import AISkillCandidateContext
+from wujiang.tactical.heroes.ai_policy import AISkillCandidateContext, AISkillScoreContext
 from wujiang.tactical.heroes.mechanics.next_five_effects import apply_piercing_status_effect
 from wujiang.tactical.heroes.mechanics.next_five_effects import damage_followup_effect_applies
 from wujiang.tactical.heroes.mechanics.next_five_effects import remote_rectangle_patterns
@@ -33,6 +34,85 @@ class SkillDisabledStatus(StatusEffect):
 
 
 class HeavenPunishmentSkill(Skill):
+    ai_candidate_requires_explicit_legality = True
+
+    def ai_empty_payload_filter_reason(self, context: AISkillCandidateContext, patterns: list) -> str | None:
+        for pattern in patterns:
+            cells = context.positions(pattern)
+            for target in self.affected_enemies(context.battle, context.actor, cells):
+                if any(skill.timing == "active"
+                       and (skill.max_uses_per_battle is None or skill.uses_this_battle < skill.max_uses_per_battle)
+                       and not any(getattr(status, "skill_code", None) == skill.code for status in target.statuses)
+                       for skill in self.public_active_skills(context.battle, target)):
+                    return None
+        return "no_sealable_public_skill" if patterns else None
+
+    def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
+        payload = context.payload
+        selected_code = str(payload.get("disabled_skill_code") or "")
+        target_id = payload.get("target_unit_id")
+        target = context.battle.get_unit(str(target_id)) if target_id else (targets[0] if targets else None)
+        if target is None or not selected_code:
+            return -120.0
+        selected = next((skill for skill in self.public_active_skills(context.battle, target)
+                         if skill.code == selected_code), None)
+        if selected is None or any(getattr(status, "skill_code", None) == selected_code for status in target.statuses):
+            return -120.0
+        if selected.max_uses_per_battle is not None and selected.uses_this_battle >= selected.max_uses_per_battle:
+            return -120.0
+        score = 32.0 if selected.cooldown_remaining > 0 else 55.0
+        if context.is_damaging_skill(selected_code) or context.shared.is_control_skill(selected_code):
+            score += 35.0
+        if context.shared.is_summon_skill(selected_code) or context.is_heal_skill(selected_code):
+            score += 24.0
+        if getattr(selected, "max_uses_per_battle", None) == 1 and getattr(selected, "uses_this_battle", 0) == 0:
+            score += 20.0
+        if selected.mana_cost > target.max_mana():
+            score -= 45.0
+        return score
+
+    def ai_effective_enemy_impact(self, battle, actor, payload, targets=None, shared=None, action=None):
+        if targets is None:
+            return None
+        return shared.score_skill_payload(battle, actor, action, payload,
+                                          shared.difficulty_profile("standard"), instant_only=False) > 0
+
+    def ai_hostile_target_impact(self, battle, actor, payload, target):
+        selected_code = str(payload.get("disabled_skill_code") or "")
+        return bool(selected_code) and any(
+            getattr(target_skill, "timing", None) == "active"
+            and target_skill.code == selected_code
+            and not any(getattr(status, "skill_code", None) == selected_code for status in target.statuses)
+            for target_skill in self.public_active_skills(battle, target)
+        )
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        battle, actor, payload = context.battle, context.actor, context.payload
+        targets = list(context.effect_units(self))
+        selected_code = str(payload.get("disabled_skill_code") or "")
+        target = battle.units.get(str(payload.get("target_unit_id") or ""))
+        if target is None or not selected_code:
+            return -1000.0
+        control_value = context.shared.skill_control_bonus(context, targets)
+        with context.probe_rollback():
+            before = {unit.unit_id: (unit.current_hp, unit.total_shields()) for unit in targets}
+            sealed_before = any(getattr(status, "skill_code", None) == selected_code for status in target.statuses)
+            try:
+                self.execute(battle, actor, payload)
+            except ActionError:
+                return -1000.0
+            score = 0.0
+            for unit in targets:
+                hp, shields = before[unit.unit_id]
+                value = max(0.0, hp - unit.current_hp) * 155.0 + max(0, shields - unit.total_shields()) * 20.0
+                if context.death_probability(unit) > 0:
+                    value += (80.0 * context.death_probability(unit) if context.direct_scoring() else 80.0)
+                score += value if unit.player_id != actor.player_id else -value * 1.35
+            sealed_after = any(getattr(status, "skill_code", None) == selected_code for status in target.statuses)
+            if sealed_after and not sealed_before:
+                score += max(0.0, control_value)
+        return score if score > 0 else -1000.0
+
     target_unit_is_anchor = True
 
     def ai_candidate_payloads(self, context: AISkillCandidateContext) -> list[dict[str, Any]]:

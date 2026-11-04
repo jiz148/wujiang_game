@@ -1,6 +1,7 @@
 """Source-preserving object assembly for excel_r028 / 飞王."""
 
 from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_hero_kit
+from wujiang.tactical.heroes.ai_score_policies import FeiwangAttackPolicy
 from wujiang.tactical.heroes.mechanics.iaido import (
     BigShensuSkill,
     FeiWangSpeedOnHeroKillTrait,
@@ -17,6 +18,7 @@ from wujiang.tactical.heroes.mechanics.fei_wang_gale import GaleSkill
 def install(r) -> None:
     register_hero_kit(FragmentMappedHeroKit(
         "excel_r028",
+        ai_policy=FeiwangAttackPolicy(),
         skills={
             "神速": BigShensuSkill,
             "狂风": GaleSkill,

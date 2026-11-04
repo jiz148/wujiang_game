@@ -388,6 +388,9 @@ class ManaDrainImmunityTrait(Trait):
 
 
 class BigShensuSkill(ShensuSkill):
+    def ai_self_buff_score(self, context: AISkillScoreContext) -> float:
+        return context.shared.feiwang_shensu_score(context)
+
     def __init__(self) -> None:
         super().__init__()
         self.code = "big_shensu"

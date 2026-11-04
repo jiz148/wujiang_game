@@ -8,13 +8,26 @@ from contextlib import contextmanager
 from typing import Any
 
 from wujiang.tactical.engine.core import ActionError, Battle, HeroUnit, Position, Skill
-from wujiang.tactical.heroes.ai_policy import AISkillCandidateContext, SharedCandidateConstruction
+from wujiang.tactical.heroes.ai_policy import AISkillCandidateContext, AISkillScoreContext, SharedCandidateConstruction
 from wujiang.tactical.heroes.common import (
     ensure_ally, ensure_enemy, match_payload_pattern, payload_position,
     positions_to_dict,
 )
 
 class MimicSkill(Skill):
+    ai_nonhostile_throttle_exempt = True
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        copied_context = context.shared.mimic_payload_context(context)
+        if copied_context is None:
+            return -1000.0
+        _, copied, copied_payload, copied_action = copied_context
+        actor = context.actor
+        with self.copying(actor, copied, reserve_point=True):
+            value = context.shared.copied_skill_score(context, copied_action, copied_payload)
+            mana = copied.mana_cost_for_payload(context.battle, actor, copied_payload)
+        return value - (18.0 if actor.mana_points > 1 else 30.0) - mana * 8.0
+
     ai_candidate_plan = RANKED_CANDIDATES
     excluded_codes = {"mimic_skill", "agency_borrowed_skill", "agency_contract"}
 

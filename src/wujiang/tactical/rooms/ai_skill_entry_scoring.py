@@ -85,7 +85,9 @@ class AISkillEntryScoring:
     def nova_paid_action_adjustment(self, battle: Battle, actor: Unit, code: str, payload: dict[str, Any]) -> float:
         """Account for the payment event before the skill's ordinary effect score."""
         if not battle.has_weather("电磁场") and not any(
-            unit.hero_code == "excel_r305" and unit.alive for unit in battle.all_units()
+            unit.alive and any(getattr(component, "ai_nova_payment_field", False)
+                               for component in unit.traits)
+            for unit in battle.all_units()
         ):
             return 0.0
         try:
@@ -101,7 +103,8 @@ class AISkillEntryScoring:
                 return -1000.0
             adjustment -= loss * 170.0
         for nova in battle.all_units():
-            if (nova.hero_code != "excel_r305" or not nova.alive or nova.banished
+            if (not any(getattr(component, "ai_nova_payment_field", False)
+                        for component in nova.traits) or not nova.alive or nova.banished
                     or nova.position is None or battle.distance_between_units(nova, actor) > 3):
                 continue
             adjustment += 16.0 if nova.player_id == actor.player_id else -24.0
@@ -116,26 +119,15 @@ class AISkillEntryScoring:
         if (not recipient.alive or recipient.total_shields() > 0 or recipient.dodge_charges > 0
                 or recipient.skill_non_damage_effects_blocked()):
             return -1000.0
-        if recipient.hero_code not in {"excel_r238", "excel_r239", "excel_r240", "excel_r242", "excel_r243", "excel_r244", "excel_r245", "excel_r246", "excel_r247"}:
-            return -1000.0
         if not battle.hell_rebirth_options_for(recipient):
             return -1000.0
-        rebirth_value = {"excel_r238": 92.0, "excel_r239": 112.0, "excel_r240": 93.0,
-                         "excel_r242": 70.0, "excel_r243": 115.0, "excel_r244": 102.0,
-                         "excel_r245": 112.0, "excel_r246": 105.0, "excel_r247": 85.0}[recipient.hero_code]
+        rebirth_value = next((value for component in recipient.traits
+                              if callable(score := getattr(component, "ai_shuffle_rebirth_value", None))
+                              if (value := score(battle, actor)) is not None), None)
+        if rebirth_value is None:
+            return -1000.0
         lost_position = 16.0 if recipient.turn_ready else 0.0
         current_value = recipient.current_hp * 120.0 + recipient.current_mana * 13.0 + lost_position
-        if recipient.hero_code == "excel_r247":
-            dogs = [unit for unit in battle.all_units() if unit.alive and not unit.banished and unit.position is not None
-                    and unit.hero_code == "hell_dog_summon" and unit.summoner_id == recipient.unit_id]
-            for dog in dogs:
-                ring = set(battle.neighbors(dog.position))
-                for unit in battle.effect_units_at_cells(list(ring)):
-                    if unit.unit_id == recipient.unit_id or unit.unit_id == dog.unit_id:
-                        continue
-                    impact = min(unit.current_hp, battle.damage_rule.calculate_damage(3, unit.stat("defense"))) * 100.0
-                    rebirth_value += impact if unit.player_id != actor.player_id else -impact
-            rebirth_value -= len(dogs) * 28.0
         return rebirth_value - current_value - 22.0
 
 

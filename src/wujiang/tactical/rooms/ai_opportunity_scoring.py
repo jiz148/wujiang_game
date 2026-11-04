@@ -143,7 +143,7 @@ class AIOpportunityScoring:
                     skill.uses_this_turn = 0
             value = self.services.r21_unit_attack_opportunity(battle, unit)
             for skill in unit.skills:
-                if skill.timing not in {"active", "instant"} or skill.code in {"eagle_eye", "vain_giant_shadow"}:
+                if skill.timing not in {"active", "instant"} or skill.ai_action_opportunity_excluded:
                     continue
                 if not skill.can_use(battle, unit, {})[0]:
                     continue
@@ -163,13 +163,13 @@ class AIOpportunityScoring:
             targets = battle.effect_units(skill.get_target_units_for_payload(battle, actor, payload))
             if not targets:
                 return -1000.0
-            if skill.code == "vain_giant_shadow" and actor in targets and not actor.cannot_attack:
+            if skill.ai_action_control_requires_attack_pause and actor in targets and not actor.cannot_attack:
                 preview = battle.basic_attack_preview_for_payload(actor)
                 if any(self.services.r21_attack_value(battle, actor, battle.get_unit(unit_id), {"target_unit_id": unit_id}) > 0
                        for unit_id in preview.get("target_unit_ids", [])):
                     return -1000.0
             before = {unit.unit_id: self.services.r21_unit_action_opportunities(battle, unit, profile) for unit in targets}
-            status_name = "鹰眼" if skill.code == "eagle_eye" else "虚荣巨影"
+            status_name = skill.ai_action_control_status or "虚荣巨影"
             refresh = {}
             for unit in targets:
                 existing = unit.get_status(status_name)

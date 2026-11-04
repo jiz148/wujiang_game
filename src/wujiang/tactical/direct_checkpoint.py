@@ -89,7 +89,12 @@ class DirectSnapshot(_GraphSnapshot):
                     == self.position_stamp)
 
     def restore(self):
-        self.kernel.restore_namespaces(self.namespaces)
+        # The native namespace setter caused an access violation in a late
+        # long-match rollback. Keep graph/slot restoration native, but let
+        # Python dispatch the namespace assignment through the owner's type.
+        for owner, namespace in self.namespaces:
+            if owner.__dict__ is not namespace:
+                owner.__dict__ = namespace
         self.kernel.restore_slots(self.slots)
         self.kernel.restore_graph(self.containers, deque)
         for rng, state in self.rngs:

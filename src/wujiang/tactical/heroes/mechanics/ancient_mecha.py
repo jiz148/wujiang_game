@@ -514,6 +514,17 @@ def resolve_ancient_cursed_rust(battle: Battle, actor: Unit, queued_action: Any)
 
 
 class AncientCursedRustSkill(Skill):
+    def ai_effective_enemy_impact(self, battle: Battle, actor: Unit, payload: dict[str, Any],
+                                  targets: list[Unit] | None = None, shared: Any = None,
+                                  action: dict[str, Any] | None = None) -> bool:
+        return any(target.player_id != actor.player_id and not target.magic_immunity
+                   and (target.total_shields() > 0 or target.dodge_charges > 0
+                        or not target.has_status("古代伤害适应·普攻"))
+                   for target in ancient_cursed_rust_targets(battle, self.cells(battle, actor)))
+
+    def ai_effect_units(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> list[Unit]:
+        return ancient_cursed_rust_targets(battle, self.chosen_cells(battle, actor, payload))
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         battle, actor = context.battle, context.actor
         score = -10.0
@@ -601,6 +612,14 @@ class AncientJawWeaknessStatus(StatModifierStatus):
 
 
 class AncientJawSkill(Skill):
+    def ai_effective_enemy_impact(self, battle: Battle, actor: Unit, payload: dict[str, Any],
+                                  targets: list[Unit] | None = None, shared: Any = None,
+                                  action: dict[str, Any] | None = None) -> bool | None:
+        if targets is None:
+            return None
+        return any(not target.magic_immunity and not target.skill_non_damage_effects_blocked()
+                   and target.dodge_charges <= 0 for target in targets)
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         battle, actor = context.battle, context.actor
         target = battle.units.get(str(context.payload.get("target_unit_id") or ""))

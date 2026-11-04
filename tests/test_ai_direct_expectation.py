@@ -3,8 +3,14 @@ from contextlib import ExitStack
 import os
 import pickle
 import random
+import sys
 import unittest
+from pathlib import Path
 from unittest import mock
+
+SRC = Path(__file__).resolve().parents[1] / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 from wujiang.tactical import prediction
 from wujiang.tactical.engine.core import Battle, DamageContext, Position, StatusEffect

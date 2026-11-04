@@ -257,6 +257,8 @@ def _resolve_storm_crossing(battle: Battle, actor: Unit, action: Any) -> None:
 
 
 class ElectronicStormSkill(Skill):
+    ai_nonhostile_throttle_exempt = True
+
     target_cells_are_geometry_only = True
     excludes_caster_from_effect = True
     excludes_allies_from_effect = True
@@ -421,6 +423,7 @@ class AfterimageField(BattleFieldEffect):
 
 
 class AfterimageSkill(Skill):
+    ai_enemy_impact_requirement = False
     target_cells_are_geometry_only = True
 
     def __init__(self) -> None:

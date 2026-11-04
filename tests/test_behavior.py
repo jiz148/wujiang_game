@@ -14056,7 +14056,8 @@ class CombatBehaviorTests(unittest.TestCase):
         bard = primary_hero(battle, 2)
         original_position = hunter.position
 
-        with mock.patch("wujiang.tactical.heroes.next_five.random.choice", side_effect=lambda values: values[0]):
+        with mock.patch("wujiang.tactical.heroes.mechanics.clone_split.random.choice",
+                        side_effect=lambda values: True if values == (False, True) else values[0]):
             battle.perform_action({"type": "skill", "unit_id": hunter.unit_id, "skill_code": "earth_walker", "cells": [{"x": 2, "y": 4}, {"x": 2, "y": 3}, {"x": 2, "y": 5}]})
 
         # Then the clone keeps the old cell and can still take turn actions this turn
@@ -26214,6 +26215,18 @@ class DevelopedHeroReviewR10NatsumeBehaviorTests(unittest.TestCase):
         first.is_summon, ally.is_summon = False, True
         self.assertLess(natsume_skill_score(battle, actor, skill, {}), 0)
 
+    def test_ai_dispel_prioritizes_multiple_enemy_summons(self):
+        from wujiang.tactical.heroes.mechanics.clone_split import StandardCloneSummon
+        from wujiang.tactical.rooms.ai import build_skill_candidates
+        battle, actor, _, enemy, _ = self.fixture()
+        for cell in (Position(5, 6), Position(6, 6), Position(6, 5)):
+            battle.summon_unit(StandardCloneSummon(2, enemy), cell, summoner=enemy)
+        action = next(item for item in battle.action_snapshot_for(actor)["actions"]
+                      if item.get("code") == "natsume_dispel")
+        candidates = build_skill_candidates(battle, actor, action,
+                                            difficulty_profile("standard"), instant_only=False)
+        self.assertTrue(any(candidate.score > 0 for candidate in candidates))
+
     def test_ai_clone_disguise_does_not_select_dispel_from_secret_identity(self):
         from wujiang.tactical.heroes.next_five import StandardCloneSummon
         from wujiang.tactical.rooms.ai import ai_enemy_view, natsume_skill_score
@@ -26719,10 +26732,12 @@ class SecondRepairR12BehaviorTests(unittest.TestCase):
         dragon, bard = primary_hero(battle, 1), primary_hero(battle, 2)
         dragon.position, bard.position = Position(1, 1), Position(3, 3)
         skill = dragon.get_skill("gravity_field")
-        payload = {"type": "skill", "unit_id": dragon.unit_id, "skill_code": skill.code, "x": 3, "y": 3}
+        payload = {"type": "skill", "unit_id": dragon.unit_id, "skill_code": skill.code, "x": 3, "y": 3,
+                   "chain_prompt_prefix": "伪造提示"}
         with mock.patch("wujiang.tactical.heroes.excel_roster.random.random", side_effect=[0.25, 0.75, 0.75]) as rng:
             queued = battle.build_queued_action(payload)
         self.assertEqual((rng.call_count, queued.payload["gravity_side"]), (3, 2))
+        self.assertEqual(queued.payload["chain_prompt_prefix"], "硬币 2、1、1，范围 2×2；")
         self.assertIn("冻结范围边长 2", battle.queued_action_effect_summary(queued))
         battle.prepay_skill_resources(skill, dragon, queued.payload)
         queued.payload["resources_prepaid"] = True
@@ -30320,15 +30335,15 @@ class DevelopedHeroReviewR21BehaviorTests(unittest.TestCase):
         battle, actor, _ = self.fixture()
         self.assertEqual([actor.get_skill(code).mana_cost for code in ("missile", "ion_shield", "quantum_shield")], [0, 0, 0])
 
-    def test_barrier_aura_covers_both_sides_and_mech_reduction(self):
+    def test_barrier_aura_covers_allies_only_and_mech_reduction(self):
         battle, actor, enemy = self.fixture()
         enemy.position = Position(3, 3)
         ally = self.extra(battle, 1, Position(2, 4))
-        for target in (enemy, ally):
+        for target, ordinary, mecha in ((enemy, 4, 4), (ally, 3, 2)):
             target.race = "人类"
-            self.assertEqual(self.damage(battle, actor, target, raw=4, field=True).actual_damage, 3)
+            self.assertEqual(self.damage(battle, actor, target, raw=4, field=True).actual_damage, ordinary)
             target.race = "机甲"
-            self.assertEqual(self.damage(battle, actor, target, raw=4, field=True).actual_damage, 2)
+            self.assertEqual(self.damage(battle, actor, target, raw=4, field=True).actual_damage, mecha)
 
     def test_barrier_self_aura_one_and_lower_defense_attack_extra_one(self):
         for defense, expected in ((3, 2), (4, 3), (5, 3)):
@@ -30373,7 +30388,7 @@ class DevelopedHeroReviewR21BehaviorTests(unittest.TestCase):
         battle, actor, enemy = self.fixture()
         actor.set_footprint_offsets([(0, 0), (1, 0)])
         enemy.position = Position(4, 3)
-        self.assertEqual(self.damage(battle, None, enemy, raw=4, field=True).actual_damage, 3)
+        self.assertEqual(self.damage(battle, None, enemy, raw=4, field=True).actual_damage, 4)
         actor.position, actor._resolution_actual_position = Position(2, 3), Position(10, 3)
         self.assertEqual(self.damage(battle, None, enemy, raw=4, field=True).actual_damage, 4)
 
@@ -30383,7 +30398,7 @@ class DevelopedHeroReviewR21BehaviorTests(unittest.TestCase):
         actor.banished = True
         self.assertEqual(self.damage(battle, None, enemy, raw=2, field=True).actual_damage, 2)
         actor.banished = False
-        self.assertEqual(self.damage(battle, None, enemy, raw=2, field=True).actual_damage, 1)
+        self.assertEqual(self.damage(battle, None, enemy, raw=2, field=True).actual_damage, 2)
         for trait in actor.traits:
             trait.on_owner_removed(battle)
         self.assertFalse(any(effect.name == "电子屏障光环" for effect in battle.field_effects))
@@ -32303,7 +32318,8 @@ class SeptemberRuleClarificationBehaviorTests(unittest.TestCase):
         actor, target = primary_hero(battle, 1), primary_hero(battle, 2)
         actor.position, target.position = Position(4, 4), Position(5, 4)
         target.current_mana = 2
-        with mock.patch("wujiang.tactical.heroes.excel_roster.random.choice", side_effect=lambda choices: choices[0]):
+        with mock.patch("wujiang.tactical.heroes.mechanics.water_ninja.random.choice",
+                        side_effect=lambda choices: True if choices == (False, True) else choices[0]):
             battle.perform_action({"type": "attack", "unit_id": actor.unit_id, "target_unit_id": target.unit_id})
             self.assertIsNotNone(battle.pending_chain)
             self.assertTrue(any(option.action_code == "light_wall" for options in
@@ -32346,7 +32362,8 @@ class SeptemberRuleClarificationBehaviorTests(unittest.TestCase):
         queued = battle.build_queued_action({"type": "attack", "unit_id": actor.unit_id,
                                              "target_unit_id": target.unit_id})
         actor.position = Position(8, 8)
-        with mock.patch("wujiang.tactical.heroes.excel_roster.random.choice", side_effect=lambda choices: choices[0]):
+        with mock.patch("wujiang.tactical.heroes.mechanics.water_ninja.random.choice",
+                        side_effect=lambda choices: True if choices == (False, True) else choices[0]):
             battle.resolve_queued_action(queued)
         clones = [unit for unit in battle.all_units() if unit.is_clone and unit.summoner_id == actor.unit_id]
         self.assertEqual((actor.position, clones[0].position), (Position(7, 7), Position(8, 8)))
@@ -32481,14 +32498,18 @@ class BPSpecialModeBehaviorTests(unittest.TestCase):
     def test_workbook_mode_catalog_and_double_down(self):
         from wujiang.tactical.rooms.special_modes import SPECIAL_MODES, SPECIAL_MODE_BY_CODE, choose_bp_special_modes
 
-        self.assertEqual(len(SPECIAL_MODES), 18)
+        self.assertEqual(len(SPECIAL_MODES), 19)
         self.assertEqual({code for code, _, _ in SPECIAL_MODES}, {
             "fast", "sympathy", "slow", "duel", "real_men", "general",
             "healer_attack", "no_recovery", "sudden_death", "soft_persimmon",
             "mages", "arena", "double_down", "chain", "eternal", "true_turn",
-            "face_tank", "none",
+            "face_tank", "attack_plus_one", "none",
         })
         self.assertIn("己方行动顺序下一位仍存活", SPECIAL_MODE_BY_CODE["soft_persimmon"]["description"])
+        self.assertEqual(SPECIAL_MODE_BY_CODE["attack_plus_one"]["description"], "所有单位攻+1")
+        self.assertEqual(SPECIAL_MODE_BY_CODE["true_turn"]["description"],
+                         "所有单位不能移动，或者使用位移技能，范变为周围无限*无限")
+        self.assertEqual(choose_bp_special_modes(("attack_plus_one",)), ("attack_plus_one",))
         with mock.patch("wujiang.tactical.rooms.special_modes.secrets.choice", return_value=("double_down", "Double Down", "")):
             modes = choose_bp_special_modes()
         self.assertEqual(modes[0], "double_down")
@@ -32849,6 +32870,16 @@ class BPSpecialModeBehaviorTests(unittest.TestCase):
         self.assertIsNone(arena.winner)
         true_turn = self.battle("true_turn")
         self.assertTrue(all(unit.targeting_range() >= true_turn.width for unit in true_turn.all_units()))
+        self.assertTrue(all(unit.cannot_move for unit in true_turn.all_units()))
+        turn_actor = true_turn.current_turn_unit()
+        self.assertIsNotNone(turn_actor)
+        with self.assertRaisesRegex(ActionError, "无法移动"):
+            true_turn.perform_action({"type": "move", "unit_id": turn_actor.unit_id,
+                                      "x": turn_actor.position.x, "y": turn_actor.position.y})
+        turn_effect = true_turn.field_effects[0]
+        ellie = next(unit for unit in true_turn.hero_units(1) if unit.hero_code == "ellie")
+        self.assertTrue(turn_effect.blocks_skill_use(true_turn, ellie, ellie.get_skill("mana_pull"))[0])
+        self.assertFalse(turn_effect.blocks_skill_use(true_turn, ellie, ellie.get_skill("curse"))[0])
         real_men = self.battle("real_men")
         actor = real_men.hero_units(1)[0]
         self.assertTrue(actor.magic_immunity)
@@ -32876,6 +32907,19 @@ class BPSpecialModeBehaviorTests(unittest.TestCase):
                              is_skill=False, action_name="并列守值", raw_damage=0.125)
         face.field_effects[0].on_before_damage(face, tied)
         self.assertFalse(tied.cancelled)
+
+    def test_attack_plus_one_applies_to_both_teams_and_stacks_with_other_attack_bonuses(self):
+        from types import SimpleNamespace
+        ordinary = self.battle("none")
+        boosted = self.battle("attack_plus_one")
+        self.assertEqual(len(ordinary.all_units()), len(boosted.all_units()))
+        for original, changed in zip(ordinary.all_units(), boosted.all_units()):
+            self.assertEqual(changed.stat("attack"), original.stat("attack") + 1)
+        effect = boosted.field_effects[0]
+        self.assertEqual(effect.modify_unit_stat(boosted, SimpleNamespace(unit_id="new_summon"),
+                                                 "attack", 2), 3)
+        effect._stat_bonus[boosted.all_units()[0].unit_id] = {"attack": 2}
+        self.assertEqual(boosted.all_units()[0].stat("attack"), ordinary.all_units()[0].stat("attack") + 3)
 
     def test_duel_finishes_on_first_rep_destruction_even_with_rebirth(self):
         from wujiang.tactical.engine.core import DamageContext
@@ -32998,6 +33042,19 @@ class BPSpecialModeBehaviorTests(unittest.TestCase):
         blocked.current_mana = 0
         blocked_mages.end_turn()
         self.assertEqual(blocked.current_mana, 0)
+
+        from wujiang.tactical.heroes.registry import RoomBattleEntry, create_room_battle
+        unlimited = create_room_battle([RoomBattleEntry("n", 1, 1)],
+                                      [RoomBattleEntry("bard", 2, 2)],
+                                      mode="bp", special_mode_codes=("mages",))
+        n = next(unit for unit in unlimited.hero_units(1) if unit.hero_code == "n")
+        self.assertEqual(n.current_mana, 2)
+        n.current_mana = 7
+        effect = next(field for field in unlimited.field_effects
+                      if getattr(field, "codes", frozenset()) == frozenset({"mages"}))
+        with mock.patch.object(unlimited, "current_turn_unit", return_value=n):
+            effect.on_after_any_turn_end(unlimited, 1)
+        self.assertEqual(n.current_mana, 2)
         slow = self.battle("slow")
         actor = slow.current_turn_unit()
         skill = actor.action_skills()[0]
@@ -34348,6 +34405,7 @@ class SektoruBehaviorTests(unittest.TestCase):
         self.assertTrue(any(trait.name == "自然回魔" for trait in owner.traits))
         skill = owner.get_skill("water_wave_cannon")
         self.assertEqual((skill.mana_cost, skill.max_uses_per_turn), (2, 2))
+        self.assertEqual(owner.get_skill("gladiator_soul").max_uses_per_battle, 1)
         enemy.position = Position(5, 4)
         self.assertTrue(any({Position(5, 4), Position(5, 5)}.issubset(set(pattern))
                             for pattern in skill.patterns(battle, owner)))
@@ -34375,11 +34433,13 @@ class SektoruBehaviorTests(unittest.TestCase):
         ally.position, enemy.position = Position(2, 8), Position(7, 4)
         soul = owner.get_skill("gladiator_soul")
         soul.cooldown_remaining = 2
+        soul.uses_this_battle = 1
         old_attack, old_mana = owner.stat("attack"), owner.max_mana()
         battle.move_unit(owner, Position(2, 5), forced=True, allow_anywhere=True,
                          tags={f"source:{ally.unit_id}"})
         self.assertEqual((owner.stat("attack"), owner.max_mana()), (old_attack + 1, old_mana + 1))
         self.assertEqual(soul.cooldown_remaining, 0)
+        self.assertEqual(soul.uses_this_battle, 0)
         self.assertLessEqual(min(cell.distance_to(other) for cell in battle.unit_cells(owner)
                                  for other in battle.unit_cells(ally)), 1)
         self.assertLessEqual(min(cell.distance_to(other) for cell in battle.unit_cells(owner)
@@ -34716,6 +34776,18 @@ class NewBatch196197BigStoneBehaviorTests(unittest.TestCase):
         battle.cleanup_dead_units()
         self.assertNotIn(medium.unit_id, battle.units)
         self.assertNotIn(small.unit_id, battle.units)
+
+    def test_small_stone_ai_advances_after_its_entry_turn(self):
+        from wujiang.tactical.heroes.mechanics.stone_people import SmallStoneSummon
+        battle, owner, enemy = self.fixture()
+        small = SmallStoneSummon(owner.player_id)
+        battle.summon_unit(small, Position(8, 8), summoner=owner)
+        self.assertFalse(small.turn_ready)
+        small.turn_ready = True
+        small.position, enemy.position = Position(7, 7), Position(9, 7)
+        self.assertGreater(small.ai_policy.normal_move_candidate_score(
+            battle, small, Position(8, 7), difficulty_profile("standard"), -5.0, None), 0)
+        self.assertEqual(battle.unit_turn_slot_id(small), owner.unit_id)
 
     def test_ai_summon_position_has_value_without_board_mutation(self):
         from wujiang.tactical.rooms.ai import score_skill_payload
@@ -35190,7 +35262,7 @@ class AutoChessBehaviorTests(unittest.TestCase):
     """Rules-level scenarios; dynamic execution remains with the user."""
 
     def test_convex_native_prices_owned_draw_chance_and_ten_gold_equipment(self):
-        from wujiang.tactical.rooms.autochess import AutoChessState, ChessPiece, hero_catalog, hero_cost, owned_shop_chance
+        from wujiang.tactical.rooms.autochess import AutoChessState, ChessPiece, hero_catalog, hero_cost
         self.assertEqual([hero_cost(level) for level in range(1, 11)],
                          [1, 2, 3, 5, 7, 10, 14, 19, 24, 30])
         chess = AutoChessState(4, seed=13)
@@ -35200,8 +35272,10 @@ class AutoChessBehaviorTests(unittest.TestCase):
         low_code = next(code for code, hero in hero_catalog().items() if hero["level"] == 1)
         player.pieces.append(ChessPiece("owned", low_code))
         player.level = 8
-        self.assertEqual((owned_shop_chance(1), owned_shop_chance(8)), (0.0, 0.35))
-        with mock.patch.object(chess.rng, "random", return_value=0):
+        self.assertEqual(chess.config.owned_shop_slot_chances, (0.20, 0.15, 0.10, 0.05, 0.01))
+        with mock.patch("wujiang.tactical.rooms.autochess.random.Random") as shop_rng_type:
+            shop_rng_type.return_value.random.return_value = 0
+            shop_rng_type.return_value.choice.side_effect = lambda options: options[0]
             self.assertEqual(chess._draw_shop(player), [low_code] * chess.config.shop_slots)
         high_code = next(code for code, hero in hero_catalog().items() if hero["level"] == 6)
         player.shop[0] = high_code
@@ -35209,6 +35283,50 @@ class AutoChessBehaviorTests(unittest.TestCase):
         chess.buy(1, 0)
         self.assertEqual(player.gold, 90)
         self.assertEqual(player.pieces[-1].code, high_code)
+
+    def test_shop_owned_draw_uses_each_slot_probability_independent_of_player_level(self):
+        from wujiang.tactical.rooms.autochess import AutoChessState, ChessPiece, hero_catalog
+        catalog = hero_catalog()
+        owned_code = next(code for code, hero in catalog.items() if hero["level"] == 1)
+        high_codes = {code for code, hero in catalog.items() if hero["level"] in (9, 10)}
+        chess = AutoChessState(4, seed=31)
+        player = chess.players[1]
+        player.pieces.append(ChessPiece("owned", owned_code))
+        for level in (1, 8):
+            player.level = level
+            with mock.patch("wujiang.tactical.rooms.autochess.random.Random") as shop_rng_type:
+                shop_rng_type.return_value.random.side_effect = [0.19, 0.16, 0.09, 0.06, 0.009]
+                shop_rng_type.return_value.choices.return_value = [4]
+                shop_rng_type.return_value.choice.side_effect = lambda options: options[0]
+                shop = chess._draw_shop(player)
+            self.assertEqual((shop[0], shop[2], shop[4]), (owned_code, owned_code, owned_code))
+            self.assertIn(shop[1], high_codes)
+            self.assertIn(shop[3], high_codes)
+
+    def test_shop_each_refresh_uses_independent_seed_without_advancing_match_rng(self):
+        from wujiang.tactical.rooms.autochess import AutoChessState
+        chess = AutoChessState(4, seed=43)
+        saved_match_rng = chess.rng.getstate()
+        with mock.patch("wujiang.tactical.rooms.autochess.secrets.randbits", side_effect=[111, 222, 111]):
+            first = chess._draw_shop(chess.players[1])
+            second = chess._draw_shop(chess.players[2])
+            third = chess._draw_shop(chess.players[1])
+        self.assertEqual(first, third)
+        self.assertEqual((chess.players[1].last_shop_seed, chess.players[2].last_shop_seed), (111, 222))
+        self.assertEqual(chess.rng.getstate(), saved_match_rng)
+
+    def test_shop_normal_branch_excludes_owned_heroes(self):
+        from wujiang.tactical.rooms.autochess import AutoChessState, ChessPiece
+        chess = AutoChessState(4, seed=43)
+        player = chess.players[1]
+        player.pieces.append(ChessPiece("owned", "a"))
+        with mock.patch("wujiang.tactical.rooms.autochess.hero_catalog",
+                        return_value={"a": {"level": 1}, "b": {"level": 1}}), \
+                mock.patch("wujiang.tactical.rooms.autochess.random.Random") as shop_rng_type:
+            shop_rng_type.return_value.random.return_value = 1.0
+            shop_rng_type.return_value.choices.return_value = [0]
+            shop_rng_type.return_value.choice.side_effect = lambda options: options[0]
+            self.assertEqual(chess._draw_shop(player), ["b"] * 5)
 
     def test_four_player_lobby_ai_fill_and_account_reconnect(self):
         from wujiang.tactical.rooms.multiplayer import GameRoom
@@ -35279,7 +35397,7 @@ class AutoChessBehaviorTests(unittest.TestCase):
         chess.matches = [ChessMatch(1, 2, result={"winner": 1, "damage": 2, "hero_kills": 1}),
                          ChessMatch(3, 4, result={"winner": 1, "damage": 1, "hero_kills": 0})]
         chess._finish_round()
-        self.assertEqual(chess.players[1].gold, 50 + 1 + 2 + 1 + 5 + 3)
+        self.assertEqual(chess.players[1].gold, 50 + 1 + 7 + 3)
         self.assertEqual(chess.players[2].health, 28)
         self.assertEqual(chess.players[2].loss_streak, 1)
         chess.matches = [ChessMatch(1, 2, result={"winner": 1, "damage": 1, "hero_kills": 0}),
@@ -35290,7 +35408,7 @@ class AutoChessBehaviorTests(unittest.TestCase):
         self.assertEqual(chess.players[1].health, 28)
         self.assertEqual(chess.history[-1]["matches"][2]["actual_health_loss"], 2)
         self.assertEqual(chess.players[3].gold - old_gold,
-                         1 + 1 + 2 + 5 + min(3, (old_gold + 4) // 10))
+                         1 + 7 + min(3, (old_gold + 1) // 10))
 
     def test_interest_uses_ten_gold_steps_from_previous_balance_and_caps_at_three(self):
         from wujiang.tactical.rooms.autochess import AutoChessState
@@ -35303,9 +35421,16 @@ class AutoChessBehaviorTests(unittest.TestCase):
             chess.players[seat].gold = balance
         chess._begin_round()
         self.assertEqual([chess.players[seat].gold for seat in range(1, 7)],
-                         [14, 16, 36, 38, 48, 58])
+                         [16, 18, 38, 40, 50, 60])
 
-    def test_gold_uses_actual_opponent_health_loss_and_caps_both_streaks(self):
+    def test_streak_rewards_start_at_third_result_and_have_separate_caps(self):
+        from wujiang.tactical.rooms.autochess import CONFIG, streak_reward
+        self.assertEqual([streak_reward(n, CONFIG.win_streak_reward_cap) for n in range(1, 8)],
+                         [0, 0, 1, 2, 3, 4, 4])
+        self.assertEqual([streak_reward(n, CONFIG.loss_streak_reward_cap) for n in range(1, 7)],
+                         [0, 0, 1, 2, 2, 2])
+
+    def test_gold_uses_victory_and_three_win_threshold_without_damage_bonus(self):
         from wujiang.tactical.rooms.autochess import AutoChessState, ChessMatch
 
         chess = AutoChessState(4, seed=21)
@@ -35318,13 +35443,12 @@ class AutoChessBehaviorTests(unittest.TestCase):
         chess._finish_round()
         settled = chess.history[-1]["players"]
         self.assertEqual((settled[1]["victory_gold"], settled[1]["streak_gold"],
-                          settled[1]["health_damage_gold"], settled[1]["gold_gain"]),
-                         (1, 3, 2, 6))
+                          settled[1]["gold_gain"]), (1, 3, 4))
         self.assertEqual((settled[2]["streak_gold"], settled[2]["health_loss"],
-                          settled[2]["health"]), (3, 2, 0))
+                          settled[2]["health"]), (2, 2, 0))
         self.assertTrue(chess.players[2].eliminated)
         self.assertEqual(chess.history[-1]["matches"][0]["actual_health_loss"], 2)
-        self.assertEqual((settled[3]["health_damage_gold"], settled[3]["gold_gain"]), (3, 5))
+        self.assertEqual((settled[3]["victory_gold"], settled[3]["gold_gain"]), (1, 1))
         self.assertEqual(settled[4]["health_loss"], 7)
 
     def test_winning_against_mirror_keeps_normal_gold_without_deducting_real_health(self):
@@ -35339,7 +35463,7 @@ class AutoChessBehaviorTests(unittest.TestCase):
         chess._finish_round()
         settled = chess.history[-1]["players"]
         self.assertEqual((settled[3]["victory_gold"], settled[3]["streak_gold"],
-                          settled[3]["health_damage_gold"]), (1, 1, 3))
+                          settled[3]["gold_gain"]), (1, 0, 1))
         self.assertEqual(chess.history[-1]["matches"][1]["actual_health_loss"], 0)
         self.assertEqual(chess.players[1].health, before_mirror_health)
 
@@ -39845,18 +39969,28 @@ class NewBatch325GentlemanBehaviorTests(unittest.TestCase):
         self.assertFalse(step.can_use(battle, gentleman)[0])
         self.assertEqual(step.mana_cost_for_payload(battle, gentleman, {}), 0)
 
-    def test_actual_crossing_places_one_fixed_clone_without_random_swap(self):
+    def test_actual_crossing_randomly_swaps_with_new_clone(self):
         from wujiang.tactical.heroes.gentleman import GentlemanCloneGuardTrait
 
         battle, gentleman, enemy = self.fixture()
         before_id = gentleman.unit_id
-        gentleman.get_skill("surprise_step").execute(battle, gentleman, {"x": 3, "y": 0})
+        with mock.patch("wujiang.tactical.heroes.mechanics.clone_split.random.choice", return_value=True):
+            gentleman.get_skill("surprise_step").execute(battle, gentleman, {"x": 3, "y": 0})
         clones = [unit for unit in battle.player_units(1) if unit.is_clone and unit.summoner_id == before_id]
         self.assertEqual(len(clones), 1)
-        self.assertEqual((gentleman.position, clones[0].position), (Position(3, 0), Position(2, 2)))
+        self.assertEqual((gentleman.position, clones[0].position), (Position(2, 2), Position(3, 0)))
         self.assertEqual(enemy.position, Position(3, 2))
         self.assertTrue(any(isinstance(trait, GentlemanCloneGuardTrait) for trait in clones[0].traits))
         self.assertFalse(clones[0].turn_ready)
+
+    def test_actual_crossing_can_leave_owner_in_place(self):
+        battle, gentleman, _ = self.fixture()
+        with mock.patch("wujiang.tactical.heroes.mechanics.clone_split.random.choice", return_value=False):
+            gentleman.get_skill("surprise_step").execute(battle, gentleman, {"x": 3, "y": 0})
+        clones = [unit for unit in battle.player_units(1)
+                  if unit.is_clone and unit.summoner_id == gentleman.unit_id]
+        self.assertEqual(len(clones), 1)
+        self.assertEqual((gentleman.position, clones[0].position), (Position(3, 0), Position(2, 2)))
 
     def test_normal_move_can_cross_two_enemies_and_multicell_body_once(self):
         battle = create_battle("excel_r325", ["elite_soldier", "bard"])
@@ -40065,14 +40199,14 @@ class NewBatch324SuperCrowBehaviorTests(unittest.TestCase):
         self.assertEqual(skill.preview(battle, actor)["free_uses_remaining"], 0)
         self.assertEqual(len(battle.pending_followup_actions), 0)
 
-    def test_each_super_crow_aura_stacks_and_blocks_actual_free_cost(self):
+    def test_super_crow_summon_auras_do_not_stack_and_block_actual_free_cost(self):
         from wujiang.tactical.engine.core import Stats
         from wujiang.tactical.heroes.super_crow import SuperCrowAura
 
         battle, actor, enemy = self.fixture(2)
         enemy.base_stats = Stats(attack=3, defense=2, speed=5, attack_range=14, mana=3)
         crows = [unit for unit in battle.player_units(1) if unit.summoner_id == actor.unit_id]
-        self.assertEqual(enemy.stat("speed"), max(1.0, enemy.base_stats.speed - 2))
+        self.assertEqual(enemy.stat("speed"), max(1.0, enemy.base_stats.speed - 1))
         free = enemy.get_skill(next(skill.code for skill in enemy.skills if skill.timing == "active" and skill.mana_cost == 0))
         aura = next(effect for effect in battle.field_effects if isinstance(effect, SuperCrowAura) and effect.covers(battle, enemy))
         self.assertTrue(aura.blocks_skill_payload(battle, enemy, free, {})[0])
@@ -40259,6 +40393,20 @@ class NewBatch328329FlyingShipBehaviorTests(unittest.TestCase):
         self.assertFalse(adviser.get_skill("flying_dragon_ship").can_use(battle, adviser)[0])
         codes = [item["code"] for item in list_heroes()]
         self.assertEqual((codes.count("excel_r328"), codes.count("excel_r329")), (1, 1))
+
+    def test_both_skeleton_crew_ai_generate_ship_candidates_without_enemy_hit(self):
+        from wujiang.tactical.rooms.ai import build_skill_candidates
+        for code in ("excel_r328", "excel_r329"):
+            with self.subTest(code=code):
+                battle = create_battle(code, "elite_soldier")
+                actor = primary_hero(battle, 1)
+                skill = actor.get_skill("flying_dragon_ship")
+                self.assertFalse(skill.ai_requires_enemy_impact(battle, actor, {}))
+                action = next(item for item in battle.action_snapshot_for(actor)["actions"]
+                              if item.get("code") == "flying_dragon_ship")
+                candidates = build_skill_candidates(battle, actor, action,
+                                                    difficulty_profile("standard"), instant_only=False)
+                self.assertTrue(any(candidate.score > 0 for candidate in candidates))
 
     def test_multiple_boarding_recipient_and_all_riders_follow_ship(self):
         battle, captain, adviser, ship, _ = self.ship_fixture()
@@ -41546,6 +41694,48 @@ class HeroAIElectronicFusionSkillObjectBehaviorTests(unittest.TestCase):
         self.assertGreater(skill.ai_priority_score(context), 28.0)
 
 
+class HeroAIDynamicSkillPriorityBehaviorTests(unittest.TestCase):
+    def test_dynamic_wrappers_and_cloak_skills_dispatch_to_their_own_score(self):
+        from wujiang.tactical.heroes.flying_dragon_ship import ShipBorrowedSkill
+        from wujiang.tactical.heroes.mechanics.lao_mage import MageCloakDetachSkill, MageCloakEquipSkill
+        from wujiang.tactical.rooms.ai import _score_skill_payload, difficulty_profile
+
+        battle = create_battle("excel_r373", "elite_soldier")
+        actor = primary_hero(battle, 1)
+        source = actor.get_skill("machine_gun")
+        skills = [actor.get_skill("infinity_instant__machine_gun"),
+                  ShipBorrowedSkill("rider", source), MageCloakEquipSkill(), MageCloakDetachSkill()]
+        for skill in skills:
+            with self.subTest(code=skill.code):
+                with mock.patch.object(type(skill), "ai_priority_score", return_value=321.0):
+                    self.assertEqual(_score_skill_payload(
+                        battle, actor, {"code": skill.code, "_skill_object": skill},
+                        {"type": "skill", "unit_id": actor.unit_id, "skill_code": skill.code},
+                        difficulty_profile("standard"), instant_only=False), 321.0)
+
+    def test_wrappers_delegate_nested_score_with_the_original_instant_mode(self):
+        from wujiang.tactical.heroes.flying_dragon_ship import ShipBorrowedSkill
+        from wujiang.tactical.rooms.ai import _skill_score_context, difficulty_profile
+
+        battle = create_battle("excel_r373", "elite_soldier")
+        actor = primary_hero(battle, 1)
+        source = actor.get_skill("machine_gun")
+        instant = actor.get_skill("infinity_instant__machine_gun")
+        borrowed = ShipBorrowedSkill("rider", source)
+        profile = difficulty_profile("standard")
+        for skill, expected_mode in ((instant, False), (borrowed, True)):
+            with self.subTest(code=skill.code):
+                context = _skill_score_context(
+                    battle, actor, {"code": skill.code, "_skill_object": skill},
+                    {"type": "skill", "unit_id": actor.unit_id, "skill_code": skill.code},
+                    profile, instant_only=True)
+                with mock.patch.object(context.shared, "nested_skill_score", return_value=50.0) as scorer:
+                    score = skill.ai_priority_score(context)
+                self.assertEqual(score, 38.0 if skill is instant else 50.0)
+                self.assertEqual(scorer.call_args.kwargs["instant_only"], expected_mode)
+                self.assertEqual(actor.current_mana, 1)
+
+
 class HeroAIR17R19SkillObjectBehaviorTests(unittest.TestCase):
     SKILLS = (
         ("excel_r127", "fantasy_move", "r17_effect_score"),
@@ -41716,6 +41906,7 @@ class HeroAICandidatePlanRoutingBehaviorTests(unittest.TestCase):
                         battle, actor, {"code": code, "target_mode": skill.target_mode,
                                         "preview": {}}), result)
                 owned.assert_called_once()
+
 
     def test_pattern_payload_variants_dispatch_to_skill(self):
         from wujiang.tactical.rooms.ai import skill_payloads_for_action
@@ -41932,3 +42123,67 @@ class HeroAIImpactRuleRoutingBehaviorTests(unittest.TestCase):
                     self.assertTrue(skill_payload_has_effective_enemy_impact(
                         battle, actor, action, {}))
                 owned.assert_called_once()
+
+
+class PaidReactionLandingBehaviorTests(unittest.TestCase):
+    def test_attack_cancelled_if_pre_attack_move_applies_attack_lock(self):
+        class LockAfterMove(StatusEffect):
+            def before_basic_attack_resolution(self, battle, actor, payload):
+                actor.cannot_attack = True
+                return True
+
+        battle = create_battle("bard", "n")
+        actor, target = primary_hero(battle, 1), primary_hero(battle, 2)
+        actor.position, target.position = Position(2, 3), Position(3, 3)
+        actor.add_status(LockAfterMove("前移禁攻"))
+        queued = battle.build_queued_action({
+            "type": "attack", "unit_id": actor.unit_id, "target_unit_id": target.unit_id,
+        })
+        battle.resolve_queued_action(queued)
+        self.assertEqual(actor.attacks_used, 1)
+        self.assertTrue(any("前移后行动受限" in line for line in battle.logs))
+
+    def test_paid_chain_sequences_survive_changed_targets_and_area_origin(self):
+        from wujiang.tools.match_audit import run_match_audit
+
+        cases = (
+            (["excel_r240", "excel_r373"], ["excel_r325", "ellie"], 20261630, 7),
+            (["excel_r243", "masamune"], ["excel_r023", "jade"], 20261650, 5),
+        )
+        for allies, enemies, seed, max_steps in cases:
+            with self.subTest(seed=seed), tempfile.TemporaryDirectory() as temp_dir:
+                result = run_match_audit(allies, enemies, seed=seed, max_steps=max_steps,
+                                         output_dir=Path(temp_dir))
+                events = [json.loads(line) for line in result.trace_path.read_text(encoding="utf-8").splitlines()]
+                self.assertTrue(events[-1]["success"])
+                self.assertFalse(any(not event["success"] for event in events))
+
+    def test_faster_evasion_occupies_ghost_step_landing_without_aborting_chain(self):
+        random_state = random.getstate()
+        try:
+            random.seed(20261243)
+            battle = create_registry_battle(
+                ["excel_r071", "excel_r142"], ["excel_r021", "excel_r219"], mode="classic"
+            )
+            snow = next(unit for unit in battle.all_units() if unit.hero_code == "excel_r071")
+            ghost = next(unit for unit in battle.all_units() if unit.hero_code == "excel_r021")
+            bird = next(unit for unit in battle.all_units() if unit.hero_code == "excel_r219")
+            battle.perform_action({
+                "type": "skill", "unit_id": snow.unit_id, "skill_code": "snow_avalanche",
+                "cells": [{"x": x, "y": y} for x in range(3, 9) for y in (2, 3)],
+            })
+            battle.perform_action({
+                "type": "chain_react", "unit_id": ghost.unit_id,
+                "action_code": "ghost_step", "x": 7, "y": 4,
+            })
+            battle.perform_action({
+                "type": "chain_react", "unit_id": bird.unit_id,
+                "action_code": "evasion", "x": 7, "y": 4,
+            })
+            self.assertIsNone(battle.pending_chain)
+            self.assertEqual(bird.position, Position(7, 4))
+            self.assertEqual(ghost.position, Position(8, 5))
+            self.assertEqual(ghost.get_skill("ghost_step").uses_this_turn, 1)
+            self.assertTrue(any("鬼步" in line and "落空" in line for line in battle.logs))
+        finally:
+            random.setstate(random_state)

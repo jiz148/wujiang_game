@@ -14,6 +14,9 @@ from wujiang.tactical.heroes.common import positions_to_dict
 
 
 class DeadlyBowSkill(Skill):
+    def ai_damage_probe_hit_count(self, battle: Battle, target: HeroUnit, cells: list[Position]) -> int:
+        return 1
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.deadly_bow_score(context)
 

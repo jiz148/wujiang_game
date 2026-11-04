@@ -183,107 +183,7 @@ class AIReactionScoring:
         targets: list[Unit],
         profile: DifficultyProfile,
     ) -> float:
-        enemies = [unit for unit in targets if unit.player_id != actor.player_id]
-        allies = [unit for unit in targets if unit.player_id == actor.player_id]
-        if not enemies:
-            return -20.0
-        score = 0.0
-        cells = self.services.skill_effect_cells(battle, actor, skill, payload)
-        for unit in enemies:
-            if unit.magic_immunity:
-                continue
-            if code == "cat_taunt_roar":
-                if unit.direct_effects_blocked() or unit.skill_non_damage_effects_blocked():
-                    continue
-                if unit.total_shields() > 0:
-                    score += 16.0
-                if unit.dodge_charges > 0:
-                    score += 10.0
-                    continue
-                if unit.is_clone:
-                    score += self.services.hostile_unit_value(unit) * 0.45 + 70.0
-                    continue
-                score += self.services.hostile_unit_value(unit) * 0.25
-            else:
-                attack_power = self.services.skill_attack_power(battle, actor, skill, payload, unit, cells)
-                damage = estimate_skill_damage(
-                    battle,
-                    actor,
-                    skill,
-                    payload,
-                    unit,
-                    attack_power,
-                    cells=cells,
-                    ignore_shield=True,
-                    half_ignore_shield=False,
-                )
-                score += damage * 100.0 + self.services.hostile_unit_value(unit) * 0.45
-                if damage >= unit.current_hp - 1e-9:
-                    score += 90.0
-                    continue
-            already_taunted = any(
-                str(getattr(status, "required_attack_target_id", "") or "") == actor.unit_id
-                and not bool(getattr(status, "requirement_satisfied", False))
-                for status in unit.statuses
-            )
-            if already_taunted:
-                score -= 18.0
-                continue
-            active_skills = sum(1 for skill in unit.skills if getattr(skill, "timing", None) in {"active", "instant"})
-            incoming = self.services.estimate_damage(battle, actor, unit.stat("attack"))
-            control_value = 42.0 + unit.attack_actions_per_turn() * 16.0 + active_skills * 9.0
-            if code == "cat_taunt_roar":
-                control_value += min(1.0, unit.current_mana) * 18.0
-                control_value -= incoming * 55.0
-            else:
-                counter_damage = self.services.estimate_damage(battle, unit, actor.stat("attack"))
-                control_value += counter_damage * 70.0
-                control_value -= incoming * 45.0
-            score += control_value
-        for unit in allies:
-            if unit.magic_immunity:
-                continue
-            if code == "cat_taunt_roar":
-                if unit.direct_effects_blocked() or unit.skill_non_damage_effects_blocked():
-                    continue
-                if unit.total_shields() > 0:
-                    score -= 16.0
-                if unit.dodge_charges > 0:
-                    score -= 10.0
-                    continue
-                if unit.is_clone:
-                    score -= self.services.friendly_fire_penalty(unit)
-                    continue
-                already_taunted = any(
-                    str(getattr(status, "required_attack_target_id", "") or "") == actor.unit_id
-                    and not bool(getattr(status, "requirement_satisfied", False))
-                    for status in unit.statuses
-                )
-                if not already_taunted:
-                    active_skills = sum(1 for ally_skill in unit.skills
-                                        if getattr(ally_skill, "timing", None) in {"active", "instant"})
-                    incoming = self.services.estimate_damage(battle, actor, unit.stat("attack"))
-                    score -= 42.0 + unit.attack_actions_per_turn() * 16.0 + active_skills * 9.0
-                    score -= incoming * 55.0
-            else:
-                attack_power = self.services.skill_attack_power(battle, actor, skill, payload, unit, cells)
-                damage = estimate_skill_damage(
-                    battle,
-                    actor,
-                    skill,
-                    payload,
-                    unit,
-                    attack_power,
-                    cells=cells,
-                    ignore_shield=True,
-                    half_ignore_shield=False,
-                )
-                score -= self.services.friendly_fire_penalty(unit) + damage * 120.0
-                if damage < unit.current_hp - 1e-9:
-                    score -= unit.attack_actions_per_turn() * 22.0
-        if code == "ring_taunt":
-            score += len(enemies) * 10.0
-        return score + profile.aggressive_bonus
+        return skill.ai_taunt_control_score(battle, actor, payload, targets, self.services, profile)
 
 
     def cycle_summon_score(self,
@@ -323,12 +223,8 @@ class AIReactionScoring:
         score -= exposed_threat * 18.0
         if nearest <= 1:
             score -= 32.0
-        if code == "summon_bicycle":
-            score += adjacent_open * 5.0
-            if adjacent_open == 0:
-                score -= 80.0
-        else:
-            score += adjacent_open * 1.5
+        summon_skill = actor.get_skill(code)
+        score += summon_skill.ai_open_space_score(adjacent_open)
         score += profile.aggressive_bonus * 0.5
         return score
 
@@ -348,10 +244,11 @@ class AIReactionScoring:
         safety = min(5.0, float(nearest)) * 6.0
         danger_penalty = 36.0 if nearest <= 1 else (12.0 if nearest == 2 else 0.0)
         future_area_value = self.services.best_future_artillery_area_value(battle, actor, destination)
+        from wujiang.tactical.heroes.mechanics.sphinx_solar import SphinxCannonSummon
         existing_cannons = [
             unit
             for unit in battle.player_units(actor.player_id)
-            if str(getattr(unit, "hero_code", "")) == "sphinx_cannon" and unit.alive and unit.position is not None
+            if isinstance(unit, SphinxCannonSummon) and unit.alive and unit.position is not None
         ]
         spacing = min((self.services.distance_to_position(battle, cannon, destination) for cannon in existing_cannons), default=3)
         diversification = min(3.0, float(spacing)) * 4.0 if existing_cannons else 0.0
