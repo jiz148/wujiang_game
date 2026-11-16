@@ -150,6 +150,7 @@ class InfinityInstantSkill(Skill):
             direction_mode=source.direction_mode,
         )
         self.source = source
+        self.is_displacement_skill = source.is_displacement_skill
         for field in (
             "requires_direct_unit_target_line", "target_unit_is_anchor",
             "target_cells_are_geometry_only", "selection_cells_are_effect_cells",

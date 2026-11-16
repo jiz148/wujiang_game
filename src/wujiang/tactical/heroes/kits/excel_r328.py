@@ -12,7 +12,4 @@ def install(r) -> None:
             "飞龙船": r.FlyingDragonShipSkill,
             "启航号": r.DepartureSkill,
         },
-        traits={
-            "此单位的费魔技能可以被此单位乘骑的“飞龙船。亚特兰大”每回合不费魔使用，使用后减少此单位的每回合技能使用次数": r.ShipBorrowPermissionTrait,
-        },
     ))

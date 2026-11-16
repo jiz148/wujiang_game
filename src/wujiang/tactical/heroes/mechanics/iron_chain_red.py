@@ -47,6 +47,7 @@ class RedNextDamageStatus(StatusEffect):
 
 
 class IronChainPathSkill(H1LineDamageSkill):
+    is_displacement_skill = True
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.iron_chain_path_score(context)
 

@@ -91,21 +91,23 @@ class AISkillEntryScoring:
         ):
             return 0.0
         try:
-            cost = actor.get_skill(code).mana_cost_for_payload(battle, actor, payload)
+            skill = actor.get_skill(code)
+            cost = skill.mana_cost_for_payload(battle, actor, payload)
+            payer = skill.mana_payer(battle, actor)
         except (ActionError, ValueError, KeyError, TypeError):
             return 0.0
-        if cost <= 0 or actor.current_mana + 1e-9 < cost:
+        if cost <= 0 or payer.current_mana + 1e-9 < cost:
             return 0.0
         adjustment = 0.0
-        if battle.unit_in_weather("电磁场", actor):
-            loss = min(actor.current_hp, actor.max_health / 8.0)
-            if actor.current_hp <= actor.max_health / 8.0 + 1e-9:
+        if battle.unit_in_weather("电磁场", payer):
+            loss = min(payer.current_hp, payer.max_health / 8.0)
+            if payer.current_hp <= payer.max_health / 8.0 + 1e-9:
                 return -1000.0
             adjustment -= loss * 170.0
         for nova in battle.all_units():
             if (not any(getattr(component, "ai_nova_payment_field", False)
                         for component in nova.traits) or not nova.alive or nova.banished
-                    or nova.position is None or battle.distance_between_units(nova, actor) > 3):
+                    or nova.position is None or battle.distance_between_units(nova, payer) > 3):
                 continue
             adjustment += 16.0 if nova.player_id == actor.player_id else -24.0
         return adjustment

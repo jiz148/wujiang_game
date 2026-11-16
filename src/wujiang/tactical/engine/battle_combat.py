@@ -175,6 +175,9 @@ class BattleCombatMixin:
                 return ctx
             for component in self.components_for(ctx.target):
                 component.on_final_damage(self, ctx)
+            if ctx.source is not None and ctx.source is not ctx.target:
+                for component in self.components_for(ctx.source):
+                    component.on_final_damage(self, ctx)
             if ctx.cancelled:
                 if ctx.reason:
                     self.log_public_event(ctx.reason, source=ctx.source, target=ctx.target)
@@ -257,6 +260,12 @@ class BattleCombatMixin:
                 if retained:
                     remaining_hp = min(old_hp, max(0.0, max(retained)))
                     ctx.raw_damage = max(0.0, old_hp - remaining_hp)
+            if ctx.raw_damage > 0:
+                for effect in list(self.field_effects):
+                    effect.on_final_hp_loss(self, ctx)
+                if ctx.source is not None:
+                    for component in self.components_for(ctx.source):
+                        component.on_final_hp_loss(self, ctx)
             ctx.target.take_damage_fraction(ctx.raw_damage)
             actual_damage = round(max(0.0, old_hp - ctx.target.current_hp), 4)
             ctx.actual_damage = actual_damage

@@ -424,7 +424,7 @@ class SacrificeRitualSkill(ManaPointCostSkill):
         raise ActionError("需要选择一个被破坏的单位。")
 
     def legal_destinations(self, battle: Battle, actor: HeroUnit, unit: HeroUnit) -> list[Position]:
-        if actor.position is None:
+        if actor.position is None or not battle.unit_entry_allowed(unit)[0]:
             return []
         cells = dedupe_positions(
             [

@@ -64,6 +64,7 @@ class SoulWraithAttackPolicy(HeroAIPolicy):
 
 
 class PassThroughMovementTrait(Trait):
+    grants_pass_through = True
     def __init__(self) -> None:
         super().__init__("可穿人", "普通移动路径可以穿过单位，但落点仍必须合法。")
 

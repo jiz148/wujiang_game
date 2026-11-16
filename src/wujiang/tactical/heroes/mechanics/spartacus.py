@@ -90,6 +90,13 @@ def resolve_spartacus_placement(battle: Battle, actor: Unit, queued_action: Any)
 
 
 class EarthShatterSkill(Skill):
+    is_displacement_skill = True
+
+    def moves_owner_on_use(self, battle: Battle, actor: Unit,
+                           payload: dict[str, Any] | None) -> bool:
+        return False
+
+
     def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
         bonus = 0.0 if actor.has_status("天崩地裂强化") else 1.0
         return actor.stat("attack") + bonus + (max(0, battle.unit_hit_count_for_cells(target, cells) - 1) if cells else 0)

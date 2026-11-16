@@ -5,6 +5,7 @@ import random
 from typing import Any, Iterable, Optional
 
 from wujiang.tactical.engine.core import ActionError, Battle, Position, Unit
+from wujiang.tactical.heroes.ai_policy import object_owned_optional_choice
 from wujiang.tactical.rooms.tendency.log import record_decision
 from wujiang.tactical.rooms.tendency.situation import Situation, build_situation
 
@@ -386,6 +387,10 @@ def choose_damage_choice_action(battle: Battle) -> dict[str, Any]:
             "unit_id": unit_id,
             "target_unit_id": enemies[0] if enemies else options[0],
         }
+    if kind in {"optional_placement", "required_placement", "required_direction", "optional_heal_target", "optional_unit_selection", "required_unit_selection", "guardian_legacy"} and (actor := battle.units.get(unit_id)) is not None:
+        choice = object_owned_optional_choice(battle, actor, prompt)
+        if choice is not None:
+            return {"type": "damage_choice", "unit_id": unit_id, "target_unit_id": choice}
     return {
         "type": "damage_choice",
         "unit_id": unit_id,
@@ -489,6 +494,11 @@ def _skill_payload(battle: Battle, actor: Unit, action: dict[str, Any]) -> Optio
     def finish(payload: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
         if payload is None or not direction_required:
             return payload
+        chosen = payload.get("direction")
+        if isinstance(chosen, dict) and any(
+                _direction_step(entry) == (chosen.get("dx"), chosen.get("dy"))
+                for entry in directions):
+            return payload
         token = _direction_toward_enemy(battle, actor, directions)
         if token is None:
             return None
@@ -499,6 +509,13 @@ def _skill_payload(battle: Battle, actor: Unit, action: dict[str, Any]) -> Optio
     mode = str(action.get("target_mode") or "none")
     code = str(action.get("code") or "")
     instant_skill = _skill_object(actor, code)
+    if instant_skill is not None and instant_skill.ai_payload_value_owned:
+        supplied = instant_skill.ai_payload_candidates(battle, actor, action)
+        if supplied is not None:
+            scored = [(instant_skill.ai_payload_value(battle, actor, payload), payload)
+                      for candidate in supplied if (payload := finish(dict(candidate))) is not None]
+            viable = [(value, payload) for value, payload in scored if value is not None and value > 0]
+            return max(viable, key=lambda item: item[0])[1] if viable else None
     if getattr(instant_skill, "tendency_overclock_order", None) is not None:
         patterns = _selection_patterns(preview)
         ranked: list[tuple[float, list[Position]]] = []
@@ -544,6 +561,15 @@ def _skill_payload(battle: Battle, actor: Unit, action: dict[str, Any]) -> Optio
                       if not any(status.name == "守+1" and getattr(status, "source_id", None) == actor.unit_id
                                  for status in unit.statuses)]
             return finish(_at_unit(actor, code, allies[0])) if allies else None
+        if mode == "unit" and instant_skill is not None and instant_skill.ai_payload_value_owned:
+            candidates = [*_listed_units(battle, actor, listed, allies=False),
+                          *_listed_units(battle, actor, listed, allies=True)]
+            scored = [(instant_skill.ai_payload_value(battle, actor, payload), payload)
+                      for target in candidates
+                      if (payload := finish(_at_unit(actor, code, target))) is not None]
+            if any(value is not None for value, _ in scored):
+                viable = [(value, payload) for value, payload in scored if value is not None and value > 0]
+                return max(viable, key=lambda item: item[0])[1] if viable else None
         allies_ok = mode == "unit"
         for target in _listed_units(battle, actor, listed, allies=False) or (
             _listed_units(battle, actor, listed, allies=True) if allies_ok else []
@@ -568,6 +594,21 @@ def _skill_payload(battle: Battle, actor: Unit, action: dict[str, Any]) -> Optio
         payload = finish({"type": "skill", "unit_id": actor.unit_id, "skill_code": code})
         return payload if _payload_matters(battle, actor, payload) else None
     if mode == "cell":
+        selection = _selection(preview)
+        if selection.get("mode") == "unit_cell":
+            candidates = [finish({"type": "skill", "unit_id": actor.unit_id,
+                                  "skill_code": code,
+                                  str(selection.get("target_key") or "target_unit_id"): str(entry.get("id") or ""),
+                                  "x": cell.x, "y": cell.y})
+                          for entry in selection.get("candidates", [])
+                          for cell in _positions(entry.get("cells"))]
+            candidates = [payload for payload in candidates if payload is not None]
+            if instant_skill is not None and instant_skill.ai_payload_value_owned:
+                ranked = [(instant_skill.ai_payload_value(battle, actor, payload), payload)
+                          for payload in candidates]
+                viable = [(value, payload) for value, payload in ranked if value is not None and value > 0]
+                return max(viable, key=lambda item: item[0])[1] if viable else None
+            return next((payload for payload in candidates if _payload_matters(battle, actor, payload)), None)
         patterns = _selection_patterns(preview)
         if patterns:
             return finish(_pattern_payload(battle, actor, code, patterns))
@@ -595,6 +636,14 @@ def _skill_payload(battle: Battle, actor: Unit, action: dict[str, Any]) -> Optio
                 default=0,
             ),
         )
+        if instant_skill is not None and instant_skill.ai_payload_value_owned:
+            scored = [(instant_skill.ai_payload_value(battle, actor, payload), payload)
+                      for chosen in ordered
+                      if (payload := finish({"type": "skill", "unit_id": actor.unit_id,
+                                             "skill_code": code, "x": chosen.x, "y": chosen.y})) is not None]
+            if any(value is not None for value, _ in scored):
+                viable = [(value, payload) for value, payload in scored if value is not None and value > 0]
+                return max(viable, key=lambda item: item[0])[1] if viable else None
         for chosen in ordered[:8]:
             payload = finish({"type": "skill", "unit_id": actor.unit_id, "skill_code": code, "x": chosen.x, "y": chosen.y})
             if _payload_matters(battle, actor, payload):
@@ -622,6 +671,9 @@ def _payload_matters(battle: Battle, actor: Unit, payload: Optional[dict[str, An
             skill = None
     if skill is None:
         return True
+    if skill.ai_payload_value_owned:
+        owned_value = skill.ai_payload_value(battle, actor, payload)
+        return owned_value is not None and owned_value > 0
     before = _board_mark(battle)
     from wujiang.tactical.rooms.ai import ai_probe_rollback
     with ai_probe_rollback(battle):

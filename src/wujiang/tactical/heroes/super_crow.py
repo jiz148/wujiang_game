@@ -26,6 +26,27 @@ FORMATION_RULES = {
 
 
 class SuperCrowAttackPolicy(HeroAIPolicy):
+    def early_move_score_bonus(self, battle: Battle, actor: Unit,
+                               destination: Position) -> float:
+        if actor.position is None or actor.innate_traits_suppressed():
+            return 0.0
+        probe = SuperMessengerCrow(actor.player_id)
+        possible = [cell for cell in square_around_cells(battle, {destination}, radius=1)
+                    if cell != destination and battle.can_place_unit(probe, cell)]
+        best = 0.0
+        for enemy in living_hostile_combatants(battle, actor.player_id):
+            if enemy.position is None or enemy.banished:
+                continue
+            placed = sum(battle.distance_between_units(crow, enemy) == 1
+                         for crow in own_super_crows(battle, actor))
+            if placed >= 3:
+                continue
+            shared = sum(any(cell.distance_to(body) == 1 for body in battle.unit_cells(enemy))
+                         for cell in possible)
+            if shared > 0:
+                best = max(best, 8.0 * min(shared, 3 - placed))
+        return best
+
     def priority_skill_score(self, battle: Battle, actor: Unit, code: str,
                              payload: dict) -> float | None:
         if code not in FORMATION_RULES:
@@ -204,6 +225,28 @@ class SuperCrowFreeSkillTrait(Trait):
 class SuperCrowSummonSkill(Skill):
     tendency_priority_rank = 4
     simple_repeatable_limit = 3
+    ai_payload_value_owned = True
+    ai_enemy_impact_requirement = False
+    ai_nonhostile_throttle_exempt = True
+
+    def ai_payload_candidates(self, battle: Battle, actor: Unit,
+                              action: dict[str, Any]) -> list[dict[str, Any]] | None:
+        return [{"type": "skill", "unit_id": actor.unit_id, "skill_code": self.code,
+                 "x": cell.x, "y": cell.y} for cell in available_super_crow_cells(battle, actor)]
+
+    def ai_payload_value(self, battle: Battle, actor: Unit,
+                         payload: dict[str, Any]) -> float | None:
+        cell = payload_position(payload)
+        if cell not in available_super_crow_cells(battle, actor):
+            return None
+        adjacent = [enemy for enemy in battle.enemy_units(actor.player_id)
+                    if enemy.alive and not enemy.banished and enemy.position is not None
+                    and any(cell.distance_to(body) == 1 for body in battle.unit_cells(enemy))]
+        if not adjacent:
+            return None
+        return max(25.0 + 14.0 * sum(battle.distance_between_units(crow, enemy) == 1
+                                    for crow in own_super_crows(battle, actor))
+                   for enemy in adjacent)
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float | None:
         if context.actor.hero_code != "excel_r324":
@@ -216,7 +259,9 @@ class SuperCrowSummonSkill(Skill):
         adjacent = [enemy for enemy in enemies if enemy.position is not None and
                     any(cell.distance_to(body) == 1 for body in battle.unit_cells(enemy))]
         near = min((context.distance_to_position(enemy, cell) for enemy in enemies), default=99)
-        if near > 4:
+        # Manual crows must help form an adjacent ring around a real target.
+        # Remote free casts fill the caster's own ring and prevent formations.
+        if near > 1:
             return -1000.0
         setup = 0.0
         for enemy in adjacent:
@@ -328,6 +373,19 @@ class CrowFormationSkill(Skill):
 
     requires_direct_unit_target_line = False
 
+    def ai_effective_enemy_impact(self, battle: Battle, actor: Unit,
+                                  payload: dict[str, Any], targets: list[Unit] | None = None,
+                                  shared: Any = None, action: dict[str, Any] | None = None) -> bool | None:
+        if targets is None:
+            return None
+        try:
+            target, _ = self._selection(battle, actor, payload)
+        except (ActionError, KeyError, ValueError):
+            return False
+        # The common prefilter otherwise probes the caster's attack 1, while
+        # this skill deals multiple power-3 segments and can apply control.
+        return target.player_id != actor.player_id and target in targets
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float | None:
         if context.actor.hero_code != "excel_r324":
             return None
@@ -342,9 +400,9 @@ class CrowFormationSkill(Skill):
         life = min(target.current_hp, hits * max(0.0, per_hit))
         control = 0.0
         if self.code == "triangle_crow_array":
-            control = max(0.0, min(3.0, target.stat("speed") - 1.0)) * 12.0 + 22.0
+            control = max(0.0, min(3.0, target.stat("speed") - 1.0)) * 25.0 + 60.0
         elif self.code == "square_crow_array":
-            control = 48.0 + target.stat("attack") * 9.0
+            control = 80.0 + target.stat("attack") * 15.0
         elif self.code == "eight_dragon_crow_array":
             control = 170.0 + target.stat("attack") * 13.0
         if target.skill_non_damage_effects_blocked():

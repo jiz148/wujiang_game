@@ -107,6 +107,7 @@ class FreyDamageCapTrait(Trait):
 
 
 class FreyQuickFlashSkill(FreyAreaAIScoring, Skill):
+    is_displacement_skill = True
     ai_candidate_plan = RANKED_CANDIDATES
 
     def ai_unique_candidate_payloads(self, battle: Battle, actor: HeroUnit,

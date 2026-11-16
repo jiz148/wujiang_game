@@ -130,7 +130,8 @@ class BattleGeometryMixin:
             return False
         if actor.unit_id == target.unit_id:
             return True
-        ignore_line = any(component.ignores_direct_unit_target_line(self, actor) for component in actor.iter_components())
+        ignore_line = (any(component.ignores_direct_unit_target_line(self, actor) for component in actor.iter_components())
+                       or any(effect.ignores_direct_unit_target_line(self, actor) for effect in self.field_effects))
         for origin in actor_cells:
             for target_cell in target_cells:
                 if origin.distance_to(target_cell) > max_distance:

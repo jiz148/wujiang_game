@@ -6,7 +6,8 @@ const root = path.resolve(import.meta.dirname, "..");
 const jsonPath = path.join(root, "docs", "武将设计思想.json");
 const reviewPath = path.join(root, "docs", "武将符合性审查.json");
 const workbookPath = path.join(root, "docs", "武将实现问题清单.xlsx");
-const targetCodes = new Set(process.argv.slice(2));
+const designOnly = process.argv.includes("--design-only");
+const targetCodes = new Set(process.argv.slice(2).filter((arg) => arg !== "--design-only"));
 if (!targetCodes.size) throw new Error("Provide at least one hero code.");
 
 const archive = JSON.parse(await fs.readFile(jsonPath, "utf8"));
@@ -32,7 +33,10 @@ for (const hero of heroes) {
   const inference = (hero.inferred_rulings ?? []).map((item, index) =>
     `${index + 1}. ${item.topic}｜结论：${item.decision}｜依据：${item.reasoning}｜放弃方案：${item.rejected_alternatives}｜置信度：${item.confidence}｜玩法后果：${item.gameplay_consequence}`
   ).join("\n");
-  sheet.getRange(`A${row}:AB${row}`).values = [[...columns.map((key) => hero[key] ?? ""), inference]];
+  sheet.getRange(`A${row}:AB${row}`).values = [[...columns.map((key) => {
+    const value = hero[key] ?? "";
+    return typeof value === "object" ? JSON.stringify(value) : value;
+  }), inference]];
   sheet.getRange(`A${row}:AB${row}`).format.wrapText = true;
   sheet.getRange(`A${row}:AB${row}`).format.verticalAlignment = "top";
   existing[row - 2] = hero.code;
@@ -41,11 +45,12 @@ const questions = workbook.worksheets.getItem("问卷");
 const existingQuestionIds = questions.getRange("C2:C1000").values.map((row) => String(row[0] ?? ""));
 for (const hero of heroes) {
   for (const item of hero.questionnaire_items ?? []) {
-    if (existingQuestionIds.includes(item.id)) continue;
-    const row = existingQuestionIds.findIndex((code) => !code) + 2;
+    const existingRow = existingQuestionIds.indexOf(item.id);
+    const row = existingRow >= 0 ? existingRow + 2 : existingQuestionIds.findIndex((code) => !code) + 2;
     if (row < 2) throw new Error("No free questionnaire row found.");
+    const answer = existingRow >= 0 ? questions.getRange(`F${row}`).values[0][0] ?? "" : "";
     questions.getRange(`A${row}:H${row}`).values = [[
-      hero.name, item.area, item.id, item.question, item.options, "",
+      hero.name, item.area, item.id, item.question, item.options, answer,
       `源表第${hero.source_row}行；设计基线推定${item.inferred}，非用户回答；依据见docs/武将设计思想.json#${hero.code}。`,
       hero.source_row,
     ]];
@@ -53,6 +58,14 @@ for (const hero of heroes) {
     questions.getRange(`A${row}:H${row}`).format.verticalAlignment = "top";
     existingQuestionIds[row - 2] = item.id;
   }
+}
+if (designOnly) {
+  const output = await SpreadsheetFile.exportXlsx(workbook);
+  const temporary = `${workbookPath}.new`;
+  await output.save(temporary);
+  await fs.rename(temporary, workbookPath);
+  console.log(`Synchronized design-only ${heroes.map((hero) => hero.code).join(", ")} to 武将设计思想 and 问卷.`);
+  process.exit(0);
 }
 const review = JSON.parse(await fs.readFile(reviewPath, "utf8"));
 const summary = workbook.worksheets.getItem("说明");

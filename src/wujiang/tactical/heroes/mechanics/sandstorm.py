@@ -166,6 +166,7 @@ class WindSandSkill(Skill):
 
 
 class CrazySandSkill(Skill):
+    is_displacement_skill = True
     excludes_caster_from_effect = True
 
     def ai_move_score(self, context: AISkillScoreContext, base_score: float,

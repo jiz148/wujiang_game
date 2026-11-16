@@ -13,6 +13,7 @@ from wujiang.tactical.engine.core import StatusEffect
 from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import FlagStatus
+from wujiang.tactical.heroes.common import DashMoveSkill
 from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import positions_to_dict
@@ -125,7 +126,41 @@ class ThorHeavyHammerSkill(ThorLineDamageSkill):
         return {"reaction_mana_multiplier": 2.0}
 
 
+class ThorLeapSkill(DashMoveSkill):
+    def __init__(self) -> None:
+        super().__init__("fly_leap", "飞跃", "普通技能：费 1 魔，每回合最多 1 次，直线飞行移动恰好 3 格。",
+                         max_distance=3, exact_distance=3, mana_cost=1, max_uses_per_turn=1,
+                         straight_only=True, ignore_units=True)
+
+    def ai_move_score(self, context: AISkillScoreContext, base_score: float, destination: Position) -> float:
+        actor = context.actor
+        if destination in context.reachable_positions(actor):
+            return -1000.0
+        enemies = [unit for unit in context.hostile_units() if unit.position is not None]
+        if not enemies:
+            return -1000.0
+        attack_window = any(min((destination.distance_to(cell) for cell in context.battle.unit_cells(enemy)),
+                                default=99) <= actor.targeting_range() for enemy in enemies)
+        threatened_here = any(context.battle.distance_between_units(actor, enemy)
+                              <= enemy.normal_move_distance() + enemy.targeting_range() for enemy in enemies)
+        safer_landing = threatened_here and all(
+            min((destination.distance_to(cell) for cell in context.battle.unit_cells(enemy)), default=99)
+            > enemy.normal_move_distance() + enemy.targeting_range() for enemy in enemies)
+        return base_score - 25.0 if attack_window or safer_landing else -1000.0
+
+
 class ThorRageImpactSkill(ThorLineDamageSkill):
+    is_displacement_skill = True
+
+    def ai_priority_score(self, context: AISkillScoreContext) -> float:
+        try:
+            cells = self.chosen_cells(context.battle, context.actor, context.payload)
+        except (ActionError, KeyError, ValueError):
+            return -1000.0
+        if not any(unit.alive and not unit.banished for unit in
+                   self.affected_units(context.battle, context.actor, cells)):
+            return -1000.0
+        return context.r18_effect_score(self)
     def __init__(self) -> None:
         super().__init__(
             "thor_rage_impact",

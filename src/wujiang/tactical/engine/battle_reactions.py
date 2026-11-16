@@ -290,6 +290,8 @@ class BattleReactionMixin:
                 enemy_skill = track_prevention and reaction.action_type == "reaction_skill" and reaction.source_player_id != queued.source_player_id
                 would_hit = self.attack_would_deal_damage(queued) if enemy_skill else False
                 self.resolve_queued_action(reaction)
+                if queued.action_type == "skill" and reaction.action_type == "reaction_skill" and actor is not None:
+                    actor.get_skill(queued.payload["skill_code"]).on_reaction_resolved(self, queued, reaction)
                 if reaction.action_type == "reaction_skill" and reaction.payload.get("action_code") == "evasion":
                     completed = queued.payload.setdefault("completed_evasion_unit_ids", [])
                     for unit_id in reaction.payload.get("completed_evasion_unit_ids", []):

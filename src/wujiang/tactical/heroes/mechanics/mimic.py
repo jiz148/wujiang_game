@@ -16,6 +16,20 @@ from wujiang.tactical.heroes.common import (
 
 class MimicSkill(Skill):
     ai_nonhostile_throttle_exempt = True
+    requires_choice_replay_when_used = True
+    ai_optional_choice_owned = True
+
+    def ai_optional_choice_score(self, battle: Battle, actor: HeroUnit,
+                                 prompt: dict[str, Any], choice: str) -> float | None:
+        payload = prompt.get("action_payload") or {}
+        if payload.get("skill_code") != self.code:
+            return None
+        try:
+            _, copied, _ = self._target_skill(battle, actor, payload)
+            with self.copying(actor, copied):
+                return copied.ai_optional_choice_score(battle, actor, prompt, choice)
+        except (ActionError, AttributeError, KeyError, TypeError, ValueError):
+            return None
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         copied_context = context.shared.mimic_payload_context(context)

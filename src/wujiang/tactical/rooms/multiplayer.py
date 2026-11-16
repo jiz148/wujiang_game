@@ -682,7 +682,8 @@ def battle_state_for_viewer(
     hidden_unit_ids = {
         unit.unit_id
         for unit in battle.all_units()
-        if unit.has_status("隐身") and (viewer_player_id is None or unit.player_id != viewer_player_id)
+        if (unit.is_stealthed() and (viewer_player_id is None or unit.player_id != viewer_player_id)
+            and (viewer_player_id is None or not battle.stealth_revealed_to(unit, viewer_player_id)))
     }
     if hidden_unit_ids:
         state["units"] = [unit for unit in state["units"] if unit["id"] not in hidden_unit_ids]
@@ -702,6 +703,12 @@ def battle_state_for_viewer(
             event_payload["target_unit_ids"] = target_unit_ids
             filtered_events.append(event_payload)
         state["visual_events"] = filtered_events
+    if viewer_player_id is not None:
+        for unit_payload in state["units"]:
+            unit = battle.units.get(str(unit_payload.get("id") or ""))
+            unit_payload["stealth_revealed"] = bool(
+                unit is not None and unit.player_id != viewer_player_id
+                and unit.is_stealthed() and battle.stealth_revealed_to(unit, viewer_player_id))
     state["active_units"] = []
     if viewer_player_id is not None and viewer_player_id == input_player:
         state["active_units"] = [

@@ -42,6 +42,7 @@ class FumaAIPolicy(HeroAIPolicy):
 
 
 class FumaPursuitSkill(Skill):
+    is_displacement_skill = True
     def ai_move_score(self, context: AISkillScoreContext, base_score: float,
                       destination: Position) -> float:
         return base_score + context.shared.fuma_pursuit_score(context, self)

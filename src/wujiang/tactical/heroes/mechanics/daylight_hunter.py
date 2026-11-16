@@ -69,7 +69,7 @@ class DaylightActiveSealStatus(StatusEffect):
 
 class DaylightHunterTrait(Trait):
     def __init__(self) -> None:
-        super().__init__("昼行追猎", "每本人轮只普攻一个目标；连续追猎增加普攻次数，低半血免技能伤害，普攻破魔封主动。")
+        super().__init__("昼行追猎", "每本人轮只普攻一个目标；连续追猎增加普攻次数，低半血免技能伤害；普攻伤害不破魔，命中后的封主动附效破魔。")
         self.previous_target_id: str | None = None
         self.previous_bonus = 0
         self.current_target_id: str | None = None

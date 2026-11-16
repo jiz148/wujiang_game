@@ -782,6 +782,7 @@ class AncientArmSkill(RemoteDragonBreathSkill):
 
 
 class AncientVigorSkill(Skill):
+    is_displacement_skill = True
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         battle, actor, payload = context.battle, context.actor, context.payload
         missing = 0.0 if actor.cannot_heal else max(0.0, actor.max_health - actor.current_hp)

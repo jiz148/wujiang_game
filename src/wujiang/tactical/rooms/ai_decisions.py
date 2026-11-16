@@ -222,6 +222,13 @@ class AIDecisionCoordinator:
         if prompt.get("kind") in {"hell_dragon_first", "hell_dragon_second", "hell_dragon_effect"}:
             with self.services.ai_enemy_view(battle, unit.player_id):
                 return self.choose_hell_dragon_sacrifice_action(battle, prompt, unit)
+        if prompt.get("kind") in {"optional_placement", "required_placement", "required_direction", "optional_heal_target", "optional_unit_selection", "required_unit_selection", "guardian_legacy"}:
+            from wujiang.tactical.heroes.ai_policy import object_owned_optional_choice
+            with self.services.ai_enemy_view(battle, unit.player_id):
+                choice = object_owned_optional_choice(battle, unit, prompt)
+            if choice is not None:
+                return {"type": "damage_choice", "unit_id": unit.unit_id,
+                        "target_unit_id": choice}
         if prompt.get("kind") in {"rotation", "attack_swap", "formation", "optional_swap", "optional_placement"}:
             with self.services.ai_enemy_view(battle, unit.player_id):
                 return self.choose_rotation_damage_choice_action(battle, prompt, unit)

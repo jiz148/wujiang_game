@@ -58,7 +58,9 @@ class AbsoluteZeroStatus(StatusEffect):
         owner = self.owner
         if owner is None or owner.innate_traits_suppressed():
             return
-        if any(isinstance(trait, FlyingTrait) for trait in owner.traits):
+        if (any(isinstance(trait, FlyingTrait) for trait in owner.traits)
+                and not any(getattr(status, "suppresses_native_flying", False)
+                            for status in owner.statuses)):
             owner.has_flying = True
         if any(isinstance(trait, BlockCounterTrait) for trait in owner.traits):
             owner.has_block_counter = True

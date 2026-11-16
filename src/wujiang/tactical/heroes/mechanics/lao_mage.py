@@ -115,6 +115,12 @@ class LaoWaveBulletSkill(Skill):
 
 
 class LaoMageHandSkill(Skill):
+    is_displacement_skill = True
+
+    def moves_owner_on_use(self, battle: Battle, actor: Unit,
+                           payload: dict[str, Any] | None) -> bool:
+        return False
+
     ai_early_effect_score = True
 
     def ai_effect_score(self, context: AISkillScoreContext) -> float:
@@ -230,6 +236,7 @@ class LaoMageHandSkill(Skill):
 
 
 class MageCloakEquippedStatus(StatModifierStatus):
+    provides_temporary_flight = True
     def __init__(self, summoner_id: str, cloak_unit_id: str) -> None:
         super().__init__("法师斗篷", speed_delta=3, defense_delta=1, description="速 +3，守 +1，移动次数 +1，飞行，近战普攻伤害 +1。")
         self.summoner_id = summoner_id
@@ -260,7 +267,10 @@ class MageCloakEquippedStatus(StatModifierStatus):
         if owner is None:
             return
         owner.skills = [skill for skill in owner.skills if skill.code != "detach_mage_cloak"]
-        owner.has_flying = any(isinstance(component, FlyingTrait) for component in owner.traits) or any(
+        owner.has_flying = (any(isinstance(component, FlyingTrait) for component in owner.traits)
+                            and not owner.innate_traits_suppressed()
+                            and not any(getattr(status, "suppresses_native_flying", False)
+                                        for status in owner.statuses)) or any(
             isinstance(status, MageCloakEquippedStatus) for status in owner.statuses
         )
         owner.ignore_units_while_moving = any(isinstance(component, PassThroughMovementTrait) for component in owner.traits) or owner.has_flying

@@ -40,6 +40,16 @@ def payload_position(payload: dict[str, Any], x_key: str = "x", y_key: str = "y"
     return Position(int(payload[x_key]), int(payload[y_key]))
 
 
+def payload_direction(payload: dict[str, Any]) -> tuple[int, int]:
+    """Read a declared eight-way direction without depending on a hero module."""
+    direction = payload.get("direction")
+    raw = direction if isinstance(direction, dict) else payload
+    dx, dy = int(raw.get("dx", 0)), int(raw.get("dy", 0))
+    if (dx, dy) == (0, 0) or dx not in (-1, 0, 1) or dy not in (-1, 0, 1):
+        raise ActionError("需要选择一个合法方向。")
+    return dx, dy
+
+
 def payload_cells(payload: dict[str, Any], key: str = "cells") -> list[Position]:
     raw_cells = payload.get(key)
     if not isinstance(raw_cells, list) or not raw_cells:
@@ -887,6 +897,7 @@ class ShensuSkill(SelfBuffSkill):
 
 
 class DashMoveSkill(Skill):
+    is_displacement_skill = True
     def __init__(
         self,
         code: str,
@@ -1535,6 +1546,12 @@ class PierceSkill(Skill):
 
 
 class KnockbackSkill(Skill):
+    is_displacement_skill = True
+
+    def moves_owner_on_use(self, battle: Battle, actor: Unit,
+                           payload: dict[str, Any] | None) -> bool:
+        return False
+
     ai_reaction_score_phase = "after_hidden_source"
 
     def __init__(self) -> None:
@@ -2113,6 +2130,7 @@ class PassiveProtectionSkill(MultiTargetChainShieldSkill):
 
 
 class PassiveEvasionSkill(Skill):
+    is_displacement_skill = True
     ai_reaction_score_phase = "after_hidden_source"
 
     def __init__(self) -> None:
@@ -2217,6 +2235,7 @@ class PassiveEvasionSkill(Skill):
 
 
 class BackstepShotSkill(Skill):
+    is_displacement_skill = True
     ai_reaction_score_phase = "after_hidden_source"
 
     def __init__(self) -> None:

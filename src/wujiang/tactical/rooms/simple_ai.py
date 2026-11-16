@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, Iterable, Optional
 
 from wujiang.tactical.engine.core import ActionError, Battle, Position, Unit
+from wujiang.tactical.heroes.ai_policy import object_owned_optional_choice
 
 MOVE_LIMIT = 12
 
@@ -148,6 +149,10 @@ def choose_damage_choice_action(battle: Battle) -> dict[str, Any]:
                 "target_unit_id": "protect" if use else "decline"}
     if kind in {"attack_swap", "formation"} and options:
         return {"type": "damage_choice", "unit_id": unit_id, "target_unit_id": options[0]}
+    if kind in {"optional_placement", "required_placement", "required_direction", "optional_heal_target", "optional_unit_selection", "required_unit_selection", "guardian_legacy"} and (actor := battle.units.get(unit_id)) is not None:
+        choice = object_owned_optional_choice(battle, actor, prompt)
+        if choice is not None:
+            return {"type": "damage_choice", "unit_id": unit_id, "target_unit_id": choice}
     return {
         "type": "damage_choice",
         "unit_id": unit_id,
@@ -176,7 +181,8 @@ def _skill_payload(
 
     Only the first few usable skills are considered. A skill is usable when
     its own preview already names a legal unit or cell, or when it needs no
-    target. Pattern and forced-direction skills are left alone.
+    target. A direction skill enters only when its owner supplies a complete
+    scored payload; generic direction guessing remains excluded.
     """
     seen = 0
     actions = list(snapshot.get("actions", []))
@@ -192,9 +198,10 @@ def _skill_payload(
             continue
         if str(action.get("timing") or "") != timing:
             continue
-        if str(action.get("direction_mode") or "none") == "required":
-            continue
         skill = _ai_skill(actor, str(action.get("code") or ""))
+        if (str(action.get("direction_mode") or "none") == "required"
+                and not getattr(skill, "ai_complete_direction_payloads", False)):
+            continue
         repeat_limit = getattr(skill, "simple_repeatable_limit", 1)
         if action.get("max_uses_per_turn") is None and int(action.get("uses_this_turn") or 0) >= repeat_limit:
             continue
@@ -215,6 +222,34 @@ def _skill_from_preview(battle: Battle, actor: Unit, action: dict[str, Any]) -> 
     mode = str(action.get("target_mode") or "none")
     listed = [str(item) for item in (preview.get("target_unit_ids") or [])]
     source_code = str(action.get("code") or "").rsplit("__", 1)[-1]
+    owned_skill = _ai_skill(actor, str(action.get("code") or ""))
+    if owned_skill is not None and owned_skill.ai_payload_value_owned:
+        supplied = owned_skill.ai_payload_candidates(battle, actor, action)
+        candidates: list[dict[str, Any]] = list(supplied) if supplied is not None else []
+        if supplied is None and mode in {"none", "self"}:
+            candidates = [{"type": "skill", "unit_id": actor.unit_id,
+                           "skill_code": str(action.get("code") or "")}]
+        elif supplied is None and mode in {"enemy", "unit", "ally"}:
+            candidates = [_skill_at_unit(actor, action, target)
+                          for unit_id in listed if (target := battle.units.get(unit_id)) is not None
+                          and target.alive and target.position is not None]
+        elif supplied is None and mode == "cell":
+            selection = preview.get("selection") or {}
+            if selection.get("mode") == "unit_cell":
+                candidates = [{"type": "skill", "unit_id": actor.unit_id,
+                               "skill_code": str(action.get("code") or ""),
+                               str(selection.get("target_key") or "target_unit_id"): str(entry.get("id") or ""),
+                               "x": cell.x, "y": cell.y}
+                              for entry in selection.get("candidates", [])
+                              for cell in _positions(entry.get("cells"))]
+            else:
+                candidates = [{"type": "skill", "unit_id": actor.unit_id,
+                               "skill_code": str(action.get("code") or ""), "x": cell.x, "y": cell.y}
+                              for cell in _positions(preview.get("cells"))]
+        scored = [(owned_skill.ai_payload_value(battle, actor, payload), payload)
+                  for payload in candidates]
+        viable = [(value, payload) for value, payload in scored if value is not None and value > 0]
+        return max(viable, key=lambda item: item[0])[1] if viable else None
     area_targeting = getattr(getattr(actor, "ai_policy", None), "simple_area_targeting", None)
     if callable(area_targeting) and area_targeting(source_code):
         patterns = (preview.get("selection") or {}).get("patterns") or []

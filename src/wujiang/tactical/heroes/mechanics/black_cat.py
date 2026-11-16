@@ -160,6 +160,7 @@ class BlackCatFormSkill(Skill):
 
 
 class FantasyMoveSkill(TargetDestinationCandidates, Skill):
+    is_displacement_skill = True
     def ai_hostile_target_impact(self, battle, actor, payload, target):
         return payload.get("x") is not None and payload.get("y") is not None
 

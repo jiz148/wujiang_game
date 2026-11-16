@@ -73,6 +73,7 @@ class JiroboAfterAttackTrait(Trait):
 
 
 class JiroboFollowStepSkill(Skill):
+    is_displacement_skill = True
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         actor = context.actor
         destination = context.destination()

@@ -28,6 +28,7 @@ from wujiang.tactical.heroes.mechanics.next_five_effects import remote_rectangle
 
 
 class TrueBladeAirSlashSkill(TargetDestinationCandidates, Skill):
+    is_displacement_skill = True
     ai_effective_impact_rule = R17_IMPACT
     def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
         return target.stat("defense") + 1

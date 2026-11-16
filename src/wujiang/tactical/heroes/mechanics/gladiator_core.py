@@ -84,6 +84,7 @@ def gladiator_swap_destinations(battle: Battle, actor: Unit, ally: Unit, *, via_
 
 
 class WillowExchangeSkill(Skill):
+    is_displacement_skill = True
     resolves_from_current_position = True
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float | None:
@@ -277,6 +278,7 @@ def gladiator_swap(battle: Battle, actor: Unit, ally: Unit, *, skill_code: str, 
 
 
 class GladiatorSwapSkill(H1LineDamageSkill):
+    is_displacement_skill = True
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r17_effect_score(self)
 

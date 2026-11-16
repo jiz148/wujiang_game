@@ -120,6 +120,7 @@ def natsume_protection_changes_outcome(battle, queued_action, target):
 
 
 class NatsumeWindWordSkill(Skill):
+    is_displacement_skill = True
     ai_early_effect_score = True
 
     def __init__(self) -> None:

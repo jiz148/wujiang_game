@@ -478,6 +478,7 @@ class BattleMovementMixin:
             end=destination,
             path=path,
             via_skill=via_skill,
+            forced=forced,
             triggered_by_reaction=triggered_by_reaction,
             tags=tags or set(),
         )
@@ -495,6 +496,15 @@ class BattleMovementMixin:
                     unit._paying_skill_cost = previous_payment
                 else:
                     unit.__dict__.pop("_paying_skill_cost", None)
+        for component in list(unit.iter_components()):
+            component.on_before_move(self, ctx)
+        if ctx.cancelled:
+            if not via_skill and not forced and not triggered_by_reaction:
+                unit.normal_move_actions_used += 1
+                unit.move_used = True
+            ctx.end, ctx.path = ctx.start, [ctx.start]
+            self.log_public_event(ctx.reason or f"{unit.name} 的移动失败。", source=unit)
+            return ctx
         if not via_skill and not forced and not triggered_by_reaction and unit.is_clone:
             unit._clone_action_turn = self.turn_number
         action = self.resolving_action
@@ -665,6 +675,15 @@ class BattleMovementMixin:
         return ctx
 
 
+    def stealth_revealed_to(self, unit: Unit, player_id: int) -> bool:
+        if not unit.is_stealthed():
+            return True
+        return any(component.reveals_stealth_to(self, player_id, unit)
+                   for observer in self.all_units()
+                   if observer.alive and not observer.banished and observer.position is not None
+                   and observer.player_id == player_id
+                   for component in observer.iter_components())
+
     def unit_can_be_selected(
         self,
         unit: Unit,
@@ -679,9 +698,10 @@ class BattleMovementMixin:
         if unit.cannot_be_targeted and not ignore_stealth:
             return False, f"{unit.name} 当前无法被选中。"
         if (
-            unit.has_status("隐身")
+            unit.is_stealthed()
             and not ignore_stealth
             and (actor is None or actor.player_id != unit.player_id)
+            and (actor is None or not self.stealth_revealed_to(unit, actor.player_id))
         ):
             return False, f"{unit.name} 当前处于隐身状态。"
         return True, ""

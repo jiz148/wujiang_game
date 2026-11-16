@@ -73,6 +73,12 @@ class LiAreaScoring:
 
 
 class ChainPullSkill(LiAreaScoring, Skill):
+    is_displacement_skill = True
+
+    def moves_owner_on_use(self, battle: Battle, actor: Unit,
+                           payload: dict[str, Any] | None) -> bool:
+        return False
+
     ai_probe_hostile_effect = True
     def ai_position_bonus(self, context: AISkillScoreContext, unit: Unit,
                           sign: float, position: Position | None) -> float:

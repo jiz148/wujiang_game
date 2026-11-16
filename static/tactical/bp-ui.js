@@ -103,7 +103,7 @@ function sideColumn(team, bp, seats, details) {
   if (bp.wins) {
     stats.append(element("span", `胜场 ${bp.wins[team] ?? bp.wins[String(team)] ?? 0}`, "bp-side__wins"));
   }
-  stats.append(element("span", `已用 ${bp.total_levels?.[team] || 0}/${bp.level_cap}`, "bp-side__points"));
+  if (bp.format !== "tier") stats.append(element("span", `已用 ${bp.total_levels?.[team] || 0}/${bp.level_cap}`, "bp-side__points"));
   head.append(title, stats);
   col.append(head);
   const bans = (bp.actions || []).filter((action) => Number(action.team_id) === team && action.kind === "ban");
@@ -286,6 +286,20 @@ function renderDraftStage(panel, bp, seats, details) {
   }
   banner.append(commit);
   stage.append(banner);
+  if (bp.format === "tier" && Array.isArray(bp.round_levels) && bp.round_levels.length) {
+    const schedule = element("section", "", "bp-tier-schedule");
+    schedule.setAttribute("aria-label", "本局各轮随机等级");
+    schedule.append(element("span", "本局等级", "bp-tier-schedule__title"));
+    bp.round_levels.forEach((level, index) => {
+      const current = !reviewing && Number(bp.round_index) === index + 1;
+      const finished = reviewing || Number(bp.round_index) > index + 1;
+      const chip = element("span", `第${index + 1}轮 · ${level}级`,
+        `bp-tier-schedule__round${current ? " is-current" : ""}${finished ? " is-finished" : ""}`);
+      if (current) chip.setAttribute("aria-current", "step");
+      schedule.append(chip);
+    });
+    stage.append(schedule);
+  }
   const layout = element("div", "", "bp-layout");
   const board = element("div", "", "bp-board");
   board.append(heroBoard(bp, details, reviewing ? null : commit));
@@ -323,7 +337,7 @@ function renderAssign(panel, bp, seats) {
     if (bp.wins) {
       card.append(element("div", `胜场 ${bp.wins[team] ?? bp.wins[String(team)] ?? 0}`, "bp-side__wins"));
     }
-    card.append(element("div", `${team === 1 ? "红" : "蓝"} ${bp.total_levels?.[team] || 0}/${bp.level_cap}`, "bp-side__points"));
+    if (bp.format !== "tier") card.append(element("div", `${team === 1 ? "红" : "蓝"} ${bp.total_levels?.[team] || 0}/${bp.level_cap}`, "bp-side__points"));
     const label = element("label", "", "switch");
     const input = document.createElement("input");
     input.type = "checkbox";
@@ -382,6 +396,7 @@ export function renderBpPanel() {
     bp.auto_banned_levels,
     bp.format,
     bp.current_level,
+    bp.round_levels,
     bp.wins,
     bp.hero_pool_codes,
     bp.special_modes,

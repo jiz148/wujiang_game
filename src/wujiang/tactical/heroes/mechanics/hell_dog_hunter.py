@@ -95,6 +95,7 @@ class HellDogSkill(Skill):
 
 
 class HellTeleportSkill(Skill):
+    is_displacement_skill = True
     def __init__(self) -> None:
         super().__init__("hell_teleport", "瞬移", "大招：每场一次，瞬移到全场任意完整合法空格；不造成伤害。",
                          max_uses_per_battle=1, target_mode="cell")

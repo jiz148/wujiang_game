@@ -721,6 +721,8 @@ class RoomBPMixin:
             "tier_rounds": int(self.bp_tier_rounds),
             "round_index": round_number,
             "round_count": sum(1 for item in self.bp_tier_plan if self._tier_round_steps(item)),
+            "round_levels": ([int(item["level"]) for item in self.bp_tier_plan
+                              if self._tier_round_steps(item)] if self.bp_format == BP_FORMAT_TIER else []),
             "current_level": None if round_plan is None else int(round_plan["level"]),
             "round_bans": None if round_plan is None else int(round_plan["bans"]),
             "round_picks": None if round_plan is None else int(round_plan["picks"]),

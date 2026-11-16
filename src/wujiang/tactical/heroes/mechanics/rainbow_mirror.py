@@ -29,6 +29,7 @@ class RainbowMirrorNoMoveStatus(FlagStatus):
 
 
 class RainbowMirrorSkill(TargetDestinationCandidates, Skill):
+    is_displacement_skill = True
     ai_candidate_plan = RANKED_CANDIDATES
     requires_direct_unit_target_line = False
 

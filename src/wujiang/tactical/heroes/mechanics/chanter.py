@@ -303,6 +303,7 @@ _CARD_AI_VALUES = {
 
 
 class CardTranspositionSkill(Skill):
+    is_displacement_skill = True
     ai_reaction_score_phase = "after_hidden_source"
 
     def __init__(self) -> None:

@@ -1,5 +1,6 @@
 // Pointer and keyboard interaction on the battle board.
 import { $ } from '../core/dom.js';
+import { directionOnlySelection } from '../tactical/targeting.js';
 import { backstepFollowUpTargetIds, canInteract, currentRespawnPrompt, inspectBoardUnit, isChainMode, isDamageChoiceMode, isRespawnMode, setStagedBackstepRetreatCell, stagedBackstepRetreatCell, unitById } from '../core/net.js';
 import { render } from '../core/render.js';
 import { state, ui } from '../core/state.js';
@@ -7,7 +8,7 @@ import { keyboardHelpIsOpen, syncModalIsolation } from '../core/ui.js';
 import { closeProfileModal, profileModalVisible } from '../platform/auth.js';
 import { attackTargetIdAtCell, completeTutorialUnitSelection, explainInvalidBoardChoice, performAction } from '../tactical/room-api.js';
 import { clearActionSelection } from '../tactical/session.js';
-import { actionNeedsTarget, attackChoicePatternSelection, bodyDirectionSelection, crowFormationSelection, currentPreview, movePathAnchorForClickedCell, movePathIndexForClickedCell, movePathSelection, multiUnitSelection, patternSelection, patternSelectionIsOrdered, reviveSelectionCells, reviveUnitCellSelection, sameCell, setStagedBodyCells, setStagedCrowFormationRavenIds, setStagedCrowFormationTargetId, setStagedMovePath, setStagedMultiTargetIds, setStagedPatternCells, setStagedReviveCell, setStagedStatCells, setStagedUnitDirectionTargetId, stagedAttackActionPayload, stagedBodyCells, stagedCrowFormationRavenIds, stagedCrowFormationTargetId, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, statCellRequired, statCellSelection, unitDirectionSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
+import { actionNeedsTarget, attackChoicePatternSelection, bodyDirectionSelection, cellDirectionSelection, crowFormationSelection, currentPreview, movePathAnchorForClickedCell, movePathIndexForClickedCell, movePathSelection, multiUnitSelection, patternSelection, patternSelectionIsOrdered, reviveSelectionCells, reviveUnitCellSelection, sameCell, setStagedBodyCells, setStagedCellDirectionCell, setStagedCrowFormationRavenIds, setStagedCrowFormationTargetId, setStagedMovePath, setStagedMultiTargetIds, setStagedPatternCells, setStagedReviveCell, setStagedStatCells, setStagedUnitCellsPlacements, setStagedUnitCellsTargetId, setStagedUnitDirectionTargetId, stagedAttackActionPayload, stagedBodyCells, stagedCrowFormationRavenIds, stagedCrowFormationTargetId, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedUnitCellsPlacements, stagedUnitCellsTargetId, statCellRequired, statCellSelection, unitCellsSelection, unitDirectionSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
 import { positionKey, positionsToSet, selectedAction, targetIdsToSet } from '../tactical/vfx.js';
 
 export function onBoardClick(x, y, occupant) {
@@ -32,8 +33,11 @@ export function onBoardClick(x, y, occupant) {
       movePathSelection(action)
       || patternSelection(action)
       || multiUnitSelection(action)
+      || unitCellsSelection(action)
       || crowFormationSelection(action)
       || unitDirectionSelection(action)
+      || cellDirectionSelection(action)
+      || directionOnlySelection(action)
       || statCellSelection(action)
       || bodyDirectionSelection(action)
       || reviveUnitCellSelection(action)
@@ -198,6 +202,21 @@ export function onBoardClick(x, y, occupant) {
     return;
   }
 
+  if (unitCellsSelection(action)) {
+    const placements = stagedUnitCellsPlacements(action);
+    if (occupant && canUseUnit) {
+      setStagedUnitCellsTargetId(occupant.id);
+      render();
+      return;
+    }
+    if (!canUseCell || !stagedUnitCellsTargetId(action)) return;
+    const maxTargets = Number(unitCellsSelection(action).max_targets || 1);
+    if (placements.length >= maxTargets) return;
+    setStagedUnitCellsPlacements([...placements, { id: stagedUnitCellsTargetId(action), x, y }]);
+    render();
+    return;
+  }
+
   if (crowFormationSelection(action)) {
     if (!(occupant && canUseUnit)) {
       explainInvalidBoardChoice(action, occupant);
@@ -270,6 +289,15 @@ export function onBoardClick(x, y, occupant) {
     render();
     return;
   }
+
+  if (cellDirectionSelection(action)) {
+    if (!canUseCell) return;
+    setStagedCellDirectionCell({ x, y });
+    render();
+    return;
+  }
+
+  if (directionOnlySelection(action)) return;
 
   if (isChainMode()) {
     if (!actionNeedsTarget(action)) return;

@@ -57,7 +57,7 @@ class AILateEffectScoring:
             before = {unit.unit_id: (unit.current_hp, unit.alive, unit.total_shields(), unit.has_status("雪崩"),
                                      not unit.cannot_attack, not unit.cannot_move,
                                      sum(candidate.timing == "active" and candidate.cooldown_remaining == 0
-                                         and candidate.mana_cost <= unit.current_mana
+                                         and candidate.mana_cost <= candidate.mana_payer(battle, unit).current_mana
                                          for candidate in unit.skills) if not unit.cannot_use_skills else 0)
                       for unit in targets}
             try:

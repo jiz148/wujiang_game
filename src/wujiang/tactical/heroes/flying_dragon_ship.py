@@ -12,10 +12,12 @@ from wujiang.tactical.heroes.ai_policy import (AIReactionScoreContext,
     AISkillScoreContext, HeroAIPolicy)
 from wujiang.tactical.heroes.common import (
     FlyingTrait, HealSkill, MagicImmunityStatus, StatModifierStatus,
-    ensure_distance, payload_target_unit, positions_to_dict,
+    ensure_distance, match_payload_pattern, pattern_selection_preview,
+    payload_target_unit, positions_to_dict,
 )
 from wujiang.tactical.heroes.mechanics.blood_eater import RecoverManaSkill
 from wujiang.tactical.heroes.mechanics.next_five_effects import damage_followup_effect_applies
+from wujiang.tactical.heroes.mechanics.next_five_effects import remote_rectangle_patterns
 
 
 SHIP_CODE = "flying_dragon_ship_atlanta"
@@ -75,6 +77,138 @@ class ShipCrewAttackTrait(Trait):
         return value + sum(rider.hero_code == "excel_r329" for rider in battle.riders_for(ship))
 
 
+def _crew_aboard(battle: Battle, ship: Unit, code: str) -> bool:
+    return any(rider.hero_code == code and rider.alive for rider in battle.riders_for(ship))
+
+
+def _resolve_helmsman_crossing(battle: Battle, actor: Unit, action: QueuedAction) -> None:
+    cells = battle.payload_positions(action.payload, "cells")
+    target = battle.units.get(str(action.payload.get("crossed_unit_id") or ""))
+    if target is None or not target.alive or target.position is None or not any(
+            cell in battle.unit_cells(target) for cell in cells):
+        return
+    battle.resolve_damage(DamageContext(
+        source=actor, target=target, attack_power=4.0, is_skill=False,
+        action_name="舵手穿人伤", tags={"movement", "pass_through_damage", "ship_helmsman"},
+    ))
+
+
+class ShipHelmsmanTrait(Trait):
+    def __init__(self) -> None:
+        super().__init__("舵手船体机动", "舵手乘骑时船速+2，穿人后逐次造成固定4伤。")
+
+    def modify_stat(self, stat_name: str, value: float) -> float:
+        ship = self.owner
+        battle_ref = getattr(ship, "_battle_ref", None)
+        battle = battle_ref() if battle_ref is not None else None
+        if stat_name == "speed" and ship is not None and battle is not None and _crew_aboard(
+                battle, ship, "excel_r330"):
+            return value + 2
+        return value
+
+    def on_unit_moved(self, battle: Battle, ctx: Any) -> None:
+        ship = self.owner
+        if ctx.unit is not ship or not _crew_aboard(battle, ship, "excel_r330"):
+            return
+        riders = {rider.unit_id for rider in battle.riders_for(ship)}
+        crossings = [(unit, cell) for unit, cell in battle.path_crossing_events(ship, ctx.path)
+                     if unit.unit_id not in riders]
+        for index, (unit, cell) in enumerate(crossings, 1):
+            battle.queue_skill_effect_action(
+                actor=ship, display_name="舵手穿人伤", effect_code="ship_helmsman_crossing",
+                effect_resolver=_resolve_helmsman_crossing,
+                payload={"crossed_unit_id": unit.unit_id, "cells": [cell.to_dict()]},
+                target_units=[unit], target_cells=[cell], include_cell_units=False,
+                segment_index=index, segment_count=len(crossings),
+            )
+
+
+class ShipScoutGuardTrait(Trait):
+    def __init__(self) -> None:
+        super().__init__("侦察兵船体免伤", "侦察兵乘骑时，船每次受伤独立有1/3几率完全免去。")
+
+    def on_final_damage(self, battle: Battle, ctx: DamageContext) -> None:
+        ship = self.owner
+        if ctx.target is ship and _crew_aboard(battle, ship, "excel_r331"):
+            ctx.complete_block_chance = max(ctx.complete_block_chance, 1 / 3)
+            ctx.complete_block_label = "侦察兵船体免伤"
+
+
+class ShipFighterAttackTrait(Trait):
+    def __init__(self) -> None:
+        super().__init__("斗士船体加攻", "斗士乘骑时，飞龙船攻+1。")
+
+    def modify_stat(self, stat_name: str, value: float) -> float:
+        ship = self.owner
+        battle_ref = getattr(ship, "_battle_ref", None)
+        battle = battle_ref() if battle_ref is not None else None
+        return value + 1 if stat_name == "attack" and ship is not None and battle is not None and _crew_aboard(
+            battle, ship, "excel_r332") else value
+
+
+class ShipGunnerAreaTrait(Trait):
+    def __init__(self) -> None:
+        super().__init__("炮手船体区攻", "炮手乘骑时，飞龙船范+2且普攻改为2×2区域。")
+
+    def aboard(self, battle: Battle, actor: Unit) -> bool:
+        return actor is self.owner and _crew_aboard(battle, actor, "excel_r333")
+
+    def modify_targeting_range(self, value: int) -> int:
+        ship = self.owner
+        battle_ref = getattr(ship, "_battle_ref", None)
+        battle = battle_ref() if battle_ref is not None else None
+        return value + 2 if ship is not None and battle is not None and self.aboard(battle, ship) else value
+
+    def patterns(self, battle: Battle, actor: Unit) -> list[list[Position]]:
+        return remote_rectangle_patterns(battle, actor, 2, 2) if self.aboard(battle, actor) else []
+
+    def basic_attack_area_cells(self, battle: Battle, actor: Unit,
+                                payload: dict[str, Any] | None = None) -> list[Position] | None:
+        if not self.aboard(battle, actor):
+            return None
+        if not payload or not (payload.get("attack_cells") or payload.get("cells")):
+            return []
+        return match_payload_pattern({"cells": payload.get("attack_cells") or payload.get("cells")},
+                                     self.patterns(battle, actor))
+
+    def basic_attack_payload_metadata(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.aboard(battle, actor):
+            return {}
+        metadata: dict[str, Any] = {"area_attack": True}
+        if not payload.get("cells") and not payload.get("attack_cells") and payload.get("target_unit_id"):
+            target = battle.units.get(str(payload["target_unit_id"]))
+            if target is not None and target.alive and target.position is not None:
+                target_cells = set(battle.unit_cells(target))
+                patterns = [cells for cells in self.patterns(battle, actor)
+                            if target_cells.intersection(cells)]
+                if patterns:
+                    def area_value(cells: list[Position]) -> float:
+                        value = 0.0
+                        for unit in battle.effect_units_at_cells(cells):
+                            if unit.physical_immunity:
+                                continue
+                            hit_value = 1.0 if unit.total_shields() > 0 else min(
+                                unit.current_hp, max(0.0, actor.stat("attack") - unit.stat("defense") + 1))
+                            value += hit_value if unit.player_id != actor.player_id else -1.6 * hit_value
+                        return value
+                    best = max(patterns, key=area_value)
+                    metadata["attack_cells"] = positions_to_dict(best)
+        return metadata
+
+    def basic_attack_preview(self, battle: Battle, actor: Unit,
+                             payload: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        if not self.aboard(battle, actor):
+            return None
+        patterns = self.patterns(battle, actor)
+        preview = pattern_selection_preview(patterns)
+        covered = {cell for pattern in patterns for cell in pattern}
+        preview.update({"target_unit_ids": [unit.unit_id for unit in battle.all_units()
+                                            if unit.alive and unit.position is not None
+                                            and any(cell in covered for cell in battle.unit_cells(unit))],
+                        "secondary_cells": [], "requires_target": True})
+        return preview
+
+
 class FlyingDragonShip(AbstractHero):
     hero_code = SHIP_CODE
     simple_ship_cover_reaction = True
@@ -101,7 +235,8 @@ class FlyingDragonShip(AbstractHero):
         return []
 
     def build_traits(self) -> list[Trait]:
-        return [FlyingTrait(), ShipCrewAttackTrait()]
+        return [FlyingTrait(), ShipCrewAttackTrait(), ShipHelmsmanTrait(), ShipScoutGuardTrait(),
+                ShipFighterAttackTrait(), ShipGunnerAreaTrait()]
 
     def action_skills(self) -> list[Skill]:
         battle_ref = getattr(self, "_battle_ref", None)
@@ -113,12 +248,15 @@ class FlyingDragonShip(AbstractHero):
                 if not isinstance(skill, ShipBorrowedSkill) or skill.rider_id in aboard]
 
     def on_rider_changed(self, battle: Battle) -> None:
+        # Boarding updates must not erase the ship's inherent FlyingTrait.
+        self.ignore_units_while_moving = self.has_flying or _crew_aboard(battle, self, "excel_r330")
         existing = {skill.code for skill in self.skills}
         for rider in battle.riders_for(self):
             if not any(trait.name == "飞龙船代施" for trait in rider.traits):
                 continue
             for source_skill in rider.skills:
-                if source_skill.mana_cost <= 0 or source_skill.code == "flying_dragon_ship":
+                if (source_skill.mana_cost <= 0 or source_skill.code == "flying_dragon_ship"
+                        or not getattr(source_skill, "ship_borrowable", True)):
                     continue
                 code = f"ship_borrow__{rider.unit_id}__{source_skill.code}"
                 if code not in existing:
@@ -141,6 +279,14 @@ _SHIP_PLACEMENT_PROBES = {player_id: FlyingDragonShip(player_id) for player_id i
 
 
 class ShipBorrowedSkill(Skill):
+    def ai_payload_value(self, battle: Battle, actor: Unit,
+                               payload: dict[str, Any]) -> float | None:
+        return self.inner.ai_payload_value(battle, actor, payload)
+
+    def ai_optional_choice_score(self, battle: Battle, actor: Unit,
+                                 prompt: dict[str, Any], choice: str) -> float | None:
+        return self.inner.ai_optional_choice_score(battle, actor, prompt, choice)
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.nested_skill_score(
             context,
@@ -172,6 +318,7 @@ class ShipBorrowedSkill(Skill):
         )
         self.rider_id = rider_id
         self.source_skill = source_skill
+        self.is_displacement_skill = source_skill.is_displacement_skill
         self.inner = copy(source_skill)
         self.inner.mana_cost = 0
         self.inner.max_uses_per_turn = None
@@ -182,6 +329,10 @@ class ShipBorrowedSkill(Skill):
         self.target_unit_is_anchor = source_skill.target_unit_is_anchor
         self.target_cells_are_geometry_only = source_skill.target_cells_are_geometry_only
         self.selection_cells_are_effect_cells = source_skill.selection_cells_are_effect_cells
+        self.requires_damage_choice = bool(getattr(source_skill, "requires_damage_choice", False))
+        self.requires_choice_replay_when_used = source_skill.requires_choice_replay_when_used
+        self.ai_payload_value_owned = source_skill.ai_payload_value_owned
+        self.ai_optional_choice_owned = source_skill.ai_optional_choice_owned
 
     def bind(self, owner: Unit) -> "ShipBorrowedSkill":
         super().bind(owner)
@@ -196,6 +347,8 @@ class ShipBorrowedSkill(Skill):
         return data
 
     def _check_source(self, battle: Battle, actor: Unit) -> tuple[bool, str]:
+        if not getattr(self.source_skill, "ship_borrowable", True):
+            return False, "该乘员技能不能由飞龙船代施。"
         rider = battle.units.get(self.rider_id)
         if (rider is None or not rider.alive or rider.banished or rider.position is None
                 or rider.mounted_on_unit_id != actor.unit_id):
@@ -332,6 +485,7 @@ class DepartureMagicImmunity(MagicImmunityStatus):
 
 
 class DepartureSkill(Skill):
+    is_displacement_skill = True
     directions = ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1))
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float:

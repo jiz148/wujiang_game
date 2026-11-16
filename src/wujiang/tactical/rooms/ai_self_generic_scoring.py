@@ -190,7 +190,7 @@ class AISelfAndGenericScoring:
         if not enemies:
             return -1000.0
         body = [anchor.offset(dx, dy) for dy in range(5) for dx in range(5)]
-        distance = lambda unit, cells: min(a.distance_to(b) for a in battle.unit_cells(unit) for b in cells)
+        distance = lambda unit, cells: min((a.distance_to(b) for a in battle.unit_cells(unit) for b in cells), default=999)
         nearest = min(distance(enemy, body) for enemy in enemies)
         score = 25.0 + max(0.0, 7.0 - nearest) * 6.0
         score += sum(16.0 for enemy in enemies if distance(enemy, body) <= 2)
@@ -570,7 +570,8 @@ class AISelfAndGenericScoring:
             if not unit.alive or unit.banished or unit.position is None:
                 continue
             paid_options = [skill for skill in unit.skills
-                            if skill.mana_cost > 0 and skill.mana_cost <= unit.current_mana + 1e-9]
+                            if skill.mana_cost > 0
+                            and skill.mana_cost <= skill.mana_payer(battle, unit).current_mana + 1e-9]
             if not paid_options:
                 continue
             uses = min(2.0, len(paid_options) * 0.7)

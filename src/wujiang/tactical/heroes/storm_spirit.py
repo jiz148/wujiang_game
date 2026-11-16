@@ -257,6 +257,7 @@ def _resolve_storm_crossing(battle: Battle, actor: Unit, action: Any) -> None:
 
 
 class ElectronicStormSkill(Skill):
+    is_displacement_skill = True
     ai_nonhostile_throttle_exempt = True
 
     target_cells_are_geometry_only = True
@@ -511,6 +512,12 @@ class LightningChainLockStatus(StatusEffect):
 
 
 class LightningChainSkill(Skill):
+    is_displacement_skill = True
+
+    def moves_owner_on_use(self, battle: Battle, actor: Unit,
+                           payload: dict[str, Any] | None) -> bool:
+        return False
+
     def __init__(self) -> None:
         super().__init__("lightning_chain", "雷电锁链", "费1魔、每本人轮一次；范内直线单体无伤破魔，推一格并封锁其下个本人轮主动技能和普通移动。",
                          mana_cost=1, max_uses_per_turn=1, target_mode="enemy")

@@ -61,7 +61,7 @@ class BattlePresentationMixin:
     def record_visual_event(
         self,
         *,
-        kind: Literal["attack", "skill", "defense"],
+        kind: Literal["attack", "skill", "defense", "move"],
         display_name: str,
         actor: Unit | None = None,
         action_type: str = "",
@@ -296,13 +296,19 @@ class BattlePresentationMixin:
 
 
     def emit_visual_event_for_queued_action(self, actor: Unit, queued_action: QueuedAction) -> None:
+        from wujiang.tactical.engine.core import Position
+
         payload = queued_action.payload
         action_code = ""
-        kind: Literal["attack", "skill", "defense"]
+        kind: Literal["attack", "skill", "defense", "move"]
         target_unit_ids = list(queued_action.target_unit_ids)
         target_cells = list(queued_action.target_cells)
 
-        if queued_action.action_type == "attack":
+        if queued_action.action_type == "move":
+            kind = "move"
+            action_code = "move"
+            target_cells = [Position(int(payload["x"]), int(payload["y"]))]
+        elif queued_action.action_type == "attack":
             kind = "attack"
             action_code = str(payload.get("attack_code") or "attack")
         elif queued_action.action_type == "skill":
@@ -447,6 +453,7 @@ class BattlePresentationMixin:
             and not unit.cannot_move
             and not unit.cannot_normal_move
             and bool(move_targets)
+            and all(component.can_use_normal_move(self, unit)[0] for component in unit.iter_components())
         )
         attack_targets: list[str] = []
         attack_cells: list[dict[str, int]] = []

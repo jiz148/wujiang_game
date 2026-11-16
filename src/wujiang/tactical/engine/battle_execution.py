@@ -7,6 +7,16 @@ from typing import Any, Optional
 class BattleExecutionMixin:
     """A cohesive Battle responsibility with no independent state."""
 
+    def action_requires_choice_replay(self, payload: dict[str, Any]) -> bool:
+        """A chosen skill may prompt during its own multi-stage resolution."""
+        if payload.get("type") != "skill":
+            return False
+        actor = self.units.get(str(payload.get("unit_id") or ""))
+        if actor is None:
+            return False
+        skill = actor.skill_map().get(str(payload.get("skill_code") or ""))
+        return bool(skill is not None and skill.requires_choice_replay_when_used)
+
     def perform_action(self, payload: dict[str, Any]) -> None:
         from wujiang.tactical.engine.core import (
             ActionError,
@@ -15,9 +25,9 @@ class BattleExecutionMixin:
         if pending is not None:
             if payload.get("type") != "damage_choice" or payload.get("unit_id") != pending["unit_id"]:
                 raise ActionError("请先完成本次伤害选择。")
-            if pending.get("kind") in {"rotation", "attack_swap", "formation", "optional_swap", "optional_placement", "end_dash", "electronic_teleport", "hell_sacrifice", "hell_death_strike", "hell_rescue", "hell_dragon_first", "hell_dragon_second", "hell_dragon_effect", "gentleman_guard"}:
+            if pending.get("kind") in {"rotation", "attack_swap", "formation", "optional_swap", "optional_placement", "required_placement", "required_direction", "optional_heal_target", "optional_unit_selection", "required_unit_selection", "guardian_legacy", "end_dash", "electronic_teleport", "hell_sacrifice", "hell_death_strike", "hell_rescue", "hell_dragon_first", "hell_dragon_second", "hell_dragon_effect", "gentleman_guard"}:
                 choice = str(payload.get("target_unit_id") or "")
-                if (choice == "decline" and pending.get("kind") in {"attack_swap", "formation"}) or (choice != "decline" and choice not in pending["options"]):
+                if (choice == "decline" and pending.get("kind") in {"attack_swap", "formation", "required_unit_selection", "required_placement", "required_direction"}) or (choice != "decline" and choice not in pending["options"]):
                     raise ActionError("请选择当前提示中的合法对象与落点。")
             else:
                 choice = str(payload.get("stat_name") or "")
@@ -33,7 +43,7 @@ class BattleExecutionMixin:
             return
         if payload.get("type") == "damage_choice":
             raise ActionError("现在没有待决定的伤害。")
-        if not getattr(self, "_ai_probe_active", False) and (any(
+        if not getattr(self, "_ai_probe_active", False) and (self.action_requires_choice_replay(payload) or any(
             getattr(component, "requires_damage_choice", False)
             for unit in self.all_units() if unit.alive and not unit.banished
             for component in unit.iter_components()
@@ -75,6 +85,7 @@ class BattleExecutionMixin:
                 "stats": required.stats,
                 "options": required.options,
                 "protected_unit_id": required.protected_unit_id,
+                "choice_context": required.choice_context,
                 "action_payload": deepcopy(payload),
                 "decisions": list(decisions),
             }
@@ -98,6 +109,7 @@ class BattleExecutionMixin:
                 "stats": required.stats,
                 "options": required.options,
                 "protected_unit_id": required.protected_unit_id,
+                "choice_context": required.choice_context,
                 "action_payload": deepcopy(payload),
                 "decisions": list(decisions),
             }
@@ -207,7 +219,8 @@ class BattleExecutionMixin:
 
     def optional_position_choice(self, actor: Unit, options: list[str], *,
                                  action_name: str, kind: str, damage: float = 0,
-                                 protected_unit_id: str | None = None) -> Optional[str]:
+                                 protected_unit_id: str | None = None,
+                                 choice_context: dict[str, Any] | None = None) -> Optional[str]:
         from wujiang.tactical.engine.core import (
             DamageChoiceRequired,
         )
@@ -225,7 +238,7 @@ class BattleExecutionMixin:
             return None
         raise DamageChoiceRequired(unit_id=actor.unit_id, action_name=action_name, damage=round(float(damage), 4),
                                    event_index=event_index, kind=kind, options=list(options),
-                                   protected_unit_id=protected_unit_id)
+                                   protected_unit_id=protected_unit_id, choice_context=choice_context)
 
 
     def destroyed_active_turn_is_idle(self) -> bool:

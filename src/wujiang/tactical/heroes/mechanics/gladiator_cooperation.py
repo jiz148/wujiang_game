@@ -167,7 +167,7 @@ class GladiatorRoarSkill(Skill):
         return context.simulated_reaction(self, 8.0)
 
     def __init__(self) -> None:
-        super().__init__("gladiator_roar", "咆哮", "敌方回合一次连锁：守+1至该敌英雄回合末，11×11内友方单体受体改向本人。",
+        super().__init__("gladiator_roar", "咆哮", "敌方回合一次连锁；没有伤害；守+1至该敌英雄回合末，11×11内友方单体受体改向本人。",
                          max_uses_per_turn=1, timing="passive", target_mode="self")
 
     def can_react_to(self, battle: Battle, actor: Unit, queued_action: Any) -> tuple[bool, str]:
