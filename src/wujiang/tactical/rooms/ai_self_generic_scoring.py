@@ -570,7 +570,8 @@ class AISelfAndGenericScoring:
             if not unit.alive or unit.banished or unit.position is None:
                 continue
             paid_options = [skill for skill in unit.skills
-                            if skill.mana_cost > 0 and skill.mana_cost <= unit.current_mana + 1e-9]
+                            if skill.mana_cost > 0
+                            and skill.mana_cost <= skill.mana_payer(battle, unit).current_mana + 1e-9]
             if not paid_options:
                 continue
             uses = min(2.0, len(paid_options) * 0.7)

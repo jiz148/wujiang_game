@@ -37,6 +37,8 @@ class BattleChainMixin:
         resolved_payload["effect_code"] = effect_code
         if self.resolving_action is not None:
             resolved_payload.setdefault("declaration_id", self.resolving_action.payload.get("declaration_id"))
+            resolved_payload.setdefault("origin_action_type", self.resolving_action.payload.get(
+                "origin_action_type", self.resolving_action.action_type))
         if actor.position is not None:
             resolved_payload.setdefault("declared_source_x", actor.position.x)
             resolved_payload.setdefault("declared_source_y", actor.position.y)

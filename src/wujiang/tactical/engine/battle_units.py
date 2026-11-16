@@ -7,11 +7,21 @@ from typing import Any, Optional
 class BattleUnitsMixin:
     """A cohesive Battle responsibility with no independent state."""
 
+    def unit_entry_allowed(self, unit: Unit) -> tuple[bool, str]:
+        for effect in self.field_effects:
+            allowed, reason = effect.allows_unit_entry(self, unit)
+            if not allowed:
+                return False, reason
+        return True, ""
+
     def add_unit(self, unit: Unit, position: Position, *, allow_stealth_overlap: bool = False, trigger_enter_effects: bool = True) -> None:
         from wujiang.tactical.engine.core import (
             ActionError,
             weakref,
         )
+        allowed, reason = self.unit_entry_allowed(unit)
+        if not allowed:
+            raise ActionError(reason)
         if not self.can_place_unit(
             unit,
             position,
@@ -256,25 +266,28 @@ class BattleUnitsMixin:
 
     def prepay_skill_resources(self, skill: Skill, actor: Unit, payload: dict[str, Any]) -> None:
         previous = getattr(actor, "_paying_skill_cost", False)
+        payer = skill.mana_payer(self, actor)
+        payer_previous = getattr(payer, "_paying_skill_cost", False)
         actor._paying_skill_cost = True
+        payer._paying_skill_cost = True
         try:
-            mana_before = actor.current_mana
+            mana_before = payer.current_mana
             skill.prepay_resources(self, actor, payload)
             if skill.timing == "active":
                 actor._last_active_skill_code = skill.code
-            mana_paid = round(max(0.0, mana_before - actor.current_mana), 2)
+            mana_paid = round(max(0.0, mana_before - payer.current_mana), 2)
             if mana_paid > 0:
                 for effect in list(self.field_effects):
                     hook = getattr(effect, "on_skill_mana_paid", None)
                     if callable(hook):
-                        hook(self, actor, skill, mana_paid)
+                        hook(self, payer, skill, mana_paid)
                 for observer in list(self.all_units()):
                     if not observer.alive or observer.banished or observer.position is None:
                         continue
                     for component in list(observer.iter_components()):
                         hook = getattr(component, "on_skill_mana_paid", None)
                         if callable(hook):
-                            hook(self, actor, skill, mana_paid)
+                            hook(self, payer, skill, mana_paid)
             if actor.alive:
                 for observer in list(self.all_units()):
                     if not observer.alive or observer.banished or observer.position is None:
@@ -286,6 +299,11 @@ class BattleUnitsMixin:
                 actor._paying_skill_cost = previous
             else:
                 actor.__dict__.pop("_paying_skill_cost", None)
+            if payer is not actor:
+                if payer_previous:
+                    payer._paying_skill_cost = payer_previous
+                else:
+                    payer.__dict__.pop("_paying_skill_cost", None)
 
 
     def mounted_unit_for(self, rider: Unit | None) -> Optional[Unit]:

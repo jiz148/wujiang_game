@@ -349,6 +349,7 @@ class DescentMomentAttackStatus(StatusEffect):
 
 
 class DescentMomentSkill(TargetDestinationCandidates, Skill):
+    is_displacement_skill = True
     ai_enemy_impact_requirement = False
     ai_candidate_plan = RANKED_CANDIDATES
     ai_destination_fields = ("dest_x", "dest_y")
@@ -512,6 +513,7 @@ class DescentMomentSkill(TargetDestinationCandidates, Skill):
 
 
 class ShadowCounterSkill(Skill):
+    is_displacement_skill = True
     ai_reaction_score_phase = "after_hidden_source"
 
     def __init__(self) -> None:

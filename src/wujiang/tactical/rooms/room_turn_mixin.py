@@ -127,7 +127,7 @@ class RoomTurnMixin:
                 return False
             payload = {"type": "damage_choice", "unit_id": prompt["unit_id"],
                        "stat_name": "decline", "target_unit_id": (prompt["options"][0]
-                       if prompt.get("kind") in {"attack_swap", "formation"} else "decline")}
+                       if prompt.get("kind") in {"attack_swap", "formation", "required_placement", "required_unit_selection", "required_direction"} else "decline")}
             action_label = ("自动剑斗布阵" if prompt.get("kind") == "formation" else
                             "自动交换位置" if prompt.get("kind") == "attack_swap" else
                             "自动放弃可选换位或搬运" if prompt.get("kind") in {"optional_swap", "optional_placement"} else

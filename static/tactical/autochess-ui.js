@@ -1074,6 +1074,7 @@ function scheduleChessVfx(callback, delay) {
 }
 
 function chessVfxTheme(event) {
+  if (event.kind === 'move') return 'wind';
   if (event.kind === 'attack') return 'attack';
   if (event.kind === 'defense') return 'barrier';
   const name = `${event.action_code || ''} ${event.display_name || ''}`.toLowerCase();
@@ -1081,6 +1082,35 @@ function chessVfxTheme(event) {
   if (/(lightning|storm|thunder|雷|电)/.test(name)) return 'storm';
   if (/(shadow|dark|暗|影)/.test(name)) return 'shadow';
   return 'arcane';
+}
+
+function showChessActionCue(stage, screen, battle, event, viewerSide, duration) {
+  const layer = document.getElementById('chess-battle-vfx');
+  if (!layer || !stage?.isConnected || !event) return;
+  const units = new Map((battle.units || []).map((unit) => [unit.id, unit]));
+  const actorId = event.kind === 'defense' ? event.target_unit_ids?.[0] : event.actor_id;
+  const cell = units.get(actorId)?.position || event.source_cell;
+  if (!cell) return;
+  const width = Number(battle.board?.width || 10);
+  const x = Number(viewerSide) === 1 ? Number(cell.x) : width - 1 - Number(cell.x);
+  const tile = stage.querySelector(`.cell[data-x="${x}"][data-y="${Number(cell.y)}"]`);
+  if (!tile) return;
+  const rect = tile.getBoundingClientRect();
+  const host = screen.getBoundingClientRect();
+  const cue = node('div', `battle-action-cue is-${event.kind || 'skill'}`);
+  cue.style.left = `${rect.left - host.left + rect.width / 2}px`;
+  cue.style.top = `${rect.top - host.top + rect.height / 2}px`;
+  const cueX = rect.left - host.left + rect.width / 2;
+  const cueY = rect.top - host.top + rect.height / 2;
+  cue.style.setProperty('--cue-x-shift', cueX < 100 ? '-12%' : cueX > host.width - 100 ? '-88%' : '-50%');
+  cue.classList.toggle('is-below', cueY < 64);
+  cue.style.setProperty('--cue-duration', `${duration}ms`);
+  const type = event.kind === 'move' ? '位移'
+    : event.kind === 'attack' ? '攻击' : event.kind === 'defense' ? '应对' : '技能';
+  cue.append(node('span', 'battle-action-cue__type', type),
+    node('span', 'battle-action-cue__name', event.display_name || type));
+  layer.append(cue);
+  scheduleChessVfx(() => cue.remove(), duration);
 }
 
 function drawChessEffect(stage, screen, battle, event, viewerSide, timing) {
@@ -1180,7 +1210,17 @@ function playChessEffects(stage, battle, key, viewerSide) {
   fresh.forEach((event, index) => {
     scheduleChessVfx(() => {
       if (key !== chessVfxKey) return;
-      drawChessEffect(screen.querySelector('.autochess-board-stage'), screen, battle, event, viewerSide, timing);
+      const currentStage = screen.querySelector('.autochess-board-stage');
+      const reduced = Boolean(globalThis.WujiangBattleFeedback?.reducedMotion());
+      showChessActionCue(currentStage, screen, battle, event, viewerSide,
+        reduced ? 180 : Math.max(360, 600 / Math.max(1, Number(state.room?.chess_battle_speed) || 1)));
+      if (reduced) {
+        drawChessEffect(currentStage, screen, battle, event, viewerSide, timing);
+      } else {
+        scheduleChessVfx(() => {
+          if (key === chessVfxKey) drawChessEffect(screen.querySelector('.autochess-board-stage'), screen, battle, event, viewerSide, timing);
+        }, Math.max(140, 270 / Math.max(1, Number(state.room?.chess_battle_speed) || 1)));
+      }
     }, index * timing.spacing);
   });
 }

@@ -282,7 +282,8 @@ class DamageChoiceRequired(Exception):
     def __init__(self, *, unit_id: str, action_name: str, damage: float,
                  event_index: int, stats: list[str] | None = None,
                  kind: str = "stat", options: list[str] | None = None,
-                 protected_unit_id: str | None = None) -> None:
+                 protected_unit_id: str | None = None,
+                 choice_context: dict[str, Any] | None = None) -> None:
         self.unit_id = unit_id
         self.action_name = action_name
         self.damage = damage
@@ -291,6 +292,7 @@ class DamageChoiceRequired(Exception):
         self.kind = kind
         self.options = options or []
         self.protected_unit_id = protected_unit_id
+        self.choice_context = choice_context or {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -368,10 +370,20 @@ class BattleComponent(ABC):
     all_skills_pierce_shields = False
     ignores_incoming_piercing = False
     separate_basic_attack_windows = False
+    ai_optional_choice_owned = False
+
+    def ai_optional_choice_score(self, battle: "Battle", actor: "Unit",
+                                 prompt: dict[str, Any], choice: str) -> Optional[float]:
+        """The owning skill or trait can value a generic prompted selection."""
+        return None
 
     def limit_hp_loss(self, amount: float) -> float:
         """Pure final-loss limit; may reduce, never amplify, an individual loss."""
         return amount
+
+    def max_recoverable_hp(self) -> float | None:
+        """An optional ceiling for both battle healing and direct recovery."""
+        return None
 
     def __init__(self, name: str, description: str = "") -> None:
         self.name = name
@@ -393,6 +405,10 @@ class BattleComponent(ABC):
         return False
 
     def grants_magic_immunity_to(self, battle: "Battle", unit: "Unit") -> bool:
+        return False
+
+    def reveals_stealth_to(self, battle: "Battle", player_id: int, target: "Unit") -> bool:
+        """An observer-owned temporary detector may expose a hidden target."""
         return False
 
     def projected_trait_for(self, battle: "Battle", unit: "Unit") -> Optional["Trait"]:
@@ -419,6 +435,10 @@ class BattleComponent(ABC):
     def can_use_basic_attack(self, battle: "Battle", actor: "Unit", payload: dict[str, Any]) -> tuple[bool, str]:
         return True, ""
 
+    def can_use_normal_move(self, battle: "Battle", actor: "Unit") -> tuple[bool, str]:
+        """Check a component-owned movement resource before a move is declared."""
+        return True, ""
+
     def modify_targeting_range(self, value: int) -> int:
         return value
 
@@ -440,6 +460,10 @@ class BattleComponent(ABC):
         cost: float,
     ) -> float:
         return cost
+
+    def skill_mana_payer(self, battle: "Battle", actor: "Unit", skill: "Skill") -> Optional["Unit"]:
+        """Optionally provide the resource owner for a skill cast by this unit."""
+        return None
 
     def allows_split_normal_movement(self, battle: "Battle", actor: "Unit") -> bool:
         return False
@@ -504,6 +528,10 @@ class BattleComponent(ABC):
     def on_unit_moved(self, battle: "Battle", ctx: "MoveContext") -> None:
         return None
 
+    def treatable_levels(self, battle: "Battle") -> tuple[int, ...]:
+        """Optional in-battle level identities supplied by this component."""
+        return ()
+
     def on_unit_destroyed(self, battle: "Battle", destroyed_unit: "Unit") -> None:
         """Observe a real destruction after its final board cells are recorded."""
         return None
@@ -516,6 +544,10 @@ class BattleComponent(ABC):
         """Pay validated normal movement costs before moving or entering effects."""
         return None
 
+    def on_before_move(self, battle: "Battle", ctx: "MoveContext") -> None:
+        """React to a validated movement attempt before the body changes cells."""
+        return None
+
     def on_before_damage(self, battle: "Battle", ctx: "DamageContext") -> None:
         return None
 
@@ -525,6 +557,10 @@ class BattleComponent(ABC):
 
     def on_before_hp_loss(self, battle: "Battle", ctx: "DamageContext") -> None:
         """Adjust a positive HP-loss opportunity after shields, immunity and evasion."""
+        return None
+
+    def on_final_hp_loss(self, battle: "Battle", ctx: "DamageContext") -> None:
+        """Let source or field effects replace the final loss after every defense resolves."""
         return None
 
     def on_after_damage(self, battle: "Battle", ctx: "DamageContext") -> None:
@@ -718,6 +754,10 @@ class StatusEffect(BattleComponent):
 class BattleFieldEffect(BattleComponent):
     kind = "field"
 
+    def allows_unit_entry(self, battle: "Battle", unit: "Unit") -> tuple[bool, str]:
+        """Reject an incoming body before placement or revival changes its state."""
+        return True, ""
+
     def blocks_action_effect(self, battle: "Battle", unit: "Unit", queued_action: "QueuedAction") -> bool:
         return False
 
@@ -735,6 +775,9 @@ class BattleFieldEffect(BattleComponent):
 
     def adjust_unit_targeting_range(self, battle: "Battle", unit: "Unit", value: int) -> int:
         return value
+
+    def ignores_direct_unit_target_line(self, battle: "Battle", actor: "Unit") -> bool:
+        return False
 
     def on_unit_entered(self, battle: "Battle", unit: "Unit") -> None:
         return None
@@ -821,6 +864,19 @@ class Skill(BattleComponent, ABC):
     ai_always_hostile_effect = False
     ai_legality_requires_rollback = False
     ai_area_bonus_codes: frozenset[str] = frozenset()
+    ai_payload_value_owned = False
+    ai_complete_direction_payloads = False
+    requires_choice_replay_when_used = False
+
+    def ai_payload_value(self, battle: "Battle", actor: "Unit",
+                               payload: dict[str, Any]) -> Optional[float]:
+        """Return a positive value for a useful cast, or None for the legacy probe."""
+        return None
+
+    def ai_payload_candidates(self, battle: "Battle", actor: "Unit",
+                              action: dict[str, Any]) -> list[dict[str, Any]] | None:
+        """Optional object-owned complete payloads for simple and tendency AI."""
+        return None
 
     def ai_area_hit_bonus(self) -> float:
         return 18.0 if self.code in self.ai_area_bonus_codes else 0.0
@@ -909,12 +965,18 @@ class Skill(BattleComponent, ABC):
                                services: Any, profile: Any) -> Optional[float]:
         return None
 
+    def ai_direct_effect_score(self, battle: "Battle", actor: "Unit",
+                               payload: dict[str, Any]) -> Optional[float]:
+        """Expected value when direct replay cannot resolve random or interactive effects."""
+        return None
+
     kind = "skill"
     requires_direct_unit_target_line = True
     target_unit_is_anchor = False
     target_cells_are_geometry_only = False
     selection_cells_are_effect_cells = True
     resolves_from_current_position = False
+    is_displacement_skill = False
 
     def __init__(
         self,
@@ -959,6 +1021,16 @@ class Skill(BattleComponent, ABC):
     ) -> bool:
         """Whether a paid movement reaction can still land after faster reactions."""
         return True
+
+    def on_reaction_resolved(self, battle: "Battle", declared_action: "QueuedAction",
+                             reaction: "QueuedAction") -> None:
+        """Observe a completed reaction to this declaration before its own effect resolves."""
+        return None
+
+    def moves_owner_on_use(self, battle: "Battle", actor: "Unit",
+                           payload: Optional[dict[str, Any]]) -> bool:
+        """Whether this declaration moves its acting unit; displacement skills may override."""
+        return self.is_displacement_skill
 
     def directly_damages_on_use(self) -> Optional[bool]:
         """Declare direct damage when a skill's effect is queued by another object."""
@@ -1048,7 +1120,7 @@ class Skill(BattleComponent, ABC):
             return False, "本场战斗使用次数已满。"
         if getattr(self, "_ancient_stolen_charges", 1) <= 0:
             return False, "夺得技能的一次使用权已用完。"
-        if actor.current_mana + 1e-9 < self.mana_cost_for_payload(battle, actor, payload):
+        if self.mana_payer(battle, actor).current_mana + 1e-9 < self.mana_cost_for_payload(battle, actor, payload):
             return False, "魔力不足。"
         block_reason = battle.shared_stealth_action_block_reason(actor)
         if block_reason:
@@ -1089,6 +1161,14 @@ class Skill(BattleComponent, ABC):
             cost = component.modify_skill_mana_cost(battle, actor, self, payload, cost)
         return max(0.0, float(cost))
 
+    def mana_payer(self, battle: "Battle", actor: "Unit") -> "Unit":
+        """Keep the acting unit and the unit funding its skill independent."""
+        for component in actor.iter_components():
+            payer = component.skill_mana_payer(battle, actor, self)
+            if payer is not None:
+                return payer
+        return actor
+
     def mana_cost_text(self) -> Optional[str]:
         return None
 
@@ -1107,7 +1187,7 @@ class Skill(BattleComponent, ABC):
         payload: Optional[dict[str, Any]] = None,
     ) -> None:
         self.sync_turn_scope(battle)
-        actor.spend_mana(self.mana_cost_for_payload(battle, actor, payload))
+        self.mana_payer(battle, actor).spend_mana(self.mana_cost_for_payload(battle, actor, payload))
         self.uses_this_turn += 1
         self.uses_this_battle += 1
         if hasattr(self, "_ancient_stolen_charges"):
@@ -1163,7 +1243,7 @@ class Skill(BattleComponent, ABC):
             return False, "本回合使用次数已满。"
         if self.max_uses_per_battle is not None and self.uses_this_battle >= self.max_uses_per_battle:
             return False, "本场战斗使用次数已满。"
-        if actor.current_mana + 1e-9 < self.mana_cost:
+        if self.mana_payer(battle, actor).current_mana + 1e-9 < self.mana_cost:
             return False, "魔力不足。"
         block_reason = battle.shared_stealth_action_block_reason(actor)
         if block_reason:
@@ -1191,7 +1271,7 @@ class Skill(BattleComponent, ABC):
                 blocked, reason = payload_check(battle, actor, self, payload)
                 if blocked:
                     return False, reason
-        if actor.current_mana + 1e-9 < self.mana_cost_for_payload(battle, actor, payload):
+        if self.mana_payer(battle, actor).current_mana + 1e-9 < self.mana_cost_for_payload(battle, actor, payload):
             return False, "魔力不足。"
         ship = battle.passive_support_ship(actor, self, queued_action, payload)
         if (ship is not None and ship.ship_passive_claim_turn == battle.turn_number
@@ -1346,6 +1426,10 @@ class Skill(BattleComponent, ABC):
                 "uses_this_battle": self.uses_this_battle,
             }
         )
+        if owner is not None:
+            payer = self.mana_payer(battle, owner)
+            if payer is not owner:
+                data["mana_payer_unit_id"] = payer.unit_id
         return data
 
 
@@ -1356,8 +1440,11 @@ class MoveContext:
     end: Position
     path: list[Position]
     via_skill: bool = False
+    forced: bool = False
     triggered_by_reaction: bool = False
     tags: set[str] = field(default_factory=set)
+    cancelled: bool = False
+    reason: str = ""
 
 
 @dataclass(slots=True)
@@ -1442,7 +1529,7 @@ class HealContext:
 @dataclass(slots=True)
 class VisualEvent:
     event_id: int
-    kind: Literal["attack", "skill", "defense"]
+    kind: Literal["attack", "skill", "defense", "move"]
     display_name: str
     actor_id: Optional[str] = None
     actor_player_id: Optional[int] = None
@@ -2117,6 +2204,15 @@ class Unit(ABC):
     def is_enemy_of(self, other: "Unit") -> bool:
         return self.player_id != other.player_id
 
+    def qualifies_as_level(self, level: int) -> bool:
+        if self.level == level:
+            return True
+        battle_ref = getattr(self, "_battle_ref", None)
+        battle = battle_ref() if battle_ref is not None else None
+        return bool(battle is not None and any(
+            level in component.treatable_levels(battle) for component in self.iter_components()
+        ))
+
     def heal_fraction(self, amount: float, *, ignore_effect_immunity: bool = False) -> None:
         battle_ref = getattr(self, "_battle_ref", None)
         battle = battle_ref() if battle_ref is not None else None
@@ -2126,10 +2222,13 @@ class Unit(ABC):
             return
         if self.direct_effects_blocked() and not ignore_effect_immunity:
             return
-        if self.allow_overheal:
-            self.current_hp = round(self.current_hp + amount, 4)
-        else:
-            self.current_hp = round(min(self.max_health, self.current_hp + amount), 4)
+        ceiling = float("inf") if self.allow_overheal else self.max_health
+        for component in self.iter_components():
+            proposed = component.max_recoverable_hp()
+            if proposed is not None:
+                ceiling = min(ceiling, proposed)
+        healed = min(ceiling, self.current_hp + amount) if amount > 0 else self.current_hp + amount
+        self.current_hp = round(max(self.current_hp, healed) if amount > 0 else healed, 4)
 
     def damage_fraction_after_limits(self, amount: float) -> float:
         amount = max(0.0, float(amount))
@@ -2706,7 +2805,8 @@ class Battle(BattleDeclarationMixin, BattleReactionMixin, BattleChainMixin, Batt
         resolved_payload = self.resolved_basic_attack_payload(actor, payload)
         area_attack = (resolved_payload.get("attack_variant") != "allied_heal"
                        and self.basic_attack_area_cells_for_payload(actor, resolved_payload) is not None)
-        ignore_line = any(component.ignores_direct_unit_target_line(self, actor) for component in actor.iter_components())
+        ignore_line = (any(component.ignores_direct_unit_target_line(self, actor) for component in actor.iter_components())
+                       or any(effect.ignores_direct_unit_target_line(self, actor) for effect in self.field_effects))
         if not declared_resolution and not area_attack and not ignore_line and not any(
             origin.distance_to(cell) <= actor.targeting_range() and self.cells_are_straight_aligned(origin, cell)
             for origin in origins for cell in target_cells

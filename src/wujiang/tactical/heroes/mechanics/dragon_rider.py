@@ -493,6 +493,12 @@ class DragonSummonSkill(Skill):
 
 
 class DragonSlashSkill(SimulatedEffectDeltaScoring, DeclaredAreaSkillMixin, Skill):
+    is_displacement_skill = True
+
+    def moves_owner_on_use(self, battle: Battle, actor: Unit,
+                           payload: dict[str, Any] | None) -> bool:
+        return False
+
     ai_probe_hostile_effect = True
     def ai_attack_power(self, battle, actor, payload, target, cells) -> float:
         return 5.0

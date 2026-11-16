@@ -9,6 +9,30 @@ if TYPE_CHECKING:
     from wujiang.tactical.engine.core import Battle, Position, QueuedAction, Unit
 
 
+def object_owned_optional_choice(battle: Battle, actor: Unit,
+                                 prompt: dict[str, Any]) -> str | None:
+    """Let the owning component score a prompted choice without hero-code dispatch."""
+    options = [str(option) for option in prompt.get("options") or []]
+    if not options:
+        return None
+    ranked: list[tuple[float, str]] = []
+    handled = False
+    for component in actor.iter_components():
+        if not getattr(component, "ai_optional_choice_owned", False):
+            continue
+        for option in options:
+            value = component.ai_optional_choice_score(battle, actor, prompt, option)
+            if value is not None:
+                handled = True
+                ranked.append((float(value), option))
+    if not handled:
+        return None
+    best = max(ranked, default=(0.0, "decline"))
+    if prompt.get("kind") in {"required_unit_selection", "required_placement", "required_direction"}:
+        return best[1]
+    return best[1] if best[0] > 0 else "decline"
+
+
 @dataclass(slots=True)
 class AreaAttackScoreState:
     remaining_mana: float

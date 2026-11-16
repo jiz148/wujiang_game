@@ -4,6 +4,7 @@ from wujiang.tactical.heroes.hero_kit import FragmentMappedHeroKit, register_her
 from wujiang.tactical.heroes.mechanics.thor import (
     ThorDestroyLightningSkill,
     ThorHeavyHammerSkill,
+    ThorLeapSkill,
     ThorRageImpactSkill,
 )
 
@@ -12,6 +13,7 @@ def install(r) -> None:
     register_hero_kit(FragmentMappedHeroKit(
         "excel_r143",
         skills={
+            "飞跃": ThorLeapSkill,
             "重锤": ThorHeavyHammerSkill,
             "暴怒冲击": ThorRageImpactSkill,
             "毁灭电击": ThorDestroyLightningSkill,

@@ -17,6 +17,7 @@ from wujiang.tactical.heroes.mechanics.gladiator_core import gladiator_swap_dest
 
 
 class BirdSoulSkill(Skill):
+    is_displacement_skill = True
     ai_candidate_plan = RANKED_CANDIDATES
     requires_direct_unit_target_line = False
 

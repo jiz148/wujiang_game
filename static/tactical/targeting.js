@@ -18,7 +18,8 @@ export function unitIsSelectableTarget(unit) {
   return Boolean(unit)
     && !unit.banished
     && !unit.cannot_be_targeted
-    && (!unit.statuses.some((status) => status.name === "隐身") || actingSideCanSeeUnit(unit));
+    && (!unit.statuses.some((status) => status.name === "隐身")
+      || unit.stealth_revealed || actingSideCanSeeUnit(unit));
 }
 
 function previewCellsForTargetIds(targetIds = []) {
@@ -73,6 +74,28 @@ export function multiUnitSelection(action) {
   return action?.preview?.selection?.mode === "multi_unit" ? action.preview.selection : null;
 }
 
+export function unitCellsSelection(action) {
+  return action?.preview?.selection?.mode === "unit_cells" ? action.preview.selection : null;
+}
+
+export function stagedUnitCellsPlacements(action = selectedAction()) {
+  if (!action || state.selectedActionCode !== action.code || !unitCellsSelection(action)) return [];
+  return Array.isArray(state.stagedPayload?.placements) ? state.stagedPayload.placements : [];
+}
+
+export function stagedUnitCellsTargetId(action = selectedAction()) {
+  if (!action || state.selectedActionCode !== action.code || !unitCellsSelection(action)) return "";
+  return String(state.stagedPayload?.unitCellsTargetId || "");
+}
+
+export function setStagedUnitCellsTargetId(id) {
+  state.stagedPayload = { placements: stagedUnitCellsPlacements(), unitCellsTargetId: String(id || "") };
+}
+
+export function setStagedUnitCellsPlacements(placements) {
+  state.stagedPayload = { placements, unitCellsTargetId: "" };
+}
+
 export function crowFormationSelection(action) {
   return action?.preview?.selection?.mode === "crow_formation" ? action.preview.selection : null;
 }
@@ -100,6 +123,51 @@ export function setStagedCrowFormationRavenIds(ids) {
 
 export function unitDirectionSelection(action) {
   return action?.preview?.selection?.mode === "unit_direction" ? action.preview.selection : null;
+}
+
+export function cellDirectionSelection(action) {
+  return action?.preview?.selection?.mode === "cell_direction" ? action.preview.selection : null;
+}
+
+export function directionOnlySelection(action) {
+  return action?.preview?.selection?.mode === "direction_only" ? action.preview.selection : null;
+}
+
+export function stagedDirectionOnly(action = selectedAction()) {
+  if (!action || state.selectedActionCode !== action.code || !directionOnlySelection(action)) return null;
+  const direction = state.stagedPayload?.direction;
+  return direction?.dx == null || direction?.dy == null ? null
+    : { dx: Number(direction.dx), dy: Number(direction.dy) };
+}
+
+export function setStagedDirectionOnly(direction) {
+  state.stagedPayload = { direction: { dx: Number(direction.dx), dy: Number(direction.dy) } };
+}
+
+export function stagedCellDirectionCell(action = selectedAction()) {
+  if (!action || state.selectedActionCode !== action.code || !cellDirectionSelection(action)) return null;
+  const cell = state.stagedPayload?.cell;
+  return cell?.x == null || cell?.y == null ? null : { x: Number(cell.x), y: Number(cell.y) };
+}
+
+export function stagedCellDirection(action = selectedAction()) {
+  if (!action || state.selectedActionCode !== action.code || !cellDirectionSelection(action)) return null;
+  const direction = state.stagedPayload?.direction;
+  return direction?.dx == null || direction?.dy == null ? null
+    : { dx: Number(direction.dx), dy: Number(direction.dy) };
+}
+
+export function setStagedCellDirectionCell(cell) {
+  const direction = stagedCellDirection();
+  state.stagedPayload = { cell: { x: Number(cell.x), y: Number(cell.y) },
+    ...(direction ? { direction } : {}) };
+}
+
+export function setStagedCellDirection(direction) {
+  const cell = stagedCellDirectionCell();
+  if (!cell) return;
+  state.stagedPayload = { cell,
+    direction: { dx: Number(direction.dx), dy: Number(direction.dy) } };
 }
 
 export function stagedUnitDirectionTargetId(action = selectedAction()) {
@@ -133,8 +201,13 @@ export function bodyDirectionSelection(action) {
 }
 
 export function reviveUnitCellSelection(action) {
-  return action?.preview?.selection?.mode === "revive_unit_cell" ? action.preview.selection : null;
+  // Legacy helper name retained for the repair UI; both modes share the
+  // object-provided candidate and legal-cell selection contract.
+  return ["revive_unit_cell", "unit_cell"].includes(action?.preview?.selection?.mode)
+    ? action.preview.selection : null;
 }
+
+export const unitCellSelection = reviveUnitCellSelection;
 
 export function normalizedPatternCells(cells = []) {
   const normalized = [];
@@ -276,9 +349,22 @@ export function stagedMultiTargetIds(action = selectedAction()) {
   return normalizedTargetIds(explicit);
 }
 
+export function stagedMultiDirection(action = selectedAction()) {
+  if (!action || state.selectedActionCode !== action.code || !multiUnitSelection(action)) return null;
+  const direction = state.stagedPayload?.direction;
+  return direction?.dx == null || direction?.dy == null ? null
+    : { dx: Number(direction.dx), dy: Number(direction.dy) };
+}
+
+export function setStagedMultiDirection(direction) {
+  state.stagedPayload = { targetUnitIds: stagedMultiTargetIds(),
+    direction: { dx: Number(direction.dx), dy: Number(direction.dy) } };
+}
+
 export function setStagedMultiTargetIds(ids) {
   const normalized = normalizedTargetIds(ids);
-  state.stagedPayload = normalized.length ? { targetUnitIds: normalized } : null;
+  const direction = stagedMultiDirection();
+  state.stagedPayload = normalized.length || direction ? { targetUnitIds: normalized, direction } : null;
 }
 
 export function stagedStatName(action = selectedAction()) {
@@ -461,7 +547,11 @@ function multiUnitSelectionCanComplete(action, chosen = stagedMultiTargetIds(act
   if (!selection) return false;
   const minTargets = Number(selection.min_targets || 1);
   const maxTargets = Number(selection.max_targets || chosen.length || minTargets);
-  return chosen.length >= minTargets && chosen.length <= maxTargets;
+  const directions = selection.directions || [];
+  const direction = stagedMultiDirection(action);
+  return chosen.length >= minTargets && chosen.length <= maxTargets
+    && (!directions.length || (direction && directions.some((item) =>
+      Number(item.dx) === direction.dx && Number(item.dy) === direction.dy)));
 }
 
 function cellsMatchExactly(left = [], right = []) {
@@ -596,7 +686,7 @@ export function currentPreview() {
     };
   }
   const action = hoveredAction();
-  if (["mimic_skill", "ancient_fusion"].includes(action?.preview?.selection?.mode)) {
+  if (["mimic_skill", "ancient_fusion", "unit_skill_multi"].includes(action?.preview?.selection?.mode)) {
     return { cellKeys: new Set(), targetIds: new Set(), secondaryCellKeys: new Set(), destinationCellKeys: new Set() };
   }
   if (!action) {
@@ -748,6 +838,21 @@ export function currentPreview() {
       destinationCellKeys: new Set(),
     };
   }
+  if (unitCellsSelection(action)) {
+    const placements = stagedUnitCellsPlacements(action);
+    const selectedId = stagedUnitCellsTargetId(action);
+    const candidates = unitCellsSelection(action).candidates || [];
+    const candidate = candidates.find((entry) => String(entry.id) === selectedId);
+    const occupied = positionsToSet(placements);
+    const canAdd = placements.length < Number(unitCellsSelection(action).max_targets || 1);
+    return {
+      cellKeys: positionsToSet(canAdd ? (candidate?.cells || []).filter((cell) => !occupied.has(positionKey(cell))) : []),
+      targetIds: targetIdsToSet(candidates.filter((entry) => canAdd && !placements.some((placed) => String(placed.id) === String(entry.id)))
+        .map((entry) => String(entry.id))),
+      secondaryCellKeys: positionsToSet(placements),
+      destinationCellKeys: positionsToSet(placements),
+    };
+  }
   if (unitDirectionSelection(action)) {
     const chosenId = stagedUnitDirectionTargetId(action);
     return {
@@ -756,6 +861,19 @@ export function currentPreview() {
       secondaryCellKeys: positionsToSet(previewCellsForTargetIds(chosenId ? [chosenId] : [])),
       destinationCellKeys: new Set(),
     };
+  }
+  if (cellDirectionSelection(action)) {
+    const cell = stagedCellDirectionCell(action);
+    return {
+      cellKeys: positionsToSet(action.preview?.cells || []),
+      targetIds: new Set(),
+      secondaryCellKeys: positionsToSet(cell ? [cell] : []),
+      destinationCellKeys: new Set(),
+    };
+  }
+  if (directionOnlySelection(action)) {
+    return { cellKeys: positionsToSet(action.preview?.cells || []), targetIds: new Set(),
+      secondaryCellKeys: new Set(), destinationCellKeys: new Set() };
   }
   if (statCellSelection(action)) {
     const chosenCells = stagedStatCells(action);
@@ -885,10 +1003,33 @@ export function canCompleteTargetSelection() {
   }
   if (patternSelection(action)) return patternSelectionCanComplete(action);
   if (multiUnitSelection(action)) return multiUnitSelectionCanComplete(action);
+  if (unitCellsSelection(action)) {
+    const placements = stagedUnitCellsPlacements(action);
+    const selection = unitCellsSelection(action);
+    const candidates = selection.candidates || [];
+    return placements.length >= Number(selection.min_targets || 1)
+      && placements.length <= Number(selection.max_targets || placements.length)
+      && placements.every((entry, index) => candidates.some((candidate) => String(candidate.id) === String(entry.id)
+        && (candidate.cells || []).some((cell) => sameCell(cell, entry))
+        && placements.findIndex((other) => String(other.id) === String(entry.id)) === index
+        && placements.findIndex((other) => sameCell(other, entry)) === index));
+  }
   if (unitDirectionSelection(action)) {
     const targetId = stagedUnitDirectionTargetId(action);
     return Boolean(targetId && stagedUnitDirection(action)
       && (action.preview?.target_unit_ids || []).includes(targetId));
+  }
+  if (cellDirectionSelection(action)) {
+    const cell = stagedCellDirectionCell(action);
+    const direction = stagedCellDirection(action);
+    return Boolean(cell && direction && positionsToSet(action.preview?.cells || []).has(positionKey(cell))
+      && (cellDirectionSelection(action).directions || []).some((entry) =>
+        Number(entry.dx) === direction.dx && Number(entry.dy) === direction.dy));
+  }
+  if (directionOnlySelection(action)) {
+    const direction = stagedDirectionOnly(action);
+    return Boolean(direction && (directionOnlySelection(action).directions || []).some((entry) =>
+      Number(entry.dx) === direction.dx && Number(entry.dy) === direction.dy));
   }
   if (statCellSelection(action)) return statCellSelectionCanComplete(action);
   if (bodyDirectionSelection(action)) return bodyDirectionSelectionCanComplete(action);

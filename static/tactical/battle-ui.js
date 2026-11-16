@@ -1,5 +1,6 @@
 // Battle screen rendering: board, units, action panel and log.
 import { $ } from '../core/dom.js';
+import { directionOnlySelection, stagedDirectionOnly } from '../tactical/targeting.js';
 import { applyBoardCamera, boardBasePixels, clampBoardZoom } from '../core/events.js';
 import { activeBundles, activeOccupantAt, allUnits, backstepFollowUpTargetIds, boardPieceZIndex, boardUnits, bundleFor, canInteract, currentRespawnPrompt, hasBattle, hasRoom, hoveredUnit, inspectBoardUnit, inspectedUnit, isAiTakeover, isChainMode, isDamageChoiceMode, isGameOver, isReplayMode, isRespawnMode, selectedUnit, stagedBackstepRetreatCell, stagedTarget, unitById, unitFootprintBounds, unitHasLargeFootprint, unitOccupiedCells, unitsAtCell, viewerPlayerId, viewerTeamId, visibleUnitAt } from '../core/net.js';
 import { render } from '../core/render.js';
@@ -9,7 +10,7 @@ import { effectiveProfileName } from '../platform/auth.js';
 import { currentBattleLaunch, isCampaignBattleLaunch } from '../bridge/battle-launch.js';
 import { isRandomRoomMode, loadReplayStep, onActionClick, roomModeMeta, setArmyOrder, shouldShowLobbyPanel } from '../tactical/room-api.js';
 import { clearActionSelection } from '../tactical/session.js';
-import { actionLabel, actionLimitLabel, actionManaLabel, actionNeedsTarget, actionTierLabel, actionTimingLabel, actionTitle, bodyDirectionSelection, canCompleteTargetSelection, choicePatternSelection, crowFormationSelection, currentPreview, fieldEffectMarker, fieldEffectsByCell, hasCancelableTargetSelection, movePathSelection, multiUnitSelection, normalizedPatternCells, patternSelection, patternSelectionCanComplete, randomRoomFallbackSummary, randomRoomRosterSize, reviveUnitCellSelection, stagedAttackVariantCode, stagedBodyCells, stagedBodyDirection, stagedCrowFormationRavenIds, stagedCrowFormationTargetId, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, stagedUnitDirection, stagedUnitDirectionTargetId, statCellRequired, statCellSelection, unitDirectionSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
+import { actionLabel, actionLimitLabel, actionManaLabel, actionNeedsTarget, actionTierLabel, actionTimingLabel, actionTitle, bodyDirectionSelection, canCompleteTargetSelection, cellDirectionSelection, choicePatternSelection, crowFormationSelection, currentPreview, fieldEffectMarker, fieldEffectsByCell, hasCancelableTargetSelection, movePathSelection, multiUnitSelection, normalizedPatternCells, patternSelection, patternSelectionCanComplete, randomRoomFallbackSummary, randomRoomRosterSize, reviveUnitCellSelection, stagedAttackVariantCode, stagedBodyCells, stagedBodyDirection, stagedCellDirection, stagedCellDirectionCell, stagedCrowFormationRavenIds, stagedCrowFormationTargetId, stagedMovePath, stagedMultiDirection, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, stagedUnitCellsPlacements, stagedUnitCellsTargetId, stagedUnitDirection, stagedUnitDirectionTargetId, statCellRequired, statCellSelection, unitCellsSelection, unitDirectionSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
 import { actionByCode, actionWheelLayer, displayActions, fieldEffectDuration, fieldEffects, flushPendingArmyVfx, hoveredAction, hpRatio, manaDisplayClass, manaPipsMarkup, positionKey, positionsToSet, renderBattleVfx, selectedAction, trimNumber, tutorialState, unitBoundsRelativeToStage, unitStatusSummary } from '../tactical/vfx.js';
 
 export function renderScreens() {
@@ -56,6 +57,18 @@ function renderBoardAlert() {
   }
 
   const action = selectedAction();
+  if (action?.preview?.selection?.mode === "unit_skill_multi") {
+    const escape = (value) => String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
+    const selection = action.preview.selection;
+    const rows = (selection.targets || []).map((target) => `
+      <label class="board-alert-choice"><input type="checkbox" data-unit-skill-unit="${escape(target.unit_id)}">
+      ${escape(target.name)} · <select data-unit-skill-code="${escape(target.unit_id)}">${(target.skills || []).map((skill) =>
+        `<option value="${escape(skill.code)}">${escape(skill.name)}</option>`).join("")}</select></label>
+    `).join("");
+    showBoardHint(action.name, selection.prompt || "选择单位和各一项技能。",
+      `${rows}<button type="button" class="board-alert-choice" data-unit-skill-confirm>确认选择</button>`);
+    return;
+  }
 
   if (action?.preview?.selection?.mode === "ancient_fusion") {
     const escape = (value) => String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
@@ -180,11 +193,28 @@ function renderBoardAlert() {
 
   if (action && multiUnitSelection(action)) {
     const chosenIds = stagedMultiTargetIds(action);
+    const direction = stagedMultiDirection(action);
+    const buttons = (multiUnitSelection(action).directions || []).map((entry) => {
+      const selected = direction && direction.dx === Number(entry.dx) && direction.dy === Number(entry.dy);
+      return `<button type="button" class="board-alert-choice ${selected ? "is-selected" : ""}" data-multi-direction-dx="${entry.dx}" data-multi-direction-dy="${entry.dy}">${entry.label || `${entry.dx},${entry.dy}`}</button>`;
+    }).join("");
     showBoardHint(
       actionTitle(action),
       multiUnitSelection(action).prompt
         || `${chosenIds.length ? `已选择 ${chosenIds.length} 个目标。` : "请点击高亮单位来选择目标。"} 选好后可以点击“完成选择”，再次点击同一目标可取消。`,
+      buttons,
     );
+    return;
+  }
+  if (action && unitCellsSelection(action)) {
+    const placements = stagedUnitCellsPlacements(action);
+    const selectedId = stagedUnitCellsTargetId(action);
+    const buttons = (unitCellsSelection(action).candidates || []).map((entry) => {
+      const selected = placements.some((placed) => String(placed.id) === String(entry.id));
+      const name = unitById(String(entry.id))?.name || String(entry.id);
+      return `<button type="button" class="board-alert-choice ${selected || selectedId === String(entry.id) ? "is-selected" : ""}" data-unit-cells-target="${entry.id}">${name}${selected ? " ✓" : ""}</button>`;
+    }).join("");
+    showBoardHint(actionTitle(action), `已选 ${placements.length} 名。点击单位，再点击高亮落格；再次点击已选单位可取消。选择好后点“完成选择”。`, buttons);
     return;
   }
   if (action && crowFormationSelection(action)) {
@@ -228,9 +258,12 @@ function renderBoardAlert() {
     const buttons = candidates.map((entry) => `
       <button type="button" class="board-alert-choice ${selectedId === String(entry.id) ? "is-selected" : ""}" data-revive-unit-id="${entry.id}">${entry.name}</button>
     `).join("");
+    const selection = reviveUnitCellSelection(action);
+    const subject = selection?.subject_label || "复活单位";
+    const instruction = selection?.instruction || "先选择一个已被破坏的单位，再点击周围高亮格作为落点。";
     showBoardHint(
       actionTitle(action),
-      selectedId ? `已选择复活单位${selectedCell ? "和落点" : "，现在点击周围高亮格作为落点"}。` : "先选择一个已被破坏的单位，再点击周围高亮格作为落点。",
+      selectedId ? `已选择${subject}${selectedCell ? "和落点" : "，现在点击高亮格作为落点"}。` : instruction,
       buttons,
     );
     return;
@@ -288,6 +321,27 @@ function renderBoardAlert() {
       return `<button type="button" class="board-alert-choice ${selected ? "is-selected" : ""}" data-unit-direction-dx="${entry.dx}" data-unit-direction-dy="${entry.dy}">${entry.label || `${entry.dx},${entry.dy}`}</button>`;
     }).join("");
     showBoardHint(actionTitle(action), targetId ? "已选目标。请选择推动方向，再点“完成选择”。" : "请先点击要推动的近战目标，再选方向。", buttons);
+    return;
+  }
+
+  if (action && directionOnlySelection(action)) {
+    const direction = stagedDirectionOnly(action);
+    const buttons = (directionOnlySelection(action).directions || []).map((entry) => {
+      const selected = direction && direction.dx === Number(entry.dx) && direction.dy === Number(entry.dy);
+      return `<button type="button" class="board-alert-choice ${selected ? "is-selected" : ""}" data-direction-only-dx="${entry.dx}" data-direction-only-dy="${entry.dy}">${entry.label || `${entry.dx},${entry.dy}`}</button>`;
+    }).join("");
+    showBoardHint(actionTitle(action), directionOnlySelection(action).prompt || "选择方向，再点“完成选择”。", buttons);
+    return;
+  }
+
+  if (action && cellDirectionSelection(action)) {
+    const cell = stagedCellDirectionCell(action);
+    const direction = stagedCellDirection(action);
+    const buttons = (cellDirectionSelection(action).directions || []).map((entry) => {
+      const selected = direction && direction.dx === Number(entry.dx) && direction.dy === Number(entry.dy);
+      return `<button type="button" class="board-alert-choice ${selected ? "is-selected" : ""}" data-cell-direction-dx="${entry.dx}" data-cell-direction-dy="${entry.dy}">${entry.label || `${entry.dx},${entry.dy}`}</button>`;
+    }).join("");
+    showBoardHint(actionTitle(action), cell ? "已选落点。请选择攻击方向，再点“完成选择”。" : "请先点击直线位移的合法落点，再选攻击方向。", buttons);
     return;
   }
 
@@ -828,6 +882,9 @@ export function renderActionPanel() {
 
   actions.forEach((action) => {
     const btn = document.createElement("button");
+    const payer = action.mana_payer_unit_id && action.mana_payer_unit_id !== selectedUnit()?.id
+      ? unitById(action.mana_payer_unit_id) : null;
+    const manaLabel = `${actionManaLabel(action) || "不费魔"}${payer && action.mana_cost > 0 ? `（由${payer.name}支付）` : ""}`;
     const isSelected = state.selectedActionCode === action.code;
     const disabled = !canInteract() && action.kind !== "chain_skip";
     btn.className = `action-list-item ${isSelected ? "is-selected" : ""} ${disabled ? "is-disabled" : ""}`;
@@ -837,7 +894,7 @@ export function renderActionPanel() {
         <span>${actionLabel(action)}</span>
         <span>${actionTimingLabel(action)}</span>
       </div>
-      <div class="action-meta">${actionTierLabel(action)} · ${actionManaLabel(action) || "不费魔"} · ${actionLimitLabel(action)}</div>
+      <div class="action-meta">${actionTierLabel(action)} · ${manaLabel} · ${actionLimitLabel(action)}</div>
       <div class="action-desc">${action.description || "无额外说明。"}</div>
     `;
     btn.addEventListener("pointerenter", (event) => {
@@ -1639,10 +1696,20 @@ export function renderChainPanel() {
         ? "军神轮末可选一条合法六格穿行路线，或原地结束回合。"
       : prompt.kind === "formation"
         ? `塞克托鲁的${prompt.action_name}：选择一个在场单位及其相邻合法落点。`
+      : prompt.kind === "optional_heal_target"
+        ? `${prompt.action_name}：选择一名己方单位回复 ${prompt.damage} 点生命，或放弃。`
+      : prompt.kind === "optional_unit_selection"
+        ? `${prompt.action_name}：逐名选择合法单位，或点击“完成选择”。`
+      : prompt.kind === "required_unit_selection"
+        ? `${prompt.action_name}：先选择一名合法单位。`
       : prompt.kind === "optional_swap"
         ? "斯巴达克斯受到技能影响；可选一名友军换位，或保持位置。"
       : prompt.kind === "optional_placement"
         ? "天崩地裂已结算；可选一名友军搬到斯巴达克斯身边，或放弃。"
+      : prompt.kind === "required_placement"
+        ? `${prompt.action_name}：选择一个合法落点。`
+      : prompt.kind === "required_direction"
+        ? `${prompt.action_name}：选择一个方向。`
       : prompt.kind === "rotation"
         ? `安德鲁因【${prompt.action_name}】实际损失 ${prompt.damage} 点生命。选择友军战斗轮转，或保持位置。`
         : `拉奥将受到 ${prompt.damage} 点【${prompt.action_name}】伤害，请选择能力抵消或承受伤害。`;

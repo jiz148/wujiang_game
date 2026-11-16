@@ -124,7 +124,7 @@ class DoomLightSkill(ResourceEffectScoring, Skill):
         super().__init__(
             "doom_light",
             "末日光",
-            "大招：远程选择 7*7 区域；其中单位获得持续 4轮的末日光效果：不能回复，并在每个自己的己方回合开始时血量减半；该效果破魔且不叠加。",
+            "大招：远程选择 7*7 区域；施放时没有伤害；其中单位获得持续 4轮的末日光效果：不能回复，并在每个自己的己方回合开始时血量减半；该效果破魔且不叠加。",
             max_uses_per_battle=1,
             target_mode="cell",
         )
@@ -420,7 +420,7 @@ class DoomlightDragon(AbstractHero):
     base_stats = Stats(attack=3, defense=4, speed=3, attack_range=3, mana=5)
     footprint_width = 2
     footprint_height = 2
-    raw_skill_text = "石墙 神速 变硬 远程龙息 ￥末日光（7*7内4轮不能回复，每个己方回合开始时血*1/2，4轮，破魔；此效果不叠加） 末日（一回合一次；耗费n的血量；对n*n造成攻击力+n的破魔伤害）"
+    raw_skill_text = "石墙 神速 变硬 远程龙息 ￥末日光（7*7内4轮不能回复，每个己方回合开始时血*1/2，4轮，破魔；没有伤害；此效果不叠加) 末日（一回合一次；耗费n的血量；对n*n造成攻击力+n的破魔伤害）"
     raw_trait_text = "占2*2；飞行；对此单位攻击或造成伤害的单位受到“末日光”的效果；被此单位造成伤害的单位受到“末日光”的效果；“末日光”效果所造成的伤害等量回复此单位；此单位的血量可以超过1"
 
     def build_skills(self) -> list[Skill]:

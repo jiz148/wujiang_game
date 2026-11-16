@@ -14,6 +14,12 @@ from wujiang.tactical.heroes.common import positions_to_dict
 
 
 class GaleSkill(Skill):
+    is_displacement_skill = True
+
+    def moves_owner_on_use(self, battle: Battle, actor: Unit,
+                           payload: dict[str, Any] | None) -> bool:
+        return False
+
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.shared.gale_score(context)
 

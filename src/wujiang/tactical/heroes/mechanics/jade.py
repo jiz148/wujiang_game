@@ -415,6 +415,7 @@ class MechEnhancementSkill(Skill):
 
 
 class PlasmaThrusterSkill(Skill):
+    is_displacement_skill = True
     def __init__(self) -> None:
         super().__init__(
             "plasma_thruster",

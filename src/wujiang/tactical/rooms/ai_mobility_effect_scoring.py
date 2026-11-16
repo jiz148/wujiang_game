@@ -303,6 +303,9 @@ class AIMobilityEffectScoring:
 
     def reviewed_r18_effect_score(self, battle: Battle, actor: Unit, skill: Any, payload: dict[str, Any], profile: DifficultyProfile) -> float:
         from wujiang.tactical.heroes.mechanics.nameless_messenger import MessengerDamageSkillManaTrait
+        owned_score = skill.ai_direct_effect_score(battle, actor, payload)
+        if owned_score is not None:
+            return owned_score
         with ai_probe_rollback(battle):
             units = list(battle.all_units())
             prepare_position_values(battle, actor, units, for_baseline=True)
@@ -339,7 +342,8 @@ class AIMobilityEffectScoring:
                     score += -delta if hostile else delta
                 if hostile and unit.alive and not pending and getattr(unit.get_status("毁灭电击"), "pending", False):
                     score += unit.normal_move_distance() * 4 + (0 if unit.is_clone else unit.attack_actions_per_turn() * 20)
-                    score += min(30, sum(other.timing == "active" and other.mana_cost <= unit.current_mana for other in unit.skills) * 10)
+                    score += min(30, sum(other.timing == "active" and other.mana_cost <= other.mana_payer(battle, unit).current_mana
+                                         for other in unit.skills) * 10)
             if getattr(getattr(actor, "ai_policy", None), "ai_messenger_mana", False) and actor.mana_points > points:
                 score += 14.0 if points < 2 <= actor.mana_points else (3.0 if points < 4 else 0.0)
             if changed_enemy:

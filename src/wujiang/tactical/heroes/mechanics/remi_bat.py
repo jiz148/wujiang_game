@@ -43,6 +43,7 @@ class RemiBatSummon(AbstractHero):
 
 
 class RemiChaosSkill(Skill):
+    is_displacement_skill = True
     def ai_simulation_after(self, battle, actor, queued, services, profile, saved, before, units) -> float:
         if not actor.alive:
             return 0.0

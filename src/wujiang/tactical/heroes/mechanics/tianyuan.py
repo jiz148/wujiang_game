@@ -56,6 +56,7 @@ class TianyuanSkill(Skill):
 
 
 class TianyuanBreakthroughSkill(Skill):
+    is_displacement_skill = True
     selection_cells_are_effect_cells = False
     resolves_from_current_position = True
 

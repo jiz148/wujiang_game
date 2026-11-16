@@ -2,6 +2,7 @@
 import { activeBundles, activeOccupantAt, allUnits, canInteract, currentRespawnPrompt, fetchJson, hasBattle, hasRoom, inputPlayer, isChainMode, isDamageChoiceMode, isGameOver, isReplayMode, isRespawnMode, recordProductEvent, replayMeta, roomQueryId, simulationMeta, stagedBackstepRetreatCell, stagedBackstepTargetId, syncLocation, toggleSidebarPanel, unitById, viewerPlayerId, visibleUnitAt } from '../core/net.js';
 import { refreshState, render } from '../core/render.js';
 import { state, ui } from '../core/state.js';
+import { directionOnlySelection, setStagedDirectionOnly, stagedDirectionOnly } from '../tactical/targeting.js';
 import { setScreen, syncScreen } from '../core/ui.js';
 import { closeProfileModal, confirmProfile, effectiveProfileName, normalizeProfileName, openProfileModal, renderProfilePanel } from '../platform/auth.js';
 import { refreshRecentMatches } from '../platform/home.js';
@@ -15,7 +16,7 @@ import { renderBpPanel } from '../tactical/bp-ui.js';
 import { bindAutoChessEvents, renderAutoChessPanel } from '../tactical/autochess-ui.js';
 import { applyRoomPayload, canReclaimSeatByName, claimRoomSeat, closeModePicker, controlSimulation, copyInviteLink, createRoom, deleteRoom, exitTutorial, fillEmptySeatsWithAi, isRandomRoomMode, joinRoom, leaveFinishedBattle, leaveReplayMode, leaveRoom, loadReplayStep, openModePicker, performAction, removeRoomSeat, renderTutorialGuide, restartFromGameOver, resumeStoredSeat, resumeTutorialBattle, retryTutorialStep, roomModeMeta, selectRoomHero, setAiStyles, setRoomSeatController, setRoomSeatCount, setRoomSeatTeam, setSeatArmyComposition, setSeatRandomQuota, shouldShowLobbyPanel, startRoomBattle, startTutorialBattle, surrenderBattle, toggleAiTakeover, toggleRoomReady } from '../tactical/room-api.js';
 import { clearActionSelection, loadStoredIdentity } from '../tactical/session.js';
-import { bodyDirectionSelection, canCompleteTargetSelection, choicePatternSelection, controllerTypeLabel, crowFormationSelection, currentRoomSeat, hasCancelableTargetSelection, isBoardTargetSelectionActive, movePathSelection, multiUnitSelection, patternSelection, randomRoomRosterSize, reviveUnitCellSelection, roomSummaries, sanitizeRandomRosterSizeInput, seatHeroSummary, setStagedAttackVariant, setStagedBodyDirection, setStagedPatternChoice, setStagedReviveUnitId, setStagedStatName, setStagedUnitDirection, stagedAttackActionPayload, stagedBodyCells, stagedBodyDirection, stagedCrowFormationRavenIds, stagedCrowFormationTargetId, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, stagedUnitDirection, stagedUnitDirectionTargetId, statCellSelection, unitDirectionSelection } from '../tactical/targeting.js';
+import { bodyDirectionSelection, canCompleteTargetSelection, cellDirectionSelection, choicePatternSelection, controllerTypeLabel, crowFormationSelection, currentRoomSeat, hasCancelableTargetSelection, isBoardTargetSelectionActive, movePathSelection, multiUnitSelection, patternSelection, randomRoomRosterSize, reviveUnitCellSelection, roomSummaries, sanitizeRandomRosterSizeInput, seatHeroSummary, setStagedAttackVariant, setStagedBodyDirection, setStagedCellDirection, setStagedMultiDirection, setStagedPatternChoice, setStagedReviveUnitId, setStagedStatName, setStagedUnitCellsPlacements, setStagedUnitCellsTargetId, setStagedUnitDirection, stagedAttackActionPayload, stagedBodyCells, stagedBodyDirection, stagedCellDirection, stagedCellDirectionCell, stagedCrowFormationRavenIds, stagedCrowFormationTargetId, stagedMovePath, stagedMultiDirection, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, stagedUnitCellsPlacements, stagedUnitDirection, stagedUnitDirectionTargetId, statCellSelection, unitCellsSelection, unitDirectionSelection } from '../tactical/targeting.js';
 import { clearBattleVfx, selectedAction, tutorialState } from '../tactical/vfx.js';
 import { createMenu } from './components.js';
 import { $ } from './dom.js';
@@ -359,6 +360,18 @@ export function bindEvents() {
   });
   document.addEventListener("click", (event) => {
     const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest("[data-unit-skill-confirm]")) {
+      const action = selectedAction();
+      if (!canInteract() || action?.preview?.selection?.mode !== "unit_skill_multi") return;
+      const selections = [...document.querySelectorAll("[data-unit-skill-unit]:checked")].map((input) => ({
+        unit_id: input.dataset.unitSkillUnit,
+        skill_code: [...document.querySelectorAll("[data-unit-skill-code]")].find(
+          (select) => select.dataset.unitSkillCode === input.dataset.unitSkillUnit)?.value,
+      })).filter((choice) => choice.unit_id && choice.skill_code);
+      if (selections.length) performAction({ type: "skill", unit_id: state.selectedUnitId,
+        skill_code: action.code, selections });
+      return;
+    }
     const fusionButton = target?.closest("[data-ancient-fusion-target]");
     if (fusionButton && canInteract() && selectedAction()?.code === "ancient_fusion") {
       performAction({ type: "skill", unit_id: state.selectedUnitId, skill_code: "ancient_fusion",
@@ -446,11 +459,54 @@ export function bindEvents() {
       });
       render();
     }
+    const multiDirectionButton = target?.closest("[data-multi-direction-dx][data-multi-direction-dy]");
+    if (multiDirectionButton) {
+      const action = selectedAction();
+      if (!action || !multiUnitSelection(action)) return;
+      setStagedMultiDirection({
+        dx: Number(multiDirectionButton.dataset.multiDirectionDx),
+        dy: Number(multiDirectionButton.dataset.multiDirectionDy),
+      });
+      render();
+    }
+    const directionOnlyButton = target?.closest("[data-direction-only-dx][data-direction-only-dy]");
+    if (directionOnlyButton) {
+      const action = selectedAction();
+      if (!action || !directionOnlySelection(action)) return;
+      setStagedDirectionOnly({
+        dx: Number(directionOnlyButton.dataset.directionOnlyDx),
+        dy: Number(directionOnlyButton.dataset.directionOnlyDy),
+      });
+      render();
+    }
+    const cellDirectionButton = target?.closest("[data-cell-direction-dx][data-cell-direction-dy]");
+    if (cellDirectionButton) {
+      const action = selectedAction();
+      if (!action || !cellDirectionSelection(action)) return;
+      setStagedCellDirection({
+        dx: Number(cellDirectionButton.dataset.cellDirectionDx),
+        dy: Number(cellDirectionButton.dataset.cellDirectionDy),
+      });
+      render();
+    }
     const reviveButton = target?.closest("[data-revive-unit-id]");
     if (reviveButton) {
       const action = selectedAction();
       if (!action || !reviveUnitCellSelection(action)) return;
       setStagedReviveUnitId(reviveButton.dataset.reviveUnitId);
+      render();
+    }
+    const unitCellsButton = target?.closest("[data-unit-cells-target]");
+    if (unitCellsButton) {
+      const action = selectedAction();
+      if (!action || !unitCellsSelection(action)) return;
+      const id = unitCellsButton.dataset.unitCellsTarget;
+      const placements = stagedUnitCellsPlacements(action);
+      if (placements.some((item) => String(item.id) === String(id))) {
+        setStagedUnitCellsPlacements(placements.filter((item) => String(item.id) !== String(id)));
+      } else if (placements.length < Number(unitCellsSelection(action).max_targets || 1)) {
+        setStagedUnitCellsTargetId(id);
+      }
       render();
     }
   });
@@ -515,6 +571,7 @@ export function bindEvents() {
         if (choicePatternSelection(action)) payload.choice_code = stagedPatternChoiceCode(action);
       } else if (multiUnitSelection(action)) {
         payload.target_unit_ids = stagedMultiTargetIds(action);
+        if (multiUnitSelection(action).directions?.length) payload.direction = stagedMultiDirection(action);
         if (action.code === "floating_cannon_cover") {
           payload.target_unit_id = payload.target_unit_ids[0];
           payload.cannon_unit_id = payload.target_unit_ids[1];
@@ -552,12 +609,22 @@ export function bindEvents() {
       }
     } else if (multiUnitSelection(action)) {
       payload.target_unit_ids = stagedMultiTargetIds(action);
+      if (multiUnitSelection(action).directions?.length) payload.direction = stagedMultiDirection(action);
+    } else if (unitCellsSelection(action)) {
+      payload.placements = stagedUnitCellsPlacements(action);
     } else if (crowFormationSelection(action)) {
       payload.target_unit_id = stagedCrowFormationTargetId(action);
       payload.raven_ids = stagedCrowFormationRavenIds(action);
     } else if (unitDirectionSelection(action)) {
       payload.target_unit_id = stagedUnitDirectionTargetId(action);
       payload.direction = stagedUnitDirection(action);
+    } else if (directionOnlySelection(action)) {
+      payload.direction = stagedDirectionOnly(action);
+    } else if (cellDirectionSelection(action)) {
+      const cell = stagedCellDirectionCell(action);
+      payload.x = cell.x;
+      payload.y = cell.y;
+      payload.direction = stagedCellDirection(action);
     } else if (statCellSelection(action)) {
       payload.stat_name = stagedStatName(action);
       payload.cells = stagedStatCells(action);
@@ -566,7 +633,8 @@ export function bindEvents() {
       payload.direction = stagedBodyDirection(action);
     } else if (reviveUnitCellSelection(action)) {
       const cell = stagedReviveCell(action);
-      payload.revive_unit_id = stagedReviveUnitId(action);
+      payload[action.preview?.selection?.mode === "unit_cell"
+        ? (action.preview.selection.target_key || "target_unit_id") : "revive_unit_id"] = stagedReviveUnitId(action);
       payload.x = cell.x;
       payload.y = cell.y;
     }
@@ -1700,8 +1768,14 @@ export function renderHeader() {
   }
   if (isDamageChoiceMode()) {
     const prompt = state.battle.pending_damage_choice;
-    pill.textContent = `房间 ${state.room.room_id} · 玩家 ${inputPlayer()} 决定伤害`;
-    caption.textContent = prompt.kind === "hell_sacrifice"
+    pill.textContent = `房间 ${state.room.room_id} · 玩家 ${inputPlayer()} 选择效果`;
+    caption.textContent = prompt.kind === "optional_unit_selection"
+      ? `${prompt.action_name}：逐名选择合法单位，或点击“完成选择”。`
+      : prompt.kind === "required_unit_selection"
+      ? `${prompt.action_name}：先选择一名合法单位。`
+      : prompt.kind === "required_direction"
+      ? `${prompt.action_name}：选择一个方向。`
+      : prompt.kind === "hell_sacrifice"
       ? "赤候可以技能破坏一名己方地狱单位，或放弃。"
       : prompt.kind === "hell_death_strike"
       ? "刺客临死可选周围一名单位连续反击两次，或放弃。"

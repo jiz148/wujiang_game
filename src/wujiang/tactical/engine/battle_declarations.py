@@ -54,6 +54,10 @@ class BattleDeclarationMixin:
                 raise ActionError(f"{actor.name} 当前无法移动。")
             if actor.cannot_normal_move:
                 raise ActionError(f"{actor.name} 当前不能进行常规移动。")
+            for component in actor.iter_components():
+                allowed, reason = component.can_use_normal_move(self, actor)
+                if not allowed:
+                    raise ActionError(reason)
             explicit_steps = self.payload_positions(payload, "path")
             if explicit_steps:
                 path = self.explicit_path(

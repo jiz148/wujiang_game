@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from wujiang.tactical.prediction import secrets
+from wujiang.tactical.prediction import direct_scoring, secrets
 from typing import Sequence
 
 from wujiang.tactical.engine.core import ActionError, Battle, BattleFieldEffect, DamageContext, HealContext, HeroUnit, Position, Skill, Unit
@@ -96,11 +96,14 @@ class BPSpecialModeEffect(BattleFieldEffect):
     def adjust_unit_targeting_range(self, battle: Battle, unit: Unit, value: int) -> int:
         return max(battle.width, battle.height) if "true_turn" in self.codes else value
 
+    def ignores_direct_unit_target_line(self, battle: Battle, actor: Unit) -> bool:
+        return "true_turn" in self.codes
+
     def blocks_unit_movement(self, battle: Battle, unit: Unit) -> bool:
         return "true_turn" in self.codes
 
     def blocks_skill_use(self, battle: Battle, actor: Unit, skill: Skill) -> tuple[bool, str]:
-        if "true_turn" in self.codes and self._causes_movement(skill):
+        if "true_turn" in self.codes and self._causes_movement(battle, actor, skill):
             return True, "真回合制不能使用位移技能。"
         if "real_men" in self.codes and skill.timing != "active":
             return True, "真男人模式只能使用主动技能。"
@@ -113,7 +116,7 @@ class BPSpecialModeEffect(BattleFieldEffect):
             if (actor.unit_id in self._sympathy.get("attack", set()) and skill.timing == "active"
                     and self._deals_direct_damage(skill)):
                 return True, "同情弱者：攻最高的武将不能使用主动直接伤害技能。"
-            if actor.unit_id in self._sympathy.get("speed", set()) and self._causes_movement(skill):
+            if actor.unit_id in self._sympathy.get("speed", set()) and self._causes_movement(battle, actor, skill):
                 return True, "同情弱者：速最高的武将不能使用位移技能。"
         return False, ""
 
@@ -133,17 +136,17 @@ class BPSpecialModeEffect(BattleFieldEffect):
                                  {"super", "execute"} <= names and "伤害" in skill.description)
 
     @staticmethod
-    def _causes_movement(skill: Skill) -> bool:
-        execute_code = getattr(type(skill).execute, "__code__", None)
-        names = set(execute_code.co_names) if execute_code is not None else set()
-        return bool(names & {"move_unit", "gladiator_swap", "swap_units", "swap_positions",
-                             "teleport_unit", "force_move_unit", "push_unit", "pull_unit"}) or any(
-                                 phrase in skill.description for phrase in
-                                 ("位移", "瞬移", "传送", "移动到", "移动恰好", "飞行移动",
-                                  "普攻先移动", "推开", "拉近", "换位", "突进", "冲刺", "跳跃"))
+    def _causes_movement(battle: Battle, actor: Unit, skill: Skill,
+                         payload: dict | None = None) -> bool:
+        return skill.moves_owner_on_use(battle, actor, payload)
 
     def blocks_skill_payload(self, battle: Battle, actor: Unit, skill: Skill,
                              payload: dict | None) -> tuple[bool, str]:
+        if "true_turn" in self.codes and self._causes_movement(battle, actor, skill, payload):
+            return True, "真回合制不能使用位移技能。"
+        if ("sympathy" in self.codes and actor.unit_id in self._sympathy.get("speed", set())
+                and self._causes_movement(battle, actor, skill, payload)):
+            return True, "同情弱者：速最高的武将不能使用位移技能。"
         if ("sympathy" not in self.codes or actor.unit_id not in self._sympathy.get("attack_range", set())
                 or actor.position is None or not payload):
             return False, ""
@@ -197,6 +200,13 @@ class BPSpecialModeEffect(BattleFieldEffect):
         healer_team = source.player_id if source is not None else target.player_id
         enemies = [unit for unit in battle.on_field_hero_units() if unit.player_id != healer_team]
         if enemies:
+            if direct_scoring() and len(enemies) > 1:
+                expected_damage = amount / len(enemies)
+                for enemy in enemies:
+                    battle.resolve_damage(DamageContext(source=source or target, target=enemy,
+                                                       action_name="回复反噬", attack_power=0, is_skill=False,
+                                                       raw_damage=expected_damage, from_field_effect=True))
+                return
             enemy = secrets.choice(enemies)
             battle.resolve_damage(DamageContext(source=source or target, target=enemy,
                                                action_name="回复反噬", attack_power=0, is_skill=False,
@@ -210,6 +220,10 @@ class BPSpecialModeEffect(BattleFieldEffect):
         healer_team = origin.player_id if origin is not None else unit.player_id
         enemies = [hero for hero in battle.on_field_hero_units() if hero.player_id != healer_team]
         if enemies:
+            if direct_scoring() and len(enemies) > 1:
+                for enemy in enemies:
+                    enemy.drain_mana(min(amount, enemy.current_mana) / len(enemies))
+                return
             secrets.choice(enemies).drain_mana(amount)
 
     def on_before_damage(self, battle: Battle, ctx: DamageContext) -> None:

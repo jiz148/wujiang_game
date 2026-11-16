@@ -24,6 +24,7 @@ from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_c
 
 
 class ElectronicFusionStatus(StatModifierStatus):
+    provides_temporary_flight = True
     def __init__(self, wing_id: str) -> None:
         super().__init__(f"电子融合·{wing_id}", attack_delta=1, defense_delta=1, range_delta=1,
                          description="装甲电子翼：攻守范+1、飞行、每本人轮一次能力牺牲射击。")
@@ -59,7 +60,10 @@ class ElectronicFusionStatus(StatModifierStatus):
     def on_removed(self, battle: Battle) -> None:
         owner = self.owner
         if owner is not None:
-            owner.has_flying = any(isinstance(trait, FlyingTrait) for trait in owner.traits) or any(
+            owner.has_flying = (any(isinstance(trait, FlyingTrait) for trait in owner.traits)
+                                and not owner.innate_traits_suppressed()
+                                and not any(getattr(status, "suppresses_native_flying", False)
+                                            for status in owner.statuses)) or any(
                 isinstance(status, ElectronicFusionStatus) for status in owner.statuses
             ) or any(isinstance(status, MageCloakEquippedStatus) for status in owner.statuses)
             owner.ignore_units_while_moving = owner.has_flying or any(
@@ -377,7 +381,7 @@ class ElectronicRepairSkill(Skill):
         raise ActionError("请选择一名已被破坏的机甲武将。")
 
     def legal_destinations(self, battle: Battle, actor: Unit, target: Unit) -> list[Position]:
-        if actor.position is None:
+        if actor.position is None or not battle.unit_entry_allowed(target)[0]:
             return []
         cells = {neighbor for cell in battle.unit_cells(actor) for neighbor in battle.neighbors(cell)}
         return [cell for cell in sorted(cells, key=lambda item: (item.y, item.x))

@@ -178,15 +178,23 @@ export function displayActions() {
       ];
     }
     if (prompt.kind === "formation" || prompt.kind === "optional_placement") {
-      const choices = (prompt.options || []).map((option, index) => {
-        const [unitId, cell] = option.split("@");
-        const [x, y] = cell.split(",").map(Number);
-        return {
-          code: `placement_${index}`, name: `将${unitById(unitId)?.name || "单位"}移至（${x + 1},${y + 1}）`,
+      const choices = (prompt.options || []).flatMap((option, index) => {
+        const value = String(option ?? "");
+        const separator = value.lastIndexOf("@");
+        const unitId = separator < 0 ? prompt.unit_id : value.slice(0, separator);
+        const cell = separator < 0 ? value : value.slice(separator + 1);
+        const coordinates = /^(-?\d+),(-?\d+)$/.exec(cell);
+        if (!coordinates) return [];
+        const x = Number(coordinates[1]);
+        const y = Number(coordinates[2]);
+        const unitName = unitById(unitId)?.name || "单位";
+        return [{
+          code: `placement_${index}`, name: separator < 0
+            ? `移至（${x + 1},${y + 1}）` : `将${unitName}移至（${x + 1},${y + 1}）`,
           kind: "damage_choice", target_unit_id: option, timing: "reaction", available: true,
-          description: prompt.kind === "formation" ? "塞克托鲁受友方搬运后布阵；请选择目标与其合法落点。" : "天崩地裂后可以搬运一名友军至合法相邻格。",
+          description: prompt.action_name || "请选择合法落点。",
           preview: { cells: [{ x, y }], target_unit_ids: [unitId], requires_target: false },
-        };
+        }];
       });
       if (prompt.kind === "optional_placement") choices.push({
         code: "optional_placement_decline", name: "不搬运友军", kind: "damage_choice",
@@ -195,6 +203,64 @@ export function displayActions() {
         preview: { cells: [], target_unit_ids: [], requires_target: false },
       });
       return choices;
+    }
+    if (prompt.kind === "required_placement") {
+      return (prompt.options || []).map((option, index) => {
+        const [x, y] = option.split(",").map(Number);
+        return {
+          code: `required_placement_${index}`, name: `召至（${x + 1},${y + 1}）`,
+          kind: "damage_choice", target_unit_id: option, timing: "reaction", available: true,
+          description: prompt.action_name || "选择合法落点。",
+          preview: { cells: [{ x, y }], target_unit_ids: [], requires_target: false },
+        };
+      });
+    }
+    if (prompt.kind === "required_direction") {
+      const labels = { "-1,-1": "左上", "-1,0": "左", "-1,1": "左下",
+        "0,-1": "上", "0,1": "下", "1,-1": "右上", "1,0": "右", "1,1": "右下" };
+      return (prompt.options || []).map((option, index) => ({
+        code: `required_direction_${index}`, name: labels[option] || option,
+        kind: "damage_choice", target_unit_id: option, timing: "reaction", available: true,
+        description: prompt.action_name || "选择一个方向。",
+        preview: { cells: [], target_unit_ids: [], requires_target: false },
+      }));
+    }
+    if (prompt.kind === "optional_heal_target") {
+      return [
+        ...(prompt.options || []).map((unitId) => ({
+          code: `optional_heal_${unitId}`, name: `治疗${unitById(unitId)?.name || "友军"}`,
+          kind: "damage_choice", target_unit_id: unitId, timing: "reaction", available: true,
+          description: `受到伤害后，可使这名己方单位回复${Number(prompt.damage || 0)}生命。`,
+          preview: { cells: [], target_unit_ids: [unitId], requires_target: false },
+        })),
+        { code: "optional_heal_decline", name: "放弃治疗", kind: "damage_choice",
+          target_unit_id: "decline", timing: "reaction", available: true,
+          description: "放弃这次受伤后的治疗选择。",
+          preview: { cells: [], target_unit_ids: [], requires_target: false } },
+      ];
+    }
+    if (prompt.kind === "optional_unit_selection" || prompt.kind === "required_unit_selection") {
+      return [
+        ...(prompt.options || []).map((unitId) => ({
+          code: `optional_unit_${unitId}`, name: `选择${unitById(unitId)?.name || "己方武将"}`,
+          kind: "damage_choice", target_unit_id: unitId, timing: "reaction", available: true,
+          description: prompt.action_name || "选择一名合法单位。",
+          preview: { cells: [], target_unit_ids: [unitId], requires_target: false },
+        })),
+        ...(prompt.kind === "optional_unit_selection" ? [{ code: "optional_unit_done", name: "完成选择", kind: "damage_choice",
+          target_unit_id: "decline", timing: "reaction", available: true,
+          description: "结束本次可选的多名单位选择。",
+          preview: { cells: [], target_unit_ids: [], requires_target: false } }] : []),
+      ];
+    }
+    if (prompt.kind === "guardian_legacy") {
+      return (prompt.options || []).map((unitId) => ({
+        code: `guardian_legacy_${unitId}`,
+        name: `传承给${unitById(unitId)?.name || "守护灵"}`,
+        kind: "damage_choice", target_unit_id: unitId, timing: "reaction", available: true,
+        description: "黄信破坏后，这名己方守护灵永久获得攻、守、速各+1。",
+        preview: { cells: [], target_unit_ids: [unitId], requires_target: false },
+      }));
     }
     if (prompt.kind === "optional_swap") {
       return [
@@ -466,11 +532,41 @@ function playVisualEventNow(event) {
   if (entry) state.activeBattleVfx.push(entry);
 }
 
+function actionCueText(event) {
+  if (event?.kind === "move") return ["位移", event.display_name || "移动"];
+  if (event?.kind === "attack") return ["攻击", event.display_name || "普攻"];
+  if (event?.kind === "defense") return ["应对", event.display_name || "防御"];
+  return ["技能", event?.display_name || "施法"];
+}
+
+function showBattleActionCue(event, duration = 680) {
+  const layer = battleVfxLayer();
+  if (!layer || !event) return;
+  const [type, name] = actionCueText(event);
+  const entry = { event, expiresAt: Date.now() + duration, nodes: [] };
+  const cue = document.createElement("div");
+  cue.className = `battle-action-cue is-${event.kind || "skill"}`;
+  cue.style.setProperty("--cue-duration", `${duration}ms`);
+  const category = document.createElement("span");
+  category.className = "battle-action-cue__type";
+  category.textContent = type;
+  const title = document.createElement("span");
+  title.className = "battle-action-cue__name";
+  title.textContent = name;
+  cue.append(category, title);
+  attachBattleVfxNode(cue, layer, entry, "cue");
+  state.activeBattleVfx.push(entry);
+  renderBattleVfx();
+}
+
 export function playArmyStrikeWaves(events, { staggerMs = 360 } = {}) {
   const pending = Array.isArray(events) ? events.filter(Boolean) : [];
   if (!pending.length) return;
   if (globalThis.WujiangBattleFeedback?.reducedMotion()) {
-    pending.forEach(playVisualEventNow);
+    pending.forEach((event) => {
+      showBattleActionCue(event, 240);
+      playVisualEventNow(event);
+    });
     renderBattleVfx();
     return;
   }
@@ -479,13 +575,16 @@ export function playArmyStrikeWaves(events, { staggerMs = 360 } = {}) {
   waves.forEach((wave) => {
     const batch = pending.filter((event) => armyStrikeWaveOf(event) === wave);
     if (!batch.length) return;
-    const start = delay;
-    const handle = window.setTimeout(() => {
-      batch.forEach(playVisualEventNow);
-      renderBattleVfx();
-    }, start);
-    ui.armyVfxTimers = [...(ui.armyVfxTimers || []), handle];
-    delay += staggerMs;
+    batch.forEach((event, index) => {
+      const start = delay + index * staggerMs;
+      const cueHandle = window.setTimeout(() => showBattleActionCue(event), start);
+      const effectHandle = window.setTimeout(() => {
+        playVisualEventNow(event);
+        renderBattleVfx();
+      }, start + 330);
+      ui.armyVfxTimers = [...(ui.armyVfxTimers || []), cueHandle, effectHandle];
+    });
+    delay += batch.length * staggerMs;
   });
 }
 
@@ -505,6 +604,7 @@ function battleVfxDuration(event) {
   if (custom > 0) return custom;
   if (!event) return 700;
   if (event.kind === "attack") return 620;
+  if (event.kind === "move") return 480;
   if (event.kind === "defense") return 760;
   if (event.action_type === "skill_effect") return 840;
   return 900;
@@ -516,6 +616,7 @@ function battleVfxTheme(event) {
   if (style === "shell") return "cannon";
   if (style === "bolt") return "bolt";
   if (event.kind === "attack") return event.action_code === "counter" ? "storm" : "attack";
+  if (event.kind === "move") return "wind";
   if (event.kind === "defense") {
     if (event.defense_reason === "magic_immunity") return "void";
     if (event.defense_reason === "dodge") return "wind";
@@ -703,7 +804,15 @@ function createBattleVfxEntry(event) {
     return entry;
   }
 
-  if (event.kind === "attack") {
+  if (event.kind === "move") {
+    const landing = refs[0];
+    if (landing) {
+      const burst = document.createElement("div");
+      burst.className = `battle-vfx-burst theme-${theme}`;
+      burst.style.setProperty("--vfx-duration", `${duration}ms`);
+      attachBattleVfxNode(burst, layer, entry, "burst", landing);
+    }
+  } else if (event.kind === "attack") {
     refs.forEach((ref) => {
       const projectile = document.createElement("div");
       projectile.className = `battle-vfx-projectile theme-${theme}`;
@@ -743,6 +852,22 @@ function positionBattleVfxEntry(entry) {
   const sourcePoint = battleVfxSourcePoint(entry.event);
   entry.nodes.forEach(({ node, type, ref }) => {
     let point = ref ? battleVfxPointForRef(ref) : sourcePoint;
+    if (type === "cue") {
+      const actorId = entry.event.kind === "defense"
+        ? entry.event.target_unit_ids?.[0] : entry.event.actor_id;
+      point = unitCenterPoint(unitById(actorId || "")) || sourcePoint;
+      if (!point) {
+        node.classList.add("hidden");
+        return;
+      }
+      node.classList.remove("hidden");
+      node.style.left = `${point.x}px`;
+      node.style.top = `${point.y}px`;
+      const width = battleVfxLayer()?.getBoundingClientRect?.().width || 0;
+      node.style.setProperty("--cue-x-shift", point.x < 100 ? "-12%" : width && point.x > width - 100 ? "-88%" : "-50%");
+      node.classList.toggle("is-below", point.y < 64);
+      return;
+    }
     if (!point && type === "projectile") {
       node.classList.add("hidden");
       return;

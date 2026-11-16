@@ -101,6 +101,15 @@ class SkillPayloadBuilder:
                 payloads.append(payload)
             return self.services.dedupe_payloads(payloads)
         if target_mode == "cell":
+            if mode == "cell_direction":
+                return self.services.dedupe_payloads([
+                    {**base_payload, "x": cell.x, "y": cell.y,
+                     "direction": {"dx": int(direction["dx"]), "dy": int(direction["dy"])}}
+                    for cell in self.services.preview_positions(preview.get("cells"))
+                    for direction in selection.get("directions", [])
+                    if isinstance(direction, dict)
+                    and direction.get("dx") is not None and direction.get("dy") is not None
+                ])
             if mode == "direction":
                 payloads: list[dict[str, Any]] = []
                 for direction in selection.get("directions", []):
@@ -171,17 +180,18 @@ class SkillPayloadBuilder:
                 return self.services.dedupe_payloads(payloads)
             if mode == "body_direction":
                 return self.rock_cannon_payloads(battle, actor)
-            if mode == "revive_unit_cell":
+            if mode in {"revive_unit_cell", "unit_cell"}:
                 payloads: list[dict[str, Any]] = []
                 for candidate in selection.get("candidates", []):
-                    revive_unit_id = str(candidate.get("id") or "")
+                    target_unit_id = str(candidate.get("id") or "")
                     for cell in self.services.preview_positions(candidate.get("cells")):
                         payloads.append(
                             {
                                 "type": "skill",
                                 "unit_id": actor.unit_id,
                                 "skill_code": code,
-                                "revive_unit_id": revive_unit_id,
+                                ("revive_unit_id" if mode == "revive_unit_cell"
+                                 else str(selection.get("target_key") or "target_unit_id")): target_unit_id,
                                 "x": cell.x,
                                 "y": cell.y,
                             }

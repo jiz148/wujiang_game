@@ -377,7 +377,8 @@ class AISupportScoring:
                 incoming += estimate_attack_damage(battle, enemy, actor, {}, attack_power=enemy.stat("attack")) * enemy.attack_actions_per_turn()
             if not actor.magic_immunity and not enemy.cannot_use_skills and distance <= movement + max(2, enemy.targeting_range()):
                 if any(skill.code in self.services.DAMAGING_SKILL_CODES and skill.timing in {"active", "instant"}
-                       and enemy.current_mana >= skill.mana_cost and skill.cooldown_remaining <= 0 for skill in enemy.skills):
+                       and skill.mana_payer(battle, enemy).current_mana >= skill.mana_cost
+                       and skill.cooldown_remaining <= 0 for skill in enemy.skills):
                     incoming += self.services.estimate_damage(battle, actor, enemy.stat("attack"))
         risk = min(actor.current_hp, incoming) * 70.0
         if incoming >= actor.current_hp and incoming > 0:
@@ -615,7 +616,7 @@ class AISupportScoring:
                     for incoming in enemy.skills:
                         if (incoming.code in self.services.DAMAGING_SKILL_CODES and incoming.cooldown_remaining == 0
                                 and (incoming.max_uses_per_battle is None or incoming.uses_this_battle < incoming.max_uses_per_battle)
-                                and enemy.current_mana >= incoming.mana_cost):
+                                and incoming.mana_payer(battle, enemy).current_mana >= incoming.mana_cost):
                             terms.append((enemy, incoming, enemy.stat("attack"), 1,
                                           incoming.ignores_shield_for_payload(battle, enemy, {})))
         total = ((0.0, 1.0),)

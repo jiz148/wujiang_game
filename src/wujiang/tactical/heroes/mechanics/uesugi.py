@@ -24,6 +24,7 @@ def _text(value: Any) -> str:
 
 
 class UesugiFlashSkill(Skill):
+    is_displacement_skill = True
     ai_candidate_plan = RANKED_CANDIDATES
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.bird_skill_score()

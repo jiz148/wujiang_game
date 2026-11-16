@@ -18,6 +18,5 @@ def install(r) -> None:
         traits={
             "攻击带有以下效果：被击中单位在下个己方回合不能使用位移技能": r.RutoAttackLockTrait,
             "此单位乘骑的“飞龙船。亚特兰大”每回合攻击次数+1": r.RutoShipAttackTrait,
-            "此单位的费魔技能可以被此单位乘骑的“飞龙船。亚特兰大”每回合不费魔使用，使用后减少此单位的每回合技能使用次数": r.ShipBorrowPermissionTrait,
         },
     ))

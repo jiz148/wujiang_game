@@ -50,6 +50,9 @@ class BattleLifecycleMixin:
             if unit is None or (not hell_rebirth and (not unit.alive or not unit.banished)):
                 self.pending_respawn_unit_ids.pop(0)
                 continue
+            if hell_rebirth and not self.unit_entry_allowed(unit)[0]:
+                self.pending_respawn_unit_ids.pop(0)
+                continue
             origin = (unit.last_position if hell_rebirth else unit.banish_return_position or unit.position)
             if origin is None:
                 origin = Position(0, 0) if hell_rebirth else None
@@ -115,7 +118,8 @@ class BattleLifecycleMixin:
         origins = self.hell_dragon_return_cells.get(unit.unit_id, [])
         if unit.alive or unit.unit_id not in {body.unit_id for body in self.destroyed_units}:
             return []
-        return [cell for cell in origins if self.can_place_unit(unit, cell, mover=unit)]
+        return [cell for cell in origins if self.unit_entry_allowed(unit)[0]
+                and self.can_place_unit(unit, cell, mover=unit)]
 
 
     def restore_hell_dragon(self, unit: Unit, destination: Position) -> None:
@@ -124,6 +128,9 @@ class BattleLifecycleMixin:
         )
         if self.winner is not None:
             raise ActionError("对局已结束，献祭复活不再回场。")
+        allowed, reason = self.unit_entry_allowed(unit)
+        if not allowed:
+            raise ActionError(reason)
         if destination not in self.hell_dragon_return_options_for(unit):
             raise ActionError("古龙献祭者的原格暂不能完整容纳古龙。")
         for status in list(unit.statuses):
@@ -165,7 +172,8 @@ class BattleLifecycleMixin:
                  for body in self.unit_cells(anchor) for cell in self.neighbors(body)}
         extra_legal = next((callback for component in unit.iter_components()
                             if callable(callback := getattr(component, "hell_rebirth_destination_legal", None))), None)
-        return sorted((cell for cell in cells if self.can_place_unit(unit, cell, mover=unit)
+        return sorted((cell for cell in cells if self.unit_entry_allowed(unit)[0]
+                       and self.can_place_unit(unit, cell, mover=unit)
                        and (extra_legal is None or extra_legal(self, cell))),
                       key=lambda cell: (cell.y, cell.x))
 
@@ -194,6 +202,9 @@ class BattleLifecycleMixin:
         )
         if self.winner is not None:
             raise ActionError("对局已结束，地狱再临不再回场。")
+        allowed, reason = self.unit_entry_allowed(unit)
+        if not allowed:
+            raise ActionError(reason)
         if unit.unit_id not in self.hell_rebirth_unit_ids or destination not in self.hell_rebirth_options_for(unit):
             raise ActionError("地狱再临落点已失效。")
         for status in list(unit.statuses):
@@ -229,7 +240,7 @@ class BattleLifecycleMixin:
 
     def restore_destroyed_hell_ally(self, unit: Unit, destination: Position) -> bool:
         """Bring back one destroyed original body at the hunter's old cell."""
-        if (unit.alive or unit not in self.destroyed_units
+        if (not self.unit_entry_allowed(unit)[0] or unit.alive or unit not in self.destroyed_units
                 or (unit.is_summon and unit.summoner_id and not (
                     self.units.get(unit.summoner_id) and self.units[unit.summoner_id].alive))
                 or not self.can_place_unit(unit, destination, mover=unit)):

@@ -1,5 +1,57 @@
 # wujiang_game Project Map
 
+- 2026-11-16 神龙。末日光源表补「没有伤害」由 `heroes/mechanics/doomlight_dragon.py` 的原文和技能说明同步；`DoomLightSkill.execute` 只施加持续状态，未来轮初伤害归状态。`static/tactical/vfx.js::displayActions` 的 `optional_placement` 提示须兼容本人落点 `x,y` 与搬运他人落点 `unit@x,y`；源端两种格式都沿用此提示类型。
+
+- 2026-11-14 R353首份用户专场9项8过1败，标准AI没有保留有效灵异恐吓方向；AI局尚未运行。`heroes/disorder_wisp.py` 的无伤夺控及致盲/魅影标记现在通过对象`ai_effective_enemy_impact`报告正收益，恐吓另用`ai_effect_units`排除几何区域内非召唤物。新增标准AI致盲候选场景，定向总10项；静态检查后待用户复跑。公开147/388、余241，不进入R354。
+
+- 2026-11-14 R351用户复跑9/9定向、3/3对局、零高信号、零动作失败，自爆未选与吞噬未有候选为随机局覆盖观察。R353源设计及保存Q001–Q003先锁，`heroes/disorder_wisp.py`及`kits/excel_r353.py`承载作祟、骚灵、致盲、恐吓、魅影与两项防御特性。共享`BattleComponent.can_use_normal_move/on_before_move`与`MoveContext.cancelled`让状态在声明前禁行动、结算前取消真实位移；玩家预览和三路AI共用技能对象方向候选。9项定向场景仅静态检查，用户专场待跑。公开147/388、余241。
+
+- 2026-11-13 R351首份专场8/9回归，AI对局跳过；唯一失败是自爆11×11场景在阵容决定的小棋盘上硬断言121格。场景改为原棋盘裁边与显式13×13完整区域双覆盖，战斗对象不变；动态复跑待用户。新建`docs/新武将开发接线速查.md`供之后按机制局部定位 OOP 接口，避免逐将通读架构长文。
+
+- 2026-11-13 位移技能用户澄清：仅限能让施术者本人位移的技能；只拉/推其他单位的锁链、震开、魔力牵引等不受“禁止位移技能”条款限制，回避/飞跃仍受限。BP真回合制与同情弱者改读`Skill.moves_owner_on_use`，条件性本人位移再核本次载荷；技能对象持有自身判定。源规则记入通用规则和BP规则。
+
+- 2026-11-13 六名骷髅飞盗团武将R328–R333源表删除船免费代施特性；kit装配和游戏原文同步，船不再获得船员技能入口。真回合制全图范忽略直线对准，沿战场字段对象与通用选取接口实现；标准BP按等级轮次禁选不显示全局点数上限。R340混沌吐息随机掷骰由技能对象提供直接AI评分，避免预演执行随机分支；动态验收待用户统一运行。
+
+- 2026-11-12 R350验收：用户`new-batch-350-20261112-impactfix`14/14定向通过、首场98步完成、零高信号；击龙枪AI有有效候选并实际出手。剩余P1仅飞跃未在随机局出手，相关回合均有更高评分动作，归覆盖观察。结合前次另两场零高信号，R350无待修失败项。
+
+- 2026-11-12 R350单场复核：14/14定向、首场95步完成、零高信号，空枪区P0修复已验；P1人工追踪发现击龙枪合法敌方区域被通用AI有效影响门槛全部过滤。R350技能对象新增`ai_effective_enemy_impact`，原定向场景加有效候选与评分入口断言，待用户动态复跑。
+
+- 2026-11-12 R350复跑：13/13定向场景、3/3对局、零动作失败。唯一高信号为第13步无可见敌人进入任何合法击龙枪区，AI正确返回空候选，但审计把友军预览格误判为可攻目标。R350技能对象通过既有`ai_empty_payload_filter_reason`接口解释该条件，并补第14项定向审计场景；待用户复跑。
+
+- 2026-11-12 R350首跑：13项定向场景10过、3项均在测试夹具构造`DamageContext`时漏传必填`is_skill`而报错，AI对局跳过。四处构造已补`is_skill=False`；`tools/check_focused_test_symbols.py`新增基于AST的必填构造参数门禁，静态通过，等待用户复跑。
+
+- 2026-11-12 R347/R348合并专场17项仅末项报错：R348场景误调用简单AI内部函数，缺少`timing`；修场景时复核发现简单AI正式入口一概跳过方向技能，现对技能对象提供完整候选的方向技能放行并加场景。R347九项及R348前七项已过，AI对局未启动；用户重跑待验收。公开143/388、余245。
+- 2026-11-12 R350：R349用户复跑7/7场景、3场记录、零高信号。R350源设计JSON/XLSX先锁，再以`heroes/dragon_blood_delongkula.py`对象承载古龙狩猎、击杀成长、近战血衰、击龙枪和倒影；`kits/excel_r350.py`装配。引入通用必选落格提示供网页及三路AI处理，十三项场景静态完成，公开145/388、余243，动态待用户。
+- 2026-11-12 R349首跑：七项场景四过，三项同因新夹具用了未导入`Skill`而报NameError，AI对局跳过；改用实际技能对象。新增静态`tools/check_focused_test_symbols.py`检查定向场景未绑定名称，配合新武将导入符号门禁；用户复跑已通过。
+- 2026-11-12 R349石秀：守护灵家族末位按源349独立锁设计；`guardian_tianhui.py`持爪封位移、靠击双方破魔推位/龙封与星占下敌轮致命留1/4，kit只装配。七项定向场景与对象AI评分/预览已接；公开144/388，余244，动态待用户。R347/R348用户合并复跑17/17场景、6/6对局、零高信号，P1评分复核未见正收益漏用。
+- 2026-11-12 R348首跑在导入阶段停止：`guardian_diyi.py`误从`common`导入方向常量；已改从`mechanics/next_five_geometry.py`导入。新增纯静态`tools/check_local_import_symbols.py`核对新武将与kit的本地导入名，补上`compileall`遗漏的符号门禁；尚未运行用户专场，公开143/388、余245。
+- 2026-11-11 R348郑天寿：先锁源设计JSON/XLSX，`heroes/guardian_diyi.py`持守护灵剑击分段、掷骰逐名选择及反隐光环，`kits/excel_r348.py`仅装配；`BattleComponent.reveals_stealth_to`供目标/AI/观看方查询，房间状态输出已显形标记。前端通用`direction_only`与必选/可选单位提示、三路AI对象候选和八项定向场景均已接；R347远距目标限制修正并入专场。新增1，公开143/388、余245，动态待用户。
+- 2026-11-11 R347裴宣：源设计JSON/XLSX先锁，`heroes/guardian_dizheng.py`持地正补给、赏罚、封拳、共向纵移及召唤技能对象上的本轮伤害账本，`kits/excel_r347.py`装配。伤害账本复用现有`on_battle_damage`并在天生特性封锁时保持有效，补给复用`on_any_turn_start`；网页`targeting.js`/`battle-ui.js`/`events.js`让通用`multi_unit`附方向，三路AI取对象完整候选并避免牵系越界。九项定向场景静态待用户专场。R346用户专场8/8、3/3、0高信号，未用五项技能暂归覆盖。新增1，公开142/388、余246。
+
+- 2026-11-11 R346李逵：源设计JSON/XLSX先锁；`heroes/guardian_tiansha.py`持守护灵技能、当轮攻次/移次及跨敌轮守状态，`kits/excel_r346.py`装配本体；`mechanics/guardian_spirit.py`新增通用召唤者供魔组件。`Skill.mana_payer`让技能资格、扣费和公开资料按付款人而非施法者取魔；`battle_units.py`付款事件归付款人，网页行动标注供魔者，相关AI威胁估值读同一付款入口。八项定向场景静态待用户运行。R345复跑6/6、3/3、0高信号，未用技能暂归覆盖观察。新增1，公开141/388、余247。
+
+- 2026-11-11 R345首份专场：六项五过一败，审计跳过AI对局。五虎牢夹具误以为攻1可降0，已依通用最低攻1改为3→2及1→1双断言；战斗对象未变，待用户复跑。公开140/388、余248。
+
+- 2026-11-11 R345史进：`heroes/guardian_tianwei.py`持有五虎牢状态、招来手连锁后位移和占星聚；`mechanics/guardian_spirit.py`新增两名守护灵共用的召唤对象，R344旧召唤改继承。`Skill.on_reaction_resolved`只提供已完成反应通知，规则仍归技能。`targeting.js`/`board-input.js`/`battle-ui.js`/`events.js`支持通用`unit_cells`逐名落格，三路AI取技能对象候选。源设计先锁JSON/XLSX，六项场景已写，静态待用户专场。R344用户专场6/6、3/3、零高信号，未出三专属技暂归覆盖缺口。新增1，公开140/388、余248。
+
+- 2026-11-10 R324实战漏用复核：手召鸦漏列共享召唤类别，被敌方即时影响预筛整批挡掉；技能对象现声明不需即时敌方影响，并豁免无限非敌方技能节流，使第2/3次免费召鸦可用。阵法对象在AI有效影响预筛中声明真实多段威力3/控制，避免按本体攻1筛掉；`SuperCrowAttackPolicy`给能建立敌邻鸦环的落位加分。BP「回复反噬」的随机目标在direct评分中以各目标概率份额显式估值，现场随机仍保持原规则，归`rooms/special_battle.py`。行为场景已补，动态待用户验收。
+
+- 2026-11-10 R344黄信：`heroes/guardian_disha.py`持有召唤、坐地、落天踢与星占；`heroes/mechanics/guardian_spirit.py`持有复用的13×13牵系、守护灵→召唤者死亡链与一次己方同名继承。`kits/excel_r344.py`仅作片段装配。`targeting.js`、`board-input.js`、`battle-ui.js`、`events.js`用通用`cell_direction`表达落格后另选方向；`rooms/ai_skill_payloads.py`从同一预览枚举候选。提示目标评分从Skill推广到BattleComponent，死亡特性不走武将代码分支。源设计JSON/XLSX先锁，六项定向场景静态待用户跑；新增1，公开139/388、余249。
+
+- 2026-11-10 武将修正：R332重甲源表新增船不可使用，`flying_dragon_crew_next.py`声明不可代施，`flying_dragon_ship.py`装配与旧代施入口双重拦截，公开文本同步。R143托尔飞跃仅考虑实际攻击落位或脱险，暴怒冲击无敌方受体时不空位移；R324信鸦手召只为敌方外邻可成阵格加分，简单/倾向AI改用技能对象候选和估值。N初始魔2，加魔可超2；规则文档澄清。静态检查，动态待用户统一验收。
+
+- 2026-11-06 R341–R343首份用户专场8/8回归，九场审计273条同因`PuppetUnequipSkill.preview`漏传宿主造成AI决策异常；共用对象已补参数，原定向场景覆盖装备后预览。R342斧旧报告无正收益候选，R343舞候选最高-12，等无异常复跑再判断。新增0，公开138/388、余250。
+
+- 2026-11-06 R341–R343复跑8/8场景、9/9对局、0高信号。人工逐步审查R342斧命中被旧AI代码分类门槛漏判，R342/R343对象AI高防小数伤害误记0；`puppet_trio.py`用技能对象命中钩子和战斗伤害规则评分，补2项定向场景，动态待用户复跑。公开仍138/388、余250，守护灵批暂缓。
+
+- 2026-11-06 R341–R343机关傀儡：三将源设计JSON/XLSX先锁，`heroes/mechanics/puppet_equipment.py`共用装备/卸下、宿主状态与死亡回场；`heroes/puppet_trio.py`持有三将专属咒、连击、技能禁用和轮末骰伤；三个kit装配。预览沿通用单位/格子目标，AI对象自评分服务三路。新增3，公开138/388，余250；动态专场待用户运行。R340复跑10/10、3/3对局、零高信号。
+
+- 2026-11-05 R340暴君龙：源表340与十问先锁JSON/XLSX；专属对象`heroes/tyrant_dragon.py`，装配`kits/excel_r340.py`。共享`BattleComponent.max_recoverable_hp`为永久伤口提供治疗上限，`Skill.ai_payload_candidates`给简单/倾向AI提供完整payload，`Skill.requires_choice_replay_when_used`令仅当前吐息施放进入选择重放；`battle_execution.py`负责判定，网页`unit_skill_multi`通用选择在`battle-ui.js`/`events.js`/`targeting.js`。首次用户专场9/9回归、3/3对局；火焰候选与宽体伤害AI评分按轨迹修正，R340九项加R339一项回归待复跑。公开135/388、余253。
+
+- 2026-11-05 R339软甲龙：源表339和六项问卷先锁JSON/XLSX，经用户批准给组件增加可选等级资格查询、给技能增加位移语义标记；专属规则在`heroes/soft_armor_dragon.py`，kit装配在`kits/excel_r339.py`。缠绕沿现有目标连锁/免疫流程，突袭沿DashMoveSkill与回血流程；三路AI读取对象自评分，七项定向场景待用户专场。公开134/388、余254。R338用户专场6/6回归、3/3对局、零高信号；未用地狱设计者候选经轨迹核对未证实漏用高收益。
+
+- 2026-11-04 R338邪神：源设计JSON/XLSX先锁八项歧义，再以`heroes/hermopolis.py`持有实时镜像属性、2×2瞬移、死者封名、实验体与特化减益；经用户批准增加`BattleFieldEffect.allows_unit_entry`和通用`unit_cell`目标加落格选择，后者由网页及三路AI共享。R338公开133/388、余255；仅静态检查，用户专场待跑。R332/R333复跑10/10，飞龙船路径报错归因假说已静态修正；R334–R336测试夹具修正待复跑。
+
 - 2026-11-03 四将规则复核：翡翠立场排除本人；昼行武者普攻伤害不破魔、附效破魔；安德鲁咆哮无伤；矮小绅士造影换位池为全场同一召唤者的己方现存分身。归属在 `mechanics/jade.py`、`daylight_hunter.py`、`gladiator_cooperation.py`、`heroes/gentleman.py`，公开原文在 `heroes/excel_roster_data.py`；源表 R192 由用户保存。
 
 - 2026-11-03 双特殊规则下世界之种 AI 评分可遇到存活但被放逐的友军：`Battle.player_units` 包含该单位，`Battle.unit_cells` 返回空。`rooms/ai_self_generic_scoring.py::world_seed_score` 的距离计算须给空占位默认远距离，避免 `min()` 崩溃；行为回归覆盖该场景，动态验收待用户统一运行。
@@ -1115,3 +1167,12 @@ The codebase was reorganised by domain on 2026-08-27. Every phase record further
 - 2026-10-13 Phase H R253：源253、保存Q001–003、通用骑士乘骑/真武将/特殊扣血和独立Q004–006先锁JSON/XLSX；`heroes/excel_roster.py`接开局1×2机械马、双普攻、死后隔一本人轮再召、旧格7×7双方非机甲真武将当前血减半破魔与本实际回合普攻/技能伤害类别锁；融合不传部署身份。`rooms/ai.py`按真实受体敌友净值、马与融合代价估分，并减少对已被类别锁挡下伤害的保护。`NewBatch253AncientBehaviorTests`七项待用户运行；公开池100/388，剩余288。
 - 2026-10-13 Phase H R254/R255：源254/255及保存R254-Q001=b、R255-Q001=a/Q002=b先锁JSON/XLSX设计；excel_roster.py接平射降守、3×3双方抛射、5×5快照举盾、动态巨盾邻接及选伴守4盾墙；engine/core.py在通常防御后公开逐次1/3格挡，AI预演只取期望；rooms/ai.py评估敌我净值、保护机会与邻接站位；NewBatch254255定向场景静态完成待用户运行。公开池102/388，未实现286。R253用户复跑9/9场景、3/3对局零高信号，融合/再召无有效机会保留P2覆盖观察。
 - 2026-10-13 R254/R255首次用户专场：九项中七过；平射预览与直接执行两项共因是测试夹具(3,2)到(6,4)不满足点单位直线规则，非战斗/AI已证实缺陷。夹具改为(6,2)，并明确覆盖(6,4)的预览排除/声明拒绝；待用户新目录复跑，AI对局尚未执行。
+- 2026-11-04 R330/R331骷髅飞盗团新船员：候选门禁确认精确代码与全名未公开，源表330/331及通则先锁`docs/武将设计思想.json`与`docs/武将实现问题清单.xlsx`，各有3条推断。`heroes/flying_dragon_crew.py`持有舵手飞钩/时之沙快照与侦察兵双段锁爪/普攻降速，`heroes/flying_dragon_ship.py`既有船对象持有仅骑乘时速+2/穿人固定伤4/每次受伤1/3概率免伤，`kits/excel_r330.py`和`excel_r331.py`逐源片段接线。经用户批准，`engine/core.py`的Skill增加可选对象候选/落格评分接口，`rooms/simple_ai.py`、`rooms/tendency/decide.py`、`rooms/ai_decisions.py`只对声明归属的技能调用，船代施包装转发。`NewBatch330331FlyingCrewBehaviorTests`13项场景已写；助手仅做静态检查、未跑动态测试。新增2，公开127/388、余261，下一批R332/R333。
+- 2026-11-04 R330/R331用户专场13/13回归、6/6对局、零高信号；飞钩与船代施未出现有效机会，保留覆盖观察。R332斗士/R333炮手已独立锁源并在现有OOP接口静态实施：`flying_dragon_crew_next.py`持有重甲动态防护和无伤破魔手枪，`flying_dragon_ship.py`持有仅骑乘时攻+1、范+2与2×2双方普攻。装配见`kits/excel_r332.py`/`excel_r333.py`，定向场景`NewBatch332333FlyingCrewBehaviorTests`10项；用户专场待跑。新增2，累计公开129/388、余259；下批R334–R336。
+- 2026-11-04 R332/R333首次用户回归9/10；重甲旧夹具误把免生命伤当整击取消，现改查实际伤0，待复跑。R334–R336三竹各自源设计先锁JSON/XLSX；获用户批准后新增`BattleComponent.on_final_hp_loss`最终扣血前来源/场地通知和`optional_heal_target`通用选择，规则均由`heroes/earth_fissure_bamboo.py`的对象承载，装配见`kits/excel_r334.py`–`excel_r336.py`。标准/简单/倾向AI和网页治疗选择已接，`NewBatch334336BambooBehaviorTests`九项待用户运行。新增3，累计公开132/388、余256；下批R338–R340。
+- 2026-11-13 R351 热源魔兽：源351、保存Q001/Q002先锁JSON/XLSX；`heroes/heat_source_beast.py`对象持有2×2外邻普攻、敌方真武将数动态普攻、双档热导、自爆与死亡热爆、尸体投敌复出。`kits/excel_r351.py`装配。共享`required_direction`与`choice_context`只传提示选择，三路AI和网页使用同一提示；九项`NewBatch351HeatSourceBehaviorTests`已写。新增1，公开146/388，余242；助手仅静态检查，用户专场待运行。
+# 2026-11-16 展示入口补充
+
+- 标准 BP 的整局等级排期由 `rooms/room_bp_mixin.py::_plan_tier_rounds` 预抽，`_bp_public_state` 公开 `round_levels`，`static/tactical/bp-ui.js` 在禁选阶段显示各轮等级。
+- 战斗单位动作由 `engine/battle_presentation.py::emit_visual_event_for_queued_action` 写入 `visual_events`；普通移动也要写入。`static/tactical/vfx.js` 与 `static/tactical/autochess-ui.js` 在动作特效前展示单位上方的动作名称。展示数据属于已结算的公开战斗帧，前端提示先于特效播放。
+- 未实装武将的源表文案可同步至 `heroes/excel_roster_data.py`，不得因此计入已开发，也不得在无实装机制时开放选择。

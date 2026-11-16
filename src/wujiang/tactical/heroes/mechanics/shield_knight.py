@@ -16,6 +16,7 @@ from wujiang.tactical.heroes.common import (
 from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS
 
 class ShieldKnightChargeSkill(Skill):
+    is_displacement_skill = True
     selection_cells_are_effect_cells = False
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float:

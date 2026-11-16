@@ -31,6 +31,7 @@ def gentleman_crossings(battle: Battle, actor: Unit, path: list[Position]) -> li
 
 
 class GentlemanSurpriseStepSkill(Skill):
+    is_displacement_skill = True
     selection_cells_are_effect_cells = False
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float | None:
@@ -146,6 +147,7 @@ class GentlemanSurpriseStepSkill(Skill):
 
 
 class GentlemanDuelSkill(TargetDestinationCandidates, Skill):
+    is_displacement_skill = True
     ai_destination_fields = ("dest_x", "dest_y")
     requires_direct_unit_target_line = False
 

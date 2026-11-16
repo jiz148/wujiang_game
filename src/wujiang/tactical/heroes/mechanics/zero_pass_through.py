@@ -16,6 +16,7 @@ from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS
 
 
 class ZeroDashSkill(Skill):
+    is_displacement_skill = True
     def ai_move_score(self, context: AISkillScoreContext, base_score: float,
                       destination: Position) -> float:
         return base_score + context.shared.zero_dash_score(context, self)
@@ -87,6 +88,7 @@ class ZeroDashSkill(Skill):
 
 
 class PassThroughDamageTrait(Trait):
+    grants_pass_through = True
     def __init__(self) -> None:
         super().__init__("穿人有伤害", "移动结束后，路径每次穿过单位所在格分别造成一次可连锁的伤害。")
 

@@ -61,6 +61,12 @@ from wujiang.tactical.heroes.common import (
 
 
 class ManaPullSkill(TargetDestinationCandidates, Skill):
+    is_displacement_skill = True
+
+    def moves_owner_on_use(self, battle: Battle, actor: Unit,
+                           payload: dict[str, Any] | None) -> bool:
+        return False
+
     def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
         return 20.0 if any(unit.player_id != context.actor.player_id for unit in targets) else 6.0
 
@@ -400,6 +406,7 @@ class ParalyzingGloveSkill(Skill):
 
 
 class FateKickSkill(Skill):
+    is_displacement_skill = True
     def __init__(self) -> None:
         super().__init__("fate_kick", "命运飞踢", "直线冲刺至多 4 格，再判定前方单位；硬币正面则自己消失 1轮，反面则目标消失 1轮。", cooldown_turns=2, target_mode="cell")
 

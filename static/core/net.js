@@ -337,7 +337,7 @@ export function unitFootprintBounds(unit) {
 }
 
 function unitIsStealthed(unit) {
-  return Boolean(unit?.statuses?.some((status) => status.name === "隐身"));
+  return Boolean(!unit?.stealth_revealed && unit?.statuses?.some((status) => status.name === "隐身"));
 }
 
 export function selectedUnit() {

@@ -92,7 +92,8 @@ def ai_enemy_view(battle: Battle, player_id: int) -> Iterable[None]:
             battle._ai_view_player_id = player_id
             battle._ai_scoring_rules = RULES_VERSION
             hidden = {unit.unit_id for unit in battle.all_units()
-                      if unit.player_id != player_id and unit.is_stealthed()}
+                      if unit.player_id != player_id and unit.is_stealthed()
+                      and not battle.stealth_revealed_to(unit, player_id)}
             battle._ai_has_unseen_enemies = bool(hidden)
             sources = dict(battle.units)
             if "chess_rng" in battle.__dict__:

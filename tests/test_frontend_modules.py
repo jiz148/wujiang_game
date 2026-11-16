@@ -28,6 +28,34 @@ FORBIDDEN_EDGES = [("tactical", "strategic"), ("strategic", "tactical")]
 
 
 class FrontendModuleGraphTests(unittest.TestCase):
+    @unittest.skipIf(NODE is None, "node is required to evaluate the placement prompt")
+    def test_optional_placement_displays_self_and_ally_destinations(self) -> None:
+        script = """
+import { displayActions } from './static/tactical/vfx.js';
+import { state } from './static/core/state.js';
+import assert from 'node:assert/strict';
+state.battle = { units: [{ id: 'actor', name: '行动者' }, { id: 'ally', name: '友军' }],
+  pending_damage_choice: { kind: 'optional_placement', unit_id: 'actor',
+    action_name: '选择落点', options: ['2,3', 'ally@4,5'] } };
+let actions = displayActions();
+assert.equal(actions.length, 3);
+assert.equal(actions[0].target_unit_id, '2,3');
+assert.deepEqual(actions[0].preview.cells, [{ x: 2, y: 3 }]);
+assert.deepEqual(actions[0].preview.target_unit_ids, ['actor']);
+assert.equal(actions[1].target_unit_id, 'ally@4,5');
+assert.deepEqual(actions[1].preview.target_unit_ids, ['ally']);
+state.battle.pending_damage_choice.kind = 'formation';
+state.battle.pending_damage_choice.options = ['ally@4,5'];
+actions = displayActions();
+assert.equal(actions.length, 1);
+assert.equal(actions[0].target_unit_id, 'ally@4,5');
+"""
+        result = subprocess.run(
+            [NODE, "--input-type=module", "-e", script], cwd=ROOT,
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, msg=f"{result.stdout}\n{result.stderr}")
+
     @unittest.skipIf(NODE is None, "node is required to link-check the frontend modules")
     def test_module_graph_links_and_evaluates(self) -> None:
         result = subprocess.run(
