@@ -18,7 +18,7 @@ from wujiang.tactical.prediction import random
 
 
 def weather_race_eligible(unit: HeroUnit, race: str) -> bool:
-    return getattr(unit, "original_weather_race", unit.race) == race
+    return unit.qualifies_as_race(race, original=True)
 
 
 class WeatherExtraAttackStatus(StatusEffect):
@@ -51,7 +51,8 @@ class RacialWeatherEffect(BattleFieldEffect):
             return
         if getattr(battle, "_forecasting_action", False):
             return
-        gained = random.random() < 0.5
+        gained = battle.roll_chance(0.5, action_name="万魔殿追加攻击",
+                                    beneficiary_player_id=actor.player_id)
         if gained:
             status = actor.get_status("万魔殿追加攻击")
             if status is None:

@@ -15,4 +15,8 @@ from wujiang.tools.all_hero_deep_audit import main  # noqa: E402
 
 if __name__ == "__main__":
     os.chdir(ROOT)
+    # Some terminals cannot encode a hero's Chinese name. Preserve the audit
+    # and its file logs even when console output needs escaped characters.
+    sys.stdout.reconfigure(errors="backslashreplace")
+    sys.stderr.reconfigure(errors="backslashreplace")
     raise SystemExit(main(sys.argv[1:]))

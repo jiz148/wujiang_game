@@ -6,7 +6,6 @@ from typing import Any
 
 from wujiang.tactical.engine.core import ActionError, Battle, DamageContext, HealContext, Position, Skill, Trait, Unit, is_army_soldier
 from wujiang.tactical.heroes.common import positions_to_dict
-from wujiang.tactical.heroes.mechanics.next_five_geometry import ALL_DIRECTIONS
 
 
 def _present(unit: Unit | None) -> bool:
@@ -192,7 +191,7 @@ class BeastDevourSkill(Skill):
     """The dead-state skill is offered by the death trait, never as a live action."""
 
     def __init__(self) -> None:
-        super().__init__("beast_devour", "吞噬", "真死后选敌方单位、2×2合法落格和方向；投敌复出并作5破魔方向伤。",
+        super().__init__("beast_devour", "吞噬", "真死后选敌方单位、2×2合法落格和范内一格；投敌复出并对所选格造成5破魔伤害。",
                          max_uses_per_turn=1, target_mode="self")
 
     def can_use(self, battle: Battle, actor: Unit,
@@ -233,23 +232,18 @@ def _blast_cells(battle: Battle, owner: Unit) -> list[Position]:
             if battle.in_bounds(cell := Position(origin.x + dx, origin.y + dy))]
 
 
-def _devour_line(battle: Battle, actor: Unit, anchor: Position,
-                 direction: tuple[int, int]) -> list[Position]:
+def _devour_target_cells(battle: Battle, actor: Unit, anchor: Position) -> list[Position]:
     body = set(actor.footprint_cells_at(anchor))
-    dx, dy = direction
-    line: set[Position] = set()
-    for origin in body:
-        cell = origin.offset(dx, dy)
-        while battle.in_bounds(cell) and cell not in body:
-            line.add(cell)
-            cell = cell.offset(dx, dy)
-    return sorted(line, key=lambda cell: (cell.y, cell.x))
+    reach = actor.targeting_range()
+    return [cell for y in range(battle.height) for x in range(battle.width)
+            if (cell := Position(x, y)) not in body
+            and any(origin.distance_to(cell) <= reach
+                    and battle.cells_are_straight_aligned(origin, cell) for origin in body)]
 
 
-def _devour_direction_value(battle: Battle, actor: Unit, anchor: Position,
-                            direction: tuple[int, int]) -> float:
+def _devour_cell_value(battle: Battle, actor: Unit, cell: Position) -> float:
     new_player = 2 if actor.player_id == 1 else 1
-    victims = battle.effect_units_at_cells(_devour_line(battle, actor, anchor, direction))
+    victims = battle.effect_units_at_cells([cell])
     return sum((1.0 if unit.player_id == new_player else -1.3)
                * min(unit.current_hp, battle.damage_rule.calculate_damage(5, unit.stat("defense"))) * 100
                for unit in victims if unit is not actor and not unit.magic_immunity)
@@ -302,16 +296,15 @@ def resolve_beast_devour(battle: Battle, actor: Unit, queued: Any) -> None:
     battle.notify_destroyed_hero_count_changed()
     battle.log_public_event(f"{actor.name} 通过吞噬从玩家 {old_player} 转为玩家 {actor.player_id} 的武将。",
                             source=actor, target=target)
-    direction = queued.payload.get("direction") or []
-    if len(direction) != 2:
+    blast_cell_data = queued.payload.get("blast_cell") or {}
+    if not isinstance(blast_cell_data, dict) or "x" not in blast_cell_data or "y" not in blast_cell_data:
         return
-    dx, dy = int(direction[0]), int(direction[1])
-    line = _devour_line(battle, actor, cells[0], (dx, dy))
-    if line:
+    blast_cell = Position(int(blast_cell_data["x"]), int(blast_cell_data["y"]))
+    if blast_cell in _devour_target_cells(battle, actor, cells[0]):
         battle.queue_skill_effect_action(actor=actor, display_name="吞噬破魔喷发", effect_code="beast_devour_blast",
-            payload={"cells": positions_to_dict(line),
+            payload={"cells": positions_to_dict([blast_cell]),
                      "attack_power": 5, "ignore_shield": True, "refresh_cell_targets": True},
-            target_cells=line,
+            target_cells=[blast_cell],
             effect_resolver=resolve_beast_devour_blast)
 
 
@@ -329,7 +322,7 @@ class BeastDeathTrait(Trait):
     ai_optional_choice_owned = True
 
     def __init__(self) -> None:
-        super().__init__("热源死爆", "真正破坏后11×11威力4爆发；可选择投敌复出并作方向破魔伤。")
+        super().__init__("热源死爆", "真正破坏后11×11威力4爆发；可选择投敌复出并对范内一格造成破魔伤害。")
         self.last_devour_turn = -1
 
     def on_unit_destroyed(self, battle: Battle, destroyed_unit: Unit) -> None:
@@ -362,19 +355,20 @@ class BeastDeathTrait(Trait):
         if chosen not in options:
             return
         x, y = (int(part) for part in chosen.split(",", 1))
-        directions = [f"{dx},{dy}" for dx, dy in ALL_DIRECTIONS]
-        direction = battle.optional_position_choice(owner, directions,
-            action_name="吞噬：选择破魔喷发方向", kind="required_direction",
-            choice_context={"phase": "direction", "target_unit_id": target.unit_id,
+        blast_cells = _devour_target_cells(battle, owner, Position(x, y))
+        blast_options = [f"{cell.x},{cell.y}" for cell in blast_cells]
+        selected_cell = battle.optional_position_choice(owner, blast_options,
+            action_name="吞噬：选择范内破魔伤害格", kind="required_placement",
+            choice_context={"phase": "blast", "target_unit_id": target.unit_id,
                             "x": x, "y": y})
-        if direction not in directions:
+        if selected_cell not in blast_options:
             return
-        dx, dy = (int(part) for part in direction.split(",", 1))
+        blast_x, blast_y = (int(part) for part in selected_cell.split(",", 1))
         self.last_devour_turn = battle.turn_number
         battle.queue_skill_effect_action(actor=owner, display_name="吞噬复出",
             effect_code="beast_devour_rebirth",
             payload={"after_death_effect": True, "target_unit_id": target.unit_id,
-                     "cells": [{"x": x, "y": y}], "direction": [dx, dy]},
+                     "cells": [{"x": x, "y": y}], "blast_cell": {"x": blast_x, "y": blast_y}},
             target_cells=[], include_cell_units=False, hostile=False,
             effect_resolver=resolve_beast_devour)
 
@@ -388,22 +382,23 @@ class BeastDeathTrait(Trait):
             target = battle.units.get(choice)
             if target is None:
                 return -1000.0
-            return max((_devour_direction_value(battle, actor, cell, direction)
+            return max((_devour_cell_value(battle, actor, blast_cell)
                         for cell in _landing_cells(battle, actor, target)
-                        for direction in ALL_DIRECTIONS), default=-100.0) - 150.0
+                        for blast_cell in _devour_target_cells(battle, actor, cell)), default=-100.0) - 150.0
         if kind == "required_placement":
             try:
                 x, y = (int(part) for part in choice.split(",", 1))
             except ValueError:
                 return -1000.0
-            return max((_devour_direction_value(battle, actor, Position(x, y), direction)
-                        for direction in ALL_DIRECTIONS), default=-100.0)
-        if kind == "required_direction":
-            try:
-                dx, dy = (int(part) for part in choice.split(",", 1))
-                context = prompt.get("choice_context") or {}
-                anchor = Position(int(context["x"]), int(context["y"]))
-            except (KeyError, TypeError, ValueError):
-                return -1000.0
-            return _devour_direction_value(battle, actor, anchor, (dx, dy))
+            context = prompt.get("choice_context") or {}
+            if context.get("phase") == "blast":
+                try:
+                    anchor = Position(int(context["x"]), int(context["y"]))
+                except (KeyError, TypeError, ValueError):
+                    return -1000.0
+                selected = Position(x, y)
+                return (_devour_cell_value(battle, actor, selected)
+                        if selected in _devour_target_cells(battle, actor, anchor) else -1000.0)
+            return max((_devour_cell_value(battle, actor, blast_cell)
+                        for blast_cell in _devour_target_cells(battle, actor, Position(x, y))), default=-100.0)
         return None

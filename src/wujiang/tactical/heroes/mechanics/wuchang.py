@@ -94,7 +94,8 @@ class WuchangMistField(BattleFieldEffect):
             name = skill.name
         elif action_type != "attack":
             return
-        failed = random.random() < 0.5
+        failed = battle.roll_chance(0.5, action_name="无常之雾动作判定",
+                                    beneficiary_player_id=3 - actor.player_id)
         payload["wuchang_mist_checked"] = True
         payload["action_failed_by_wuchang_mist"] = failed
         result = "失败" if failed else "成功"

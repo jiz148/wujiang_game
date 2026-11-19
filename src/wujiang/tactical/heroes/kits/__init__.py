@@ -122,7 +122,14 @@ _CODES = (
     "excel_r351",
     "excel_r352",
     "excel_r353",
+    "excel_r354",
+    "excel_r355",
     "excel_r356",
+    "excel_r357",
+    "excel_r358",
+    "excel_r359",
+    "excel_r360",
+    "excel_r361",
     "excel_r379",
 )
 

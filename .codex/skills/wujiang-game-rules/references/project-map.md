@@ -1,5 +1,23 @@
 # wujiang_game Project Map
 
+- 2026-11-18 通用远程AI：`Skill.ai_positioning_window`读取技能原有单位目标射程或合法`pattern_cells`预览的最大距离与相对覆盖格，无精兵或机枪特判。`rooms/ai_formation_scoring.py::offensive_positioning_plan`按本回合剩余可用对敌技能取最短作战距离；`ai_acceleration.py`只在同一次未改变的决策内缓存结果，候选落点用相对坐标查覆盖。正常移动、主动位移、回避和撤步射击等被动位移共用评分；`ai_move_candidates.py`快速裁剪也用同一距离。无逐落点技能预览或战斗模拟。
+
+- 2026-11-18 BP新版规则：`rooms/special_modes.py`为源表名称和文案；`rooms/special_battle.py`负责最低级攻守速加成、最近等级差随机单挑、大将候场及中央5×5地形；`engine/battle_movement.py`区别常规移动与技能位移；`battle_presentation.py`输出地形，`static/tactical/battle-ui.js`和`static/styles.css`显示岩石。删除旧回复反噬及永恒轮回加成。通用伤害规则在`engine/core.py`归零攻上限，远程走位在`rooms/ai_formation_scoring.py`保持可攻击的放风筝落点，`ai_weather_scoring.py`的可攻击目标评分只数敌方。R038赫拉克罗斯仅同步源文，仍未实现。
+
+- 2026-11-17 R358忍法大师忍者：`heroes/ninja_master.py`持免费非大招连施、手里剑、魔笛补用和坐地莲，`kits/excel_r358.py`精确装配且复用通用撕裂。`Skill`从组件查询本轮额外免费次数和本场大招补用资格，在付款时由提供者消耗，源片段标记大招身份；没有武将编号分支。10/10定向、3/3单将长审计零高信号/动作失败，下一位R359。公开151/388、余237。
+
+- 2026-11-17 R357绝境赌徒：`heroes/desperate_gambler.py`的技能/特性对象持筹码、固定血换守、守1轮末死亡、普攻概率和重判额度；`kits/excel_r357.py`按源片段装配。`BattleExecutionMixin.probability_result`在战场概率样本生效前复用可选重演流程，公开掷币/骰/随机选取调用者共用；`battle_combat.py`让受击者在最终扣血前处理固定血。`vfx.js`/`battle-ui.js`显示重判选择；审计按提示技能归属记录通用选择。助手8/8短定向、3/3长对局零高信号/动作失败，筹码11次、重判22次。公开150/388、余238。助手只跑单将专场，绝不跑全库测试。
+
+- 2026-11-17 R355热血考拉教练：`heroes/koala_coach.py`按对象持大飞跃、掀桌动态光环、协力翻滚、破魔压顶与零魔轮末回魔，`kits/excel_r355.py`按精确片段装配。通用网页 `multi_unit` 加方向直接复用，三路AI取对象候选；自定范围的单位技能关闭默认直线门禁。掀桌连击起手修后助手10/10短定向、3/3长审计零高信号/动作失败、真实使用3次。R354修复后9/9短定向、三场长审计零高信号/动作失败，一场150步未决。
+
+- 2026-11-17 R354紫晶战士：`heroes/amethyst_warrior.py`持施技成长、被连锁回魔、集中换普通移动次数、潮汐拳先恰2步再排2×2拳伤及敌水真武将独立破魔吸魔；`kits/excel_r354.py`按精确片段装配。`BattleComponent.on_action_chained`由`engine/battle_reactions.py`对原行动每个已接纳连锁观察一次。网页复用`cell_direction`，三路AI用技能对象候选和估值。九项定向场景已静态写好，公开148/388、余240，用户专场待验。R353复跑10/10、3/3、零高信号。
+
+- 2026-11-17 R289「流星剑客」仍未实装；用户保存的源表更新「剑术。契约」为击中后双方生命乘以施术者声明的百分比。仅同步 `heroes/excel_roster_data.py` 的原文和技能片段，不创建机制、AI、设计基线或公开入口，也不计入已开发。
+
+- 2026-11-17 通用“对一个方向造成伤害”按本人当前范选中单格，R351吞噬从2×2复出身体范1选一格，单格威力5破魔；旧整条射线推断废止。R350源表扩大到飞龙/古龙武将、名字带龙的单位及其召唤链破魔，击杀成长按新文字扩大；普攻吸血始终对任何单位独立生效。规则见 `docs/通用规则.md` 和源设计修订；对象在 `heat_source_beast.py`、`dragon_blood_delongkula.py`，R350片段装配在 `kits/excel_r350.py`。
+
+- 2026-11-16 R353致盲普攻额外1魔在 `BlindnessStatus.on_owner_action_declared` 声明时支付；`can_use_basic_attack` 只在新声明/预览检查余额，已声明的 `Battle.is_declared_resolution` 不重查余额。否则支付到0的范围普攻在连锁后结算会抛 `ActionError`，房间 AI 跳过连锁也无法恢复。保留负余额声明拦截，`tests/test_behavior.py` 有付到0后结算的回归场景；按用户安排动态测试待合并运行。
+
 - 2026-11-16 神龙。末日光源表补「没有伤害」由 `heroes/mechanics/doomlight_dragon.py` 的原文和技能说明同步；`DoomLightSkill.execute` 只施加持续状态，未来轮初伤害归状态。`static/tactical/vfx.js::displayActions` 的 `optional_placement` 提示须兼容本人落点 `x,y` 与搬运他人落点 `unit@x,y`；源端两种格式都沿用此提示类型。
 
 - 2026-11-14 R353首份用户专场9项8过1败，标准AI没有保留有效灵异恐吓方向；AI局尚未运行。`heroes/disorder_wisp.py` 的无伤夺控及致盲/魅影标记现在通过对象`ai_effective_enemy_impact`报告正收益，恐吓另用`ai_effect_units`排除几何区域内非召唤物。新增标准AI致盲候选场景，定向总10项；静态检查后待用户复跑。公开147/388、余241，不进入R354。
@@ -1176,3 +1194,7 @@ The codebase was reorganised by domain on 2026-08-27. Every phase record further
 - 标准 BP 的整局等级排期由 `rooms/room_bp_mixin.py::_plan_tier_rounds` 预抽，`_bp_public_state` 公开 `round_levels`，`static/tactical/bp-ui.js` 在禁选阶段显示各轮等级。
 - 战斗单位动作由 `engine/battle_presentation.py::emit_visual_event_for_queued_action` 写入 `visual_events`；普通移动也要写入。`static/tactical/vfx.js` 与 `static/tactical/autochess-ui.js` 在动作特效前展示单位上方的动作名称。展示数据属于已结算的公开战斗帧，前端提示先于特效播放。
 - 未实装武将的源表文案可同步至 `heroes/excel_roster_data.py`，不得因此计入已开发，也不得在无实装机制时开放选择。
+
+- 2026-11-18 R359迪奥斯：heroes/dios_floating_cannon.py持四炮召唤、吸魔、独立光环、击炮后效和轮初重召；kits/excel_r359.py精确片段装配。共享Skill.mana_cost_for_payload及通用多目标护盾费用读取BattleFieldEffect.modify_skill_mana_cost；每炮自身Trait在离场时清除光环，即使召唤者先死。pattern_cells带required_cells供网页逐格选取，三路AI用对象候选。11/11定向、3/3单将长审计零高信号/动作失败；公开152/388、余236，下一位R360。
+
+- 2026-11-18 R360阿加德：专属规则归heroes/birdman_agad.py，装配kits/excel_r360.py。engine/core.py的Unit.qualifies_as_race通过BattleComponent.counts_as_race扩展种族资格，racial_weather.py使用原生资格；common.FlyingTrait.refresh_flight_state负责原生飞行压制与临时飞行并存，R350长枪压制复用。打落按首伤后独立后效；行刺声明绑定首次破魔不可回避。15/15定向及3/3单将长审计零高信号/动作失败；公开153/388、余235，下一位R361。

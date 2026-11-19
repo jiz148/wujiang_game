@@ -290,7 +290,7 @@ class SkirtHostStatus(PuppetHostStatus):
         owner = self.owner
         if owner is None or not _present(owner) or self.attached_puppet(battle) is None:
             return
-        rolled = random.randint(1, 6)
+        rolled = battle.roll_die(6, action_name="魅惑裙摆轮末掷骰", beneficiary_player_id=owner.player_id)
         power = rolled / 2
         cells = [cell for cell in square_around_cells(battle, battle.unit_cells(owner), radius=1)
                  if cell not in set(battle.unit_cells(owner))]

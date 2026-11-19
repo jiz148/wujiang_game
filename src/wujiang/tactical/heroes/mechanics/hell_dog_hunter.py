@@ -117,7 +117,7 @@ class HellTeleportSkill(Skill):
         if actor.position is None:
             return -1000.0
         avoided = danger_at(actor.position) - danger_at(destination)
-        return base_score + avoided * (1.7 if actor.current_hp <= 0.5 else 0.9) - 42.0
+        return base_score + avoided * (1.7 if actor.current_hp <= actor.max_health / 2.0 else 0.9) - 42.0
 
     def available_cells(self, battle: Battle, actor: Unit) -> list[Position]:
         if actor.position is None or actor.cannot_move or getattr(actor, "standable_terrain", False):

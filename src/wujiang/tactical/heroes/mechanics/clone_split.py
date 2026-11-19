@@ -19,7 +19,7 @@ from wujiang.tactical.prediction import expected_local
 from wujiang.tactical.prediction import random
 
 
-def maybe_swap_new_clones(actor: HeroUnit, clones: list["StandardCloneSummon"]) -> bool:
+def maybe_swap_new_clones(battle: Battle, actor: HeroUnit, clones: list["StandardCloneSummon"]) -> bool:
     """Each summon has a chance to leave its source in place or exchange it."""
     if not clones or actor.position is None:
         return False
@@ -28,9 +28,9 @@ def maybe_swap_new_clones(actor: HeroUnit, clones: list["StandardCloneSummon"]) 
         actor._ai_expected_positions = ((original, 0.5), *(
             (clone.position, 0.5 / len(clones)) for clone in clones))
         return False
-    if not random.choice((False, True)):
+    if not battle.roll_chance(0.5, action_name="分身制造换位判定"):
         return False
-    chosen = random.choice(clones)
+    chosen = battle.choose_random(clones, action_name="分身制造换位对象")
     actor.position, chosen.position = chosen.position, original
     return True
 
@@ -191,7 +191,7 @@ class SplitSkill(Skill):
                 raise ActionError("分身位置已被占用。")
             battle.summon_unit(clone, destination, summoner=actor)
             clones.append(clone)
-        exchanged = maybe_swap_new_clones(actor, clones)
+        exchanged = maybe_swap_new_clones(battle, actor, clones)
         actor.turn_ready = False
         battle.log(f"{actor.name} 使用分身制造了 {self.clone_count} 个分身，"
                    + ("并与其中一个新分身交换了位置。" if exchanged else "本体留在原位。"))

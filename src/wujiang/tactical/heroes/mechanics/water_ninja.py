@@ -65,9 +65,10 @@ class WaterNinjaCloneAfterAttackTrait(Trait):
             owner._ai_expected_positions = ((real_position, 0.5), *(
                 (clone.position, 0.5 / len(clones)) for clone in clones))
             return
-        if not random.choice((False, True)):
+        if not battle.roll_chance(0.5, action_name="水忍分身换位判定"):
             return
-        swap_clone = random.choice(sorted(clones, key=lambda unit: unit.unit_id))
+        swap_clone = battle.choose_random(sorted(clones, key=lambda unit: unit.unit_id),
+                                          action_name="水忍分身换位对象")
         swap_position = swap_clone.position
         swap_clone.position = real_position
         owner.position = swap_position

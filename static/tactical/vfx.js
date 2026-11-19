@@ -78,6 +78,21 @@ export function displayActions() {
   if (isGameOver()) return [];
   if (isDamageChoiceMode()) {
     const prompt = state.battle.pending_damage_choice;
+    if (prompt.kind === "probability_reroll") {
+      const outcome = prompt.choice_context?.outcome ?? "?";
+      const odds = (prompt.choice_context?.distribution || [])
+        .map((item) => `${item.outcome} ${Math.round(Number(item.probability || 0) * 100)}%`).join("、");
+      return [
+        { code: "probability_reroll", name: "绝境无赖：重新判定", kind: "damage_choice",
+          target_unit_id: "reroll", timing: "reaction", available: true,
+          description: `当前结果 ${outcome} 作废，按原概率独立重取一次。${odds}`,
+          preview: { cells: [], target_unit_ids: [], requires_target: false } },
+        { code: "probability_decline", name: "接受当前结果", kind: "damage_choice",
+          target_unit_id: "decline", timing: "reaction", available: true,
+          description: `保留当前结果 ${outcome}，不消耗重判次数。`,
+          preview: { cells: [], target_unit_ids: [], requires_target: false } },
+      ];
+    }
     if (prompt.kind === "gentleman_guard") {
       return [
         { code: "gentleman_guard_protect", name: "消耗一次绅士免伤", kind: "damage_choice",
@@ -207,8 +222,10 @@ export function displayActions() {
     if (prompt.kind === "required_placement") {
       return (prompt.options || []).map((option, index) => {
         const [x, y] = option.split(",").map(Number);
+        const isDevourBlast = String(prompt.action_name || "").startsWith("吞噬：选择范内破魔伤害格");
         return {
-          code: `required_placement_${index}`, name: `召至（${x + 1},${y + 1}）`,
+          code: `required_placement_${index}`,
+          name: `${isDevourBlast ? "攻击" : "召至"}（${x + 1},${y + 1}）`,
           kind: "damage_choice", target_unit_id: option, timing: "reaction", available: true,
           description: prompt.action_name || "选择合法落点。",
           preview: { cells: [{ x, y }], target_unit_ids: [], requires_target: false },

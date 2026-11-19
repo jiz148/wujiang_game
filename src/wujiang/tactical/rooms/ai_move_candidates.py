@@ -8,6 +8,7 @@ from wujiang.tactical.prediction import forecasting_active, note
 from wujiang.tactical.heroes.ai_policy import AIReactionCandidateContext
 from wujiang.tactical.heroes.ai_candidate_plan import DEFAULT_CANDIDATES
 from wujiang.tactical.rooms.ai_targets import living_hostile_combatants
+from wujiang.tactical.rooms.ai_formation_scoring import offensive_positioning_plan
 
 if TYPE_CHECKING:
     from wujiang.tactical.rooms.ai import AICandidate, DifficultyProfile
@@ -44,7 +45,7 @@ class MoveCandidateBuilder:
         enemies = living_hostile_combatants(battle, actor.player_id)
         if not enemies:
             return cells[:self.services.FAST_AI_MOVE_LIMIT]
-        preferred = max(1, int(actor.targeting_range()))
+        preferred, _ = offensive_positioning_plan(battle, actor)
         origin = actor.position
 
         def rank(cell: Position) -> tuple[float, int]:

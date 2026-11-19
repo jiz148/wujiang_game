@@ -97,10 +97,13 @@ class BattleMovementMixin:
         return result
 
 
-    def terrain_step_allowed(self, unit: Unit, start: Position, end: Position) -> bool:
-        if getattr(unit, "has_flying", False):
+    def terrain_step_allowed(self, unit: Unit, start: Position, end: Position,
+                             *, skill_displacement: bool = False) -> bool:
+        if getattr(unit, "has_flying", False) or skill_displacement:
             return True
         cells = set(self.unit_cells_at(unit, start) + self.unit_cells_at(unit, end))
+        if any((cell.x, cell.y) in self.special_terrain_cells for cell in cells):
+            return False
         return not any(
             other.unit_id != unit.unit_id and getattr(other, "standable_terrain", False)
             and cells.intersection(self.unit_cells(other))
@@ -135,8 +138,9 @@ class BattleMovementMixin:
             if not self.in_bounds(step):
                 raise ActionError("移动路径超出战场边界。")
             previous = path[-1]
-            if not self.terrain_step_allowed(unit, previous, step):
-                raise ActionError("只有飞行单位可以移动到地形上或离开地形。")
+            if not self.terrain_step_allowed(unit, previous, step,
+                                             skill_displacement=not use_movement_cost):
+                raise ActionError("常规移动不能进入、离开或穿过地形。")
             if allow_anywhere:
                 path.append(step)
                 distance_cost += 1
@@ -191,7 +195,8 @@ class BattleMovementMixin:
                 Position(x, y)
                 for x in range(self.width)
                 for y in range(self.height)
-                if self.terrain_step_allowed(unit, unit.position, Position(x, y))
+                if self.terrain_step_allowed(unit, unit.position, Position(x, y),
+                                             skill_displacement=not use_movement_cost)
                 and self.can_place_unit(unit, Position(x, y), ignore=unit, mover=unit, ignore_units=False)
             ]
         if straight_only:
@@ -209,7 +214,8 @@ class BattleMovementMixin:
                 previous = unit.position
                 spent = 0
                 for step, candidate in enumerate(self.line_positions(unit.position, direction, max_distance), start=1):
-                    if not self.terrain_step_allowed(unit, previous, candidate):
+                    if not self.terrain_step_allowed(unit, previous, candidate,
+                                                     skill_displacement=not use_movement_cost):
                         break
                     if not self.can_traverse_position(unit, candidate, ignore_units=ignore_units):
                         break
@@ -233,7 +239,8 @@ class BattleMovementMixin:
                 if dist != distances.get(pos):
                     continue
                 for nxt in self.neighbors(pos):
-                    if not self.terrain_step_allowed(unit, pos, nxt):
+                    if not self.terrain_step_allowed(unit, pos, nxt,
+                                                     skill_displacement=not use_movement_cost):
                         continue
                     step_ignores_units = ignore_units and nxt != unit.position
                     if not self.can_traverse_position(unit, nxt, ignore_units=step_ignores_units):
@@ -260,7 +267,8 @@ class BattleMovementMixin:
             if dist >= max_distance:
                 continue
             for nxt in self.neighbors(pos):
-                if not self.terrain_step_allowed(unit, pos, nxt):
+                if not self.terrain_step_allowed(unit, pos, nxt,
+                                                 skill_displacement=not use_movement_cost):
                     continue
                 if nxt in visited:
                     continue
@@ -299,8 +307,9 @@ class BattleMovementMixin:
             raise ActionError("单位不在战场上。")
         if destination == unit.position:
             return [unit.position]
-        if not self.terrain_step_allowed(unit, unit.position, destination):
-            raise ActionError("只有飞行单位可以移动到地形上或离开地形。")
+        if not self.terrain_step_allowed(unit, unit.position, destination,
+                                         skill_displacement=not use_movement_cost):
+            raise ActionError("常规移动不能进入、离开或穿过地形。")
         if allow_anywhere:
             return [unit.position, destination]
         if straight_only:
@@ -318,8 +327,9 @@ class BattleMovementMixin:
             while current != destination:
                 previous = current
                 current = current.offset(dx, dy)
-                if not self.terrain_step_allowed(unit, previous, current):
-                    raise ActionError("只有飞行单位可以移动到地形上或离开地形。")
+                if not self.terrain_step_allowed(unit, previous, current,
+                                                 skill_displacement=not use_movement_cost):
+                    raise ActionError("常规移动不能进入、离开或穿过地形。")
                 step_ignores_units = ignore_units and current != destination
                 if not self.can_traverse_position(unit, current, ignore_units=step_ignores_units):
                     raise ActionError("移动路径被阻挡。")
@@ -342,7 +352,8 @@ class BattleMovementMixin:
                 if pos == destination:
                     break
                 for nxt in self.neighbors(pos):
-                    if not self.terrain_step_allowed(unit, pos, nxt):
+                    if not self.terrain_step_allowed(unit, pos, nxt,
+                                                     skill_displacement=not use_movement_cost):
                         continue
                     step_ignores_units = ignore_units and nxt != destination
                     if not self.can_traverse_position(unit, nxt, ignore_units=step_ignores_units):
@@ -374,7 +385,8 @@ class BattleMovementMixin:
             if pos == destination:
                 break
             for nxt in self.neighbors(pos):
-                if not self.terrain_step_allowed(unit, pos, nxt):
+                if not self.terrain_step_allowed(unit, pos, nxt,
+                                                 skill_displacement=not use_movement_cost):
                     continue
                 next_dist = distances[pos] + 1
                 if next_dist > max_distance or nxt in parents:
@@ -420,8 +432,8 @@ class BattleMovementMixin:
         )
         ignore_units = ignore_units or unit.ignore_units_while_moving
 
-        if unit.banished and "arena" in getattr(self, "special_mode_codes", ()):
-            raise ActionError("擂台候场单位不能移动或受到位移效果。")
+        if unit.is_bp_benched():
+            raise ActionError("候场单位不能移动或受到位移效果。")
         if unit.position is None:
             raise ActionError("单位不在战场上。")
         if getattr(unit, "attached_to_unit_id", None):

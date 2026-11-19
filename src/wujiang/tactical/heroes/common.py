@@ -705,6 +705,19 @@ class FlyingTrait(Trait):
         owner.has_flying = True
         return self
 
+    @staticmethod
+    def refresh_flight_state(owner: Unit, *, suppressing: bool = False) -> None:
+        """Keep native suppression and independent temporary flight compatible."""
+        native = any(isinstance(trait, FlyingTrait) for trait in owner.traits)
+        suppressed = suppressing or any(getattr(status, "suppresses_native_flying", False)
+                                        for status in owner.statuses)
+        temporary = any(getattr(status, "provides_temporary_flight", False)
+                        for status in owner.statuses)
+        if native:
+            owner.has_flying = (not suppressed and not owner.innate_traits_suppressed()) or temporary
+            owner.ignore_units_while_moving = owner.has_flying or any(
+                getattr(trait, "grants_pass_through", False) for trait in owner.traits)
+
 
 class OverhealTrait(Trait):
     def __init__(self) -> None:
@@ -763,11 +776,12 @@ class PrecisionTrainingTrait(Trait):
             and ctx.target.unit_id != self.owner.unit_id
         )
 
-    def _roll_proc(self, tags: set[str]) -> None:
+    def _roll_proc(self, battle: Battle, tags: set[str]) -> None:
         if self.CHECKED_TAG in tags:
             return
         tags.add(self.CHECKED_TAG)
-        if random.random() < 1 / 3:
+        if battle.roll_chance(1 / 3, action_name="精兵压制判定",
+                              beneficiary_player_id=self.owner.player_id):
             tags.add(self.PROC_TAG)
 
     def _apply_slow(self, battle: Battle, target: HeroUnit) -> None:
@@ -784,7 +798,7 @@ class PrecisionTrainingTrait(Trait):
             return
         if getattr(battle, "_ai_probe_active", False):
             return
-        self._roll_proc(ctx.tags)
+        self._roll_proc(battle, ctx.tags)
 
     def on_after_damage(self, battle: Battle, ctx: DamageContext) -> None:
         if not self._is_owners_attack(ctx):
@@ -1165,21 +1179,25 @@ class MultiTargetChainShieldSkill(Skill):
         }
         return [unit for unit in self.ally_targets(battle, actor) if unit.unit_id in threatened_ids]
 
-    def affordable_target_limit(self, actor: HeroUnit, queued_action: Optional[QueuedAction] = None) -> int:
+    def affordable_target_limit(self, battle: Battle, actor: HeroUnit,
+                                queued_action: Optional[QueuedAction] = None) -> int:
         multiplier = (
             max(0.0, float(queued_action.payload.get("reaction_mana_multiplier", 1.0) or 1.0))
             if queued_action is not None else 1.0
         )
         cost_per_target = self.mana_cost * multiplier
+        extra_cost = 0.0
+        for effect in list(battle.field_effects):
+            extra_cost = effect.modify_skill_mana_cost(battle, actor, self, None, extra_cost)
         if cost_per_target <= 0:
-            return 99
-        return int((actor.current_mana + 1e-9) // cost_per_target)
+            return 99 if actor.current_mana + 1e-9 >= extra_cost else 0
+        return max(0, int((actor.current_mana - extra_cost + 1e-9) // cost_per_target))
 
     def can_react_to(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> tuple[bool, str]:
         ok, reason = super().can_react_to(battle, actor, queued_action)
         if not ok:
             return ok, reason
-        if self.affordable_target_limit(actor, queued_action) < 1:
+        if self.affordable_target_limit(battle, actor, queued_action) < 1:
             return False, "魔力不足。"
         return True, ""
 
@@ -1201,6 +1219,8 @@ class MultiTargetChainShieldSkill(Skill):
             if component is self:
                 continue
             cost = component.modify_skill_mana_cost(battle, actor, self, payload, cost)
+        for effect in list(battle.field_effects):
+            cost = effect.modify_skill_mana_cost(battle, actor, self, payload, cost)
         return round(max(0.0, cost), 2)
 
     def mana_cost_text(self) -> Optional[str]:
@@ -1232,7 +1252,7 @@ class MultiTargetChainShieldSkill(Skill):
             return False, "需要选择至少一个目标。"
         if any(target.unit_id not in selectable for target in targets):
             return False, "存在不能被当前护盾保护的目标。"
-        if len(targets) > self.affordable_target_limit(actor, queued_action):
+        if len(targets) > self.affordable_target_limit(battle, actor, queued_action):
             return False, "当前资源不足，无法同时保护这么多目标。"
         return True, ""
 
@@ -1291,13 +1311,13 @@ class MultiTargetChainShieldSkill(Skill):
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
         return multi_unit_selection_preview(
             self.ally_targets(battle, actor),
-            max_targets=self.affordable_target_limit(actor),
+            max_targets=self.affordable_target_limit(battle, actor),
         )
 
     def reaction_preview(self, battle: Battle, actor: HeroUnit, queued_action: QueuedAction) -> dict[str, Any]:
         return multi_unit_selection_preview(
             self.selectable_targets(battle, actor, queued_action),
-            max_targets=self.affordable_target_limit(actor, queued_action),
+            max_targets=self.affordable_target_limit(battle, actor, queued_action),
         )
 
 

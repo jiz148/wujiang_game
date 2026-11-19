@@ -653,9 +653,6 @@ export function renderBoard() {
   const placementWidth = Number(shipFootprint?.width || placementSize);
   const placementHeight = Number(shipFootprint?.height || placementSize);
   const boardWidth = state.battle.board.width;
-  const eternalZone = state.room?.mode === "bp" && state.room?.bp?.special_modes?.some((mode) => mode.code === "eternal");
-  const eternalLeft = Math.floor((boardWidth - 5) / 2);
-  const eternalTop = Math.floor((state.battle.board.height - 5) / 2);
   const cellAt = [];
 
   for (let y = 0; y < state.battle.board.height; y += 1) {
@@ -678,11 +675,10 @@ export function renderBoard() {
       const key = `${x},${y}`;
       const terrain = Array.isArray(state.battle?.board?.terrain) ? state.battle.board.terrain : [];
       const isWall = terrain.some((item) => Number(item.x) === x && Number(item.y) === y && item.kind === "wall");
+      const isBigRock = terrain.some((item) => Number(item.x) === x && Number(item.y) === y && item.kind === "big_rock");
       const cellEffects = fieldCellMap.get(key) || [];
-      const inEternalZone = eternalZone && x >= eternalLeft && x < eternalLeft + 5
-        && y >= eternalTop && y < eternalTop + 5;
-      if (inEternalZone) cell.classList.add("is-bp-eternal-zone");
       if (isWall) cell.classList.add("is-terrain-wall");
+      if (isBigRock) cell.classList.add("is-terrain-big-rock");
       if (preview.cellKeys.has(key)) cell.classList.add("is-preview");
       if (preview.secondaryCellKeys.has(key)) cell.classList.add("is-secondary");
       if (preview.destinationCellKeys?.has(key)) cell.classList.add("is-footprint-destination");
@@ -702,7 +698,7 @@ export function renderBoard() {
       if (occupant && preview.targetIds.has(occupant.id)) cellLabels.push("可选目标");
       if (unitOccupiedCells(selected).some((cellPosition) => cellPosition.x === x && cellPosition.y === y)) cellLabels.push("当前选择");
       if (cellEffects.length) cellLabels.push(`战场状态：${cellEffects.map((effect) => effect.name).join("、")}`);
-      if (inEternalZone) cellLabels.push("永恒轮回战场区域");
+      if (isBigRock) cellLabels.push("大石头地形");
       cell.setAttribute?.("aria-label", cellLabels.join("；"));
       if (typeof cell.setAttribute !== "function") cell.ariaLabel = cellLabels.join("；");
 
@@ -1674,7 +1670,9 @@ export function renderChainPanel() {
   }
   if (isDamageChoiceMode()) {
     const prompt = state.battle.pending_damage_choice;
-    if (caption) caption.textContent = prompt.kind === "hell_dragon_first"
+    if (caption) caption.textContent = prompt.kind === "probability_reroll"
+      ? `${prompt.action_name} 的概率结果是 ${prompt.choice_context?.outcome ?? "?"}。绝境赌徒可接受或重判。`
+      : prompt.kind === "hell_dragon_first"
       ? "古龙阵亡：选择第一名己方地狱单位，或放弃献祭。"
       : prompt.kind === "gentleman_guard"
       ? `矮小绅士可取消【${prompt.action_name}】的 ${prompt.damage} 点伤害；本体与分身共享两次额度。`

@@ -370,7 +370,7 @@ class GentlemanCrossingCloneTrait(Trait):
             battle.summon_unit(clone, previous, summoner=owner)
             original_position = owner.position
             clones = self.owned_clones(battle, owner)
-            exchanged = maybe_swap_new_clones(owner, clones)
+            exchanged = maybe_swap_new_clones(battle, owner, clones)
             exchanged_clone = next((unit for unit in clones if unit.position == original_position), clone) if exchanged else clone
             battle.log_public_event(f"{owner.name} 穿过敌方单位并留下分身"
                                     + ("，与分身换位。" if exchanged else "，本体留在原位。"),

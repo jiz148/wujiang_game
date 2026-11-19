@@ -476,7 +476,8 @@ class FateKickSkill(Skill):
             actor._ai_expected_banish_probability = .5
             target._ai_expected_banish_probability = .5
             return
-        if random.random() < 0.5:
+        if battle.roll_chance(0.5, action_name="命运飞踢掷币",
+                              beneficiary_player_id=target.player_id):
             battle.banish_unit(actor, 2)
             battle.log(f"{actor.name} 的命运飞踢判定为正面，自身消失 1轮。")
         else:

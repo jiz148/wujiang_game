@@ -5,7 +5,6 @@ from wujiang.tactical.heroes.dragon_blood_delongkula import (
     AncientDragonHuntTrait, AncientDragonKillTrait, DragonSpearSkill,
     FearReflectionSkill, MeleeBloodCurseTrait,
 )
-from wujiang.tactical.heroes.mechanics.li import AttackLifeStealTrait
 
 
 def install(r) -> None:
@@ -13,9 +12,8 @@ def install(r) -> None:
         "excel_r350",
         skills={"击龙枪": DragonSpearSkill, "恐惧倒影": FearReflectionSkill},
         traits={
-            "攻击和技能对“古龙”武将和其召唤物破魔，普攻吸血": AncientDragonHuntTrait,
-            "破坏一个“古龙”武将时，攻+1，守+1": AncientDragonKillTrait,
+            "攻击和技能对“飞龙”或“古龙”武将，或者名字里带有“龙”字的单位和其召唤物破魔": AncientDragonHuntTrait,
+            "破坏一个“飞龙”或“古龙”武将，或者名字里带有“龙”字的单位时，攻+1，守+1": AncientDragonKillTrait,
             "所有对此单位造成近战伤害的单位受到一下效果：每个己方回合结束时血*1/2": MeleeBloodCurseTrait,
         },
-        extra_trait_factories=(AttackLifeStealTrait,),
     ))

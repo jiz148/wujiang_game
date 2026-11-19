@@ -104,8 +104,9 @@ class HauntingSkill(MultiTargetChainShieldSkill):
     def execute(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
         raise ActionError("作祟只能在敌方主动技能的连锁窗口使用。")
 
-    def affordable_target_limit(self, actor: Unit, queued_action: QueuedAction | None = None) -> int:
-        return 1
+    def affordable_target_limit(self, battle: Battle, actor: Unit,
+                                queued_action: QueuedAction | None = None) -> int:
+        return min(1, super().affordable_target_limit(battle, actor, queued_action))
 
     def can_react_to(self, battle: Battle, actor: Unit, queued_action: QueuedAction) -> tuple[bool, str]:
         ok, reason = super().can_react_to(battle, actor, queued_action)
@@ -162,7 +163,8 @@ class PoltergeistStatus(StatusEffect):
     def on_before_move(self, battle: Battle, ctx: MoveContext) -> None:
         if ctx.unit is not self.owner or ctx.cancelled or getattr(battle, "_ai_probe_active", False):
             return
-        failed = random.random() < 0.5
+        failed = battle.roll_chance(0.5, action_name="骚灵移动判定",
+                                    beneficiary_player_id=3 - ctx.unit.player_id)
         battle.log_public_event(f"{ctx.unit.name} 的骚灵移动判定：{'失败' if failed else '成功'}。", source=ctx.unit)
         if failed:
             ctx.cancelled = True
@@ -213,7 +215,8 @@ class BlindnessStatus(StatusEffect):
         return True, ""
 
     def can_use_basic_attack(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> tuple[bool, str]:
-        if actor is self.owner and actor.current_mana + 1e-9 < 1:
+        if (actor is self.owner and not battle.is_declared_resolution(actor, payload, {"attack"})
+                and actor.current_mana + 1e-9 < 1):
             return False, "致盲状态下普攻还需1魔。"
         return True, ""
 

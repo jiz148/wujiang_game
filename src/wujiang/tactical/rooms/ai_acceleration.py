@@ -82,6 +82,7 @@ class _Memo:
         self.independent_row_trials = {}
         self.independent_row_disabled = set()
         self.tactical_query_bypass = set()
+        self.positioning_plans = {}
         self.statistics = dict(hits=0, misses=0, impure=0, unsupported=0,
                                move_hits=0, move_misses=0,
                                snapshots=0, snapshot_seconds=0.0, baseline_hits=0, baseline_misses=0,
@@ -205,6 +206,17 @@ def decision_memo_scope():
     finally:
         _last_statistics.set(dict(memo.statistics))
         _memo.reset(token)
+
+
+def decision_local_positioning_plan(key, build):
+    """Reuse a derived skill range only within the current AI decision."""
+    memo = _memo.get() if _enabled.get() and not _in_worker else None
+    if memo is None:
+        return build()
+    key = key()
+    if key not in memo.positioning_plans:
+        memo.positioning_plans[key] = build()
+    return memo.positioning_plans[key]
 
 
 def last_statistics():

@@ -160,7 +160,8 @@ class FloatingCraneCityField(SimpleGlobalWeatherEffect):
             return
         if skill.timing != "active":
             return
-        failed = random.random() < 0.5
+        failed = battle.roll_chance(0.5, action_name="浮鹤城主动技能判定",
+                                    beneficiary_player_id=3 - actor.player_id)
         payload["floating_crane_checked"] = True
         payload["action_failed_by_floating_crane"] = failed
         battle.log_public_event(f"{actor.name} 的【{skill.name}】受浮鹤城影响，判定{'失败' if failed else '成功'}。", source=actor)
