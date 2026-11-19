@@ -222,8 +222,9 @@ class RedRandomPierceTrait(Trait):
     def __init__(self) -> None:
         super().__init__("赤之随机破魔", "每次声明普攻或技能时后端公开随机；1/2几率该整次动作破魔。")
 
-    def roll_pierce(self) -> bool:
-        return random.random() < 0.5
+    def roll_pierce(self, battle: Battle) -> bool:
+        return battle.roll_chance(0.5, action_name="赤之随机破魔",
+                                  beneficiary_player_id=self.owner.player_id)
 
     def on_before_damage(self, battle: Battle, ctx: DamageContext) -> None:
         if not direct_scoring() or ctx.source is not self.owner or ctx.from_field_effect:
@@ -240,7 +241,7 @@ class RedRandomPierceTrait(Trait):
         if direct_scoring():
             payload["red_random_pierce_probability"] = .5
             return
-        success = self.roll_pierce()
+        success = self.roll_pierce(battle)
         payload["red_random_pierce"] = success
         if success:
             payload["ignore_shield"] = True

@@ -162,6 +162,10 @@ def choose_damage_choice_action(battle: Battle) -> dict[str, Any]:
 
 
 def _attack_payload(battle: Battle, actor: Unit, snapshot: dict[str, Any]) -> Optional[dict[str, Any]]:
+    for component in actor.iter_components():
+        variant = component.ai_basic_attack_variant_payload(battle, actor, snapshot)
+        if variant is not None:
+            return variant
     for action in snapshot.get("actions", []):
         if action.get("kind") == "attack" and action.get("available"):
             payload = _targeted_payload(battle, actor, action, "attack")

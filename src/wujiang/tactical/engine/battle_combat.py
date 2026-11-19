@@ -233,7 +233,10 @@ class BattleCombatMixin:
                     # let AI inspect the next live random result through rollback.
                     ctx.raw_damage = round(ctx.raw_damage * (1 - ctx.complete_block_chance), 4)
                 else:
-                    blocked = random.random() < ctx.complete_block_chance
+                    blocked = self.roll_chance(
+                        ctx.complete_block_chance, action_name=ctx.complete_block_label or "完全格挡判定",
+                        beneficiary_player_id=ctx.target.player_id,
+                    )
                     self.log_public_event(
                         f"{ctx.target.name} 的【{ctx.complete_block_label or '格挡'}】判定：{'完全格挡' if blocked else '未格挡'}。",
                         source=ctx.source, target=ctx.target,
@@ -265,6 +268,9 @@ class BattleCombatMixin:
                     effect.on_final_hp_loss(self, ctx)
                 if ctx.source is not None:
                     for component in self.components_for(ctx.source):
+                        component.on_final_hp_loss(self, ctx)
+                if ctx.raw_damage > 0:
+                    for component in self.components_for(ctx.target):
                         component.on_final_hp_loss(self, ctx)
             ctx.target.take_damage_fraction(ctx.raw_damage)
             actual_damage = round(max(0.0, old_hp - ctx.target.current_hp), 4)

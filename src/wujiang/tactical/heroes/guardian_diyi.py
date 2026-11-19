@@ -266,7 +266,7 @@ class LeatherBagSkill(Skill):
                 "requires_target": False, "dice": "1d6", "choice_after_roll": True}
 
     def execute(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
-        rolled = random.randint(1, 6)
+        rolled = battle.roll_die(6, action_name="牛皮锦囊掷骰", beneficiary_player_id=actor.player_id)
         battle.log_public_event(f"{actor.name} 的牛皮锦囊掷出 {rolled}。", source=actor)
         selected: set[str] = set()
         for index in range(rolled):

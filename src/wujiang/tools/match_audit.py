@@ -1144,7 +1144,9 @@ def battle_state_digest(battle: Battle) -> dict[str, Any]:
         "pending_chain": queued_action_ref(battle, queued) if queued is not None else None,
         "pending_respawn": prompt.to_public_dict() if prompt is not None else None,
         "pending_damage_choice": (
-            {key: battle.pending_damage_choice[key] for key in ("unit_id", "action_name", "damage", "event_index", "stats")}
+            {**{key: battle.pending_damage_choice[key] for key in ("unit_id", "action_name", "damage", "event_index", "stats")},
+             "kind": battle.pending_damage_choice.get("kind"),
+             "offered_skill_code": (battle.pending_damage_choice.get("choice_context") or {}).get("skill_code")}
             if battle.pending_damage_choice is not None else None
         ),
         "winner": battle.winner,

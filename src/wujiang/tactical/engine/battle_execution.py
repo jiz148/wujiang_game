@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 class BattleExecutionMixin:
     """A cohesive Battle responsibility with no independent state."""
@@ -25,7 +25,7 @@ class BattleExecutionMixin:
         if pending is not None:
             if payload.get("type") != "damage_choice" or payload.get("unit_id") != pending["unit_id"]:
                 raise ActionError("请先完成本次伤害选择。")
-            if pending.get("kind") in {"rotation", "attack_swap", "formation", "optional_swap", "optional_placement", "required_placement", "required_direction", "optional_heal_target", "optional_unit_selection", "required_unit_selection", "guardian_legacy", "end_dash", "electronic_teleport", "hell_sacrifice", "hell_death_strike", "hell_rescue", "hell_dragon_first", "hell_dragon_second", "hell_dragon_effect", "gentleman_guard"}:
+            if pending.get("kind") in {"rotation", "attack_swap", "formation", "optional_swap", "optional_placement", "required_placement", "required_direction", "optional_heal_target", "optional_unit_selection", "required_unit_selection", "guardian_legacy", "end_dash", "electronic_teleport", "hell_sacrifice", "hell_death_strike", "hell_rescue", "hell_dragon_first", "hell_dragon_second", "hell_dragon_effect", "gentleman_guard", "probability_reroll"}:
                 choice = str(payload.get("target_unit_id") or "")
                 if (choice == "decline" and pending.get("kind") in {"attack_swap", "formation", "required_unit_selection", "required_placement", "required_direction"}) or (choice != "decline" and choice not in pending["options"]):
                     raise ActionError("请选择当前提示中的合法对象与落点。")
@@ -117,6 +117,110 @@ class BattleExecutionMixin:
             self._damage_choice_active = False
             self._damage_choice_decisions = []
             self._damage_choice_event_index = 0
+
+    def probability_result(self, *, action_name: str, outcomes: list[Any],
+                           weights: list[float], sample: Callable[[], Any],
+                           score_for_player: Callable[[Any, Any], float] | None = None) -> Any:
+        """Sample once, then allow eligible units to replace the result before use.
+
+        The existing action-choice replay preserves the original RNG state while a
+        human chooses; only the committed pass advances the live random stream.
+        """
+        from wujiang.tactical.engine.core import DamageChoiceRequired
+
+        result = sample()
+        if (len(outcomes) < 2 or not getattr(self, "_damage_choice_active", False)
+                or getattr(self, "_ai_probe_active", False)):
+            return result
+        order = {unit_id: index for index, unit_id in enumerate(self.turn_order_unit_ids)}
+        units = sorted((unit for unit in self.all_units() if unit.alive and not unit.banished
+                        and unit.position is not None),
+                       key=lambda unit: (order.get(unit.unit_id, len(order)), unit.unit_id))
+        for unit in units:
+            skill = next((skill for skill in unit.skills
+                          if skill.can_reroll_probability(self, unit)), None)
+            if skill is None:
+                continue
+            while skill.can_reroll_probability(self, unit):
+                event_index = int(getattr(self, "_damage_choice_event_index", 0))
+                self._damage_choice_event_index = event_index + 1
+                decisions = getattr(self, "_damage_choice_decisions", [])
+                if event_index < len(decisions):
+                    choice = decisions[event_index]
+                elif getattr(self, "_damage_choice_probe_default", False):
+                    choice = "decline"
+                else:
+                    total = sum(weights)
+                    expected = (sum(weight * score_for_player(unit, outcome)
+                                    for outcome, weight in zip(outcomes, weights)) / total
+                                if score_for_player is not None and total > 0 else 0.0)
+                    current = score_for_player(unit, result) if score_for_player is not None else 0.0
+                    raise DamageChoiceRequired(
+                        unit_id=unit.unit_id, action_name=action_name, damage=0.0,
+                        event_index=event_index, kind="probability_reroll",
+                        options=["reroll", "decline"],
+                        choice_context={"outcome": str(getattr(result, "name", result)), "expected_score": expected,
+                                        "current_score": current, "skill_code": skill.code,
+                                        "distribution": [
+                                            {"outcome": str(getattr(outcome, "name", outcome)),
+                                             "probability": round(weight / total, 4)}
+                                            for outcome, weight in zip(outcomes, weights)
+                                        ] if total > 0 else []},
+                    )
+                if choice != "reroll":
+                    break
+                before = result
+                skill.consume_probability_reroll(self, unit)
+                result = sample()
+                self.log_public_event(
+                    f"{unit.name} 使用【{skill.name}】使【{action_name}】的结果 {before} 无效，重新得到 {result}。",
+                    source=unit,
+                )
+        return result
+
+    def roll_chance(self, probability: float, *, action_name: str,
+                    beneficiary_player_id: int | None = None,
+                    good_when_true: bool = True) -> bool:
+        from wujiang.tactical.prediction import random
+
+        chance = max(0.0, min(1.0, float(probability)))
+        def score(unit: Any, value: bool) -> float:
+            if beneficiary_player_id is None:
+                return 0.0
+            benefit = 100.0 if value is good_when_true else 0.0
+            return benefit if unit.player_id == beneficiary_player_id else -benefit
+        return bool(self.probability_result(
+            action_name=action_name, outcomes=[False, True] if 0 < chance < 1 else [chance == 1],
+            weights=[1 - chance, chance] if 0 < chance < 1 else [1.0],
+            sample=lambda: random.random() < chance, score_for_player=score,
+        ))
+
+    def roll_die(self, sides: int, *, action_name: str,
+                 beneficiary_player_id: int | None = None) -> int:
+        from wujiang.tactical.prediction import random
+
+        faces = list(range(1, sides + 1))
+        def score(unit: Any, value: int) -> float:
+            if beneficiary_player_id is None:
+                return 0.0
+            benefit = float(value) * 18.0
+            return benefit if unit.player_id == beneficiary_player_id else -benefit
+        return int(self.probability_result(
+            action_name=action_name, outcomes=faces, weights=[1.0] * len(faces),
+            sample=lambda: random.randint(1, sides), score_for_player=score,
+        ))
+
+    def choose_random(self, options: list[Any] | tuple[Any, ...], *, action_name: str,
+                      score_for_player: Callable[[Any, Any], float] | None = None) -> Any:
+        from wujiang.tactical.prediction import random
+
+        values = list(options)
+        if not values:
+            raise ValueError("random choice needs options")
+        return self.probability_result(
+            action_name=action_name, outcomes=values, weights=[1.0] * len(values),
+            sample=lambda: random.choice(values), score_for_player=score_for_player,
+        )
 
 
     def damage_stat_choice(self, ctx: DamageContext, stats: list[str]) -> Optional[str]:

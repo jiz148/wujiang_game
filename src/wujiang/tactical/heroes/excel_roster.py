@@ -423,6 +423,7 @@ def _make_build_skills(spec: dict[str, Any]) -> Callable[[AbstractHero], list[Sk
             skill = (kit.special_skill(fragment) if kit is not None else None) or _common_skill_factory(fragment)
             if skill is None or skill.code in seen_codes:
                 continue
+            skill.is_ultimate = _text(fragment.get("fragment")).startswith(("￥", "¥"))
             seen_codes.add(skill.code)
             skills.append(skill)
         if kit is not None:
@@ -625,7 +626,14 @@ IMPLEMENTED_EXCEL_HERO_CODES: frozenset[str] = frozenset(
         "excel_r351",
         "excel_r352",
         "excel_r353",
+        "excel_r354",
+        "excel_r355",
         "excel_r356",
+        "excel_r357",
+        "excel_r358",
+        "excel_r359",
+        "excel_r360",
+        "excel_r361",
         "excel_r379",
     }
 )

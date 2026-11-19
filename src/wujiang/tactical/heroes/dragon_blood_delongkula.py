@@ -27,35 +27,45 @@ def _true_hero(unit: Unit) -> bool:
     return not unit.is_summon and not unit.is_clone and not is_army_soldier(unit)
 
 
-def _ancient_hero(battle: Battle, unit: Unit) -> bool:
+def _dragon_hunt_target(battle: Battle, unit: Unit) -> bool:
     seen: set[str] = set()
     current = unit
-    while current.is_summon and current.summoner_id and current.unit_id not in seen:
+    while current.unit_id not in seen:
+        if "龙" in current.name or (_true_hero(current) and current.race in {"飞龙", "古龙"}):
+            return True
+        if not current.is_summon or not current.summoner_id:
+            break
         seen.add(current.unit_id)
         parent = battle.units.get(current.summoner_id)
         if parent is None:
             return False
         current = parent
-    return _true_hero(current) and current.race == "古龙" and (current is unit or unit.is_summon)
+    return False
+
+
+def _dragon_growth_target(unit: Unit) -> bool:
+    return "龙" in unit.name or (_true_hero(unit) and unit.race in {"飞龙", "古龙"})
 
 
 class AncientDragonHuntTrait(Trait):
     def __init__(self) -> None:
-        super().__init__("古龙狩猎", "普攻和技能对古龙武将及其召唤物破魔。")
+        super().__init__("古龙狩猎", "普攻和技能对飞龙、古龙武将或名字带龙的单位及其召唤物破魔。")
 
     def on_targeted(self, battle: Battle, ctx: TargetContext) -> None:
-        if ctx.actor is self.owner and _ancient_hero(battle, ctx.target):
+        if (ctx.actor is self.owner and not ctx.from_field_effect
+                and (ctx.is_skill or "attack" in ctx.tags)
+                and _dragon_hunt_target(battle, ctx.target)):
             ctx.ignore_shield = True
 
     def on_before_damage(self, battle: Battle, ctx: DamageContext) -> None:
         if (ctx.source is self.owner and not ctx.from_field_effect
-                and (ctx.is_skill or "attack" in ctx.tags) and _ancient_hero(battle, ctx.target)):
+                and (ctx.is_skill or "attack" in ctx.tags) and _dragon_hunt_target(battle, ctx.target)):
             ctx.ignore_shield = True
 
 
 class AncientDragonGrowth(StatusEffect):
     def __init__(self) -> None:
-        super().__init__("古龙战果", "每次真正击杀古龙武将后攻、守各+1。")
+        super().__init__("古龙战果", "每次亲自真正击杀飞龙、古龙武将或名字带龙的单位后攻、守各+1。")
 
     def modify_stat(self, stat_name: str, value: float) -> float:
         return value + 1 if stat_name in {"attack", "defense"} else value
@@ -63,16 +73,15 @@ class AncientDragonGrowth(StatusEffect):
 
 class AncientDragonKillTrait(Trait):
     def __init__(self) -> None:
-        super().__init__("古龙战果", "亲自真正破坏一名古龙武将后，永久攻守各+1。")
+        super().__init__("古龙战果", "亲自真正破坏飞龙、古龙武将或名字带龙的单位后，永久攻守各+1。")
 
     def on_unit_destroyed(self, battle: Battle, destroyed_unit: Unit) -> None:
         owner = self.owner
-        if (not _present(owner) or destroyed_unit.race != "古龙"
-                or not _true_hero(destroyed_unit)
+        if (not _present(owner) or not _dragon_growth_target(destroyed_unit)
                 or getattr(destroyed_unit, "_destroying_source_unit_id", None) != owner.unit_id):
             return
         owner.add_status(AncientDragonGrowth(), source=owner)
-        battle.log_public_event(f"{owner.name} 击破古龙武将，攻、守永久各+1。",
+        battle.log_public_event(f"{owner.name} 击破龙类目标，攻、守永久各+1。",
                                 source=owner, target=destroyed_unit)
 
 
@@ -124,15 +133,7 @@ class SpearSuppression(StatusEffect):
         return max(1, value - 2) if stat_name == "speed" else value
 
     def _refresh_flight(self, owner: Unit, *, applying: bool) -> None:
-        native = any(isinstance(trait, FlyingTrait) for trait in owner.traits)
-        suppressed = applying or any(
-            isinstance(status, SpearSuppression) for status in owner.statuses)
-        temporary = any(getattr(status, "provides_temporary_flight", False)
-                        for status in owner.statuses)
-        if native:
-            owner.has_flying = (not suppressed and not owner.innate_traits_suppressed()) or temporary
-            owner.ignore_units_while_moving = owner.has_flying or any(
-                getattr(trait, "grants_pass_through", False) for trait in owner.traits)
+        FlyingTrait.refresh_flight_state(owner, suppressing=applying)
 
     def bind(self, owner: Unit) -> "SpearSuppression":
         super().bind(owner)
@@ -274,7 +275,7 @@ class DragonSpearSkill(DeclaredAreaSkillMixin, Skill):
         for target in battle.effect_units_at_cells(cells):
             if target.magic_immunity or not battle.unit_can_be_selected(target, actor=actor)[0]:
                 continue
-            damage = 0.0 if target.total_shields() and not _ancient_hero(battle, target) else min(
+            damage = 0.0 if target.total_shields() and not _dragon_hunt_target(battle, target) else min(
                 target.current_hp, battle.damage_rule.calculate_damage(
                     actor.stat("attack") + max(0, battle.unit_hit_count_for_cells(target, cells) - 1),
                     target.stat("defense")))

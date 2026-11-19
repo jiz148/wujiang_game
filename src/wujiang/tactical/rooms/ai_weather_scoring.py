@@ -308,7 +308,9 @@ class AIWeatherAndThreatScoring:
             target_ids = {
                 str(unit_id)
                 for unit_id in preview_target_ids
-                if not bool(getattr(battle.units.get(str(unit_id)), "is_siege_structure", False))
+                if (battle.units.get(str(unit_id)) is not None
+                    and battle.units[str(unit_id)].player_id != actor.player_id
+                    and not bool(getattr(battle.units[str(unit_id)], "is_siege_structure", False)))
             }
             return len(target_ids)
         except Exception:

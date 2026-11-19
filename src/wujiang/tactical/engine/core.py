@@ -345,6 +345,8 @@ class SummaryDamageRule(DamageRule):
     name = "summary"
 
     def calculate_damage(self, attack_power: float, defense: float) -> float:
+        if attack_power <= 0:
+            return 0.0
         if attack_power > defense:
             return 1.0
         gap = max(defense - attack_power + 1, 1)
@@ -357,6 +359,8 @@ class SpreadsheetDamageRule(DamageRule):
     name = "spreadsheet"
 
     def calculate_damage(self, attack_power: float, defense: float) -> float:
+        if attack_power <= 0:
+            return 0.0
         if attack_power > defense:
             return 1.0
         gap = max((defense - attack_power) * 2, 1)
@@ -461,6 +465,29 @@ class BattleComponent(ABC):
     ) -> float:
         return cost
 
+    def counts_as_race(self, race: str) -> bool:
+        """Grant an additional racial identity without replacing the native race."""
+        return False
+
+    def extra_turn_skill_use_available(self, battle: "Battle", actor: "Unit", skill: "Skill") -> bool:
+        """Offer an additional free use without spending the skill's ordinary turn quota."""
+        return False
+
+    def consume_extra_turn_skill_use(self, battle: "Battle", actor: "Unit", skill: "Skill") -> None:
+        return None
+
+    def additional_battle_skill_uses(self, battle: "Battle", actor: "Unit", skill: "Skill") -> int:
+        """Offer a separately owned use beyond the skill's battle limit."""
+        return 0
+
+    def consume_additional_battle_skill_use(self, battle: "Battle", actor: "Unit", skill: "Skill") -> None:
+        return None
+
+    def on_own_skill_prepaid(self, battle: "Battle", actor: "Unit", skill: "Skill",
+                             *, used_extra_turn_use: bool) -> None:
+        """Observe a committed declaration after its ordinary or extra quota is charged."""
+        return None
+
     def skill_mana_payer(self, battle: "Battle", actor: "Unit", skill: "Skill") -> Optional["Unit"]:
         """Optionally provide the resource owner for a skill cast by this unit."""
         return None
@@ -538,6 +565,11 @@ class BattleComponent(ABC):
 
     def on_any_skill_declared(self, battle: "Battle", actor: "Unit", skill: "Skill") -> None:
         """Observe one formally prepaid skill declaration, independent of its hit count."""
+        return None
+
+    def on_action_chained(self, battle: "Battle", declared_action: "QueuedAction",
+                          reaction: "QueuedAction") -> None:
+        """Observe one accepted reaction to this component's owner's action."""
         return None
 
     def on_before_normal_move(self, battle: "Battle", ctx: "MoveContext") -> None:
@@ -649,6 +681,15 @@ class BattleComponent(ABC):
         actor: "Unit",
     ) -> list[dict[str, Any]]:
         return []
+
+    def ai_basic_attack_variant_payload(
+        self,
+        battle: "Battle",
+        actor: "Unit",
+        snapshot: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        """Offer an object-owned basic attack variant to lightweight AI routes."""
+        return None
 
     def basic_attack_preview(
         self,
@@ -857,6 +898,7 @@ class TemporaryDefenseStatus(StatusEffect):
 
 
 class Skill(BattleComponent, ABC):
+    is_ultimate = False
     excludes_caster_from_effect = False
     excludes_allies_from_effect = False
     ai_enemy_impact_requirement: Optional[bool] = None
@@ -1054,6 +1096,17 @@ class Skill(BattleComponent, ABC):
         """Declare a skill-specific effective enemy hit before or after target discovery."""
         return None
 
+    def can_reroll_probability(self, battle: "Battle", actor: "Unit") -> bool:
+        """Whether this skill may replace a just-sampled battlefield outcome."""
+        return False
+
+    def remaining_probability_rerolls(self, battle: "Battle") -> int:
+        return 0
+
+    def consume_probability_reroll(self, battle: "Battle", actor: "Unit") -> None:
+        """Commit one chosen reroll; specialized skills own their usage clock."""
+        return None
+
     def ai_ignores_shield_for_target(self, battle: "Battle", actor: "Unit", payload: dict[str, Any],
                                      target: "Unit") -> bool:
         return bool(self.ignores_shield_for_payload(battle, actor, payload))
@@ -1114,9 +1167,11 @@ class Skill(BattleComponent, ABC):
                 return False, reason
         if self.cooldown_remaining > 0 and not self.allows_additional_use_during_cooldown(battle, actor):
             return False, f"还需冷却 {self.cooldown_remaining} 个己方回合。"
-        if self.max_uses_per_turn is not None and self.uses_this_turn >= self.max_uses_per_turn:
+        if (self.max_uses_per_turn is not None and self.uses_this_turn >= self.max_uses_per_turn
+                and self.extra_turn_use_provider(battle, actor) is None):
             return False, "本回合使用次数已满。"
-        if self.max_uses_per_battle is not None and self.uses_this_battle >= self.max_uses_per_battle:
+        if (self.max_uses_per_battle is not None
+                and self.uses_this_battle >= self.max_uses_per_battle + self.additional_battle_uses(battle, actor)):
             return False, "本场战斗使用次数已满。"
         if getattr(self, "_ancient_stolen_charges", 1) <= 0:
             return False, "夺得技能的一次使用权已用完。"
@@ -1145,6 +1200,14 @@ class Skill(BattleComponent, ABC):
         self._uses_turn_number = current_turn_number
         self.uses_this_turn = 0
 
+    def extra_turn_use_provider(self, battle: "Battle", actor: "Unit") -> Optional[BattleComponent]:
+        return next((component for component in actor.iter_components()
+                     if component is not self and component.extra_turn_skill_use_available(battle, actor, self)), None)
+
+    def additional_battle_uses(self, battle: "Battle", actor: "Unit") -> int:
+        return sum(max(0, component.additional_battle_skill_uses(battle, actor, self))
+                   for component in actor.iter_components() if component is not self)
+
     def mana_cost_for_payload(
         self,
         battle: "Battle",
@@ -1159,7 +1222,9 @@ class Skill(BattleComponent, ABC):
             if component is self:
                 continue
             cost = component.modify_skill_mana_cost(battle, actor, self, payload, cost)
-        return max(0.0, float(cost))
+        for effect in list(battle.field_effects):
+            cost = effect.modify_skill_mana_cost(battle, actor, self, payload, cost)
+        return 0.0 if self.extra_turn_use_provider(battle, actor) is not None else max(0.0, float(cost))
 
     def mana_payer(self, battle: "Battle", actor: "Unit") -> "Unit":
         """Keep the acting unit and the unit funding its skill independent."""
@@ -1180,6 +1245,27 @@ class Skill(BattleComponent, ABC):
     ) -> int:
         return actor.targeting_range()
 
+    def ai_positioning_window(self, battle: "Battle", actor: "Unit") -> Optional[tuple[int, frozenset[tuple[int, int]] | None]]:
+        """Read a skill's legal selection shape once for AI movement planning."""
+        if self.target_mode not in {"enemy", "unit", "cell"}:
+            return None
+        if self.target_mode == "cell" and actor.position is not None:
+            preview = self.preview(battle, actor)
+            selection = preview.get("selection") or {}
+            cells = preview.get("cells") or []
+            origins = battle.unit_cells(actor)
+            positions = [Position(int(cell["x"]), int(cell["y"]))
+                         for cell in cells if isinstance(cell, dict) and "x" in cell and "y" in cell]
+            distances = [min(origin.distance_to(cell) for origin in origins)
+                         for cell in positions] if origins else []
+            if distances:
+                if selection.get("mode") == "pattern_cells" and self.selection_cells_are_effect_cells:
+                    offsets = frozenset((cell.x - actor.position.x, cell.y - actor.position.y)
+                                        for cell in positions)
+                    return max(1, max(distances)), offsets
+                return max(1, max(distances)), None
+        return max(1, int(self.direct_unit_target_range(battle, actor, {}))), None
+
     def prepay_resources(
         self,
         battle: "Battle",
@@ -1187,13 +1273,28 @@ class Skill(BattleComponent, ABC):
         payload: Optional[dict[str, Any]] = None,
     ) -> None:
         self.sync_turn_scope(battle)
+        extra_turn_provider = self.extra_turn_use_provider(battle, actor)
+        extra_battle_provider = None
+        if self.max_uses_per_battle is not None and self.uses_this_battle >= self.max_uses_per_battle:
+            extra_battle_provider = next((component for component in actor.iter_components()
+                                          if component is not self
+                                          and component.additional_battle_skill_uses(battle, actor, self) > 0), None)
         self.mana_payer(battle, actor).spend_mana(self.mana_cost_for_payload(battle, actor, payload))
-        self.uses_this_turn += 1
+        if extra_turn_provider is not None:
+            extra_turn_provider.consume_extra_turn_skill_use(battle, actor, self)
+        else:
+            self.uses_this_turn += 1
         self.uses_this_battle += 1
+        if extra_battle_provider is not None:
+            extra_battle_provider.consume_additional_battle_skill_use(battle, actor, self)
         if hasattr(self, "_ancient_stolen_charges"):
             self._ancient_stolen_charges -= 1
         if self.cooldown_turns:
             self.cooldown_remaining = self.cooldown_turns
+        for component in list(actor.iter_components()):
+            if component is not self:
+                component.on_own_skill_prepaid(battle, actor, self,
+                                               used_extra_turn_use=extra_turn_provider is not None)
 
     def finalize_use(self, battle: "Battle", actor: "Unit") -> None:
         if self.timing == "active":
@@ -1239,11 +1340,13 @@ class Skill(BattleComponent, ABC):
             return False, "连锁速度不够快。"
         if self.cooldown_remaining > 0:
             return False, "技能冷却中。"
-        if self.max_uses_per_turn is not None and self.uses_this_turn >= self.max_uses_per_turn:
+        if (self.max_uses_per_turn is not None and self.uses_this_turn >= self.max_uses_per_turn
+                and self.extra_turn_use_provider(battle, actor) is None):
             return False, "本回合使用次数已满。"
-        if self.max_uses_per_battle is not None and self.uses_this_battle >= self.max_uses_per_battle:
+        if (self.max_uses_per_battle is not None
+                and self.uses_this_battle >= self.max_uses_per_battle + self.additional_battle_uses(battle, actor)):
             return False, "本场战斗使用次数已满。"
-        if self.mana_payer(battle, actor).current_mana + 1e-9 < self.mana_cost:
+        if self.mana_payer(battle, actor).current_mana + 1e-9 < self.mana_cost_for_payload(battle, actor, {}):
             return False, "魔力不足。"
         block_reason = battle.shared_stealth_action_block_reason(actor)
         if block_reason:
@@ -1417,6 +1520,9 @@ class Skill(BattleComponent, ABC):
                 "cooldown_remaining": self.cooldown_remaining,
                 "max_uses_per_turn": self.max_uses_per_turn,
                 "max_uses_per_battle": self.max_uses_per_battle,
+                "is_ultimate": self.is_ultimate,
+                "extra_turn_uses_available": self.extra_turn_use_provider(battle, owner) is not None if owner is not None else False,
+                "additional_battle_uses": self.additional_battle_uses(battle, owner) if owner is not None else 0,
                 "target_mode": self.target_mode,
                 "passive": self.passive,
                 "timing": self.timing,
@@ -1661,6 +1767,10 @@ class RespawnPrompt:
 
 
 class Unit(ABC):
+    def is_bp_benched(self) -> bool:
+        return bool(self.banished and (getattr(self, "_bp_arena_benched", False)
+                                       or getattr(self, "_bp_general_benched", False)))
+
     def __getstate__(self) -> dict[str, Any]:
         state = dict(self.__dict__)
         state.pop("_battle_ref", None)
@@ -1674,26 +1784,12 @@ class Unit(ABC):
         battle_ref = self.__dict__.get("_battle_ref")
         battle = battle_ref() if battle_ref is not None else None
         modes = getattr(battle, "special_mode_codes", ()) if battle is not None else ()
-        if previous is not None and value != previous and "arena" in modes and self.__dict__.get("banished", False):
+        if previous is not None and value != previous and self.is_bp_benched():
             return
         if previous is not None and value > previous and battle is not None:
             if "no_recovery" in modes:
                 return
         object.__setattr__(self, name, value)
-        if previous is None or value <= previous or battle is None or "healer_attack" not in modes:
-            return
-        gained = round(value - previous, 4)
-        for effect in list(battle.field_effects):
-            if name == "current_hp" and not self.__dict__.get("_inside_battle_heal", False):
-                hook = getattr(effect, "on_direct_heal", None)
-                if callable(hook):
-                    action = battle.resolving_action
-                    origin = battle.units.get(action.actor_id) if action is not None else None
-                    hook(battle, self, gained, source=origin)
-            elif name == "current_mana":
-                hook = getattr(effect, "on_mana_gained", None)
-                if callable(hook):
-                    hook(battle, self, gained)
 
     def __init__(
         self,
@@ -1828,7 +1924,7 @@ class Unit(ABC):
     def iter_components(self) -> Iterable[BattleComponent]:
         battle_ref = getattr(self, "_battle_ref", None)
         battle = battle_ref() if battle_ref is not None else None
-        if battle is not None and self.banished and "arena" in getattr(battle, "special_mode_codes", ()):
+        if battle is not None and self.is_bp_benched():
             return
         active_skills_only = battle is not None and "real_men" in getattr(battle, "special_mode_codes", ())
         yield from (skill for skill in self.skills if not active_skills_only or skill.timing == "active")
@@ -1875,7 +1971,7 @@ class Unit(ABC):
     def add_status(self, status: StatusEffect, *, source: Optional["Unit"] = None) -> None:
         battle_ref = getattr(self, "_battle_ref", None)
         battle = battle_ref() if battle_ref is not None else None
-        if battle is not None and self.banished and "arena" in getattr(battle, "special_mode_codes", ()):
+        if battle is not None and self.is_bp_benched():
             return
         if source is None and battle is not None:
             source = battle.units.get(getattr(status, "source_unit_id", ""))
@@ -2113,7 +2209,7 @@ class Unit(ABC):
             return 0.0
         battle_ref = getattr(self, "_battle_ref", None)
         battle = battle_ref() if battle_ref is not None else None
-        if battle is not None and self.banished and "arena" in getattr(battle, "special_mode_codes", ()):
+        if battle is not None and self.is_bp_benched():
             return 0.0
         if amount > 0 and battle is not None and "no_recovery" in getattr(battle, "special_mode_codes", ()):
             return 0.0
@@ -2179,7 +2275,7 @@ class Unit(ABC):
                 value = trait.modify_received_stat_change(component, stat_name, before, value)
         battle_ref = getattr(self, "_battle_ref", None)
         battle = battle_ref() if battle_ref is not None else None
-        if battle is not None and not (self.banished and "arena" in getattr(battle, "special_mode_codes", ())):
+        if battle is not None and not self.is_bp_benched():
             for effect in battle.field_effects:
                 value = effect.modify_unit_stat(battle, self, stat_name, value)
         if stat_name in self.stat_minimums:
@@ -2195,14 +2291,14 @@ class Unit(ABC):
         if battle is not None:
             for effect in battle.field_effects:
                 value = effect.adjust_unit_targeting_range(battle, self, value)
-        if battle is not None and "sympathy" in getattr(battle, "special_mode_codes", ()):
-            if any(self.unit_id in getattr(effect, "_sympathy", {}).get("attack_range", set())
-                   for effect in battle.field_effects):
-                return 1
         return max(1, value)
 
     def is_enemy_of(self, other: "Unit") -> bool:
         return self.player_id != other.player_id
+
+    def qualifies_as_race(self, race: str, *, original: bool = False) -> bool:
+        native = getattr(self, "original_weather_race", self.race) if original else self.race
+        return native == race or any(component.counts_as_race(race) for component in self.iter_components())
 
     def qualifies_as_level(self, level: int) -> bool:
         if self.level == level:
@@ -2216,7 +2312,7 @@ class Unit(ABC):
     def heal_fraction(self, amount: float, *, ignore_effect_immunity: bool = False) -> None:
         battle_ref = getattr(self, "_battle_ref", None)
         battle = battle_ref() if battle_ref is not None else None
-        if battle is not None and self.banished and "arena" in getattr(battle, "special_mode_codes", ()):
+        if battle is not None and self.is_bp_benched():
             return
         if amount > 0 and battle is not None and "no_recovery" in getattr(battle, "special_mode_codes", ()):
             return
@@ -2517,6 +2613,7 @@ class Battle(BattleDeclarationMixin, BattleReactionMixin, BattleChainMixin, Batt
         self.win_reason_code = ""
         self.win_reason_text = ""
         self.blocked_cells: set[tuple[int, int]] = set()
+        self.special_terrain_cells: set[tuple[int, int]] = set()
         self.army_orders: dict[int, dict[str, str]] = default_army_orders()
         self.army_ai_players: set[int] = set()
         self.army_strike_wave: str = ""

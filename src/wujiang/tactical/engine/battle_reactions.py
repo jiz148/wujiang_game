@@ -289,6 +289,9 @@ class BattleReactionMixin:
             for reaction in reactions:
                 enemy_skill = track_prevention and reaction.action_type == "reaction_skill" and reaction.source_player_id != queued.source_player_id
                 would_hit = self.attack_would_deal_damage(queued) if enemy_skill else False
+                if actor is not None and actor.alive:
+                    for component in list(actor.iter_components()):
+                        component.on_action_chained(self, queued, reaction)
                 self.resolve_queued_action(reaction)
                 if queued.action_type == "skill" and reaction.action_type == "reaction_skill" and actor is not None:
                     actor.get_skill(queued.payload["skill_code"]).on_reaction_resolved(self, queued, reaction)

@@ -316,7 +316,8 @@ class FumaSkillManaTrait(Trait):
             return
         if getattr(battle, "_forecasting_action", False):
             return
-        if random.random() < 0.5:
+        if battle.roll_chance(0.5, action_name="风魔随机回魔",
+                              beneficiary_player_id=owner.player_id):
             gained = owner.gain_mana(1)
             battle.log_public_event(f"{owner.name} 的【风魔随机回魔】成功，获得 {gained} 点魔。", source=owner)
         else:

@@ -182,6 +182,13 @@ class AIDecisionCoordinator:
         if prompt is None:
             raise ActionError("当前没有待选择的伤害。")
         unit = battle.get_unit(prompt["unit_id"])
+        if prompt.get("kind") == "probability_reroll":
+            context = prompt.get("choice_context") or {}
+            improvement = float(context.get("expected_score") or 0) - float(context.get("current_score") or 0)
+            skill = unit.get_skill(str(context.get("skill_code") or ""))
+            remaining = skill.remaining_probability_rerolls(battle) if skill is not None else 0
+            choice = "reroll" if remaining > 0 and improvement > (8.0 if remaining >= 2 else 18.0) else "decline"
+            return {"type": "damage_choice", "unit_id": unit.unit_id, "target_unit_id": choice}
         if prompt.get("kind") == "gentleman_guard":
             with self.services.ai_enemy_view(battle, unit.player_id):
                 protected = battle.units.get(str(prompt.get("protected_unit_id") or ""))

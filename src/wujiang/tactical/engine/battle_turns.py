@@ -396,6 +396,7 @@ class BattleTurnMixin:
                 return
             hero = self.units.get(hero_id) if hero_id else None
             if (hero is None or not hero.alive or ("arena" in getattr(self, "special_mode_codes", ()) and hero.banished)
+                    or getattr(hero, "_bp_general_benched", False)
                     or hero.is_summon or is_army_soldier(hero)
                     or getattr(hero, "equipped_to_id", None)):
                 self.advance_turn_slot_index()

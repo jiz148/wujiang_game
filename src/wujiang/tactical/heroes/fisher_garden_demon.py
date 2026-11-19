@@ -141,7 +141,8 @@ class FisherGrowthTrait(Trait):
         # follow-up bonus. A projected attack must not roll or grant a live turn.
         if direct_scoring():
             return
-        heads = random.random() < 0.5
+        heads = battle.roll_chance(0.5, action_name="渔夫普攻后掷币",
+                                   beneficiary_player_id=actor.player_id)
         if heads:
             self.coin_bonus += 1
         battle.log_public_event(
@@ -428,7 +429,8 @@ class BlackNightShadowSkill(PointCostSkill):
                     is_skill=True, action_name=self.name, ignore_shield=True, cannot_evade=True,
                     forecast_damage_rows=rows, tags={"skill", self.code}))
             return
-        rolled = 3 if getattr(battle, "_ai_probe_active", False) and not forecasting_active() else random.randint(1, 6)
+        rolled = 3 if getattr(battle, "_ai_probe_active", False) and not forecasting_active() else battle.roll_die(
+            6, action_name="黑夜魔影掷骰", beneficiary_player_id=actor.player_id)
         cells = self.cells(battle, actor, payload)
         battle.log_public_event(f"{actor.name} 的【黑夜魔影】掷出 {rolled} 点，结算 {rolled} 段。", source=actor)
         for segment in range(1, rolled + 1):

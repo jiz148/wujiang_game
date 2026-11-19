@@ -193,7 +193,7 @@ def queue_crow_replenishment(battle: Battle, actor: Unit, *, trigger: str) -> No
     def replenish(current: Battle, source: Unit, _queued: Any) -> None:
         if not source.alive or source.position is None or source.banished or source.innate_traits_suppressed():
             return
-        rolled = random.randint(1, 6)
+        rolled = battle.roll_die(6, action_name="乌鸦轮末掷骰", beneficiary_player_id=source.player_id)
         cells = _automatic_crow_cells(current, source, rolled)
         current.log_public_event(f"{source.name} 的{trigger}补鸦掷出 {rolled} 点，实际召唤 {len(cells)} 只。", source=source)
         for cell in cells:

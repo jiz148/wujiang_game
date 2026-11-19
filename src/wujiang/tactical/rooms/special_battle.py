@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from wujiang.tactical.prediction import direct_scoring, secrets
+from wujiang.tactical.prediction import secrets
 from typing import Sequence
 
 from wujiang.tactical.engine.core import ActionError, Battle, BattleFieldEffect, DamageContext, HealContext, HeroUnit, Position, Skill, Unit
@@ -16,18 +16,22 @@ def real_hero(unit: Unit) -> bool:
 def prepare_bp_special_rosters(player1: list[Unit], player2: list[Unit], codes: Sequence[str]) -> tuple[list[Unit], list[Unit]]:
     """Apply modes that change who enters the battle before spawn placement."""
     selected = (list(player1), list(player2))
-    if "general" in codes:
-        remaining = []
-        for team in selected:
-            if len(team) <= 1:
-                remaining.append(team)
-                continue
-            highest = max(unit.level for unit in team)
-            excluded = secrets.choice([unit for unit in team if unit.level == highest])
-            remaining.append([unit for unit in team if unit is not excluded])
-        selected = tuple(remaining)
     if "duel" in codes:
-        selected = tuple([secrets.choice(team)] for team in selected)
+        if "general" in codes:
+            remaining = []
+            for team in selected:
+                if len(team) <= 1:
+                    remaining.append(team)
+                    continue
+                highest = max(unit.level for unit in team)
+                general = secrets.choice([unit for unit in team if unit.level == highest])
+                remaining.append([unit for unit in team if unit is not general])
+            selected = tuple(remaining)
+        pairs = [(left, right) for left in selected[0] for right in selected[1]]
+        smallest_gap = min(abs(left.level - right.level) for left, right in pairs)
+        chosen = secrets.choice([(left, right) for left, right in pairs
+                                 if abs(left.level - right.level) == smallest_gap])
+        selected = ([chosen[0]], [chosen[1]])
     return selected
 
 
@@ -42,8 +46,8 @@ class BPSpecialModeEffect(BattleFieldEffect):
         super().__init__(name=f"BP特殊模式：{names}", description="本局BP特殊规则")
         self._tether_guard = False
         self._initial_distance: dict[tuple[str, str], int] = {}
-        self._stat_bonus: dict[str, dict[str, int]] = {}
-        self._sympathy: dict[str, set[str]] = {}
+        self._sympathy_unit_ids: set[str] = set()
+        self._general_ids: dict[int, str] = {}
         self._arena_order: dict[int, list[str]] = {}
         self._mages_original_mana: dict[str, float] = {}
         self._pending_match_end: tuple[str, str] | None = None
@@ -56,9 +60,23 @@ class BPSpecialModeEffect(BattleFieldEffect):
                 self._mages_original_mana[hero.unit_id] = original
                 hero.current_mana = original
         if "sympathy" in self.codes and heroes:
-            for stat in ("attack", "defense", "speed", "attack_range"):
-                maximum = max(unit.stat(stat) for unit in heroes)
-                self._sympathy[stat] = {unit.unit_id for unit in heroes if unit.stat(stat) == maximum}
+            lowest = min(unit.level for unit in heroes)
+            self._sympathy_unit_ids = {unit.unit_id for unit in heroes if unit.level == lowest}
+        if "general" in self.codes and "duel" not in self.codes:
+            for team in (1, 2):
+                members = [unit for unit in heroes if unit.player_id == team]
+                if len(members) <= 1:
+                    continue
+                highest = max(unit.level for unit in members)
+                general = secrets.choice([unit for unit in members if unit.level == highest])
+                self._general_ids[team] = general.unit_id
+                self._set_general_bench(battle, general, benched=True)
+                battle.log(f"大将模式：{general.name} 候场，其他己方武将全部被破坏后参战。")
+        if "big_rock" in self.codes:
+            left, top = (battle.width - 5) // 2, (battle.height - 5) // 2
+            battle.special_terrain_cells = {(x, y) for x in range(left, left + 5)
+                                            for y in range(top, top + 5)
+                                            if 0 <= x < battle.width and 0 <= y < battle.height}
         if "arena" in self.codes:
             first_team = battle.units[battle.turn_order_unit_ids[0]].player_id
             if "fast" in self.codes:
@@ -68,6 +86,9 @@ class BPSpecialModeEffect(BattleFieldEffect):
                 secrets.SystemRandom().shuffle(ordered)
                 if "fast" in self.codes:
                     ordered.reverse()
+                if team in self._general_ids:
+                    ordered.remove(self._general_ids[team])
+                    ordered.append(self._general_ids[team])
                 self._arena_order[team] = ordered
                 for unit_id in ordered[1:]:
                     self._set_arena_bench(battle, battle.units[unit_id], benched=True)
@@ -86,11 +107,12 @@ class BPSpecialModeEffect(BattleFieldEffect):
                         self._initial_distance[(unit.unit_id, nxt.unit_id)] = battle.distance_between_units(unit, nxt)
 
     def modify_unit_stat(self, battle: Battle, unit: Unit, stat_name: str, value: float) -> float:
+        if unit.unit_id in self._sympathy_unit_ids and stat_name in {"attack", "defense", "speed"}:
+            value += 1.0
         if "fast" in self.codes and stat_name == "speed":
             return 10.0
         if "true_turn" in self.codes and stat_name == "attack_range":
             return float(max(battle.width, battle.height))
-        value += self._stat_bonus.get(unit.unit_id, {}).get(stat_name, 0)
         return value + (1.0 if "attack_plus_one" in self.codes and stat_name == "attack" else 0.0)
 
     def adjust_unit_targeting_range(self, battle: Battle, unit: Unit, value: int) -> int:
@@ -112,28 +134,7 @@ class BPSpecialModeEffect(BattleFieldEffect):
                 owned_skill.sync_turn_scope(battle)
             if sum(owned_skill.uses_this_turn for owned_skill in actor.action_skills()) >= 1:
                 return True, "慢速模式每回合只能使用一个技能。"
-        if "sympathy" in self.codes:
-            if (actor.unit_id in self._sympathy.get("attack", set()) and skill.timing == "active"
-                    and self._deals_direct_damage(skill)):
-                return True, "同情弱者：攻最高的武将不能使用主动直接伤害技能。"
-            if actor.unit_id in self._sympathy.get("speed", set()) and self._causes_movement(battle, actor, skill):
-                return True, "同情弱者：速最高的武将不能使用位移技能。"
         return False, ""
-
-    @staticmethod
-    def _deals_direct_damage(skill: Skill) -> bool:
-        declared = skill.directly_damages_on_use()
-        if declared is not None:
-            return declared
-        # Classify the implemented skill operation, not prose that may describe
-        # a later trigger, a defense against damage, or explicitly no damage.
-        execute_code = getattr(type(skill).execute, "__code__", None)
-        names = set(execute_code.co_names) if execute_code is not None else set()
-        return bool(names & {"DamageContext", "resolve_damage", "queue_damage", "damage_at_cells",
-                             "resolve_area_damage", "resolve_hit", "resolve_attack_damage",
-                             "queue_area_damage_effect",
-                             "queue_projectile", "apply_to_units"}) or bool(
-                                 {"super", "execute"} <= names and "伤害" in skill.description)
 
     @staticmethod
     def _causes_movement(battle: Battle, actor: Unit, skill: Skill,
@@ -144,101 +145,14 @@ class BPSpecialModeEffect(BattleFieldEffect):
                              payload: dict | None) -> tuple[bool, str]:
         if "true_turn" in self.codes and self._causes_movement(battle, actor, skill, payload):
             return True, "真回合制不能使用位移技能。"
-        if ("sympathy" in self.codes and actor.unit_id in self._sympathy.get("speed", set())
-                and self._causes_movement(battle, actor, skill, payload)):
-            return True, "同情弱者：速最高的武将不能使用位移技能。"
-        if ("sympathy" not in self.codes or actor.unit_id not in self._sympathy.get("attack_range", set())
-                or actor.position is None or not payload):
-            return False, ""
-        cells: list[Position] = []
-        target_units: list[Unit] = []
-        for key in ("target_unit_id", "resolved_target_unit_id"):
-            target = battle.units.get(str(payload.get(key) or ""))
-            if target is not None and target.position is not None:
-                target_units.append(target)
-        for unit_id in payload.get("target_unit_ids", ()) or ():
-            target = battle.units.get(str(unit_id))
-            if target is not None and target.position is not None:
-                target_units.append(target)
-        for x_key, y_key in (("x", "y"), ("target_x", "target_y"),
-                             ("declared_target_x", "declared_target_y"),
-                             ("center_x", "center_y"), ("dest_x", "dest_y"),
-                             ("move_x", "move_y"), ("landing_x", "landing_y")):
-            if payload.get(x_key) is not None and payload.get(y_key) is not None:
-                cells.append(Position(int(payload[x_key]), int(payload[y_key])))
-        for key in ("cells", "target_cells", "target_cell", "destination"):
-            raw = payload.get(key, ()) or ()
-            for cell in (raw if isinstance(raw, (list, tuple)) else [raw]):
-                if isinstance(cell, Position):
-                    cells.append(cell)
-                elif isinstance(cell, dict) and cell.get("x") is not None and cell.get("y") is not None:
-                    cells.append(Position(int(cell["x"]), int(cell["y"])))
-        if (any(battle.unit_distance_to_cell(actor, cell) > 1 for cell in cells)
-                or any(battle.distance_between_units(actor, target) > 1 for target in target_units)):
-            return True, "同情弱者：范最高的武将只能在1格范围内发动技能。"
         return False, ""
 
     def on_before_heal(self, battle: Battle, ctx: HealContext) -> None:
-        if ("sympathy" in self.codes and ctx.target.unit_id in self._sympathy.get("defense", set())
-                and self._is_passive_effect(battle, ctx.source, ctx.action_name)):
-            ctx.cancelled = True
-            ctx.reason = "同情弱者：守最高的武将不受被动技能影响。"
-            return
         if "no_recovery" in self.codes:
             ctx.cancelled = True
             ctx.reason = "老一套对我没用：本局禁止回复。"
 
-    def on_after_heal(self, battle: Battle, ctx: HealContext) -> None:
-        gained = max(0.0, ctx.actual_heal)
-        if gained and "healer_attack" in self.codes:
-            self.on_direct_heal(battle, ctx.target, gained, source=ctx.source)
-
-    def on_direct_heal(self, battle: Battle, target: Unit, amount: float,
-                       *, source: Unit | None = None) -> None:
-        if "healer_attack" not in self.codes:
-            return
-        healer_team = source.player_id if source is not None else target.player_id
-        enemies = [unit for unit in battle.on_field_hero_units() if unit.player_id != healer_team]
-        if enemies:
-            if direct_scoring() and len(enemies) > 1:
-                expected_damage = amount / len(enemies)
-                for enemy in enemies:
-                    battle.resolve_damage(DamageContext(source=source or target, target=enemy,
-                                                       action_name="回复反噬", attack_power=0, is_skill=False,
-                                                       raw_damage=expected_damage, from_field_effect=True))
-                return
-            enemy = secrets.choice(enemies)
-            battle.resolve_damage(DamageContext(source=source or target, target=enemy,
-                                               action_name="回复反噬", attack_power=0, is_skill=False,
-                                               raw_damage=amount, from_field_effect=True))
-
-    def on_mana_gained(self, battle: Battle, unit: Unit, amount: float) -> None:
-        if amount <= 0 or "healer_attack" not in self.codes:
-            return
-        action = battle.resolving_action
-        origin = battle.units.get(action.actor_id) if action is not None else None
-        healer_team = origin.player_id if origin is not None else unit.player_id
-        enemies = [hero for hero in battle.on_field_hero_units() if hero.player_id != healer_team]
-        if enemies:
-            if direct_scoring() and len(enemies) > 1:
-                for enemy in enemies:
-                    enemy.drain_mana(min(amount, enemy.current_mana) / len(enemies))
-                return
-            secrets.choice(enemies).drain_mana(amount)
-
     def on_before_damage(self, battle: Battle, ctx: DamageContext) -> None:
-        action = battle.resolving_action
-        acting_unit = battle.units.get(action.actor_id) if action is not None else None
-        action_skill_code = str(action.payload.get("skill_code") or "") if action is not None else ""
-        if ("sympathy" in self.codes and action is not None
-                and action.action_type in {"skill", "skill_effect"}
-                and action.actor_id in self._sympathy.get("attack", set())
-                and acting_unit is not None and any(
-                    skill.code == action_skill_code and skill.timing == "active"
-                    for skill in acting_unit.action_skills())
-                and not ctx.from_field_effect):
-            ctx.cancelled = True
-            ctx.reason = "同情弱者：攻最高的武将不能以主动技能直接造成伤害。"
         if "face_tank" in self.codes:
             enemy_heroes = [hero for hero in battle.on_field_hero_units()
                             if hero.player_id == ctx.target.player_id]
@@ -247,35 +161,6 @@ class BPSpecialModeEffect(BattleFieldEffect):
                     ctx.target.stat("defense") < max(hero.stat("defense") for hero in enemy_heroes)):
                 ctx.cancelled = True
                 ctx.reason = "刚正面：只能伤害对方守最高的武将。"
-        if ("sympathy" in self.codes and ctx.target.unit_id in self._sympathy.get("defense", set())
-                and self._is_passive_effect(battle, ctx.source, ctx.action_name)):
-            ctx.cancelled = True
-            ctx.reason = "同情弱者：守最高的武将不受被动技能影响。"
-
-    def on_targeted(self, battle: Battle, ctx) -> None:
-        if ("sympathy" in self.codes and ctx.target.unit_id in self._sympathy.get("defense", set())
-                and self._is_passive_effect(battle, ctx.actor, ctx.action_name)):
-            ctx.cancelled = True
-            ctx.reason = "同情弱者：守最高的武将不受被动技能影响。"
-
-    def blocks_status_application(self, battle: Battle, source: Unit | None, target: Unit, status) -> bool:
-        return ("sympathy" in self.codes and target.unit_id in self._sympathy.get("defense", set())
-                and self._is_passive_effect(battle, source, status.name))
-
-    @staticmethod
-    def _is_passive_effect(battle: Battle, source: Unit | None, action_name: str) -> bool:
-        action = battle.resolving_action
-        if action is not None and (source is None or action.actor_id == source.unit_id):
-            if action.action_type == "reaction_skill":
-                return True
-            if source is not None:
-                code = str(action.payload.get("skill_code") or "")
-                if any(skill.code == code and skill.timing in {"passive", "reaction"}
-                       for skill in source.action_skills()):
-                    return True
-        return bool(source is not None and any(
-            skill.name == action_name and skill.timing in {"passive", "reaction"}
-            for skill in source.action_skills()))
 
     def on_after_source_damage(self, battle: Battle, ctx: DamageContext) -> None:
         if ("soft_persimmon" in self.codes and real_hero(ctx.target) and not ctx.target.alive
@@ -306,6 +191,7 @@ class BPSpecialModeEffect(BattleFieldEffect):
                 continue
             if "soft_persimmon" in self.codes and not getattr(unit, "_bp_soft_replacement", False):
                 self._replace_soft_persimmon(battle, unit)
+        self._activate_waiting_generals(battle)
         for unit in list(battle.all_units()):
             if not real_hero(unit) or unit.alive:
                 continue
@@ -373,7 +259,6 @@ class BPSpecialModeEffect(BattleFieldEffect):
         original.position = position
         original.owner_seat_id = owner_seat_id
         original._battle_ref = weakref.ref(battle)
-        self._stat_bonus.pop(original_id, None)
         for component in original.iter_components():
             component.bind(original)
         # A benched arena unit is otherwise immune to HP changes; replacement
@@ -437,15 +322,43 @@ class BPSpecialModeEffect(BattleFieldEffect):
                 unit._bp_arena_benched = True
                 unit.banished = True
             elif getattr(unit, "_bp_arena_benched", False):
-                unit.banished = False
                 del unit._bp_arena_benched
+                if not getattr(unit, "_bp_general_benched", False):
+                    unit.banished = False
+
+    @staticmethod
+    def _set_general_bench(battle: Battle, hero: Unit, *, benched: bool) -> None:
+        for unit in list(battle.all_units()):
+            if unit.unit_id != hero.unit_id and battle.controlling_hero_id(unit) != hero.unit_id:
+                continue
+            if benched:
+                unit._bp_general_benched = True
+                unit.banished = True
+            elif getattr(unit, "_bp_general_benched", False):
+                del unit._bp_general_benched
+                if not getattr(unit, "_bp_arena_benched", False):
+                    unit.banished = False
+
+    def _activate_waiting_generals(self, battle: Battle) -> None:
+        for team, general_id in tuple(self._general_ids.items()):
+            general = battle.units.get(general_id)
+            if general is None or not general.alive or not getattr(general, "_bp_general_benched", False):
+                continue
+            if any(real_hero(unit) and unit.alive and unit.player_id == team
+                   and unit.unit_id != general_id for unit in battle.all_units()):
+                continue
+            self._set_general_bench(battle, general, benched=False)
+            battle.log(f"大将模式：{general.name} 解除候场并参战。")
 
     def on_unit_entered(self, battle: Battle, unit: Unit) -> None:
-        if "arena" not in self.codes:
-            return
         controller = battle.units.get(battle.controlling_hero_id(unit) or "")
-        if controller is not None and controller is not unit and getattr(controller, "_bp_arena_benched", False):
+        if controller is None or controller is unit:
+            return
+        if "arena" in self.codes and getattr(controller, "_bp_arena_benched", False):
             unit._bp_arena_benched = True
+            unit.banished = True
+        if "general" in self.codes and getattr(controller, "_bp_general_benched", False):
+            unit._bp_general_benched = True
             unit.banished = True
 
     def on_after_any_turn_end(self, battle: Battle, ended_player_id: int) -> None:
@@ -455,21 +368,6 @@ class BPSpecialModeEffect(BattleFieldEffect):
                     and not hero.is_stealthed()
                     and not any(getattr(status, "grants_stealth", False) for status in hero.statuses)):
                 hero.current_mana = self._mages_original_mana.get(hero.unit_id, float(hero.base_stats.mana))
-
-    def on_round_complete(self, battle: Battle) -> None:
-        if "eternal" not in self.codes:
-            return
-        left = (battle.width - 5) // 2
-        top = (battle.height - 5) // 2
-        present = {unit.player_id for unit in battle.on_field_hero_units() if unit.position is not None
-                   and left <= unit.position.x < left + 5 and top <= unit.position.y < top + 5}
-        if len(present) == 1:
-            winner = next(iter(present))
-            stat = secrets.choice(("attack", "defense", "speed", "attack_range"))
-            for unit in battle.all_units():
-                if unit.alive and not unit.banished and unit.player_id == winner:
-                    self._stat_bonus.setdefault(unit.unit_id, {})[stat] = self._stat_bonus.get(unit.unit_id, {}).get(stat, 0) + 1
-            battle.log(f"永恒轮回战场：玩家 {winner} 全员{stat} +1。")
 
     def on_unit_moved(self, battle: Battle, ctx) -> None:
         if "chain" not in self.codes or self._tether_guard or ctx.unit.position is None:

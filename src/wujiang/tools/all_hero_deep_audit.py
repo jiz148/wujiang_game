@@ -153,6 +153,11 @@ def action_code(event: dict[str, Any]) -> str:
         return str(payload.get("action_code") or "chain_react")
     if action_type == "attack":
         return str(payload.get("attack_variant") or "attack")
+    if action_type == "damage_choice" and payload.get("target_unit_id") == "reroll":
+        before = event.get("before") if isinstance(event.get("before"), dict) else {}
+        prompt = before.get("pending_damage_choice") if isinstance(before.get("pending_damage_choice"), dict) else {}
+        if prompt.get("kind") == "probability_reroll" and prompt.get("offered_skill_code"):
+            return str(prompt["offered_skill_code"])
     return action_type
 
 

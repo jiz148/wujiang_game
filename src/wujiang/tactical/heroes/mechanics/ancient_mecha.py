@@ -97,7 +97,8 @@ class AncientRepairSkill(Skill):
                 setattr(status, attribute, .2)
             recipient.add_status(status, source=actor)
             return
-        stat_name = random.choice(("attack", "defense", "speed", "attack_range", "mana"))
+        stat_name = battle.choose_random(("attack", "defense", "speed", "attack_range", "mana"),
+                                         action_name="古代机械修整随机能力")
         recipient.add_status(AncientRepairBonusStatus(stat_name, battle.turn_number), source=actor)
         battle.log_public_event(f"{actor.name} 修整了{recipient.name}，其{stat_name}暂时+1。", source=actor, target=recipient)
 
@@ -666,7 +667,8 @@ class AncientJawSkill(Skill):
                 recipient.add_status(weakness, source=actor)
                 recipient.clamp_mana()
                 return
-            stat_name = random.choice(("attack", "defense", "speed", "attack_range", "mana"))
+            stat_name = battle.choose_random(("attack", "defense", "speed", "attack_range", "mana"),
+                                             action_name="古代机械颚随机弱点")
             weakness = AncientJawWeaknessStatus(actor.unit_id, stat_name)
             recipient.add_status(weakness, source=actor)
             if weakness in recipient.statuses:

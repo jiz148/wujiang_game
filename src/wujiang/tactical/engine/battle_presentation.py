@@ -571,6 +571,9 @@ class BattlePresentationMixin:
                 "terrain": [
                     {"x": x, "y": y, "kind": "wall"}
                     for x, y in sorted(self.blocked_cells)
+                ] + [
+                    {"x": x, "y": y, "kind": "big_rock"}
+                    for x, y in sorted(self.special_terrain_cells)
                 ],
             },
             "active_player": self.active_player,

@@ -123,7 +123,8 @@ class GravityFieldSkill(Skill):
         self.chosen_center(battle, actor, payload)
         if getattr(battle, "_forecasting_action", False) or getattr(battle, "_ai_probe_active", False):
             return {"gravity_results_logged": False}
-        values = [2 if random.random() < 0.5 else 1 for _ in range(3)]
+        values = [2 if battle.roll_chance(0.5, action_name="重力场硬币",
+                                           beneficiary_player_id=actor.player_id) else 1 for _ in range(3)]
         side = values[0] * values[1] * values[2]
         return {"gravity_coin_values": values, "gravity_side": side, "gravity_results_logged": False,
                 "chain_prompt_prefix": f"硬币 {'、'.join(str(value) for value in values)}，范围 {side}×{side}；"}
@@ -166,7 +167,8 @@ class GravityFieldSkill(Skill):
         if not isinstance(coin_values, list) or len(coin_values) != 3 or any(value not in (1, 2) for value in coin_values):
             if getattr(battle, "_forecasting_action", False) or getattr(battle, "_ai_probe_active", False):
                 raise ActionError("重力场预演需要明确的概率分支。")
-            coin_values = [2 if random.random() < 0.5 else 1 for _ in range(3)]
+            coin_values = [2 if battle.roll_chance(0.5, action_name="重力场硬币",
+                                                beneficiary_player_id=actor.player_id) else 1 for _ in range(3)]
         side = coin_values[0] * coin_values[1] * coin_values[2]
         cells = self.cells_for_side(battle, center, side)
         if not payload.get("gravity_results_logged"):

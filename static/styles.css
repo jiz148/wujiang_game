@@ -9683,7 +9683,10 @@ body.battle-mode .board-piece.is-hero:not(.is-footprint):not(.is-mounted-rider):
   white-space: pre-line;
   color: var(--text-2);
 }
-.cell.is-bp-eternal-zone { box-shadow: inset 0 0 0 2px rgba(111, 219, 168, .65); }
+.cell.is-terrain-big-rock {
+  background: linear-gradient(135deg, #6d777d, #475056 55%, #363d42);
+  box-shadow: inset 0 2px 0 rgba(220, 231, 232, .32), inset 0 -3px 0 rgba(15, 22, 27, .34);
+}
 @media (max-width: 760px) {
   .bp-content { grid-template-columns: minmax(0, 1fr); grid-template-areas: 'details' 'main'; }
   .bp-hero-details { max-height: 42vh; z-index: 10; }

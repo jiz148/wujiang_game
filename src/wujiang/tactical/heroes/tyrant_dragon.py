@@ -494,7 +494,7 @@ class ChaosBreathSkill(ManaPointCostSkill):
         return True, ""
 
     def execute(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
-        rolled = random.randint(1, 6)
+        rolled = battle.roll_die(6, action_name="混沌吐息掷骰", beneficiary_player_id=actor.player_id)
         battle.log_public_event(f"{actor.name} 混沌吐息掷出 {rolled}，最多可移动喷吐 {rolled} 段。",
                                 source=actor)
         _choose_chaos_stage(battle, actor, 1, rolled)

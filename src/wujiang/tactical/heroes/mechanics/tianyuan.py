@@ -45,7 +45,8 @@ class TianyuanSkill(Skill):
                          max_uses_per_turn=1, target_mode="self")
 
     def execute(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
-        rolled = 3.5 if direct_scoring() else (3 if getattr(battle, "_ai_probe_active", False) and not forecasting_active() else random.randint(1, 6))
+        rolled = 3.5 if direct_scoring() else (3 if getattr(battle, "_ai_probe_active", False) and not forecasting_active() else battle.roll_die(
+            6, action_name="天元掷骰", beneficiary_player_id=actor.player_id))
         counter = actor.get_status("叹号计数点")
         if isinstance(counter, TianyuanCounterStatus):
             counter.points += rolled
