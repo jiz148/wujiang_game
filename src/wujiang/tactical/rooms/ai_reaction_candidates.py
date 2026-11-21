@@ -68,7 +68,7 @@ class ReactionCandidateBuilder:
         preview = action.get("preview", {}) or {}
         base_payload = {"type": "attack", "unit_id": actor.unit_id}
         base_payload.update(dict(action.get("attack_payload") or {}))
-        if base_payload.get("attack_variant") == "crow_spawn":
+        if preview.get("cell_targeted_attack"):
             return [{**base_payload, "x": cell.x, "y": cell.y}
                     for cell in self.services.preview_positions(preview.get("cells"))]
         selection = dict(preview.get("selection") or {})
@@ -177,6 +177,12 @@ class ReactionCandidateBuilder:
                                            self.services._SHARED_CANDIDATE_GEOMETRY))
             if selected is not None:
                 return selected
+        reaction_skill = next((skill for skill in reactor.skills if skill.code == action_code), None)
+        skill_payloads = getattr(reaction_skill, "ai_reaction_payloads", None) if reaction_skill else None
+        if skill_payloads is not None:
+            selected = skill_payloads(battle, reactor, queued_action, option)
+            if selected is not None:
+                return selected
         if action_code in {"block", "counter", "knockback", "hell_pressure", "hell_pressure_free"}:
             return [base_payload]
         if action_code == "agency_borrowed_skill":
@@ -192,7 +198,8 @@ class ReactionCandidateBuilder:
             return [{**base_payload, "target_unit_id": target.unit_id, "cannon_unit_id": cannon.unit_id}
                     for target in skill._threatened_units(battle, reactor, queued_action)
                     for cannon in skill._cannons_near(battle, reactor, target)]
-        if action_code in self.services.REACTION_SHIELD_CODES:
+        reaction_skill = next((skill for skill in reactor.skills if skill.code == action_code), None)
+        if action_code in self.services.REACTION_SHIELD_CODES or getattr(reaction_skill, "ai_reaction_shield", False):
             target_ids = self.shield_targets_for_reaction(battle, reactor, queued_action, preview, action_code=action_code)
             if target_ids:
                 return [
@@ -287,7 +294,10 @@ class ReactionCandidateBuilder:
         protected: set[str] = set()
         for reaction in window.chosen_reactions:
             payload = reaction.payload if isinstance(reaction.payload, dict) else {}
-            if str(payload.get("action_code") or "") not in self.services.REACTION_SHIELD_CODES:
+            code = str(payload.get("action_code") or "")
+            reactor = battle.units.get(reaction.actor_id)
+            skill = next((item for item in reactor.skills if item.code == code), None) if reactor is not None else None
+            if code not in self.services.REACTION_SHIELD_CODES and not getattr(skill, "ai_reaction_shield", False):
                 continue
             protected.update(str(unit_id) for unit_id in payload.get("target_unit_ids", []) if unit_id)
             if payload.get("target_unit_id"):

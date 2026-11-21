@@ -480,7 +480,7 @@ class ChaosBreathSkill(ManaPointCostSkill):
 
     def __init__(self) -> None:
         super().__init__("chaos_breath", "混沌吐息",
-                         "每本人回合一次，费1魔力点；掷1d6，最多逐段四格移动并伤害身体周围单位。",
+                         "每本人回合一次，费1魔力点；掷1d6，每段先移动恰好4格，落点确定后才伤害身体周围单位；移动途中不造成伤害。",
                          mana_point_cost=1, max_uses_per_turn=1, target_mode="none")
 
     def can_use(self, battle: Battle, actor: Unit,

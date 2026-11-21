@@ -50,7 +50,7 @@ class RoomMatchMixin:
             self._sync_default_captains()
             for team_id in TEAM_IDS:
                 captain = self.seats.get(self.bp_captains.get(team_id, -1))
-                if captain is None or not captain.is_human or captain.team_id != team_id:
+                if captain is None or not captain.occupied or captain.team_id != team_id:
                     return f"请先为{team_name(team_id)}指定真人队长。"
             if self.bp_format == BP_FORMAT_TIER:
                 if not self._tier_pool_can_start():

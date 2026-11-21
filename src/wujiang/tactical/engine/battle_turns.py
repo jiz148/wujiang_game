@@ -228,6 +228,22 @@ class BattleTurnMixin:
         unit.controller_hero_id = self.controlling_hero_id(controller)
         unit.owner_seat_id = getattr(controller, "owner_seat_id", None)
 
+    def exchange_unit_control(self, first: Unit, second: Unit) -> None:
+        """Swap controllers atomically while each body keeps its original turn slot."""
+        if first is second or first.player_id == second.player_id:
+            return
+        first_slot, second_slot = self.unit_turn_slot_id(first), self.unit_turn_slot_id(second)
+        first_control = (first.player_id, self.controlling_hero_id(first),
+                         getattr(first, "owner_seat_id", None))
+        second_control = (second.player_id, self.controlling_hero_id(second),
+                          getattr(second, "owner_seat_id", None))
+        for unit in (first, second):
+            for rider in self.riders_for(unit):
+                self.clear_mounted_state(rider)
+        first.preserved_turn_slot_id, second.preserved_turn_slot_id = first_slot, second_slot
+        first.player_id, first.controller_hero_id, first.owner_seat_id = second_control
+        second.player_id, second.controller_hero_id, second.owner_seat_id = first_control
+
 
     def turn_bundle_units(
         self,

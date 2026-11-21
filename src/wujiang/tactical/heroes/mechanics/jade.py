@@ -1,6 +1,7 @@
 """Jade battlefield objects and skills."""
 
 from __future__ import annotations
+from wujiang.tactical.settlement_reuse import AreaDamageSpec, independent_area_skill
 
 from wujiang.tactical.heroes.ai_candidate_plan import RANKED_CANDIDATES
 
@@ -184,7 +185,16 @@ class MissileSkill(MissileAreaMixin, WindowChargeSkill):
                 self.window_remaining_uses = 0
 
 
+@independent_area_skill('r18')
 class CommonMissileSkill(MissileAreaMixin, Skill):
+    def ai_direct_area_patterns(self, battle: Battle, actor: Unit):
+        return self.patterns(battle,actor)
+
+    def ai_direct_area_spec(self, battle: Battle, actor: Unit, payload: dict[str, Any], cells=None) -> AreaDamageSpec:
+        power = actor.stat('attack')
+        return AreaDamageSpec(cells if cells is not None else tuple(self.chosen_cells(battle, actor, payload)),
+            {'attack_power':power,'is_skill':True,'action_name':'导弹',
+             'tags':{'skill','missile'},'declared_source_attack':power})
     ai_candidate_plan = RANKED_CANDIDATES
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r18_effect_score(self)

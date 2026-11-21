@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import random
 from wujiang.tactical.prediction import equipment_random, direct_scoring
+from wujiang.tactical.stat_queries import stat_dependencies
+from wujiang.tactical.query_purity import readonly_query_methods
+from wujiang.tactical.settlement_reuse import independent_area_component
 
 from wujiang.tactical.engine.core import Battle, DamageContext, HealContext, StatusEffect
 from wujiang.tactical.heroes.common import (
@@ -19,6 +22,9 @@ def _rng(battle: Battle) -> random.Random:
     return equipment_random(battle)
 
 
+@independent_area_component
+@readonly_query_methods('modify_attack_actions_per_turn', 'modify_normal_move_actions_per_turn',
+    'modify_normal_move_distance', 'modify_targeting_range')
 class EquipmentStatus(StatusEffect):
     def __init__(self, code: str, attributes: str, effect: str) -> None:
         super().__init__(f"装备·{code}", f"{attributes}；{effect}")
@@ -46,6 +52,7 @@ class EquipmentStatus(StatusEffect):
             owner.chess_duration_bonus = getattr(owner, "chess_duration_bonus", 0) + duration_bonus
         return self
 
+    @stat_dependencies('code', 'bonus_defense', 'owner', owner_fields=('role', 'race', 'attribute'))
     def modify_stat(self, stat_name: str, value: float) -> float:
         owner = self.owner
         if owner is None:
@@ -73,6 +80,11 @@ class EquipmentStatus(StatusEffect):
         if stat_name == "attack_range" and self.code in {"木弓", "风力弓"} and owner.role == "弓箭手":
             return value + 1
         return value
+
+    def ai_area_independent(self, source: Unit) -> bool:
+        if self.owner is source:
+            return self.code not in {'风力弓', '吸血面具', '德古拉之爪', '嗜血大剑', '腰带'}
+        return self.code != '德古拉之爪'
 
     def modify_attack_actions_per_turn(self, value: int) -> int:
         if self.code in {"幽灵手套", "点金手"}:

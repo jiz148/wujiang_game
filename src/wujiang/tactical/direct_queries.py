@@ -30,18 +30,34 @@ def _class_plan(kind, hook, unit, kernel, cache, core):
         if kernel.type_versions_match((kind,), versions) and kernel.function_codes_match(codes):
             return result
     contract = core._DIRECT_COMPONENT_DISCOVERY
-    expected = (contract[:3] if unit else (contract[3], contract[4], contract[8]) if hook == "runtime_children" else contract[3:5] if hook == "components" else
+    expected = (contract[:3] if unit else (contract[4],) if hook == 'projection' else (contract[3], contract[4], contract[8]) if hook == "runtime_children" else contract[3:5] if hook == "components" else
                 (contract[3], contract[4], contract[5 if hook == "sync_linked_state" else 6]))
     names = (("iter_components", "projected_traits", "innate_traits_suppressed") if unit else
+             ('projected_trait_for',) if hook == 'projection' else
              ("provided_components", "projected_trait_for"))
-    if not unit and hook != "components":
+    if not unit and hook not in ('components', 'projection'):
         names += (hook,)
+    if not unit and hook in core._DIRECT_NOTIFICATION_HOOKS:
+        expected = (contract[3], contract[4], core._DIRECT_NOTIFICATION_HOOKS[hook] or _MISSING)
     if (type(kind).__getattribute__ is not type.__getattribute__
             or _raw(kind, "__getattribute__") is not object.__getattribute__
             or _raw(kind, "__getattr__") is not _MISSING):
         return False
-    if any(_raw(kind, name) is not method for name, method in zip(names, expected)):
-        return False
+    empty_field = None
+    actual = tuple(_raw(kind, name) for name in names)
+    for name, method, original in zip(names, actual, expected):
+        if method is original:
+            continue
+        if name != 'provided_components' or os.environ.get('WUJIANG_AI_DYNAMIC_COMPONENTS', '1') == '0':
+            return False
+        from wujiang.tactical.component_providers import EmptyComponentBranch
+        from types import FunctionType
+        proof = vars(method).get('_empty_component_branch') if type(method) is FunctionType else None
+        if type(proof) is not EmptyComponentBranch or not proof.matches(method):
+            return False
+        empty_field = proof.field
+        if hasattr(_raw(kind, empty_field), '__get__'):
+            return False
     fields = (("skills", "traits", "statuses", "_triggered_skill_definitions", "_battle_ref",
                "banished", "is_summon", "is_clone", "alive", "position") if unit else
               ("suppresses_innate_traits", "timing"))
@@ -55,10 +71,14 @@ def _class_plan(kind, hook, unit, kernel, cache, core):
     versions = kernel.type_versions((kind,))
     if versions is None:
         return False
-    codes = tuple((method, method.__code__) for method in expected)
+    from types import FunctionType
+    codes = tuple((method, method.__code__) for method in dict.fromkeys((*expected, *actual)) if type(method) is FunctionType)
+    result = (suppression, _raw(kind, 'timing'))
+    if empty_field is not None:
+        result += (empty_field,)
     if len(cache) < 1024:
-        cache[key] = versions, codes, (suppression, _raw(kind, "timing"))
-    return suppression, _raw(kind, "timing")
+        cache[key] = versions, codes, result
+    return result
 
 
 def _query_context(battle, hook):

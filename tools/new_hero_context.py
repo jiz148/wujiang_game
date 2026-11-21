@@ -21,7 +21,9 @@ XML_NS = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 
 def saved_answers(codes: set[str]) -> dict[str, list[tuple[str, str, str, str]]]:
     """Read the relevant question, options, and saved answer without dumping the workbook."""
-    wanted = {f"R{int(code.rsplit('r', 1)[1])}-": code for code in codes}
+    wanted = {prefix: code for code in codes
+              for prefix in (f"R{int(code.rsplit('r', 1)[1])}-",
+                             f"R{int(code.rsplit('r', 1)[1]):03d}-")}
     answers: dict[str, list[tuple[str, str, str, str]]] = {code: [] for code in codes}
     workbook = ROOT / "docs/武将实现问题清单.xlsx"
     if not workbook.exists():
@@ -99,6 +101,10 @@ def main() -> None:
     archive = json.loads((ROOT / "docs/武将设计思想.json").read_text(encoding="utf-8-sig"))
     designs = {entry["code"]: entry for entry in archive["heroes"]}
     answers = saved_answers(set(args.codes))
+    for code, design in designs.items():
+        if code in answers and "questionnaire_items" in design:
+            current_ids = {item["id"] for item in design["questionnaire_items"]}
+            answers[code] = [entry for entry in answers[code] if entry[0] in current_ids]
     for code in args.codes:
         spec = by_code.get(code)
         if spec is None:

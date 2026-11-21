@@ -215,8 +215,14 @@ def normalize_bp_tier_pool(value: Any) -> tuple[int, ...]:
     return tuple(levels)
 
 
-def heroes_catalog() -> list[dict[str, Any]]:
+@lru_cache(maxsize=1)
+def _room_hero_catalog() -> list[dict[str, Any]]:
     return list_heroes()
+
+
+def heroes_catalog() -> list[dict[str, Any]]:
+    # Room responses may be modified by callers. Keep the process-wide catalog private.
+    return copy.deepcopy(_room_hero_catalog())
 
 
 def hero_lookup() -> dict[str, dict[str, Any]]:

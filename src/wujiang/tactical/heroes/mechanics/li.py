@@ -143,6 +143,11 @@ class ChainPullSkill(LiAreaScoring, Skill):
         if target_ctx.cancelled:
             battle.log(target_ctx.reason)
             return
+        if getattr(target, "is_terrain", False):
+            battle.log_public_event(f"{actor.name} 的链条击中 {target.name}，但地形不能被拉动。",
+                                    source=actor, target=target)
+            return
+        self.on_hit_target(battle, actor, target)
         target_cells = battle.unit_cells(target)
         try_cells = [cell for cell in cells if any(cell.distance_to(actor_cell) <= 1 for actor_cell in battle.unit_cells(actor))]
         for destination in try_cells:
@@ -161,6 +166,10 @@ class ChainPullSkill(LiAreaScoring, Skill):
                 battle.log(f"{actor.name} 用链条将 {target.name} 拉到身边。")
                 return
         battle.log(f"{actor.name} 的链条击中了 {target.name}，但没有合法落点。")
+
+    def on_hit_target(self, battle: Battle, actor: HeroUnit, target: HeroUnit) -> None:
+        """Subclass-owned effects after the shared chain successfully hits."""
+        return None
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
         preview = pattern_selection_preview(self.patterns(battle, actor))
@@ -223,7 +232,7 @@ class WhirlwindAttackSkill(LiAreaScoring, Skill):
 
 class RedHeatStatus(StatModifierStatus):
     def __init__(self) -> None:
-        super().__init__("红热", attack_delta=2, speed_delta=3, description="攻 +2，速 +3。")
+        super().__init__("红热", attack_delta=2, speed_delta=2, description="攻 +2，速 +2。")
 
     def on_owner_turn_end(self, battle: Battle) -> None:
         if self.owner is None or not self.owner.alive:
@@ -250,7 +259,7 @@ class RedHeatSkill(Skill):
         super().__init__(
             "red_heat",
             "红热",
-            "开关技能：只能在回合开始阶段使用；开启期间攻 +2、速 +3，自己回合结束时血减半。",
+            "开关技能：只能在回合开始阶段使用；开启期间攻 +2、速 +2，自己回合结束时血减半。",
             max_uses_per_turn=1,
             target_mode="self",
         )
@@ -568,8 +577,8 @@ class Li(AbstractHero):
     attribute = "土"
     race = "人类"
     level = 9
-    base_stats = Stats(attack=3, defense=5, speed=3, attack_range=1, mana=5)
-    raw_skill_text = "飞跃 链条 变硬 保护 ￥回天（普攻一周） 红热（开关技能，仅可在回合开始时使用，一回合一次；每个己方回合结束时血*1/2；攻+2，速+3） 精华（2轮一次，额外破魔攻击两次，如果在回合结束时有破魔攻击次数没有用过，则魔+剩余次数） 见切（被动技能；一回合一次；挡住一次攻击；下回合攻击次数+1，速+1） ￥定（使用后血+1/2，结束红热状态；效果持续4轮；此单位无法行动，守+2，魔免，自然回血）"
+    base_stats = Stats(attack=3, defense=4, speed=3, attack_range=1, mana=5)
+    raw_skill_text = "飞跃 链条 变硬 保护 ￥回天（普攻一周） 红热（开关技能，仅可在回合开始时使用，一回合一次；每个己方回合结束时血*1/2；攻+2，速+2） 精华（2轮一次，额外破魔攻击两次，如果在回合结束时有破魔攻击次数没有用过，则魔+剩余次数） 见切（被动技能；一回合一次；挡住一次攻击；下回合攻击次数+1，速+1） ￥定（使用后血+1/2，结束红热状态；效果持续4轮；此单位无法行动，守+2，魔免，自然回血）"
     raw_trait_text = "攻击3次；攻击吸血；没有移动次数限制；不会受到来自对方单位的无法位移效果影响，速度不会被对方单位下降"
 
     def build_skills(self) -> list[Skill]:

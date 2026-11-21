@@ -952,6 +952,7 @@ export async function setRoomSeatController(seatId, controllerType) {
         room_id: state.room.room_id,
         player_token: state.playerToken,
         seat_id: Number(seatId),
+        has_hero_catalog: Boolean(state.heroes?.length),
         controller_type: controllerType,
       }),
     });

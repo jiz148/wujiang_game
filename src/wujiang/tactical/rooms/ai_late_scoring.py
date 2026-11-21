@@ -6,6 +6,7 @@ from typing import Any, Callable, Protocol
 from copy import deepcopy
 from typing import Any, Callable, Iterable, Optional
 from wujiang.tactical.rooms.ai_probe import ai_probe_rollback
+from wujiang.tactical.stat_queries import stat_values_for
 from wujiang.tactical.rooms.ai_targets import living_hostile_combatants
 from wujiang.tactical.prediction import (expected_numeric, expected_local, forecasting_active, direct_scoring, rules_enabled,
     prediction_session, record_candidates, note, expected_attack_damage,
@@ -57,18 +58,23 @@ class AILateTacticalScoring:
         self.services = services
 
     def r23_action_state(self, battle: Battle) -> dict[str, tuple[Unit, float, float, int, int, bool, dict[str, float]]]:
+        units = battle.all_units()
+        values = stat_values_for(units) if direct_scoring() else None
         return {unit.unit_id: (unit, unit.current_hp, unit.current_mana, unit.total_shields(), unit.dodge_charges,
-                              unit.alive, {name: unit.stat(name) for name in ("attack", "defense", "speed")})
-                for unit in battle.all_units()}
+                              unit.alive, dict(values[id(unit)]) if values is not None else {name: unit.stat(name) for name in ("attack", "defense", "speed")})
+                for unit in units}
 
 
     def r23_action_delta(self, actor: Unit, before: dict[str, Any]) -> float:
         """Price actual outcomes for all recipients, including friendly losses."""
         score = 0.0
+        from wujiang.tactical.rooms import ai
+        values = (stat_values_for([row[0] for row in before.values()])
+                  if direct_scoring() and self.services is ai and ai._r23_stat_query_bindings_match() else None)
         for unit, hp, mana, shields, dodges, alive, stats in before.values():
             loss = (hp - unit.current_hp) * 100.0 + (mana - unit.current_mana) * 18.0
             loss += (shields - unit.total_shields()) * 20.0 + (dodges - unit.dodge_charges) * 12.0
-            loss += sum((stats[name] - unit.stat(name)) * weight
+            loss += sum((stats[name] - (values[id(unit)][name] if values is not None else unit.stat(name))) * weight
                         for name, weight in (("attack", 24.0), ("defense", 30.0), ("speed", 14.0)))
             if alive and not unit.alive:
                 loss += 90.0
@@ -104,6 +110,10 @@ class AILateTacticalScoring:
 
     def r23_paid_skill_value(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> float:
         """Use the same outcome scale as Kiku's attacks, including actual prepaid mana."""
+        from wujiang.tactical.settlement_reuse import try_area_score
+        reused = try_area_score(self,battle,actor,payload,'r23')
+        if reused is not None:
+            return reused
         with ai_probe_rollback(battle):
             battle._forecasting_action = True
             battle.pending_followup_actions.clear()

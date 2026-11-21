@@ -143,8 +143,12 @@ def direct_checkpoint(battle):
                         cache.insert(0, saved)
     if saved is None:
         note("direct_checkpoint_fallbacks")
-        with core.battle_state_rollback(battle):
-            yield
+        try:
+            with core.battle_state_rollback(battle):
+                yield
+        finally:
+            if session is not None:
+                session['last_direct_checkpoint']=None
         return
     rng_state = random.getstate()
     try:
@@ -152,3 +156,6 @@ def direct_checkpoint(battle):
     finally:
         saved.restore()
         random.setstate(rng_state)
+        # Original query caches may attach values to this exact restored state;
+        # readers still recheck the entire graph before accepting a cached hit.
+        session['last_direct_checkpoint']=saved

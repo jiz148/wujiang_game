@@ -427,6 +427,7 @@ class WaterWaveCannonSkill(RemoteDragonBreathSkill):
 class GladiatorSoulStatus(StatModifierStatus):
     def __init__(self, source_unit_id: str) -> None:
         super().__init__("剑斗之魂", attack_delta=1, mana_delta=1,
+                         description="攻+1、魔上限+1。",
                          duration=3, tick_scope="owner_turn_end")
         self.source_unit_id = source_unit_id
         self.is_skill_effect = True

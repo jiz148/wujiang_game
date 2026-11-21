@@ -13,6 +13,8 @@ class BattleCombatMixin:
             forecasting_active,
             random,
         )
+        from wujiang.tactical.settlement_reuse import guard_damage
+        guard_damage(self, ctx)
         if direct_scoring() and not hasattr(ctx, "forecast_hit_probability"):
             # Saved reaction checkpoints may predate these scoring-only slots.
             ctx.forecast_hit_probability = 1.0
@@ -185,6 +187,8 @@ class BattleCombatMixin:
                 return ctx
             if ctx.target.is_clone:
                 ctx.destroyed_as_clone = True
+                if getattr(self, "_damage_probe_target_unit_id", None) == ctx.target.unit_id:
+                    self._damage_probe_hit = True
                 ctx.raw_damage = 0.0
                 ctx.target.current_hp = 0.0
                 ctx.target.alive = False
@@ -218,6 +222,8 @@ class BattleCombatMixin:
                 damage_amount = ctx.raw_damage
             ctx.raw_damage = ctx.target.damage_fraction_after_limits(damage_amount)
             if ctx.raw_damage > 0:
+                for effect in list(self.field_effects):
+                    effect.on_before_hp_loss(self, ctx)
                 for component in self.components_for(ctx.target):
                     component.on_before_hp_loss(self, ctx)
             if direct_scoring():
@@ -275,10 +281,13 @@ class BattleCombatMixin:
             ctx.target.take_damage_fraction(ctx.raw_damage)
             actual_damage = round(max(0.0, old_hp - ctx.target.current_hp), 4)
             ctx.actual_damage = actual_damage
+            if actual_damage > 0 and getattr(self, "_damage_probe_target_unit_id", None) == ctx.target.unit_id:
+                self._damage_probe_hit = True
             if direct_scoring():
                 from wujiang.tactical.direct_expectation import record_death_probability
                 record_death_probability(ctx)
-            if actual_damage > 0:
+            from wujiang.tactical.direct_queries import empty_hook_pass
+            if actual_damage > 0 and not (direct_scoring() and empty_hook_pass(self, 'on_battle_damage')):
                 for observer in list(self.all_units()):
                     if observer.alive and observer.position is not None and not observer.banished:
                         for component in self.components_for(observer):
@@ -323,7 +332,8 @@ class BattleCombatMixin:
 
 
     def heal(self, ctx: HealContext) -> HealContext:
-        ctx.target = self.effect_recipient(ctx.target)
+        if not ctx.direct_target:
+            ctx.target = self.effect_recipient(ctx.target)
         with self.suppress_logs_for_stealth(ctx.target):
             for effect in list(self.field_effects):
                 effect.on_before_heal(self, ctx)
@@ -360,7 +370,8 @@ class BattleCombatMixin:
                 self.record_skill_effect(ctx.target)
             self.record_heal_summary(ctx, gained)
             self.log_public_event(
-                f"{ctx.target.name} 回复了 {gained} 点生命。",
+                (f"{ctx.target.name} 的回血转为减少 {-gained:g} 点生命。"
+                 if gained < 0 else f"{ctx.target.name} 回复了 {gained:g} 点生命。"),
                 source=ctx.source,
                 target=ctx.target,
             )
@@ -371,6 +382,8 @@ class BattleCombatMixin:
                     component.on_after_heal(self, ctx)
             for component in list(ctx.target.iter_components()):
                 component.on_after_heal(self, ctx)
+            if not ctx.target.alive:
+                self.cleanup_dead_units()
             return ctx
 
 

@@ -398,8 +398,13 @@ class SacrificeRitualSkill(ManaPointCostSkill):
 
     def can_use(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
         ok, reason = super().can_use(battle, actor, payload)
-        if not ok or not payload:
+        if not ok:
             return ok, reason
+        if not any(self.legal_destinations(battle, actor, unit)
+                   for unit in self.destroyed_candidates(battle)):
+            return False, "没有可召回单位的合法落格。"
+        if not payload:
+            return True, ""
         try:
             target = self.candidate_by_payload(battle, payload)
             if payload_position(payload) not in self.legal_destinations(battle, actor, target):
@@ -477,6 +482,8 @@ class SacrificeRitualSkill(ManaPointCostSkill):
         candidate_data: list[dict[str, Any]] = []
         for unit in candidates:
             cells = self.legal_destinations(battle, actor, unit)
+            if not cells:
+                continue
             all_cells.extend(cells)
             candidate_data.append(
                 {

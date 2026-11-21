@@ -167,7 +167,8 @@ class IaidoChargeSkill(Skill):
         if not actor.has_status("聚气。拔刀斩"):
             actor.add_status(IaidoChargeStatus())
         if not actor.has_status("聚气当回合禁攻"):
-            actor.add_status(FlagStatus("聚气当回合禁攻", "cannot_attack", duration=1))
+            actor.add_status(FlagStatus("聚气当回合禁攻", "cannot_attack",
+                                        description="聚气后本回合不能普攻。", duration=1))
         battle.log(f"{actor.name} 进入【聚气。拔刀斩】状态。")
 
 

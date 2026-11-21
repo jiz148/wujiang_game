@@ -1,41 +1,78 @@
-"""Auto chess battle-start synergies for role, attribute, and race."""
+"""Auto chess synergy catalog and battle components.
+
+The workbook is authoritative for displayed tier descriptions. Behavior for
+each tag lives in :mod:`synergy_effects`.
+"""
 from __future__ import annotations
 
-import random
+import re
+import zipfile
 from collections import Counter
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree
 
-from wujiang.tactical.engine.core import Battle, DamageContext, StatusEffect
-from wujiang.tactical.prediction import direct_scoring
+from wujiang.tactical.rooms.synergy_effects import SUPPORTED_TAGS, SynergyStatus, SynergyField
 
 
 CATEGORY_LABELS = {"role": "职业", "attribute": "属性", "race": "种族"}
-ROLE_STATS = {"剑士": "attack", "法师": "mana", "骑士": "defense",
-              "弓箭手": "attack_range", "勇者": "attack", "贤者": "mana"}
-ATTRIBUTE_STATS = {"火": "attack", "光": "defense", "雷": "speed",
-                   "水": "mana", "风": "speed", "土": "defense"}
-RACE_STATS = {"人类": "defense", "机甲": "defense", "精灵": "speed", "灵体": "mana"}
-STAT_LABELS = {"attack": "攻击", "defense": "防御", "speed": "速度",
-               "attack_range": "范围", "mana": "魔法"}
+_CATEGORY_KEYS = {value: key for key, value in CATEGORY_LABELS.items()}
+_WORKBOOK = Path(__file__).resolve().parents[4] / "data" / "自走棋羁绊效果.xlsx"
+_NS = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+
+
+@lru_cache(maxsize=1)
+def synergy_catalog() -> dict[tuple[str, str, int], str]:
+    """Read the source workbook without a server-side Excel dependency."""
+    with zipfile.ZipFile(_WORKBOOK) as archive:
+        strings: list[str] = []
+        if "xl/sharedStrings.xml" in archive.namelist():
+            root = ElementTree.fromstring(archive.read("xl/sharedStrings.xml"))
+            strings = ["".join(t.text or "" for t in item.findall(".//m:t", _NS))
+                       for item in root.findall("m:si", _NS)]
+        root = ElementTree.fromstring(archive.read("xl/worksheets/sheet1.xml"))
+        rows: list[list[str]] = []
+        for row in root.findall(".//m:sheetData/m:row", _NS):
+            values = ["", "", "", ""]
+            for cell in row.findall("m:c", _NS):
+                match = re.match(r"([A-Z]+)", cell.get("r", ""))
+                if match is None or match.group(1) not in ("A", "B", "C", "D"):
+                    continue
+                value = cell.find("m:v", _NS)
+                inline = cell.find("m:is", _NS)
+                if value is not None:
+                    text = strings[int(value.text or 0)] if cell.get("t") == "s" else value.text or ""
+                else:
+                    text = "".join(t.text or "" for t in inline.findall(".//m:t", _NS)) if inline is not None else ""
+                values[ord(match.group(1)) - ord("A")] = text.strip()
+            rows.append(values)
+    if not rows or rows[0] != ["条件类别", "羁绊标签", "数量", "效果（可修改）"]:
+        raise ValueError("自走棋羁绊效果.xlsx 表头或列顺序有误。")
+    result: dict[tuple[str, str, int], str] = {}
+    for index, (category, name, count, effect) in enumerate(rows[1:], start=2):
+        if not category and not name:
+            continue
+        if category not in _CATEGORY_KEYS or count not in ("3", "6") or not name or not effect:
+            raise ValueError(f"自走棋羁绊效果.xlsx 第 {index} 行条件或效果无效。")
+        key = (_CATEGORY_KEYS[category], name, int(count) // 3)
+        if key in result:
+            raise ValueError(f"自走棋羁绊效果.xlsx 第 {index} 行重复：{key}")
+        result[key] = effect
+    for category, name, _ in result:
+        if (category, name, 1) not in result or (category, name, 2) not in result:
+            raise ValueError(f"羁绊 {category}/{name} 缺少 3 人或 6 人效果。")
+    if {(category, name) for category, name, _ in result} != SUPPORTED_TAGS:
+        raise ValueError("羁绊源表标签与已实现的战斗效果不一致，请同步修改。")
+    return result
 
 
 def synergy_tier(count: int) -> int:
     return 2 if count >= 6 else 1 if count >= 3 else 0
 
 
-def synergy_stat(category: str, key: str) -> str | None:
-    if category == "role":
-        return ROLE_STATS.get(key, "speed")
-    if category == "attribute":
-        return None if key == "暗" else ATTRIBUTE_STATS.get(key, "attack")
-    return RACE_STATS.get(key, "speed")
-
-
 def synergy_description(category: str, key: str, tier: int) -> str:
-    if category == "attribute" and key == "暗":
-        return f"全体暗属性武将受到可闪避伤害时有 {tier * 10}% 几率闪避"
-    stat = synergy_stat(category, key)
-    return f"全体{key}武将{STAT_LABELS[stat]} +{tier}"
+    return synergy_catalog().get((category, key, tier), "")
 
 
 def synergy_counts(pieces: list[Any], catalog: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -52,28 +89,3 @@ def synergy_counts(pieces: list[Any], catalog: dict[str, dict[str, Any]]) -> lis
                            "first": synergy_description(category, key, 1),
                            "second": synergy_description(category, key, 2)})
     return result
-
-
-class SynergyStatus(StatusEffect):
-    def __init__(self, category: str, key: str, tier: int) -> None:
-        super().__init__(f"自走棋羁绊·{CATEGORY_LABELS[category]}·{key}",
-                         synergy_description(category, key, tier))
-        self.category = category
-        self.key = key
-        self.tier = tier
-
-    def modify_stat(self, stat_name: str, value: float) -> float:
-        return value + self.tier if stat_name == synergy_stat(self.category, self.key) else value
-
-    def on_before_damage(self, battle: Battle, ctx: DamageContext) -> None:
-        if (self.category != "attribute" or self.key != "暗" or
-                ctx.target is not self.owner or ctx.cancelled or ctx.cannot_evade or ctx.from_field_effect):
-            return
-        if direct_scoring():
-            from wujiang.tactical.direct_expectation import damage_chance
-            damage_chance(ctx, 1 - self.tier * .1)
-            return
-        rng = getattr(battle, "chess_rng", None) or random
-        if rng.random() < self.tier * 0.1:
-            ctx.cancelled = True
-            ctx.reason = f"{ctx.target.name} 的暗属性羁绊闪避了伤害。"

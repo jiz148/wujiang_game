@@ -53,7 +53,10 @@ class BattleUnitsMixin:
     def remove_unit(self, unit: Unit) -> None:
         if unit.unit_id not in self.units or getattr(unit, "_removal_in_progress", False):
             return
+        was_destroyed = not unit.alive
         self.capture_destruction_position(unit)
+        if was_destroyed and unit.alive:
+            return
         unit._removal_in_progress = True
         try:
             self._remove_unit(unit)
@@ -74,6 +77,10 @@ class BattleUnitsMixin:
             callback = getattr(component, "on_hell_dragon_destroyed", None)
             if callable(callback):
                 callback(self)
+        for component in list(unit.iter_components()):
+            component.on_owner_destruction_pending(self)
+        if unit.alive:
+            return
         if skill_death and not getattr(unit, "_suppress_hell_forced_skill_death", False):
             for component in list(unit.iter_components()):
                 callback = getattr(component, "on_hell_forced_skill_death", None)
@@ -90,7 +97,7 @@ class BattleUnitsMixin:
         for observer in list(self.all_units()):
             for component in list(observer.iter_components()):
                 component.on_unit_destroyed(self, unit)
-        unit.__dict__.pop("_destroying_source_unit_id", None)
+        unit._last_destroying_source_unit_id = unit.__dict__.pop("_destroying_source_unit_id", None)
         if unit.is_summon and unit.summoner_id:
             summoner = self.units.get(unit.summoner_id)
             if summoner is not None and summoner.alive:
@@ -238,6 +245,10 @@ class BattleUnitsMixin:
             direct_scoring,
         )
         if direct_scoring():
+            from wujiang.tactical.stat_queries import cached_components
+            cached = cached_components(unit)
+            if cached is not None:
+                return cached
             from wujiang.tactical.direct_queries import component_snapshot
             result = component_snapshot(self, unit)
             if result is not None:
@@ -289,6 +300,10 @@ class BattleUnitsMixin:
                         if callable(hook):
                             hook(self, payer, skill, mana_paid)
             if actor.alive:
+                from wujiang.tactical.prediction import direct_scoring
+                from wujiang.tactical.direct_queries import empty_hook_pass
+                if direct_scoring() and empty_hook_pass(self, 'on_any_skill_declared'):
+                    return
                 for observer in list(self.all_units()):
                     if not observer.alive or observer.banished or observer.position is None:
                         continue

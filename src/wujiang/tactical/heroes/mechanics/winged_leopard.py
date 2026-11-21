@@ -93,7 +93,7 @@ class EagleEyeSkill(DeclaredAreaSkillMixin, Skill):
         return context.control_score(self)
 
     def __init__(self) -> None:
-        super().__init__("eagle_eye", "鹰眼", "普通技能：基础费 0.5 魔，每回合第一次免费；2*3 范围，无伤害，封锁攻击和主动技能 3 轮。", mana_cost=0.5, target_mode="cell")
+        super().__init__("eagle_eye", "鹰眼", "普通技能：基础费 1 魔，每回合第一次免费；2*3 范围，无伤害，封锁攻击和主动技能 3 轮。", mana_cost=1, target_mode="cell")
 
     def mana_cost_for_payload(self, battle: Battle, actor: HeroUnit, payload: dict[str, Any] | None = None) -> float:
         self.sync_turn_scope(battle)

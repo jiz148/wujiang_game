@@ -8,7 +8,7 @@ import { keyboardHelpIsOpen, syncModalIsolation } from '../core/ui.js';
 import { closeProfileModal, profileModalVisible } from '../platform/auth.js';
 import { attackTargetIdAtCell, completeTutorialUnitSelection, explainInvalidBoardChoice, performAction } from '../tactical/room-api.js';
 import { clearActionSelection } from '../tactical/session.js';
-import { actionNeedsTarget, attackChoicePatternSelection, bodyDirectionSelection, cellDirectionSelection, crowFormationSelection, currentPreview, movePathAnchorForClickedCell, movePathIndexForClickedCell, movePathSelection, multiUnitSelection, patternSelection, patternSelectionIsOrdered, reviveSelectionCells, reviveUnitCellSelection, sameCell, setStagedBodyCells, setStagedCellDirectionCell, setStagedCrowFormationRavenIds, setStagedCrowFormationTargetId, setStagedMovePath, setStagedMultiTargetIds, setStagedPatternCells, setStagedReviveCell, setStagedStatCells, setStagedUnitCellsPlacements, setStagedUnitCellsTargetId, setStagedUnitDirectionTargetId, stagedAttackActionPayload, stagedBodyCells, stagedCrowFormationRavenIds, stagedCrowFormationTargetId, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedUnitCellsPlacements, stagedUnitCellsTargetId, statCellRequired, statCellSelection, unitCellsSelection, unitDirectionSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
+import { actionNeedsTarget, attackChoicePatternSelection, bodyDirectionSelection, cellDirectionSelection, crowFormationSelection, currentPreview, movePathAnchorForClickedCell, movePathIndexForClickedCell, movePathSelection, multiUnitSelection, optionSelection, patternSelection, patternSelectionIsOrdered, reviveSelectionCells, reviveUnitCellSelection, sameCell, setStagedBodyCells, setStagedCellDirectionCell, setStagedCrowFormationRavenIds, setStagedCrowFormationTargetId, setStagedMovePath, setStagedMultiTargetIds, setStagedOptionTargetId, setStagedPatternCells, setStagedReviveCell, setStagedStatCells, setStagedUnitCellsPlacements, setStagedUnitCellsTargetId, setStagedUnitDirectionTargetId, stagedAttackActionPayload, stagedBodyCells, stagedCrowFormationRavenIds, stagedCrowFormationTargetId, stagedMovePath, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedUnitCellsPlacements, stagedUnitCellsTargetId, statCellRequired, statCellSelection, unitCellsSelection, unitDirectionSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
 import { positionKey, positionsToSet, selectedAction, targetIdsToSet } from '../tactical/vfx.js';
 
 export function onBoardClick(x, y, occupant) {
@@ -39,6 +39,7 @@ export function onBoardClick(x, y, occupant) {
       || cellDirectionSelection(action)
       || directionOnlySelection(action)
       || statCellSelection(action)
+      || optionSelection(action)
       || bodyDirectionSelection(action)
       || reviveUnitCellSelection(action)
       || action.preview?.destinations_by_target
@@ -248,6 +249,17 @@ export function onBoardClick(x, y, occupant) {
       return;
     }
     setStagedUnitDirectionTargetId(occupant.id);
+    render();
+    return;
+  }
+
+  if (optionSelection(action)) {
+    if (!optionSelection(action).requires_unit) return;
+    if (!(occupant && canUseUnit)) {
+      explainInvalidBoardChoice(action, occupant);
+      return;
+    }
+    setStagedOptionTargetId(occupant.id);
     render();
     return;
   }

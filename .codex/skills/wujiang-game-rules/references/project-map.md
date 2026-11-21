@@ -1,5 +1,57 @@
 # wujiang_game Project Map
 
+- 2026-11-20 复杂组件位置基线：`tactical/query_purity.py`持只读资格类型／代码计划，组件对象声明只读钩子及直接子组件；`rooms/ai_mobility_effect_scoring.py`只补实际位移／死亡移除单位的原位置分数，额外变位回全体基线。与`stat_queries.py`属性值缓存分开，负收益整场视图原型撤销。冻结9eb895da8e348cf3，混合32装备羁绊2210→1231ms(-44.28%)、密集32 1524→1446ms(-5.15%)，140定向与24输入958技能分数通过；仍未达200ms／四场验收。报告`reports/ai-position-purity-20261120/report.md`。`check_full_ai_matrix.py --source verified`指向本轮冻结版并验证真实子进程状态。
+- 2026-11-20 R124/R150：`heroes/bee_king.py`持自动/主动产蜂、同源蜂巢与蜂反；`heroes/mana_messenger.py`持友军供魔、敌方效果过滤、付魔叠守与超硬化；精确kit分别为`kits/excel_r124.py`和`kits/excel_r150.py`。各4项定向及各3场有界对局本将零高信号/动作失败；公开204/388、余184，魔使最终审计`reports/new-batch-150-20261120-final2`。
+
+- 2026-11-20 完整AI混合评估：`tactical/probe_reuse.py`复用完整检查点一致时的原普攻结果；`settlement_reuse.py`提前拒绝未知组件并仅校验实际入口的保守Battle调用闭包。`tools/check_full_ai_matrix.py`管理9旧＋15新输入及公开武将机制清单、后续12行动者轮换。128项定向、24场景同规则开关对照通过；电子31装备405→227ms、电子换位1042→855ms，混合32仍1.5–2.4秒。负收益固定子组件原型已回退，未操作服务器／验收四场并行。见`reports/ai-general-evaluation-20261120/report.md`及冻结版边界。
+
+- 2026-11-20 R049/R055/R062：`heroes/silent_swordsman.py`持敌格伤害尝试蓄点、四格递减剑和先补魔回血的余点爆发；`kanzaki.py`持即时一闪与公开四骰追随者；`flame_emissary.py`持炎巨人、空区爆裂、全场加血和协同热情冲击。三个精确kit在`kits/excel_r049/r055/r062.py`。通用`mechanics/clone_split.py::SplitSkill.can_use`过滤少于三落格。18项定向及各3场有界对局零高信号/动作失败；公开200/388、余188。报告分别为`reports/new-batch-049-20261120-final`、`new-batch-055-20261120`、`new-batch-062-20261120`。
+
+- 2026-11-20 R132–R134: `heroes/twin_devil.py` owns dead-unit skill exchange and control swap; `mercury_mage.py` owns summon, final HP-loss prevention/heal, mobility field and fixate; `f_warrior.py` owns enlarged common-skill variants and object-owned AI impact. Exact fragments are in `kits/excel_r132/r133/r134.py`; generic atomic control swap in `engine/battle_turns.py`. 17 focused checks and 9 bounded matches, zero high-signal/action failures; public 197/388, remaining 191. Reports `reports/new-batch-132133-20261120-verified`, `reports/new-batch-134-20261120-final`.
+
+- 2026-11-20 R131/R151/R160：源身份和精确片段在`heroes/excel_roster_data.py`与三个`kits/excel_r*.py`；专属规则分别在`heroes/francis.py`、`l_spear.py`、`dead_soul_echo.py`。R131烫伤用受体`on_owner_turn_end`，骰子现场一次、直接AI逐击概率；R160敌轮末技能由通用`optional_skill_use`提示及对象AI评分处理，网页动作在`static/tactical/vfx.js`展示。18项定向和各3场有界对局最终零高信号/动作失败；公开194/388、余194。报告`reports/new-batch-131151160-20261120-final`。
+
+
+- 2026-11-20 完整AI技能复用：`tactical/settlement_reuse.py`持单决策受体复用，机枪/通用导弹/卫星及装备/羁绊/电子特性对象声明资格。未知、耦合、死亡走原流程；412→110次伤害，避免163次完整技能试算。电子31装备驻留397→192ms（-51.79%），重载214ms、首次223–280ms尚非全部≤200。冻结28a3516a364980fd、115定向、9输入54见证和163技能全分数核对通过；交换无稳定收益，旧研究证书2项原/新均红。bat下次启用、legacy保留，未操作服务器/四场验收；见`reports/ai-skill-settlement-20261120/report.md`。
+
+- 2026-11-20 R119/R130/R135：`heroes/huangquan.py`持当前速三倍、无3轮腐化开关和分段移动；`heroes/iron_fist_rodick.py`持轮末蓄力、所有伤害半破魔、钢拳与禁回避气场；`heroes/child_of_water.py`持凝固与仅敌方受体的深海推离。精确片段在各自`kits/excel_r119/r130/r135.py`。共享死后连锁候选改从保存的候选对象读取玩家归属；AOE只选敌人时令目标格仅作几何预览。16项合并定向通过，各3场有界专场最终零本将高信号/动作失败；另有R326旧随机评分异常。公开191/388、余197。
+
+- 2026-11-20 R104/R116：`heroes/vanguard_e.py`持孤军动态攻守、每次实际位移后额外免费旋转、身体外一周连锁伤；大穿刺与冲刺沿现有对象。`heroes/demon_zela.py`持2×2恶魔邻接动态攻守、3×3破魔拉近、本轮来自则拉普攻半破魔、飞扑后独立可连锁周围伤。源对象分别在`kits/excel_r104/r116.py`精确装配。12项定向与各3场有界对局通过，零高信号/动作失败；公开188/388、余200。
+
+- 2026-11-20 R095/R096：`heroes/dream_demon.py`持镇定只压制施放前能力修正、哈欠周期资源/打断、入梦破魔；`heroes/snow_woman.py`持冰墙、菱撒按重施升伤和声明反制、吹雪逐目标公开硬币与真实场地伤害试算。各自`kits/excel_r095/r096.py`精确装配。`MultiTargetChainShieldSkill.ai_reaction_shield`供标准、简单、倾向AI识别同类连锁护盾。15项定向加3项既有场景通过，各3场有界对局零高信号/动作失败；公开186/388、余202。
+
+- 2026-11-19 R061/R068：`heroes/leopard_man.py`持奔袭动态周围全生命伤+1、友军临时「结伴而行」及目标×落格三路AI；`heroes/wolf_king.py`持召狼、咬伤逐队伍轮失血、两种公开硬币及狼王普通移动登狼AI；各自精确kit。`battle_movement.py`通用单格指定主人坐骑移动重合后绑定。11项定向、各3场有界对局零高信号/动作失败，R061一场150步未决；乘骑抽查一项现存红项已做撤回接线对照。公开182/388、余206。
+
+- 2026-11-19 R063/R069：`heroes/ruin_child.py`持破魔纠缠周期吸血魔、虚灵全伤与全回复倍率；`heroes/moon_beast.py`持方向脉冲、3×3闪光弹整次普攻公开硬币、主动施技复位普通行动、邻敌施技加攻及真毁可连锁普通一周攻击。两份精确kit装配，网页复用方向/单体/可点格协议，三路AI接对象候选；13项合并定向及各3场有界对局零高信号/动作失败，R063一场150步未决。问卷同步保留缺省文本。公开180/388、余208；下一批继续低编号缺口。
+
+- 2026-11-19 R048/R050：`heroes/photon_lang.py`持三轮生命伤免疫、方向推进和下一己方队伍进攻轮禁移、逐友军合法落格圣域及对象AI落格收益；`heroes/revenge_seed.py`持敌方轮友将真毁计数、复仇最终伤+层数、受伤减1再分担并以本体为反弹来源。两将 kit 精确装配，现有网页选择协议可直接使用，无共享结构分支。16项定向、各3场有界对局零高信号/动作失败；R048圣域随机局未实际使用，正式选格和AI场景单独通过。公开178/388、余210。
+
+- 2026-11-19 完整AI电子31＋装备续轮：`tactical/stat_queries.py`持单决策属性依赖视图/批次/组件列表副本，装备与羁绊对象声明原函数读取字段；原生字段守卫按实际字段、类版本、代码、集合失效。R18省去无位移时未消费的位置基线，位移恢复后走原路径；R23未知护盾/数字操作/价值查询及自定义评分服务保留读取顺序。冻结源7ca38a4b2f4ce4f4：31装备主决策1270→441ms（-65.29%），100–200ms尚未达标；9输入54调用见证全等，91定向通过；旧研究证书2项原/新均红。无净收益的免疫缓存、整图读缓存、空查询证明、零权重价值省算已回退；反应小输入基本不变，不能推广主决策收益。`reports/ai-electronic-200ms-20261119/report.md`有源/构件备份、逐步日志和限制；未重启服务器。
+
+- 2026-11-19 R045：`heroes/nameless_rock_soldier.py`持玩家选完整正方形扩大、受击蓄点、无攻蓄势、满血逐次保命与回血扣点；`kits/excel_r045.py`精确装配。`core.py`增加通用直接回血完成钩子，正式回血在本将特性里按同一上下文去重。7项定向、最终3场单将有界对局零高信号/动作失败，巨大化实战4次；公开176/388、余212。
+
+- 2026-11-19 R040：`heroes/clockwork_shark.py`持独立点数、倒刺声明反伤、方向脉冲、MK2逐路径穿人及三路对象AI穿人路线；`kits/excel_r040.py`精确装配。网页复用`direction_only`。9项定向与最终3场单将有界对局零高信号/动作失败；对局未攒够10点启用MK2，定向场景单独证实。公开175/388、余213；下一批继续低编号未实现将。
+
+- 2026-11-19 低编号三将：R038在`heroes/heracles.py`/`kits/excel_r038.py`，R042在`heroes/wing_god.py`/`kits/excel_r042.py`，R044在`heroes/ninja_medic_sai.py`/`kits/excel_r044.py`。`core.py`新增组件提供的动态物免查询，`temple_archangel.py`圣体只保存基础物免；`match_audit.py`仅对技能对象证实全部合法候选净收益非正时解释AI过滤。20项定向和各3场有界对局零高信号/动作失败，公开174/388、余214，下一批R039–R041。
+
+- 2026-11-19 完整AI优化落地：`component_providers.py`持条件空分支对象协议，羁绊对象自行声明pierce为空；共享查询与原生扫描每遍检查实际字段，非空/未知保留完整发现。`geometry.py`持不可变有界矩形/签名索引，卫星加农炮自身调用；投射只为空时走独立快查。电子31单位主行动约-49.94%、含装备-47.16%、地狱24单位-32.50%、轮末瞬移-40.46%；9输入36次调用的候选浮点位/顺序/行动/状态/RNG/ID全等，62项定向通过。交换没有稳定改善。整场账本、生成器布局及四进程推测无净收益，未保留；四worker仍不代表四场并算。bat下次启动启用保留项，legacy保留，新原生制品已编译，未操作服务器。既有发布/存档测试问题和完整证据见 `reports/ai-performance-implementation-20261119/report.md`。
+
+- 2026-11-19 R380：`heroes/penitent.py`持种族宣言、月之暗面、枷锁授荆棘、普攻延期惩戒与AI估值，`kits/excel_r380.py`按源片段装配。`BattleComponent.on_permanent_race_changed`及`Unit.change_race_permanently`使心月临时兽人形态结束后保留永久种族改写；`targeting.js`/`battle-ui.js`/`board-input.js`/`events.js`共用option选择协议。12项定向、3场有界审计零高信号/动作失败；公开171/388、余217，下一位R381。
+
+- 2026-11-19 完整AI性能调查：自走棋必须测当前源表羁绊及真实开场召唤，裸武将短测会漏掉 `SynergyStatus.provided_components` 覆写导致 `direct_queries._class_plan` 拒绝组件快照、空钩子和检查点复用的退化。隔离空提供者消融在电子31单位/地狱24单位中分别减少41.56%/34.99%耗时，四份同进程成对候选浮点位/行动/状态/RNG/ID全等；这不是生产修复或四场验收。纯区域图案原型另见约18%局部收益。下一步走通用动态组件资格、对象持有的纯几何缓存、投射提供者索引及真正支持direct的多场进程，不能盲开旧并行开关或弱化安全证明。证据 `reports/ai-performance-review-20261119/report.md`；生产代码/启动配置未改。
+
+- 2026-11-19 R377–R378：`heroes/northern_king.py`拥有铁魂魄实体、枷锁目标和伤害硬币试算/实掷；`heroes/wolf_doctor_xinyue.py`拥有掷骰形态与两种回复技能。`kits/excel_r377.py`、`excel_r378.py`按新版源行精确装配。通用`BattleComponent.modify_mana_gain_amount`及`Unit.gain_mana`/`heal_fraction`支持资源反转，`battle_combat.py`记录反转扣血；没有英雄编号分支。16项定向、各3场有界审计零高信号/动作失败；公开170/388、余218，下一位R380。
+
+- 2026-11-19 R375–R376：`heroes/orc_rabbit.py`持兔洞地形单位、造洞普攻变体、转发与脱兔；`heroes/ice_eye_rosita.py`持声明攻守御、冰眼计数/减速、毒锁及身后反噬，`kits/excel_r375.py`、`excel_r376.py`只做装配。共享入口是 `HeroAIPolicy.attack_payload_has_hero_benefit`、`ChainPullSkill.on_hit_target`、`BattleFieldEffect.delays_elimination` 和 `ai_reaction_candidates.py` 的通用可点格预览；`ChainPullSkill.execute`命中不可位移地形时正常结束。罗西塔远程穿刺对象用 `SkillCandidatePlan` 缩减143个标准AI候选，并用对象候选供简单/倾向AI提交完整图案。19项定向、各3场有界审计零高信号/动作失败；公开168/388、余220，下一位R377。
+
+- 2026-11-19 R372–R374：`heroes/void_spirit.py`拥有虚无之灵四技能和太虚点；`heroes/orc_tiger.py`拥有寅的星象鉴、虎灵召唤、动态守及虎群同命。`kits/excel_r372.py`、`excel_r374.py`按源片段装配。异化借 `battle_execution.py` 的退场回合末选择回放；共鸣脉冲借 `core.py` 与 `battle_movement.py` 通用普攻非伤附效钩子。两将17项定向、各3场有界审计通过；公开166/388、余222，下一位R375。
+
+- 2026-11-19 R370–R371：`heroes/spirit_remnants.py`共享计数点与非阻挡场地标记；`ash_spirit.py`持灰烬拳索、火罩和残焰；`earth_spirit.py`持残岩翻滚、岩冲、磁握和磁化。`battle_movement.py`区分外来技能位移与本将主动自位移，以免火罩误挡激活残焰。`kits/excel_r370.py`、`excel_r371.py`按源片段装配；14项定向及各3场有界审计。公开164/388、余224，下一位R372。
+
+- 2026-11-19 R367–R369：`shadow_god_wind.py`持神枪半破魔、两伤上限和复出后敌全队攻次；`shadow_god_curse.py`持直线干扰、全图普攻及复出后位移次数；`shadow_god_last.py`持超视、攻+1、源方概率连锁、终极秩序、牺牲重生、连锁反伤和击杀召回。`shadow_gods.py`共用默示录与召回事务；`engine`提供真死前/真毁后观察及逐目标伤害试算，`ai_reaction_candidates.py`优先取技能对象候选。20/20定向、九场单将有界审计零高信号/动作失败。公开162/388、余226，下一位R370。
+
+- 2026-11-19 R364–R366：`heroes/temple_archangel.py`持圣体、+2变硬、飞跃减速、抱摔、圣歌、镭射眼；`shadow_god_king.py`持什托王影袭三段、减伤连锁、扣血反转及召唤后禁疗；`shadow_god_fire.py`持永火王恶犬、烈火鞭、被动限制及召唤后余焰。`shadow_gods.py`只共享默示录尸体选择及临时借当前轮槽。精确片段在`kits/excel_r364.py`至`excel_r366.py`。定向26/26，三将各3场完成，零高信号/动作失败。公开159/388、余229；下一位R367。
+
 - 2026-11-18 通用远程AI：`Skill.ai_positioning_window`读取技能原有单位目标射程或合法`pattern_cells`预览的最大距离与相对覆盖格，无精兵或机枪特判。`rooms/ai_formation_scoring.py::offensive_positioning_plan`按本回合剩余可用对敌技能取最短作战距离；`ai_acceleration.py`只在同一次未改变的决策内缓存结果，候选落点用相对坐标查覆盖。正常移动、主动位移、回避和撤步射击等被动位移共用评分；`ai_move_candidates.py`快速裁剪也用同一距离。无逐落点技能预览或战斗模拟。
 
 - 2026-11-18 BP新版规则：`rooms/special_modes.py`为源表名称和文案；`rooms/special_battle.py`负责最低级攻守速加成、最近等级差随机单挑、大将候场及中央5×5地形；`engine/battle_movement.py`区别常规移动与技能位移；`battle_presentation.py`输出地形，`static/tactical/battle-ui.js`和`static/styles.css`显示岩石。删除旧回复反噬及永恒轮回加成。通用伤害规则在`engine/core.py`归零攻上限，远程走位在`rooms/ai_formation_scoring.py`保持可攻击的放风筝落点，`ai_weather_scoring.py`的可攻击目标评分只数敌方。R038赫拉克罗斯仅同步源文，仍未实现。
@@ -487,7 +539,7 @@ Update this file after every new gameplay requirement or code change in `wujiang
 
 - 2026-10-10 Phase H R223：源223及保存R223-Q002=b/Q003=a先锁JSON/XLSX；`heroes/excel_roster.py`的装甲电子翼附着/射击/解除由宿主状态逐翼提供，`engine/core.py`跳过已附着本体轮槽、向资料公开赠与技能，`rooms/ai.py`比较独立输出、宿主危险与永久减值。`NewBatch223`静态场景覆盖克隆/多翼/寿命/轮序/AI无污染，用户运行定向命令；公开池85。
 
-- 2026-10-09 并行自走棋首版：规则与数值在 `docs/自走棋模式规则.md`；`rooms/autochess.py` 管 4/8 人经营、商店/预算/布阵、AI 备战、配对、经济/淘汰及观战数据，`multiplayer.py` 复用账号房间并持久化，`engine/core.py` 完整战斗轮超时判定，`api.py` 操作接口，`static/tactical/autochess-ui.js` 界面。`data/装备.xlsx` 经 `rooms/equipment.py` 读取，`rooms/equipment_effects.py` 接入战斗，5 金每轮限抽一件、每将三件；`rooms/synergy.py` 实现职业/属性/种族 3/6 档羁绊；`tests/test_behavior.py::AutoChessBehaviorTests` 定向场景，动态验证由用户执行。2026-10-09 体验修正：商店和后备席共用 `hero-hover.js` 展示武将与三类 3/6 档羁绊；`#autochess` 独立全屏路由在备战和交战都显示完整 10×10 标准战场、真实占格及开场坐骑提示；服务端公开当前与下一级按现有武将等级可上场人数上限。每次买已拥有的同名将直接强化所选或优先场上个体并待选一项能力 +1；不再等三张合成。开战阶段分批建立战场和推进 AI，每次只发送精简观战快照、定期持久化，操作响应不附带额外模拟；非 JSON、超时和网络错误显示具体原因。`resolve_ai_until_human_input` 公共包装已接受 `max_steps`。
+- 2026-10-09 并行自走棋首版：规则与数值在 `docs/自走棋模式规则.md`；`rooms/autochess.py` 管 4/8 人经营、商店/预算/布阵、AI 备战、配对、经济/淘汰及观战数据，`multiplayer.py` 复用账号房间并持久化，`engine/core.py` 完整战斗轮超时判定，`api.py` 操作接口，`static/tactical/autochess-ui.js` 界面。`data/装备.xlsx` 经 `rooms/equipment.py` 读取，`rooms/equipment_effects.py` 接入战斗，5 金每轮限抽一件、每将三件；`rooms/synergy.py` 读取 `data/自走棋羁绊效果.xlsx` 的职业/属性/种族 3/6 档文本，`rooms/synergy_effects.py` 实现状态和开场召唤；`tests/test_behavior.py::AutoChessBehaviorTests` 是旧版定向场景。2026-10-09 体验修正：商店和后备席共用 `hero-hover.js` 展示武将与三类 3/6 档羁绊；`#autochess` 独立全屏路由在备战和交战都显示完整 10×10 标准战场、真实占格及开场坐骑提示；服务端公开当前与下一级按现有武将等级可上场人数上限。每次买已拥有的同名将直接强化所选或优先场上个体并待选一项能力 +1；不再等三张合成。开战阶段分批建立战场和推进 AI，每次只发送精简观战快照、定期持久化，操作响应不附带额外模拟；非 JSON、超时和网络错误显示具体原因。`resolve_ai_until_human_input` 公共包装已接受 `max_steps`。
 - 2026-10-09 运行入口：`start_windows_server.bat` 从 `C:\Users\jiz14\TeamGH\wujiang_game` 加载代码；在 Codex worktree 实施的功能必须同步到该主目录后重启脚本才会出现在与朋友共享的公网页面。`scripts/start_windows_server.ps1` 的隧道后台进程使用隐藏窗口，启动器本身仍显示公网地址。
 
 - 2026-10-08 BP 系统禁等级：`GameRoom._begin_bp()` 从仍可完成完整禁选与双方等级预算的组合里随机取两个不同等级，所有该级武将本局不可手动禁/选，不计入队长禁选步骤；`_bp_draft_feasible` 排除系统禁级，`_bp_choice_error` 对禁将和选将均验算完成性，公开 `auto_banned_levels` 与当前 `legal_levels`。连局重抽并持久化，BP UI 显示可展开的系统禁将名单及资料，并提前标记无法补齐阵容的候选。`BPRoomBehaviorTests` 覆盖等级1/2禁后等级10不可禁选、抽签可行性、UI与房间存档。
@@ -1198,3 +1250,11 @@ The codebase was reorganised by domain on 2026-08-27. Every phase record further
 - 2026-11-18 R359迪奥斯：heroes/dios_floating_cannon.py持四炮召唤、吸魔、独立光环、击炮后效和轮初重召；kits/excel_r359.py精确片段装配。共享Skill.mana_cost_for_payload及通用多目标护盾费用读取BattleFieldEffect.modify_skill_mana_cost；每炮自身Trait在离场时清除光环，即使召唤者先死。pattern_cells带required_cells供网页逐格选取，三路AI用对象候选。11/11定向、3/3单将长审计零高信号/动作失败；公开152/388、余236，下一位R360。
 
 - 2026-11-18 R360阿加德：专属规则归heroes/birdman_agad.py，装配kits/excel_r360.py。engine/core.py的Unit.qualifies_as_race通过BattleComponent.counts_as_race扩展种族资格，racial_weather.py使用原生资格；common.FlyingTrait.refresh_flight_state负责原生飞行压制与临时飞行并存，R350长枪压制复用。打落按首伤后独立后效；行刺声明绑定首次破魔不可回避。15/15定向及3/3单将长审计零高信号/动作失败；公开153/388、余235，下一位R361。
+
+- 2026-11-18 R361阿斯特拉萨：hero-owned规则在heroes/grand_magus_astrasa.py，精确片段装配kits/excel_r361.py；大龙息继承mechanics/dragon_breath.py，￥瞬移复用mechanics/hell_dog_hunter.py。engine/core.py新增BattleComponent.ai_basic_attack_variant_payload，rooms/simple_ai.py与tendency/decide.py从对象读取广域普攻净收益；标准AI通过固定区域的一格选择模式按全体受体评分。动态禁令由本将Trait持有BattleFieldEffect，在本人入场/离场管理；破魔爆破同时公开声明层与伤害层标记。21/21定向、3/3单将长审计零高信号/动作失败；公开154/388、余234，下一位R362。
+
+- 2026-11-19 R362尤贝尔特：规则对象在heroes/great_demon_yubert.py，精确片段装配kits/excel_r362.py；多格交换合法落格与位置事件复用mechanics/gladiator_core.py，点数付款复用ManaPointCostSkill，相位三格移动复用DashMoveSkill、待攻状态沿R021的普攻前一步协议。换位破魔在声明和实际成功结算各处理一次对应责任；三路AI共用对象预览与待攻状态提供的完整载荷。11/11定向、3/3单将有界审计零高信号/动作失败；公开155/388、余233，下一位R363。
+
+- 2026-11-19 R363吸血鬼王子：hero-owned巢穴、回巢、积点血咒、条件影袭在heroes/vampire_prince.py；kits/excel_r363.py精确装配。engine/core.py的HealContext.direct_target及battle_combat.py保留默认坐骑承伤/受疗映射，显式让巢上自然回复直达骑手。标准AI与简单/倾向AI均从技能对象取得收益及完整区域载荷。14/14定向、3/3单将有界审查零高信号/动作失败；1场150步未决，随机局无正收益回巢机会，另有正式定向证明。公开156/388、余232，下一位R364。预测证书另有35个本批未改模块指纹陈旧，不能无复核重签。
+- 2026-11-19 R082超量机械王：`heroes/overlaid_mecha_king.py`持钢加农召唤与破魔磁暴；`kits/excel_r082.py`装配固定2×2。共享`Unit.magic_immunity`读取状态对象的`suppresses_magic_immunity`标记以允许魔免失效；磁暴声明冻结原格、公开穿盾/无视魔免，结果受体承接附效。5项定向、3场单将审计通过。
+- 2026-11-19 R077拳击袋鼠：`heroes/boxing_kangaroo.py`持地裂、兽化、闪避及第二拳；`kits/excel_r077.py`精确装配，源数据六格飞跃片段修复。方向地裂区域在声明时冻结，实际受体当前血半伤；飞跃对象提供三路AI可兑现位移收益。10项定向、3场单将审计通过。两将后公开184/388、余204。

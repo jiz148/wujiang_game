@@ -765,7 +765,8 @@ _TACTICAL_QUERY_BINDINGS = tuple(
         (Battle, ("reachable_positions", "neighbors", "line_positions", "terrain_step_allowed",
                   "can_traverse_position", "can_place_unit", "normal_movement_step_cost",
                   "attack_target_allowed", "resolve_attack_damage", "effect_units", "enemy_units", "all_units")),
-        (Unit, ("__getstate__", "__setattr__", "iter_components", "stat")),
+        (Unit, ("__getstate__", "__setattr__", "iter_components", "stat",
+                "normal_move_distance", "targeting_range", "attack_actions_per_turn")),
     ) for name in names
 )
 
@@ -803,3 +804,33 @@ sys.modules[AISelfAndGenericScoring.__module__].bind_room(_AI_SELF_GENERIC_SCORI
 sys.modules[AIImpactQueries.__module__].bind_room(_AI_IMPACT_SCORING)
 sys.modules[AIWeatherAndThreatScoring.__module__].bind_room(_AI_WEATHER_SCORING)
 sys.modules[AILateTacticalScoring.__module__].bind_room(_AI_LATE_SCORING)
+
+
+_LAZY_POSITION_QUERY_BINDINGS = tuple(
+    (owner, name, getattr(owner, name), getattr(owner, name).__code__)
+    for owner, names in (
+        (sys.modules[__name__], ('reviewed_effect_baseline', 'reviewed_r17_position_value',
+            'offensive_reach_score_at', 'natsume_unit_danger', 'expected_attack_damage', 'estimate_attack_damage')),
+        (AIWeatherAndThreatScoring, ('offensive_reach_score_at',)),
+        (AISupportScoring, ('natsume_unit_danger',)),
+    ) for name in names)
+_LAZY_POSITION_INNER_CODES = tuple((inner, inner.__code__) for _, _, function, _ in _LAZY_POSITION_QUERY_BINDINGS
+    if (inner := getattr(function, '__wrapped__', None)) is not None)
+
+
+def _lazy_position_query_bindings_match():
+    return (all(getattr(owner, name) is function and function.__code__ is code
+                for owner, name, function, code in (*_TACTICAL_QUERY_BINDINGS, *_LAZY_POSITION_QUERY_BINDINGS))
+            and all(function.__code__ is code for function, code in _LAZY_POSITION_INNER_CODES))
+
+
+from wujiang.tactical import direct_expectation as _direct_expectation
+_R23_STAT_QUERY_BINDINGS = tuple((owner, name, getattr(owner, name), getattr(owner, name).__code__)
+    for owner, name in ((sys.modules[__name__], 'hostile_unit_value'),
+                       (AIWeatherAndThreatScoring, 'hostile_unit_value'),
+                       (_direct_expectation, 'expected_death')))
+
+
+def _r23_stat_query_bindings_match():
+    return all(getattr(owner, name) is function and function.__code__ is code
+               for owner, name, function, code in _R23_STAT_QUERY_BINDINGS)

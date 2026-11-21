@@ -77,6 +77,13 @@ class MatchHistoryStore:
                       postgame_json TEXT NOT NULL,
                       seats_json TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS bp_choices (
+                      match_id TEXT NOT NULL, step INTEGER NOT NULL, rules TEXT NOT NULL,
+                      allies TEXT NOT NULL, enemies TEXT NOT NULL, user_id INTEGER,
+                      eligible TEXT NOT NULL, hero TEXT NOT NULL, won INTEGER NOT NULL,
+                      PRIMARY KEY (match_id, step)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_bp_context ON bp_choices(rules, allies, enemies);
                     CREATE TABLE IF NOT EXISTS match_participants (
                       match_id TEXT NOT NULL REFERENCES match_history(match_id) ON DELETE CASCADE,
                       user_id INTEGER NOT NULL,
@@ -102,16 +109,10 @@ class MatchHistoryStore:
     ) -> bool:
         self._ensure_schema()
         match_id = str(match.get("match_id") or "").strip()
-        if not match_id or not participants:
+        if not match_id or not (participants or match.get("bp_choices")):
             return False
         with self._lock, closing(self._connect()) as connection:
-            existing = connection.execute(
-                "SELECT 1 FROM match_history WHERE match_id = ?",
-                (match_id,),
-            ).fetchone()
-            if existing is not None:
-                return False
-            connection.execute(
+            inserted = connection.execute(
                 """
                 INSERT INTO match_history (
                   match_id, room_id, mode, mode_name, experience_kind,
@@ -119,6 +120,7 @@ class MatchHistoryStore:
                   duration_seconds, mvp_name, replay_path, replay_step_count,
                   postgame_json, seats_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(match_id) DO NOTHING
                 """,
                 (
                     match_id,
@@ -139,6 +141,15 @@ class MatchHistoryStore:
                     json.dumps(match.get("seats") or [], ensure_ascii=False),
                 ),
             )
+            if not inserted.rowcount:
+                return False
+            for sample in match.get("bp_choices", ()):
+                connection.execute(
+                    "INSERT INTO bp_choices VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (match_id, sample["step"], sample["rules"], sample["allies"], sample["enemies"],
+                     sample["user_id"], json.dumps(sample["eligible"]), sample["hero"],
+                     int(sample["team"] == match["winner_team_id"])),
+                )
             for participant in participants:
                 connection.execute(
                     """
@@ -155,6 +166,52 @@ class MatchHistoryStore:
                 )
             connection.commit()
         return True
+
+    def bp_results(self, rules):
+        self._ensure_schema()
+        fmt, size = json.loads(rules)[:2]
+        with closing(self._connect()) as connection:
+            rows = connection.execute("""
+                SELECT hero, COUNT(*) AS picks, SUM(won) AS wins FROM bp_choices
+                WHERE json_extract(rules, '$[0]') = ? AND json_extract(rules, '$[1]') = ?
+                GROUP BY hero
+            """, (fmt, size))
+            return {row["hero"]: dict(row) for row in rows}
+
+    def bp_rates(self, rules, allies, enemies, *, user_id=None, fallback=False):
+        """Count each legal opportunity once, including heroes nobody selected."""
+        self._ensure_schema()
+        if fallback:
+            fmt, size = json.loads(rules)[:2]
+            query = """
+                SELECT eligible, hero, won, (allies = ? AND enemies = ?) AS specificity
+                FROM bp_choices
+                WHERE json_extract(rules, '$[0]') = ? AND json_extract(rules, '$[1]') = ?
+            """
+            params = [allies, enemies, fmt, size]
+        else:
+            query = "SELECT eligible, hero, won, 1 AS specificity FROM bp_choices WHERE rules = ? AND allies = ? AND enemies = ?"
+            params = [rules, allies, enemies]
+        if user_id is not None:
+            query += " AND user_id = ?"
+            params.append(user_id)
+        buckets = [{}, {}]
+        with closing(self._connect()) as connection:
+            for row in connection.execute(query, params):
+                rates = buckets[row["specificity"]]
+                for code in json.loads(row["eligible"]):
+                    stat = rates.setdefault(code, {"available": 0, "picks": 0, "wins": 0})
+                    stat["available"] += 1
+                chosen = rates[row["hero"]]
+                chosen["picks"] += 1
+                chosen["wins"] += row["won"]
+        if not fallback:
+            return buckets[1]
+        result = {}
+        for scope, rates in zip(("format", "lineup"), buckets):
+            for code, counts in rates.items():
+                result[code] = {**counts, "scope": scope}
+        return result
 
     def _public_row(self, row: sqlite3.Row) -> dict[str, Any]:
         return {

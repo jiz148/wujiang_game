@@ -25,7 +25,7 @@ class BattleExecutionMixin:
         if pending is not None:
             if payload.get("type") != "damage_choice" or payload.get("unit_id") != pending["unit_id"]:
                 raise ActionError("请先完成本次伤害选择。")
-            if pending.get("kind") in {"rotation", "attack_swap", "formation", "optional_swap", "optional_placement", "required_placement", "required_direction", "optional_heal_target", "optional_unit_selection", "required_unit_selection", "guardian_legacy", "end_dash", "electronic_teleport", "hell_sacrifice", "hell_death_strike", "hell_rescue", "hell_dragon_first", "hell_dragon_second", "hell_dragon_effect", "gentleman_guard", "probability_reroll"}:
+            if pending.get("kind") in {"rotation", "attack_swap", "formation", "optional_swap", "optional_placement", "required_placement", "required_direction", "optional_heal_target", "optional_unit_selection", "required_unit_selection", "optional_skill_use", "guardian_legacy", "end_dash", "electronic_teleport", "hell_sacrifice", "hell_death_strike", "hell_rescue", "hell_dragon_first", "hell_dragon_second", "hell_dragon_effect", "gentleman_guard", "probability_reroll"}:
                 choice = str(payload.get("target_unit_id") or "")
                 if (choice == "decline" and pending.get("kind") in {"attack_swap", "formation", "required_unit_selection", "required_placement", "required_direction"}) or (choice != "decline" and choice not in pending["options"]):
                     raise ActionError("请选择当前提示中的合法对象与落点。")
@@ -47,7 +47,12 @@ class BattleExecutionMixin:
             getattr(component, "requires_damage_choice", False)
             for unit in self.all_units() if unit.alive and not unit.banished
             for component in unit.iter_components()
-        ) or (payload.get("type") == "respawn_select" and
+        ) or (payload.get("type") == "end_turn" and any(
+            getattr(component, "requires_damage_choice", False)
+            for unit in self.current_turn_bundle_units(include_banished=True)
+            if unit.alive and unit.banished
+            for component in unit.iter_components()
+        )) or (payload.get("type") == "respawn_select" and
               str(payload.get("unit_id") or "") in self.hell_rebirth_unit_ids)):
             self._perform_action_with_damage_choices(payload, [])
             return
@@ -474,7 +479,8 @@ class BattleExecutionMixin:
                     if not ok:
                         raise ActionError(reason)
                     for field in ("kings_insight_checked", "wuchang_mist_checked", "action_failed_by_wuchang_mist",
-                                  "floating_crane_checked", "action_failed_by_floating_crane"):
+                                  "floating_crane_checked", "action_failed_by_floating_crane",
+                                  "synergy_failure_checked", "action_failed_by_synergy"):
                         reaction_payload.pop(field, None)
                     reaction_payload.update(skill.queued_reaction_payload_metadata(self, reactor, reaction_payload))
                     # Preserve a reaction that was already legal while destroyed;

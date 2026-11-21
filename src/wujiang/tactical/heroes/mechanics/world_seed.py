@@ -30,6 +30,9 @@ class WorldSeedSkillEffectGuardTrait(Trait):
     def __init__(self) -> None:
         super().__init__("世界之种技能效果免疫", "不受技能的非伤害效果影响，技能伤害仍然结算。")
 
+    def blocks_skill_non_damage_effects(self) -> bool:
+        return True
+
     def accepts_status(self, status: StatusEffect) -> bool:
         return not getattr(status, "is_skill_effect", True)
 

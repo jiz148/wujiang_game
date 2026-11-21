@@ -196,6 +196,28 @@ export function statCellSelection(action) {
   return action?.preview?.selection?.mode === "stat_cells" ? action.preview.selection : null;
 }
 
+export function optionSelection(action) {
+  return action?.preview?.selection?.mode === "option" ? action.preview.selection : null;
+}
+
+export function stagedOptionCode(action = selectedAction()) {
+  if (!action || state.selectedActionCode !== action.code || !optionSelection(action)) return "";
+  return String(state.stagedPayload?.optionCode || "");
+}
+
+export function stagedOptionTargetId(action = selectedAction()) {
+  if (!action || state.selectedActionCode !== action.code || !optionSelection(action)) return "";
+  return String(state.stagedPayload?.targetUnitId || "");
+}
+
+export function setStagedOptionCode(code) {
+  state.stagedPayload = { ...(state.stagedPayload || {}), optionCode: String(code || "") };
+}
+
+export function setStagedOptionTargetId(id) {
+  state.stagedPayload = { ...(state.stagedPayload || {}), targetUnitId: String(id || "") };
+}
+
 export function bodyDirectionSelection(action) {
   return action?.preview?.selection?.mode === "body_direction" ? action.preview.selection : null;
 }
@@ -889,6 +911,15 @@ export function currentPreview() {
       destinationCellKeys: new Set(),
     };
   }
+  if (optionSelection(action)) {
+    const chosen = stagedOptionTargetId(action);
+    return {
+      cellKeys: positionsToSet(previewCellsForTargetIds(filteredTargetIds)),
+      targetIds: targetIdsToSet(filteredTargetIds),
+      secondaryCellKeys: positionsToSet(previewCellsForTargetIds(chosen ? [chosen] : [])),
+      destinationCellKeys: new Set(),
+    };
+  }
   if (bodyDirectionSelection(action)) {
     const chosenCells = stagedBodyCells(action);
     return {
@@ -1032,6 +1063,16 @@ export function canCompleteTargetSelection() {
       Number(entry.dx) === direction.dx && Number(entry.dy) === direction.dy));
   }
   if (statCellSelection(action)) return statCellSelectionCanComplete(action);
+  if (optionSelection(action)) {
+    const selection = optionSelection(action);
+    const option = stagedOptionCode(action);
+    const target = stagedOptionTargetId(action);
+    if (!(selection.options || []).some((entry) => String(entry.code) === option)) return false;
+    if (!selection.requires_unit) return true;
+    if (!(action.preview?.target_unit_ids || []).includes(target)) return false;
+    const allowed = selection.options_by_target?.[target];
+    return !Array.isArray(allowed) || allowed.includes(option);
+  }
   if (bodyDirectionSelection(action)) return bodyDirectionSelectionCanComplete(action);
   if (reviveUnitCellSelection(action)) return reviveUnitCellSelectionCanComplete(action);
   return false;

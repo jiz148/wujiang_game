@@ -50,10 +50,14 @@ class GamblerWoundDefenseTrait(Trait):
         if ctx.target is self.owner and "gambler_wounded" in ctx.modifier_receipts:
             if self.owner.stat("defense") > 1:
                 self.defense_loss += 1
+                ctx.modifier_receipts.add("gambler_defense_lost")
             battle.log_public_event(
                 f"{self.owner.name} 血量不变，受伤使守降至{self.owner.stat('defense'):g}。",
                 source=ctx.source, target=self.owner,
             )
+
+    def ai_damage_impact_without_hp_loss(self, ctx: DamageContext) -> bool:
+        return ctx.target is self.owner and "gambler_defense_lost" in ctx.modifier_receipts
 
     def wager(self, battle: Battle) -> None:
         if self.owner is None or self.owner.stat("defense") <= 1:

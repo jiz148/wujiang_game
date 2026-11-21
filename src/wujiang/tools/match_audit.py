@@ -742,6 +742,12 @@ def action_diagnostic(
                     if not requires_enemy or ai_policy.skill_payload_has_effective_enemy_impact(battle, actor, action, payload):
                         effective_payloads.append(payload)
             candidates = ai_policy.build_skill_candidates(battle, actor, action, profile, instant_only=instant_only)
+            if effective_payloads and not candidates:
+                skill = actor.skill_map().get(code)
+                if skill is not None:
+                    diag["expected_filter_reason"] = skill.ai_candidate_filtered_reason(
+                        battle, actor, raw_payloads,
+                    )
             if effective_payloads and all(
                 ai_policy.should_throttle_unlimited_nonhostile_skill(battle, actor, action, payload)
                 for payload in effective_payloads

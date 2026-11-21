@@ -548,7 +548,7 @@ class RoomViewsMixin:
                 "invite_url": self.invite_url(base_url),
                 "host_player_id": self.host_player_id,
                 "random_roster_size": self.random_roster_size,
-                "bp": self._bp_public_state() if self.mode == "bp" else None,
+                "bp": self._bp_public_state(with_rates=True, viewer=viewer) if self.mode == "bp" else None,
                 "hero_limit": self.hero_limit,
                 "army_enabled": bool(getattr(self, "army_enabled", False)),
                 "board_width": int(getattr(self, "board_width", DEFAULT_BOARD_WIDTH) or DEFAULT_BOARD_WIDTH),

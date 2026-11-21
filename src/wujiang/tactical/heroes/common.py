@@ -1,6 +1,9 @@
 ﻿from __future__ import annotations
 
 from wujiang.tactical.prediction import random, direct_scoring
+from wujiang.tactical.probe_reuse import original_probe_component
+from wujiang.tactical.stat_queries import stat_dependencies
+from wujiang.tactical.query_purity import readonly_query_methods
 from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from wujiang.tactical.heroes.ai_policy import AIReactionScoreContext, AISkillScoreContext
@@ -319,6 +322,7 @@ class FlagStatus(StatusEffect):
             setattr(self.owner, self.flag_name, self.value if still_active else False)
 
 
+@original_probe_component
 class StatModifierStatus(StatusEffect):
     def __init__(
         self,
@@ -340,6 +344,8 @@ class StatModifierStatus(StatusEffect):
         self.range_delta = range_delta
         self.mana_delta = mana_delta
 
+    @stat_dependencies(
+        'attack_delta', 'defense_delta', 'speed_delta', 'range_delta', 'mana_delta', query_only=True)
     def modify_stat(self, stat_name: str, value: float) -> float:
         if stat_name == "attack":
             return value + self.attack_delta
@@ -686,6 +692,7 @@ class InvincibleUntilActionStatus(StatusEffect):
         self.owner.remove_status(self, battle)
 
 
+@readonly_query_methods('modify_attack_actions_per_turn')
 class AttackCountTrait(Trait):
     def __init__(self, attacks_per_turn: int) -> None:
         super().__init__(f"攻击 {attacks_per_turn} 次", f"每回合可攻击 {attacks_per_turn} 次。")
@@ -1124,6 +1131,7 @@ class WindowChargeSkill(Skill):
 
 
 class MultiTargetChainShieldSkill(Skill):
+    ai_reaction_shield = True
     shield_amount = 1
 
     def ally_targets(self, battle: Battle, actor: HeroUnit) -> list[HeroUnit]:
@@ -1425,7 +1433,7 @@ class DrainManaSkill(Skill):
         target = payload_target_unit(battle, payload)
         ensure_enemy(actor, target)
         if not battle.is_declared_resolution(actor, payload, {"skill"}):
-            ensure_distance(actor, target, actor.targeting_range())
+            ensure_distance(actor, target, self.direct_unit_target_range(battle, actor, payload))
         target_ctx = battle.validate_target(actor, target, action_name="吸魔", is_skill=True,
                                             is_hostile=True, record_effect_on_validation=False)
         if target_ctx.cancelled:
@@ -1441,7 +1449,7 @@ class DrainManaSkill(Skill):
         battle.log(f"{actor.name} 吸取了 {target.name} 的 {lost} 点魔力。")
 
     def preview(self, battle: Battle, actor: HeroUnit) -> dict[str, Any]:
-        targets = [unit for unit in battle.enemy_units(actor.player_id) if unit.position and actor.position and actor.position.distance_to(unit.position) <= actor.targeting_range()]
+        targets = [unit for unit in battle.enemy_units(actor.player_id) if unit.position and actor.position and actor.position.distance_to(unit.position) <= self.direct_unit_target_range(battle, actor)]
         return {"cells": positions_to_dict([unit.position for unit in targets if unit.position]), "target_unit_ids": [unit.unit_id for unit in targets], "secondary_cells": [], "requires_target": True}
 
 
@@ -1590,14 +1598,19 @@ class KnockbackSkill(Skill):
         battle, actor = context.battle, context.actor
         proxy_target = context.proxy_target()
         threat = context.threat(proxy_target)
-        score = threat * 0.8 + 18.0
+        # The shield is gained before the incoming effect even when immunity
+        # prevents the push or the current attack's damage.
+        shield_value = 65.0 if proxy_target.total_shields() == 0 else 30.0
+        score = threat * 0.8 + 18.0 + shield_value
         adjacent_units = [
             unit for unit in battle.all_units()
             if unit.unit_id != actor.unit_id and unit.position is not None
             and battle.distance_between_units(actor, unit) <= 1
         ]
-        nearby_enemies = [unit for unit in adjacent_units if unit.player_id != actor.player_id]
-        nearby_allies = [unit for unit in adjacent_units if unit.player_id == actor.player_id]
+        displaced_units = [unit for unit in adjacent_units
+                           if self.outward_destination(battle, proxy_target, unit) is not None]
+        nearby_enemies = [unit for unit in displaced_units if unit.player_id != actor.player_id]
+        nearby_allies = [unit for unit in displaced_units if unit.player_id == actor.player_id]
         future_melee_value = sum(context.damage(enemy, actor.stat("attack")) * 55.0
                                  for enemy in nearby_enemies)
         score -= min(110.0, future_melee_value)
@@ -1622,6 +1635,7 @@ class KnockbackSkill(Skill):
             return None
         if (getattr(unit, "standable_terrain", False)
                 or getattr(unit, "attached_to_unit_id", None)
+                or (unit.player_id != actor.player_id and unit.magic_immunity)
                 or unit.direct_effects_blocked()
                 or unit.skill_non_damage_effects_blocked()):
             return None
@@ -1713,8 +1727,22 @@ class KnockbackSkill(Skill):
         return self.preview(battle, battle.reaction_proxy_target(actor, queued_action) or actor)
 
 
+from wujiang.tactical.settlement_reuse import AreaDamageSpec, independent_area_skill
+
+
+@independent_area_skill('r18')
 class MachineGunSkill(Skill):
     ai_area_bonus_codes = frozenset({"machine_gun"})
+    line_length = 3
+
+    def ai_direct_area_patterns(self, battle: Battle, actor: Unit):
+        return self.patterns(battle,actor)
+
+    def ai_direct_area_spec(self, battle: Battle, actor: Unit, payload: dict[str, Any], cells=None) -> AreaDamageSpec:
+        power = actor.stat('attack')
+        return AreaDamageSpec(cells if cells is not None else tuple(self.chosen_line(battle, actor, payload)),
+            {'attack_power':power,'is_skill':True,'action_name':self.name,
+             'tags':{'skill',self.code},'declared_source_attack':power})
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         return context.r18_effect_score(self)
@@ -1745,8 +1773,8 @@ class MachineGunSkill(Skill):
                 battle,
                 origin,
                 self.directions(),
-                3,
-                max_distance=3,
+                self.line_length,
+                max_distance=self.line_length,
                 touch_distance=1,
             ):
                 if any((cell.x, cell.y) in actor_cells for cell in pattern):
@@ -1770,9 +1798,9 @@ class MachineGunSkill(Skill):
                     target=unit,
                     attack_power=actor.stat("attack"),
                     is_skill=True,
-                    action_name="机枪",
+                    action_name=self.name,
                     area_cell_hits=battle.unit_hit_count_for_cells(unit, cells),
-                    tags={"skill", "machine_gun"},
+                    tags={"skill", self.code},
                 )
             )
 

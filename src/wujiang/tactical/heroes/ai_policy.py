@@ -256,6 +256,7 @@ class SharedReactionScoring(Protocol):
     def damage(self, battle: Battle, target: Unit, power: float) -> float: ...
     def primary_target(self, battle: Battle, payload: dict) -> Unit | None: ...
     def threat(self, battle: Battle, target: Unit, queued: QueuedAction) -> float: ...
+    def remaining_loss(self, battle: Battle, target: Unit, queued: QueuedAction) -> float: ...
     def skill_context(self, battle: Battle, actor: Unit, payload: dict,
                       profile: Any, code: str) -> AISkillScoreContext: ...
     def destination(self, payload: dict) -> Position | None: ...
@@ -320,6 +321,9 @@ class AIReactionScoreContext:
 
     def threat(self, target: Unit) -> float:
         return self.shared.threat(self.battle, target, self.queued_action)
+
+    def remaining_loss(self, target: Unit) -> float:
+        return self.shared.remaining_loss(self.battle, target, self.queued_action)
 
     def skill_context(self, code: str) -> AISkillScoreContext:
         return self.shared.skill_context(self.battle, self.actor, self.payload,
@@ -404,11 +408,8 @@ class FreeReactionScoring:
     def score(self, context: AIReactionScoreContext) -> float:
         if context.code == "block":
             proxy_target = context.proxy_target()
-            threat = context.threat(proxy_target)
-            score = threat + context.temporary_defense_prevention() + 20.0
-            if proxy_target.current_hp <= max(0.25, threat / 100.0):
-                score += 55.0
-            return score
+            prevention = context.temporary_defense_prevention()
+            return prevention + 25.0 if prevention > 0 else -20.0
         if context.code == "counter":
             actor = context.actor
             attacker = context.battle.get_unit(context.queued_action.actor_id)
@@ -447,7 +448,9 @@ class ShieldReactionScoring:
         score = 0.0
         urgent = False
         for target in targets:
-            target_threat = context.threat(target)
+            target_threat = context.remaining_loss(target)
+            if target_threat <= 0:
+                continue
             score += target_threat + 20.0
             if target.current_hp <= max(0.25, target_threat / 100.0):
                 score += 55.0
@@ -455,6 +458,8 @@ class ShieldReactionScoring:
             if target.unit_id == actor.unit_id and target_threat > 0:
                 score += 18.0
                 urgent = True
+        if score <= 0:
+            return -1000.0
         skill = None
         try:
             skill = actor.get_skill(context.code)
@@ -678,9 +683,19 @@ class HeroAIPolicy:
     contextual_reaction_prefixes: tuple[str, ...] = ()
     reaction_score_phase = "before_hidden_source"
 
+    def attack_payload_has_hero_benefit(self, battle: Battle, actor: Unit,
+                                        payload: dict) -> bool:
+        """A non-damage attack may still create a hero-owned useful effect."""
+        return False
+
     def extra_normal_move_candidates(self, battle: Battle, actor: Unit,
                                      role: str, profile: Any, builder: Any) -> list:
         return []
+
+    def lightweight_normal_move_payload(self, battle: Battle, actor: Unit,
+                                        cells: list[Position], *, retreating: bool = False) -> dict | None:
+        """Optional legal path for simple/tendency AI before their generic destination choice."""
+        return None
 
     def normal_move_candidate_score(self, battle: Battle, actor: Unit,
                                     destination: Position, profile: Any,

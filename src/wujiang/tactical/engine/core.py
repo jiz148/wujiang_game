@@ -381,12 +381,28 @@ class BattleComponent(ABC):
         """The owning skill or trait can value a generic prompted selection."""
         return None
 
+    def ai_damage_impact_without_hp_loss(self, ctx: "DamageContext") -> bool:
+        """Report a useful hit whose effect is not visible in ordinary unit fields."""
+        return False
+
     def limit_hp_loss(self, amount: float) -> float:
         """Pure final-loss limit; may reduce, never amplify, an individual loss."""
         return amount
 
     def max_recoverable_hp(self) -> float | None:
         """An optional ceiling for both battle healing and direct recovery."""
+        return None
+
+    def modify_direct_heal_amount(self, amount: float) -> float:
+        """Adjust recovery paths that do not create a HealContext."""
+        return amount
+
+    def modify_mana_gain_amount(self, amount: float) -> float:
+        """Adjust positive mana recovery before it is applied to the owner."""
+        return amount
+
+    def on_permanent_race_changed(self, previous_race: str, new_race: str) -> None:
+        """Keep a temporary race overlay's eventual restoration in sync."""
         return None
 
     def __init__(self, name: str, description: str = "") -> None:
@@ -408,7 +424,14 @@ class BattleComponent(ABC):
     def blocks_skill_non_damage_effects(self) -> bool:
         return False
 
+    def blocks_basic_attack_non_damage_effects(self) -> bool:
+        return False
+
     def grants_magic_immunity_to(self, battle: "Battle", unit: "Unit") -> bool:
+        return False
+
+    def grants_physical_immunity_to(self, battle: "Battle", unit: "Unit") -> bool:
+        """A fielded provider may protect an ally at its current position."""
         return False
 
     def reveals_stealth_to(self, battle: "Battle", player_id: int, target: "Unit") -> bool:
@@ -463,6 +486,12 @@ class BattleComponent(ABC):
         payload: Optional[dict[str, Any]],
         cost: float,
     ) -> float:
+        return cost
+
+    def modify_committed_skill_mana_cost(
+        self, battle: "Battle", actor: "Unit", skill: "Skill", cost: float,
+    ) -> float:
+        """Apply a resource roll only once, when a legal skill is prepaid."""
         return cost
 
     def counts_as_race(self, race: str) -> bool:
@@ -563,6 +592,15 @@ class BattleComponent(ABC):
         """Observe a real destruction after its final board cells are recorded."""
         return None
 
+    def on_owner_destruction_pending(self, battle: "Battle") -> None:
+        """Resolve this owner's optional death rescue before its body is removed."""
+        return None
+
+    def on_unit_destruction_finalized(self, battle: "Battle", destroyed_unit: "Unit",
+                                      source_unit_id: str | None) -> None:
+        """Observe a destroyed unit only after its corpse enters the graveyard."""
+        return None
+
     def on_any_skill_declared(self, battle: "Battle", actor: "Unit", skill: "Skill") -> None:
         """Observe one formally prepaid skill declaration, independent of its hit count."""
         return None
@@ -633,6 +671,10 @@ class BattleComponent(ABC):
         return None
 
     def on_after_heal(self, battle: "Battle", ctx: "HealContext") -> None:
+        return None
+
+    def on_direct_heal_applied(self, battle: "Battle", amount: float) -> None:
+        """Observe positive HP actually restored outside Battle.heal."""
         return None
 
     def on_owner_removed(self, battle: "Battle") -> None:
@@ -719,6 +761,20 @@ class BattleComponent(ABC):
 
     def forced_normal_move_paths(self, battle: "Battle", actor: "Unit") -> Optional[list[list["Position"]]]:
         return None
+
+    def normal_move_destination_allowed(self, battle: "Battle", actor: "Unit",
+                                        destination: "Position") -> bool:
+        """Whether a destination shown by the generic move range is usable."""
+        return True
+
+    def normal_move_bonus_path(self, battle: "Battle", actor: "Unit",
+                               destination: "Position") -> Optional[list["Position"]]:
+        """Provide the exact route when a component grants a conditional range bonus."""
+        return None
+
+    def normal_move_path_allowed(self, battle: "Battle", actor: "Unit",
+                                 path: list["Position"]) -> bool:
+        return True
 
     def basic_attack_area_cells(
         self,
@@ -856,6 +912,10 @@ class BattleFieldEffect(BattleComponent):
     def affected_cells(self, battle: "Battle") -> list["Position"]:
         return []
 
+    def delays_elimination(self, battle: "Battle", eliminated_player_id: int) -> bool:
+        """A pending field effect may settle before elimination is final."""
+        return False
+
     def board_marker(self, battle: "Battle") -> str:
         return self.name[:2]
 
@@ -918,6 +978,11 @@ class Skill(BattleComponent, ABC):
     def ai_payload_candidates(self, battle: "Battle", actor: "Unit",
                               action: dict[str, Any]) -> list[dict[str, Any]] | None:
         """Optional object-owned complete payloads for simple and tendency AI."""
+        return None
+
+    def ai_candidate_filtered_reason(self, battle: "Battle", actor: "Unit",
+                                     payloads: list[dict[str, Any]]) -> str | None:
+        """Explain why all legal, enemy-covering candidates have no net value."""
         return None
 
     def ai_area_hit_bonus(self) -> float:
@@ -1019,6 +1084,7 @@ class Skill(BattleComponent, ABC):
     selection_cells_are_effect_cells = True
     resolves_from_current_position = False
     is_displacement_skill = False
+    source_side_reaction = False
 
     def __init__(
         self,
@@ -1279,7 +1345,11 @@ class Skill(BattleComponent, ABC):
             extra_battle_provider = next((component for component in actor.iter_components()
                                           if component is not self
                                           and component.additional_battle_skill_uses(battle, actor, self) > 0), None)
-        self.mana_payer(battle, actor).spend_mana(self.mana_cost_for_payload(battle, actor, payload))
+        committed_cost = self.mana_cost_for_payload(battle, actor, payload)
+        for component in list(actor.iter_components()):
+            if component is not self:
+                committed_cost = component.modify_committed_skill_mana_cost(battle, actor, self, committed_cost)
+        self.mana_payer(battle, actor).spend_mana(max(0.0, committed_cost))
         if extra_turn_provider is not None:
             extra_turn_provider.consume_extra_turn_skill_use(battle, actor, self)
         else:
@@ -1322,6 +1392,13 @@ class Skill(BattleComponent, ABC):
         self.sync_turn_scope(battle)
         if not self.is_reaction:
             return False, "不是连锁技能。"
+        if self.timing in {"passive", "reaction"}:
+            source = battle.units.get(queued_action.actor_id)
+            if source is not None:
+                for component in source.iter_components():
+                    hook = getattr(component, "blocks_target_passive_reaction", None)
+                    if callable(hook) and hook(battle, actor, queued_action, self):
+                        return False, "本实际回合对该攻击者只能使用一次被动技能。"
         if actor.banished or (not actor.alive and not self.can_react_after_destroyed(battle, actor, queued_action)):
             return False, "单位不在战场上。"
         if actor.cannot_use_skills:
@@ -1630,6 +1707,7 @@ class HealContext:
     tags: set[str] = field(default_factory=set)
     effect_source: Optional[BattleComponent] = None
     actual_heal: float = 0.0
+    direct_target: bool = False
 
 
 @dataclass(slots=True)
@@ -1911,6 +1989,12 @@ class Unit(ABC):
             return
         if battle is None or not (self.is_summon or self.is_clone) or not self.alive or self.banished or self.position is None:
             return
+        if direct_scoring() and os.environ.get('WUJIANG_AI_PROJECTION_QUERIES', '1') != '0':
+            from wujiang.tactical.direct_queries import empty_hook_pass
+            # Projection reads source.traits only. Its proof is independent of
+            # temporary skill providers and is checked against the live lists.
+            if empty_hook_pass(battle, 'projection'):
+                return
         seen: set[str] = set()
         for source in battle.all_units():
             if not source.alive or source.banished or source.position is None:
@@ -1978,6 +2062,12 @@ class Unit(ABC):
             action = battle.resolving_action
             if source is None and action is not None:
                 source = battle.units.get(action.actor_id)
+        action = battle.resolving_action if battle is not None else None
+        if (source is not None and source.player_id != self.player_id
+                and self.basic_attack_non_damage_effects_blocked()
+                and action is not None
+                and action.payload.get("origin_action_type", action.action_type) in {"attack", "basic_attack"}):
+            return
         if not hasattr(status, "is_skill_effect"):
             action = battle.resolving_action if battle is not None else None
             status.is_skill_effect = action is None or action.action_type in {"skill", "reaction_skill", "skill_effect"}
@@ -2014,6 +2104,12 @@ class Unit(ABC):
                 status.on_removed(battle)
             if battle is not None:
                 battle.log(f"{self.name} 的状态【{status.name}】结束。")
+
+    def change_race_permanently(self, new_race: str) -> None:
+        previous_race = self.race
+        for component in tuple(self.iter_components()):
+            component.on_permanent_race_changed(previous_race, new_race)
+        self.race = new_race
 
     def has_status(self, name: str) -> bool:
         return any(status.name == name for status in self.statuses)
@@ -2183,15 +2279,22 @@ class Unit(ABC):
     def skill_non_damage_effects_blocked(self) -> bool:
         return any(component.blocks_skill_non_damage_effects() for component in self.iter_components())
 
+    def basic_attack_non_damage_effects_blocked(self) -> bool:
+        return any(component.blocks_basic_attack_non_damage_effects() for component in self.iter_components())
+
     @property
     def magic_immunity(self) -> bool:
+        if any(getattr(status, "suppresses_magic_immunity", False) for status in self.statuses):
+            return False
         if getattr(self, "_base_magic_immunity", False):
             return True
         battle_ref = getattr(self, "_battle_ref", None)
         battle = battle_ref() if battle_ref is not None else None
         if battle is None or not self.alive or self.banished or self.position is None:
             return False
-        if "real_men" in getattr(battle, "special_mode_codes", ()):
+        if ("real_men" in getattr(battle, "special_mode_codes", ())
+                and not (isinstance(self, HeroUnit) and not self.is_summon
+                         and not self.is_clone and self.physical_immunity)):
             return True
         return any(
             trait.grants_magic_immunity_to(battle, self)
@@ -2204,6 +2307,25 @@ class Unit(ABC):
     def magic_immunity(self, value: bool) -> None:
         self._base_magic_immunity = bool(value)
 
+    @property
+    def physical_immunity(self) -> bool:
+        if getattr(self, "_base_physical_immunity", False):
+            return True
+        battle_ref = getattr(self, "_battle_ref", None)
+        battle = battle_ref() if battle_ref is not None else None
+        if battle is None or not self.alive or self.banished or self.position is None:
+            return False
+        return any(
+            component.grants_physical_immunity_to(battle, self)
+            for source in battle.all_units()
+            if source.alive and not source.banished and source.position is not None
+            for component in (*source.traits, *source.statuses)
+        )
+
+    @physical_immunity.setter
+    def physical_immunity(self, value: bool) -> None:
+        self._base_physical_immunity = bool(value)
+
     def gain_mana(self, amount: float) -> float:
         if self.direct_effects_blocked():
             return 0.0
@@ -2213,6 +2335,16 @@ class Unit(ABC):
             return 0.0
         if amount > 0 and battle is not None and "no_recovery" in getattr(battle, "special_mode_codes", ()):
             return 0.0
+        recovery_requested = amount > 0
+        if recovery_requested:
+            for component in self.iter_components():
+                amount = component.modify_mana_gain_amount(amount)
+            if amount < 0:
+                lost = self.drain_mana(-amount)
+                if lost > 0 and battle is not None:
+                    battle.log_public_event(f"{self.name} 的回魔转为减少 {lost:g} 点魔。",
+                                            source=self, target=self)
+                return 0.0
         before = self.current_mana
         requested = round(self.current_mana + amount, 2)
         maximum = max(self.max_mana(), requested) if self.allow_unbounded_mana else self.max_mana()
@@ -2266,6 +2398,13 @@ class Unit(ABC):
         self._cannot_move = bool(value)
 
     def stat(self, stat_name: Literal["attack", "defense", "speed", "attack_range", "mana"]) -> float:
+        if direct_scoring():
+            value = _direct_stat_value(self, stat_name)
+            if value is not None:
+                return value
+        return self._stat_without_query_cache(stat_name)
+
+    def _stat_without_query_cache(self, stat_name: str) -> float:
         base_value = getattr(self.base_stats, stat_name)
         value = float(base_value)
         for component in self.iter_components():
@@ -2310,6 +2449,7 @@ class Unit(ABC):
         ))
 
     def heal_fraction(self, amount: float, *, ignore_effect_immunity: bool = False) -> None:
+        requested_recovery = amount > 0
         battle_ref = getattr(self, "_battle_ref", None)
         battle = battle_ref() if battle_ref is not None else None
         if battle is not None and self.is_bp_benched():
@@ -2318,13 +2458,32 @@ class Unit(ABC):
             return
         if self.direct_effects_blocked() and not ignore_effect_immunity:
             return
+        if amount > 0 and not getattr(self, "_inside_battle_heal", False):
+            for component in self.iter_components():
+                amount = component.modify_direct_heal_amount(amount)
+        if amount < 0:
+            before = self.current_hp
+            self.take_damage_fraction(-amount)
+            if requested_recovery and battle is not None and not getattr(self, "_inside_battle_heal", False):
+                battle.log_public_event(
+                    f"{self.name} 的回血转为减少 {before - self.current_hp:g} 点生命。",
+                    source=self, target=self,
+                )
+                if not self.alive:
+                    battle.cleanup_dead_units()
+            return
         ceiling = float("inf") if self.allow_overheal else self.max_health
         for component in self.iter_components():
             proposed = component.max_recoverable_hp()
             if proposed is not None:
                 ceiling = min(ceiling, proposed)
+        previous_hp = self.current_hp
         healed = min(ceiling, self.current_hp + amount) if amount > 0 else self.current_hp + amount
         self.current_hp = round(max(self.current_hp, healed) if amount > 0 else healed, 4)
+        if (battle is not None and not getattr(self, "_inside_battle_heal", False)
+                and self.current_hp > previous_hp):
+            for component in list(self.iter_components()):
+                component.on_direct_heal_applied(battle, self.current_hp - previous_hp)
 
     def damage_fraction_after_limits(self, amount: float) -> float:
         amount = max(0.0, float(amount))
@@ -3270,6 +3429,17 @@ class Battle(BattleDeclarationMixin, BattleReactionMixin, BattleChainMixin, Batt
                 return False
             return self._attack_probe_success
 
+    def queued_action_would_damage_unit(self, queued: QueuedAction, target: Unit) -> bool:
+        """Probe one declared recipient's positive HP loss without committing effects."""
+        with battle_state_rollback(self), self.suppress_logs():
+            self._damage_probe_target_unit_id = target.unit_id
+            self._damage_probe_hit = False
+            try:
+                self.resolve_queued_action(replace(queued, payload=dict(queued.payload)))
+            except ActionError:
+                return False
+            return self._damage_probe_hit
+
 
 
 
@@ -3322,6 +3492,26 @@ _DIRECT_COMPONENT_DISCOVERY = (
     BattleComponent.runtime_children, Unit.__getstate__, SummaryDamageRule.calculate_damage,
 )
 _DIRECT_COMPONENT_CODES = tuple((method, method.__code__) for method in _DIRECT_COMPONENT_DISCOVERY)
+_DIRECT_NOTIFICATION_HOOKS = {
+    'on_any_skill_declared': BattleComponent.on_any_skill_declared,
+    'on_battle_damage': BattleComponent.on_battle_damage,
+    'redirect_queued_action': None,
+    'on_skill_mana_paid': None,
+}
+_DIRECT_COMPONENT_CODES += tuple((method, method.__code__) for method in _DIRECT_NOTIFICATION_HOOKS.values() if method is not None)
+
+_DIRECT_STAT_METHODS = tuple((method, method.__code__) for method in (
+    Unit.stat, Unit._stat_without_query_cache, Unit.is_bp_benched, Unit.total_shields,
+    BattleComponent.modify_stat, BattleComponent.modify_received_stat_change,
+    BattleFieldEffect.modify_unit_stat, *_DIRECT_COMPONENT_DISCOVERY,
+))
+_DIRECT_STAT_BINDINGS = tuple((owner, name, getattr(owner, name), getattr(owner, name).__code__)
+    for owner, names in (
+        (Unit, ('stat', '_stat_without_query_cache', 'is_bp_benched', 'total_shields')),
+        (BattleComponent, ('modify_stat', 'modify_received_stat_change', 'grants_magic_immunity_to')),
+        (BattleFieldEffect, ('modify_unit_stat',)),
+    ) for name in names)
+from wujiang.tactical.stat_queries import cached_stat_value as _direct_stat_value
 
 # Original pure placement query implementations. The optional batch rejects
 # runtime method/code/default/closure replacements and all field descriptors.

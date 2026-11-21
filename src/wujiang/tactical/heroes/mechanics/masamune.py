@@ -236,14 +236,14 @@ class HealMountSkill(Skill):
 
 class TripleStrikeAttackTrait(Trait):
     def __init__(self) -> None:
-        super().__init__("三连重斩", "可以选择一次普攻占用 3 次普攻次数；那次普攻伤害 +3 并半破魔。")
+        super().__init__("三连重斩", "可以选择一次普攻占用 3 次普攻次数；那次普攻伤害 +2 并半破魔。")
 
     def basic_attack_action_entries(self, battle: Battle, actor: HeroUnit) -> list[dict[str, Any]]:
         return [
             {
                 "code": "attack_triple",
                 "name": "三连重斩",
-                "description": "普攻变体：占用 3 次普攻次数；这次普攻伤害 +3 并半破魔。",
+                "description": "普攻变体：占用 3 次普攻次数；这次普攻伤害 +2 并半破魔。",
                 "attack_payload": {"attack_variant": "triple"},
                 "is_attack_variant": True,
             }
@@ -255,9 +255,9 @@ class TripleStrikeAttackTrait(Trait):
         return {
             "attack_name": "三连重斩",
             "attack_cost": 3,
-            "attack_bonus": 3,
+            "attack_bonus": 2,
             "half_ignore_shield": True,
-            "attack_note": "这次普攻伤害 +3，并且半破魔。",
+            "attack_note": "这次普攻伤害 +2，并且半破魔。",
         }
 
 
@@ -439,7 +439,7 @@ class MotorHorseSummon(AbstractHero):
     attribute = "土"
     race = "召唤物"
     level = 1
-    base_stats = Stats(attack=0, defense=5, speed=5, attack_range=1, mana=0)
+    base_stats = Stats(attack=0, defense=4, speed=5, attack_range=1, mana=0)
     footprint_width = 1
     footprint_height = 2
     stat_minimums = {"attack": 0.0}
@@ -508,11 +508,11 @@ class Masamune(AbstractHero):
     attribute = "土"
     race = "人类"
     level = 4
-    base_stats = Stats(attack=4, defense=3, speed=3, attack_range=1, mana=3)
+    base_stats = Stats(attack=3, defense=3, speed=3, attack_range=1, mana=3)
     entry_footprint_width = 1
     entry_footprint_height = 2
-    raw_skill_text = "摩托马（攻0守5速5；每个己方回合可以使用一次神速） 保护 六刀流（一回合一次；仅能在非乘骑状态并且当回合未攻击时使用；本回合内攻-1，攻击六次） 治愈良驹（一回合一次；仅能在乘骑时使用此；单位召唤的“摩托马”血+1/2）"
-    raw_trait_text = "弧形攻击；乘骑状态时每回合可以不用魔使用一次飞跃；可选择一次攻击占用3次普攻次数，那次攻击伤害+3并且半破魔；此单位在下马后可以格挡，反击，并且攻击吸血"
+    raw_skill_text = "摩托马（攻0守4速5；每个己方回合可以使用一次神速） 保护 六刀流（一回合一次；仅能在非乘骑状态并且当回合未攻击时使用；本回合内攻-1，攻击六次） 治愈良驹（一回合一次；仅能在乘骑时使用此；单位召唤的“摩托马”血+1/2）"
+    raw_trait_text = "弧形攻击；乘骑状态时每回合可以不用魔使用一次飞跃；可选择一次攻击占用3次普攻次数，那次攻击伤害+2并且半破魔；此单位在下马后可以格挡，反击，并且攻击吸血"
 
     def build_skills(self) -> list[Skill]:
         return [

@@ -26,6 +26,14 @@ class GuaranteedRevival(StatusEffect):
             self.owner.alive, self.owner.current_hp = True, 1.0
 
 
+class ForecastHitChance(StatusEffect):
+    """Explicit fixture probability, independent of editable synergy rules."""
+    def on_before_damage(self, battle, ctx):
+        if ctx.target is self.owner:
+            from wujiang.tactical.direct_expectation import damage_chance
+            damage_chance(ctx, .8)
+
+
 class DirectExpectationBehaviorTests(unittest.TestCase):
     def setUp(self):
         self.stack = ExitStack()
@@ -62,9 +70,9 @@ class DirectExpectationBehaviorTests(unittest.TestCase):
                 self.assertEqual(score(battle), 37.5)
         self.assertEqual(calls, [True])
 
-    def test_dark_dodge_and_heavy_claw_multiply_probabilities_without_rng_or_state_leaks(self):
+    def test_hit_chance_and_heavy_claw_multiply_probabilities_without_rng_or_state_leaks(self):
         battle, actor, target = self.fixture()
-        target.add_status(SynergyStatus("attribute", "暗", 2))
+        target.add_status(ForecastHitChance('八成命中维护夹具', ''))
         actor.add_status(EquipmentStatus("重爪", "", ""))
         before = pickle.dumps(battle), random.getstate(), battle.chess_rng.getstate()
         observations = []

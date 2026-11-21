@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from wujiang.tactical.heroes.ai_candidate_plan import DAMAGE_DEDUPED_RANKED_CANDIDATES
+from wujiang.tactical.probe_reuse import original_probe_component
 
 from typing import Any
 from wujiang.tactical.engine.core import Battle
@@ -82,6 +83,7 @@ class AlexanderHurricaneSkill(DeclaredAreaSkillMixin, Skill):
         return battle.effect_units_at_cells(self.chosen_cells(battle, actor, payload))
 
 
+@original_probe_component
 class AlexanderSkillEffectGuardTrait(WorldSeedSkillEffectGuardTrait):
     def __init__(self) -> None:
         Trait.__init__(self, "亚历山大技能效果免疫", "不受技能非伤害效果影响，技能伤害仍结算。")
@@ -95,6 +97,7 @@ class AlexanderSkillEffectGuardTrait(WorldSeedSkillEffectGuardTrait):
         return False, ""
 
 
+@original_probe_component
 class AlexanderAfterAttackSwapTrait(Trait):
     requires_damage_choice = True
 
@@ -120,6 +123,7 @@ class AlexanderAfterAttackSwapTrait(Trait):
             gladiator_swap(battle, actor, ally, skill_code="alexander_attack_swap", via_skill=False)
 
 
+@original_probe_component
 class AlexanderMovedByAllyTrait(Trait):
     def __init__(self) -> None:
         super().__init__("亚历山大协同", "因其他己方单位非技能效果位移时，本回合和下个自己的回合攻守+1并重置战斗飓风。")
@@ -137,6 +141,7 @@ class AlexanderMovedByAllyTrait(Trait):
         existing = owner.get_status("亚历山大协同增益")
         if existing is None:
             status = StatModifierStatus("亚历山大协同增益", attack_delta=1, defense_delta=1,
+                                        description="攻+1、守+1。",
                                         duration=2, tick_scope="owner_turn_end")
             status.is_skill_effect = False
             owner.add_status(status, source=source)
@@ -148,6 +153,7 @@ class AlexanderMovedByAllyTrait(Trait):
         battle.log_public_event(f"{owner.name} 受友方位移，攻守+1并重置战斗飓风。", source=source, target=owner)
 
 
+@original_probe_component
 class AlexanderMagicAuraTrait(Trait):
     def __init__(self) -> None:
         super().__init__("亚历山大魔免光环", "身体周围5×5内其他己方单位获得魔免。")

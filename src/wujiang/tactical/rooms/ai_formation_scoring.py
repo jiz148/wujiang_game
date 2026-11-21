@@ -26,18 +26,22 @@ from wujiang.tactical.engine.core import (
 )
 
 
-def offensive_positioning_plan(battle: Battle, actor: Unit) -> tuple[int, tuple[frozenset[tuple[int, int]], ...]]:
+def offensive_positioning_plan(battle: Battle, actor: Unit) -> tuple[int, tuple[frozenset[tuple[int, int]], ...], tuple[int, ...]]:
     """Read available skills' selection ranges once per unchanged AI decision."""
     preferred = actor.targeting_range()
-    if preferred <= 1 or actor.cannot_use_skills:
-        return preferred, ()
+    basic_available = not actor.cannot_attack and actor.attacks_used < actor.attack_actions_per_turn()
+    if preferred <= 1 and basic_available:
+        return preferred, (), ()
+    if actor.cannot_use_skills:
+        return preferred, (), ()
     skills = actor.action_skills()
     for skill in skills:
         skill.sync_turn_scope(battle)
 
-    def compute() -> tuple[int, tuple[frozenset[tuple[int, int]], ...]]:
-        limit = preferred
+    def compute() -> tuple[int, tuple[frozenset[tuple[int, int]], ...], tuple[int, ...]]:
+        reaches: list[int] = []
         shapes: list[frozenset[tuple[int, int]]] = []
+        plain_reaches: list[int] = []
         for skill in skills:
             if skill.timing != "active" or (skill.code not in OFFENSIVE_POSITIONING_CODES
                                             and skill.directly_damages_on_use() is not True):
@@ -50,16 +54,19 @@ def offensive_positioning_plan(battle: Battle, actor: Unit) -> tuple[int, tuple[
             window = skill.ai_positioning_window(battle, actor)
             if window is not None:
                 reach, shape = window
-                limit = min(limit, reach)
+                reaches.append(reach)
                 if shape:
                     shapes.append(shape)
-        return limit, tuple(shapes)
+                else:
+                    plain_reaches.append(reach)
+        limit = min(([preferred] if basic_available else []) + reaches, default=preferred)
+        return limit, tuple(shapes), tuple(plain_reaches)
 
     if getattr(battle, "_ai_probe_active", False) or battle.resolving_action is not None:
         return compute()
     return decision_local_positioning_plan(
         lambda: (id(battle), actor.unit_id, battle.turn_number, actor.position,
-                 preferred, actor.current_mana,
+                 preferred, actor.current_mana, actor.attacks_used, actor.cannot_attack,
                  tuple((skill.code, skill.uses_this_turn, skill.uses_this_battle,
                         skill.cooldown_remaining) for skill in skills),
                  tuple((status.name, getattr(status, "duration", None)) for status in actor.statuses),
@@ -303,34 +310,38 @@ class AIFormationScoring:
         movement_targets = [forced_target] if forced_target is not None else enemies
         nearest_enemy = min(self.services.distance_to_position(battle, enemy, destination) for enemy in movement_targets)
         current_distance = min(self.services.distance_between_units(battle, actor, enemy) for enemy in movement_targets)
-        ranged_reach = actor.targeting_range()
-        ranged_positioning = forced_target is None and ranged_reach > 1
-        preferred_reach, positioning_shapes = offensive_positioning_plan(
-            battle, actor) if ranged_positioning else (ranged_reach, ())
+        preferred_reach, positioning_shapes, plain_reaches = offensive_positioning_plan(battle, actor)
+        ranged_positioning = forced_target is None and preferred_reach > 1
+        basic_available = not actor.cannot_attack and actor.attacks_used < actor.attack_actions_per_turn()
         current_attack_reach = (self.services.offensive_reach_score_at(battle, actor, actor.position)
-                                if actor.position is not None and ranged_reach > 1 else 0)
+                                if actor.position is not None and basic_available and ranged_positioning else 0)
         destination_attack_reach = (self.services.offensive_reach_score_at(battle, actor, destination)
-                                    if ranged_reach > 1 else 0)
+                                    if basic_available else 0)
+        target_cells = ([cell for enemy in movement_targets for cell in battle.unit_cells(enemy)]
+                        if positioning_shapes and actor.position is not None else [])
+        before_shapes = sum(any((cell.x - actor.position.x, cell.y - actor.position.y) in shape
+                                for cell in target_cells) for shape in positioning_shapes) if target_cells else 0
+        after_shapes = sum(any((cell.x - destination.x, cell.y - destination.y) in shape
+                               for cell in target_cells) for shape in positioning_shapes) if target_cells else 0
+        current_window = (current_attack_reach > 0 or before_shapes > 0
+                          or any(current_distance <= reach for reach in plain_reaches))
+        destination_window = (destination_attack_reach > 0 or after_shapes > 0
+                              or any(nearest_enemy <= reach for reach in plain_reaches))
+        future_basic_window = (not actor.cannot_attack
+                               and nearest_enemy <= actor.targeting_range())
         if ranged_positioning and current_distance > preferred_reach:
             # Close only until every currently available attack window can reach.
             score = float(current_distance - nearest_enemy) * 6.0
             score -= max(0.0, preferred_reach - nearest_enemy) * 12.0
-        elif ranged_positioning and destination_attack_reach > 0:
+        elif ranged_positioning and (destination_window or future_basic_window):
             # Once in the useful range, favor the outer edge without losing a shot.
             score = float(nearest_enemy - current_distance) * 9.0
             score -= max(0.0, nearest_enemy - preferred_reach) * 12.0
         else:
             score = float(current_distance - nearest_enemy) * 6.0
-            if ranged_positioning and current_attack_reach > 0 and destination_attack_reach == 0:
+            if ranged_positioning and current_window and not destination_window:
                 score -= 36.0
-        if positioning_shapes and actor.position is not None:
-            target_cells = [cell for enemy in movement_targets for cell in battle.unit_cells(enemy)]
-            for shape in positioning_shapes:
-                before = any((cell.x - actor.position.x, cell.y - actor.position.y) in shape
-                             for cell in target_cells)
-                after = any((cell.x - destination.x, cell.y - destination.y) in shape
-                            for cell in target_cells)
-                score += 16.0 * (after - before)
+        score += 16.0 * (after_shapes - before_shapes)
         move_policy = getattr(actor, "ai_policy", None)
         if move_policy is not None:
             score += move_policy.early_move_score_bonus(battle, actor, destination)
@@ -340,7 +351,8 @@ class AIFormationScoring:
                 score += 140.0
         if move_policy is not None:
             score += move_policy.post_forced_move_score_bonus(battle, actor, destination)
-        offensive_gain = destination_attack_reach if ranged_reach > 1 else self.services.offensive_reach_score_at(battle, actor, destination)
+        offensive_gain = (destination_attack_reach + after_shapes
+                          + int(any(nearest_enemy <= reach for reach in plain_reaches)))
         score += offensive_gain * 18.0
         score += self.services.great_fire_funeral_alignment_score_at(battle, actor, destination)
         follow_behind = False
@@ -362,8 +374,11 @@ class AIFormationScoring:
                 )
         if role == "support" and not follow_behind:
             nearest_ally = min((self.services.distance_to_position(battle, ally, destination) for ally in allies), default=2)
-            score += max(0.0, 3.0 - nearest_ally) * 6.0
-            score += max(0.0, nearest_enemy - 1.0) * profile.support_bonus
+            ally_spacing_weight = 2.0 if current_distance > preferred_reach else 6.0
+            score += max(0.0, 3.0 - nearest_ally) * ally_spacing_weight
+            # Safety matters near a usable firing window, but unlimited safety
+            # credit outside every window makes cautious supports never advance.
+            score += max(0.0, min(nearest_enemy, preferred_reach + 1) - 1.0) * profile.support_bonus
         elif role != "support" and not ranged_positioning:
             score += max(0.0, 4.0 - nearest_enemy) * (4.0 + profile.aggressive_bonus / 6.0)
         if getattr(battle, "fast_ai_simulation", False):

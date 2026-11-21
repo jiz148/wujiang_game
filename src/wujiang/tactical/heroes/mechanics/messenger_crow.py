@@ -75,7 +75,7 @@ class MessengerCrowSummon(AbstractHero):
     attribute = "暗"
     race = "鸟人"
     level = 1
-    base_stats = Stats(attack=1, defense=3, speed=5, attack_range=1, mana=0)
+    base_stats = Stats(attack=1, defense=1, speed=5, attack_range=1, mana=0)
     raw_skill_text = ""
     raw_trait_text = "飞行；外邻敌方速-1且不能使用不费魔技能；效果不叠加"
 
@@ -127,11 +127,11 @@ class MessengerCrowSkill(Skill):
 
     def ai_priority_score(self, context: AISkillScoreContext) -> float:
         cell = Position(int(context.payload.get("x", -1)), int(context.payload.get("y", -1)))
-        return self.position_score(context.battle, context.actor, cell, mana_cost=0.5)
+        return self.position_score(context.battle, context.actor, cell, mana_cost=1)
 
     def __init__(self) -> None:
-        super().__init__("messenger_crow", "报信乌鸦", "费0.5魔；选外邻合法空格召唤飞行报信乌鸦；威压效果不叠加。",
-                         mana_cost=0.5, target_mode="cell")
+        super().__init__("messenger_crow", "报信乌鸦", "费1魔；选外邻合法空格召唤飞行报信乌鸦；威压效果不叠加。",
+                         mana_cost=1, target_mode="cell")
 
     def available_cells(self, battle: Battle, actor: Unit) -> list[Position]:
         probe = MessengerCrowSummon(actor.player_id)

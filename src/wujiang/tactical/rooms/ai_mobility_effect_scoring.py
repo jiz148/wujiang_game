@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from wujiang.tactical.probe_reuse import position_probe_scope
+import os
+
 from typing import Any, Callable, Protocol
 from typing import Any, Callable, Iterable, Optional
 from wujiang.tactical.rooms.ai_acceleration import cached_effect_baseline, cached_move_batch, cached_move_score, cached_position_value, cached_tactical_query, decision_memo_scope, prepare_position_values, tactical_queries_active
@@ -182,6 +185,7 @@ class AIMobilityEffectScoring:
         return score - 12.0
 
 
+    @position_probe_scope
     def reviewed_r17_position_value(self, battle: Battle, actor: Unit, unit: Unit) -> float:
         positions = getattr(unit, "_ai_expected_positions", None) if direct_scoring() else None
         if positions:
@@ -302,14 +306,40 @@ class AIMobilityEffectScoring:
 
 
     def reviewed_r18_effect_score(self, battle: Battle, actor: Unit, skill: Any, payload: dict[str, Any], profile: DifficultyProfile) -> float:
-        from wujiang.tactical.heroes.mechanics.nameless_messenger import MessengerDamageSkillManaTrait
         owned_score = skill.ai_direct_effect_score(battle, actor, payload)
         if owned_score is not None:
             return owned_score
+        if direct_scoring() and os.environ.get('WUJIANG_AI_LAZY_POSITION_BASELINE', '1') != '0':
+            from wujiang.tactical.settlement_reuse import try_area_score
+            reused = try_area_score(self,battle,actor,payload,'r18',skill)
+            if reused is not None:
+                return reused
+        if (direct_scoring() and os.environ.get('WUJIANG_AI_LAZY_POSITION_BASELINE', '1') != '0'
+                and _position_queries_unchanged(self, battle)):
+            value = self._r18_effect_probe(battle, actor, skill, payload, profile, positions=False)
+            if type(value) is _PositionBaselineRequest:
+                if os.environ.get('WUJIANG_AI_POSITION_QUERY_PURITY', '1') != '0':
+                    value = self._r18_effect_probe(battle, actor, skill, payload, profile,
+                        positions=True, position_units=value.unit_ids)
+                else:
+                    value = _POSITION_BASELINE_REQUIRED
+            if value is not _POSITION_BASELINE_REQUIRED:
+                return value
+        return self._r18_effect_probe(battle, actor, skill, payload, profile, positions=True)
+
+    def _r18_effect_probe(self, battle: Battle, actor: Unit, skill: Any, payload: dict[str, Any], profile: DifficultyProfile, *, positions: bool, position_units=None) -> float:
+        from wujiang.tactical.heroes.mechanics.nameless_messenger import MessengerDamageSkillManaTrait
         with ai_probe_rollback(battle):
             units = list(battle.all_units())
-            prepare_position_values(battle, actor, units, for_baseline=True)
-            before = self.services.reviewed_effect_baseline(battle, actor, units, include_pending=True)
+            selected = units if position_units is None else [unit for unit in units if unit.unit_id in position_units]
+            if positions:
+                prepare_position_values(battle, actor, selected, for_baseline=True)
+            known = self.services.reviewed_effect_baseline(battle, actor, selected, include_pending=True) if positions else {}
+            before = (known if positions and position_units is None else
+                      {unit.unit_id: known[unit.unit_id] if unit.unit_id in known else
+                                    (unit.current_hp, unit.current_mana, unit.total_shields(), unit.dodge_charges,
+                                     unit.alive, unit.position, None,
+                                     bool(getattr(unit.get_status('毁灭电击'), 'pending', False))) for unit in units})
             points = actor.mana_points
             pressure = 0.0
             try:
@@ -326,16 +356,24 @@ class AIMobilityEffectScoring:
                 skill.execute(battle, actor, queued.payload)
             except (ActionError, KeyError, ValueError, TypeError):
                 return -1000.0
+            moved = frozenset(unit.unit_id for unit in units if unit.position != before[unit.unit_id][5])
+            if not positions and moved:
+                # The complete probe restores state, RNG and IDs before the
+                # original position-sensitive scorer is entered once.
+                note('position_baseline_displacement_fallbacks')
+                return _PositionBaselineRequest(moved)
+            if positions and position_units is not None:
+                if not moved.issubset(position_units):
+                    return _POSITION_BASELINE_REQUIRED
+                note('partial_position_baseline_units', len(selected))
+            if not positions:
+                note('unused_position_baselines_avoided')
             score, changed_enemy = 0.0, False
             for unit in units:
                 hp, mana, shields, dodges, alive, position, position_value, pending = before[unit.unit_id]
                 hp_loss = hp - unit.current_hp
-                value = hp_loss * 100 + (mana - unit.current_mana) * 24
-                value += max(0, shields - unit.total_shields()) * 20 + max(0, dodges - unit.dodge_charges) * 12
-                if alive and self.services.scored_death_probability(unit) > 0:
-                    value += (90 * self.services.scored_death_probability(unit) if direct_scoring() else 90)
-                hostile = unit.player_id != actor.player_id
-                score += value if hostile else -value * (1.3 if hp_loss > 0 else 1.1)
+                contribution, hostile = self._r18_damage_unit_value(actor,unit,before[unit.unit_id],hp_loss)
+                score += contribution
                 changed_enemy |= hostile and (hp_loss > 0 or shields > unit.total_shields())
                 if unit.position != position:
                     delta = self.services.reviewed_r17_position_value(battle, actor, unit) - position_value
@@ -350,6 +388,41 @@ class AIMobilityEffectScoring:
                 score += pressure
             return score - 8.0
 
+    def _r18_damage_unit_value(self, actor, unit, before, hp_loss):
+        hp, mana, shields, dodges, alive, position, position_value, pending = before
+        value = hp_loss * 100 + (mana - unit.current_mana) * 24
+        value += max(0, shields - unit.total_shields()) * 20 + max(0, dodges - unit.dodge_charges) * 12
+        if alive and self.services.scored_death_probability(unit) > 0:
+            value += (90 * self.services.scored_death_probability(unit) if direct_scoring() else 90)
+        hostile = unit.player_id != actor.player_id
+        return (value if hostile else -value * (1.3 if hp_loss > 0 else 1.1)), hostile
+
+
+_POSITION_BASELINE_REQUIRED = object()
+
+
+class _PositionBaselineRequest:
+    def __init__(self, unit_ids):
+        self.unit_ids = unit_ids
+
+_POSITION_METHODS = tuple((name, getattr(AIMobilityEffectScoring, name), getattr(AIMobilityEffectScoring, name).__code__)
+    for name in ('reviewed_r17_position_value', 'reviewed_effect_baseline'))
+
+
+def _position_queries_unchanged(service, battle):
+    from wujiang.tactical.rooms import ai
+    from wujiang.tactical.stat_queries import stat_values_for
+    from wujiang.tactical.query_purity import position_queries_readonly
+    if (service.services is not ai or type(service) is not AIMobilityEffectScoring
+            or any(name in vars(service) or getattr(type(service), name) is not function or function.__code__ is not code
+                   for name, function, code in _POSITION_METHODS)
+            or not ai._lazy_position_query_bindings_match()
+            or (stat_values_for(battle.all_units(), ()) is None
+                and (os.environ.get('WUJIANG_AI_POSITION_QUERY_PURITY', '1') == '0'
+                     or not position_queries_readonly(battle.all_units())))):
+        note('position_baseline_unreviewed_query_fallbacks')
+        return False
+    return True
 
 _BOUND_SERVICE: AIMobilityEffectScoring | None = None
 

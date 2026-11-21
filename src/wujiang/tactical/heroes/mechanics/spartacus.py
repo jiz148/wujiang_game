@@ -24,6 +24,7 @@ from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_c
 class SpartacusShatterStatus(StatModifierStatus):
     def __init__(self) -> None:
         super().__init__("天崩地裂强化", attack_delta=1, defense_delta=1,
+                         description="攻+1、守+1。",
                          duration=1, tick_scope="owner_turn_end")
         self.is_skill_effect = True
 

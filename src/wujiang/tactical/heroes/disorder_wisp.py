@@ -48,6 +48,7 @@ class WispEvasionImmunityTrait(Trait):
     def on_unit_moved(self, battle: Battle, ctx: MoveContext) -> None:
         if ctx.unit is self.owner and "evasion" in ctx.tags and not ctx.cancelled:
             ctx.unit.add_status(FlagStatus("闪灵回避魔免", "magic_immunity",
+                description="回避后直到当前英雄行动回合结束魔免。",
                 duration=1, tick_scope="any_turn_end"))
             battle.log_public_event(f"{ctx.unit.name} 回避后获得本轮魔免。", source=ctx.unit)
 

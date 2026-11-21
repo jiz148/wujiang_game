@@ -28,6 +28,7 @@ from wujiang.tactical.heroes.common import match_payload_pattern
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import pattern_signature
 from wujiang.tactical.heroes.common import positions_to_dict
+from wujiang.tactical.heroes.mechanics.area_guard import MultiCellAreaDamageGuardTrait
 from wujiang.tactical.heroes.mechanics.area_helpers import area_patterns_preview
 from wujiang.tactical.heroes.mechanics.area_helpers import combined_remote_rectangle_patterns
 from wujiang.tactical.heroes.mechanics.declared_area import DeclaredAreaSkillMixin
@@ -243,7 +244,7 @@ class DragonRideableMountTrait(RideableMountTrait):
 
 class DragonDamageResistanceTrait(Trait):
     def __init__(self) -> None:
-        super().__init__("龙鳞", "受到技能公式伤害时攻击值 -1，到 1；多格命中最多按 1 格计算。")
+        super().__init__("龙鳞", "受到技能公式伤害时攻击值 -1，到 1。")
 
     def on_before_damage(self, battle: Battle, ctx: DamageContext) -> None:
         owner = self.owner
@@ -251,7 +252,6 @@ class DragonDamageResistanceTrait(Trait):
             return
         if not ctx.is_skill or ctx.raw_damage is not None:
             return
-        ctx.area_cell_hits = 1
         ctx.attack_power = max(1.0, ctx.attack_power - 1.0)
 
 
@@ -356,10 +356,10 @@ class DragonMountSummon(AbstractHero):
     hero_code = "dragon_mount"
     hero_name = "龙"
     role = "坐骑"
-    attribute = "火"
+    attribute = "炎"
     race = "召唤物"
     level = 1
-    base_stats = Stats(attack=3, defense=5, speed=5, attack_range=4, mana=0)
+    base_stats = Stats(attack=3, defense=4, speed=5, attack_range=2, mana=0)
     footprint_width = 2
     footprint_height = 2
     stat_minimums = {"mana": 0.0}
@@ -376,6 +376,7 @@ class DragonMountSummon(AbstractHero):
         return [
             FlyingTrait(),
             DragonRideableMountTrait(),
+            MultiCellAreaDamageGuardTrait(),
             DragonDamageResistanceTrait(),
             DragonAreaAttackTrait(),
         ]
@@ -743,13 +744,13 @@ class DragonRider(AbstractHero):
     hero_code = "dragon_rider"
     hero_name = "龙骑"
     role = "骑士"
-    attribute = "火"
+    attribute = "炎"
     race = "兽人"
     level = 5
-    base_stats = Stats(attack=4, defense=4, speed=3, attack_range=1, mana=5)
+    base_stats = Stats(attack=3, defense=3, speed=3, attack_range=1, mana=5)
     entry_footprint_width = 2
     entry_footprint_height = 2
-    raw_skill_text = "龙息 召龙（攻3守5速5范4；飞行，占2*2；受到公式技能攻击值-1，到1；固定扣血不减免；最多受到一格伤害；攻击范围3*3；攻击带有以下破魔效果：被击中后直到龙骑下个自己的回合开始前速-1，守-1） 保护 龙斩（一回合一次；伤5格；带有破魔的链条效果；收到链条效果的单位直到龙骑下个自己的回合开始前速-2，到1） 链条 【1喷烟（一回合最多使用一次；3*6；没有伤害；被击中区域直到龙骑下个自己的回合开始前所有除单位无法使用主动技能，攻击）"
+    raw_skill_text = "龙息 召龙（攻3守4速5范2；飞行，占2*2；受到的技能伤害-1，到1；最多受到一格伤害；攻击范围3*3；攻击带有以下破魔效果：被击中后直到下个回合结束前速-1，守-1） 保护 龙斩（一回合一次；伤5格；带有破魔的链条效果；收到链条效果的单位直到下个回合结束前速-2，到1） 链条 【1喷烟（一回合最多使用一次；3*6；没有伤害；被击中区域直到下个回合结束前所有除单位无法使用主动技能，攻击）"
     raw_trait_text = "场上每有一个己方“法师”武将，每回合开始时魔+1"
 
     def build_skills(self) -> list[Skill]:

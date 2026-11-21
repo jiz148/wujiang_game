@@ -10,8 +10,8 @@ import { effectiveProfileName } from '../platform/auth.js';
 import { currentBattleLaunch, isCampaignBattleLaunch } from '../bridge/battle-launch.js';
 import { isRandomRoomMode, loadReplayStep, onActionClick, roomModeMeta, setArmyOrder, shouldShowLobbyPanel } from '../tactical/room-api.js';
 import { clearActionSelection } from '../tactical/session.js';
-import { actionLabel, actionLimitLabel, actionManaLabel, actionNeedsTarget, actionTierLabel, actionTimingLabel, actionTitle, bodyDirectionSelection, canCompleteTargetSelection, cellDirectionSelection, choicePatternSelection, crowFormationSelection, currentPreview, fieldEffectMarker, fieldEffectsByCell, hasCancelableTargetSelection, movePathSelection, multiUnitSelection, normalizedPatternCells, patternSelection, patternSelectionCanComplete, randomRoomFallbackSummary, randomRoomRosterSize, reviveUnitCellSelection, stagedAttackVariantCode, stagedBodyCells, stagedBodyDirection, stagedCellDirection, stagedCellDirectionCell, stagedCrowFormationRavenIds, stagedCrowFormationTargetId, stagedMovePath, stagedMultiDirection, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, stagedUnitCellsPlacements, stagedUnitCellsTargetId, stagedUnitDirection, stagedUnitDirectionTargetId, statCellRequired, statCellSelection, unitCellsSelection, unitDirectionSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
-import { actionByCode, actionWheelLayer, displayActions, fieldEffectDuration, fieldEffects, flushPendingArmyVfx, hoveredAction, hpRatio, manaDisplayClass, manaPipsMarkup, positionKey, positionsToSet, renderBattleVfx, selectedAction, trimNumber, tutorialState, unitBoundsRelativeToStage, unitStatusSummary } from '../tactical/vfx.js';
+import { actionLabel, actionLimitLabel, actionManaLabel, actionNeedsTarget, actionTierLabel, actionTimingLabel, actionTitle, bodyDirectionSelection, canCompleteTargetSelection, cellDirectionSelection, choicePatternSelection, crowFormationSelection, currentPreview, fieldEffectMarker, fieldEffectsByCell, hasCancelableTargetSelection, movePathSelection, multiUnitSelection, normalizedPatternCells, optionSelection, patternSelection, patternSelectionCanComplete, randomRoomFallbackSummary, randomRoomRosterSize, reviveUnitCellSelection, stagedAttackVariantCode, stagedBodyCells, stagedBodyDirection, stagedCellDirection, stagedCellDirectionCell, stagedCrowFormationRavenIds, stagedCrowFormationTargetId, stagedMovePath, stagedMultiDirection, stagedMultiTargetIds, stagedOptionCode, stagedOptionTargetId, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, stagedUnitCellsPlacements, stagedUnitCellsTargetId, stagedUnitDirection, stagedUnitDirectionTargetId, statCellRequired, statCellSelection, unitCellsSelection, unitDirectionSelection, unitIsSelectableTarget } from '../tactical/targeting.js';
+import { actionByCode, actionWheelLayer, displayActions, fieldEffectDuration, fieldEffects, flushPendingArmyVfx, hoveredAction, hpRatio, manaDisplayClass, manaPipsMarkup, positionKey, positionsToSet, renderBattleVfx, selectedAction, statusEffectLabel, trimNumber, tutorialState, unitBoundsRelativeToStage, unitStatusSummary } from '../tactical/vfx.js';
 
 export function renderScreens() {
   applyScreen();
@@ -224,6 +224,21 @@ function renderBoardAlert() {
     showBoardHint(actionTitle(action), target
       ? `已选阵法目标；选择其周围 ${need} 只要牺牲的报信乌鸦（已选 ${chosen.length} 只），然后点击“完成选择”。再次点击目标可重选。`
       : `先点击高亮的阵法目标，再选择其周围 ${need} 只报信乌鸦。`);
+    return;
+  }
+
+  if (action && optionSelection(action)) {
+    const selection = optionSelection(action);
+    const chosen = stagedOptionCode(action);
+    const target = stagedOptionTargetId(action);
+    const allowed = selection.options_by_target?.[target];
+    const buttons = (selection.options || []).map((entry) => {
+      const code = String(entry.code || "");
+      const disabled = target && Array.isArray(allowed) && !allowed.includes(code);
+      return `<button type="button" class="board-alert-choice ${chosen === code ? "is-selected" : ""}"
+        data-option-code="${escapeStatusMarkup(code)}" ${disabled ? "disabled" : ""}>${escapeStatusMarkup(String(entry.label || code))}</button>`;
+    }).join("");
+    showBoardHint(actionTitle(action), selection.prompt || "选择效果后点击完成选择。", buttons);
     return;
   }
 
@@ -1109,8 +1124,14 @@ export function scheduleBoardOverlayRender() {
   renderBoardOverlays();
 }
 
+function escapeStatusMarkup(value) {
+  return value.replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[char]);
+}
+
 function renderUnitHoverCard(unit) {
-  const statuses = unitStatusSummary(unit).join(" · ") || "无";
+  const statuses = escapeStatusMarkup(unitStatusSummary(unit).join(" · ") || "无");
   const traits = unit.traits.map((trait) => trait.name).join(" · ") || "无";
   return `
     <strong>${unit.name}</strong>
@@ -1312,11 +1333,11 @@ export function renderSelectedCard() {
       : "";
     return;
   }
-  const statusEntries = (unit.statuses || []).map((status) => `${status.name}${status.duration ? `(${status.duration})` : ""}`);
+  const statusEntries = (unit.statuses || []).map(statusEffectLabel);
   if (unit.banished) {
     statusEntries.unshift(`消失${unit.banish_turns_remaining > 0 ? `(${unit.banish_turns_remaining})` : ""}`);
   }
-  const statuses = statusEntries.join(" · ") || "无";
+  const statuses = escapeStatusMarkup(statusEntries.join(" · ") || "无");
   const traits = (unit.traits || []).map((trait) => trait.name).join(" · ") || "无";
   const maxMana = unitMaxMana(unit);
   const hpPercent = Math.round(resourceRatio(unit.hp, unit.max_hp) * 100);
@@ -1708,6 +1729,8 @@ export function renderChainPanel() {
         ? `${prompt.action_name}：选择一个合法落点。`
       : prompt.kind === "required_direction"
         ? `${prompt.action_name}：选择一个方向。`
+      : prompt.kind === "optional_skill_use"
+        ? `${prompt.action_name}：现在可使用，或留待之后的敌方轮末。`
       : prompt.kind === "rotation"
         ? `安德鲁因【${prompt.action_name}】实际损失 ${prompt.damage} 点生命。选择友军战斗轮转，或保持位置。`
         : `拉奥将受到 ${prompt.damage} 点【${prompt.action_name}】伤害，请选择能力抵消或承受伤害。`;

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any, Callable, Protocol
 from wujiang.tactical.rooms.ai_types import DifficultyProfile
 from typing import Any, Callable, Iterable, Optional
@@ -627,6 +628,7 @@ class _SharedReactionScoringServices(Protocol):
     preview_positions: Callable[..., Any]
     primary_target_unit: Callable[..., Any]
     queued_shield_protected_unit_ids: Callable[..., Any]
+    r21_queued_loss: Callable[..., Any]
     r19_attack_window_value: Callable[..., Any]
     r21_attack_value: Callable[..., Any]
     r22_attack_value: Callable[..., Any]
@@ -658,6 +660,22 @@ class _SharedReactionScoring:
 
     def threat(self, battle: Battle, target: Unit, queued: QueuedAction) -> float:
         return self.services.incoming_threat_score(battle, target, queued)
+
+    def remaining_loss(self, battle: Battle, target: Unit, queued: QueuedAction) -> float:
+        if forecasting_active() and queued.actor_id not in battle.units:
+            return self.services.incoming_threat_score(battle, target, queued)
+        chosen = list(battle.pending_chain.chosen_reactions) if battle.pending_chain is not None else []
+        if not chosen:
+            return self.services.r21_queued_loss(battle, target, queued)
+        with ai_probe_rollback(battle):
+            try:
+                for reaction in reversed(chosen):
+                    battle.resolve_queued_action(deepcopy(reaction))
+                if not battle.target_can_chain_against(target, queued):
+                    return 0.0
+                return self.services.r21_queued_loss(battle, target, queued)
+            except (ActionError, KeyError, TypeError, ValueError):
+                return self.services.r21_queued_loss(battle, target, queued)
 
     def skill_context(self, battle: Battle, actor: Unit, payload: dict,
                       profile: DifficultyProfile, code: str) -> AISkillScoreContext:
