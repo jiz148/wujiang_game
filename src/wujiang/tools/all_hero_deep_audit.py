@@ -158,6 +158,11 @@ def action_code(event: dict[str, Any]) -> str:
         prompt = before.get("pending_damage_choice") if isinstance(before.get("pending_damage_choice"), dict) else {}
         if prompt.get("kind") == "probability_reroll" and prompt.get("offered_skill_code"):
             return str(prompt["offered_skill_code"])
+    if action_type == "damage_choice" and payload.get("target_unit_id") == "use":
+        before = event.get("before") if isinstance(event.get("before"), dict) else {}
+        prompt = before.get("pending_damage_choice") if isinstance(before.get("pending_damage_choice"), dict) else {}
+        if prompt.get("kind") == "optional_skill_use" and prompt.get("offered_skill_code"):
+            return str(prompt["offered_skill_code"])
     return action_type
 
 

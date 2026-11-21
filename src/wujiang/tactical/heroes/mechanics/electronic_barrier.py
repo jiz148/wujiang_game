@@ -1,6 +1,7 @@
 """Electronic dragon laser and barrier objects."""
 
 from __future__ import annotations
+from wujiang.tactical.settlement_reuse import independent_area_component
 
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import BattleFieldEffect
@@ -45,7 +46,10 @@ class ElectronicLaserSkill(HellSlashSkill):
         return [cells for cells in super().patterns(battle, actor) if not body.intersection(cells)]
 
 
+@independent_area_component
 class ElectronicLaserDamageBonusTrait(Trait):
+    def ai_area_independent(self, source: Unit) -> bool:
+        return True
     def __init__(self) -> None:
         super().__init__("镭射龙伤害强化", "直接伤害锁定当前攻击较低的单位时伤害 +1。")
 
@@ -61,7 +65,10 @@ class ElectronicLaserDamageBonusTrait(Trait):
             ctx.raw_damage += 1
 
 
+@independent_area_component
 class ElectronicBarrierPersonalGuardTrait(Trait):
+    def ai_area_independent(self, source: Unit) -> bool:
+        return True
     def __init__(self) -> None:
         super().__init__("屏障龙自身减伤", "低防守单位对自身造成直接伤害时伤害 -1。")
 

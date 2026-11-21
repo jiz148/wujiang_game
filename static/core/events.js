@@ -16,7 +16,7 @@ import { renderBpPanel } from '../tactical/bp-ui.js';
 import { bindAutoChessEvents, renderAutoChessPanel } from '../tactical/autochess-ui.js';
 import { applyRoomPayload, canReclaimSeatByName, claimRoomSeat, closeModePicker, controlSimulation, copyInviteLink, createRoom, deleteRoom, exitTutorial, fillEmptySeatsWithAi, isRandomRoomMode, joinRoom, leaveFinishedBattle, leaveReplayMode, leaveRoom, loadReplayStep, openModePicker, performAction, removeRoomSeat, renderTutorialGuide, restartFromGameOver, resumeStoredSeat, resumeTutorialBattle, retryTutorialStep, roomModeMeta, selectRoomHero, setAiStyles, setRoomSeatController, setRoomSeatCount, setRoomSeatTeam, setSeatArmyComposition, setSeatRandomQuota, shouldShowLobbyPanel, startRoomBattle, startTutorialBattle, surrenderBattle, toggleAiTakeover, toggleRoomReady } from '../tactical/room-api.js';
 import { clearActionSelection, loadStoredIdentity } from '../tactical/session.js';
-import { bodyDirectionSelection, canCompleteTargetSelection, cellDirectionSelection, choicePatternSelection, controllerTypeLabel, crowFormationSelection, currentRoomSeat, hasCancelableTargetSelection, isBoardTargetSelectionActive, movePathSelection, multiUnitSelection, patternSelection, randomRoomRosterSize, reviveUnitCellSelection, roomSummaries, sanitizeRandomRosterSizeInput, seatHeroSummary, setStagedAttackVariant, setStagedBodyDirection, setStagedCellDirection, setStagedMultiDirection, setStagedPatternChoice, setStagedReviveUnitId, setStagedStatName, setStagedUnitCellsPlacements, setStagedUnitCellsTargetId, setStagedUnitDirection, stagedAttackActionPayload, stagedBodyCells, stagedBodyDirection, stagedCellDirection, stagedCellDirectionCell, stagedCrowFormationRavenIds, stagedCrowFormationTargetId, stagedMovePath, stagedMultiDirection, stagedMultiTargetIds, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, stagedUnitCellsPlacements, stagedUnitDirection, stagedUnitDirectionTargetId, statCellSelection, unitCellsSelection, unitDirectionSelection } from '../tactical/targeting.js';
+import { bodyDirectionSelection, canCompleteTargetSelection, cellDirectionSelection, choicePatternSelection, controllerTypeLabel, crowFormationSelection, currentRoomSeat, hasCancelableTargetSelection, isBoardTargetSelectionActive, movePathSelection, multiUnitSelection, optionSelection, patternSelection, randomRoomRosterSize, reviveUnitCellSelection, roomSummaries, sanitizeRandomRosterSizeInput, seatHeroSummary, setStagedAttackVariant, setStagedBodyDirection, setStagedCellDirection, setStagedMultiDirection, setStagedOptionCode, setStagedPatternChoice, setStagedReviveUnitId, setStagedStatName, setStagedUnitCellsPlacements, setStagedUnitCellsTargetId, setStagedUnitDirection, stagedAttackActionPayload, stagedBodyCells, stagedBodyDirection, stagedCellDirection, stagedCellDirectionCell, stagedCrowFormationRavenIds, stagedCrowFormationTargetId, stagedMovePath, stagedMultiDirection, stagedMultiTargetIds, stagedOptionCode, stagedOptionTargetId, stagedPatternCells, stagedPatternChoiceCode, stagedReviveCell, stagedReviveUnitId, stagedStatCells, stagedStatName, stagedUnitCellsPlacements, stagedUnitDirection, stagedUnitDirectionTargetId, statCellSelection, unitCellsSelection, unitDirectionSelection } from '../tactical/targeting.js';
 import { clearBattleVfx, selectedAction, tutorialState } from '../tactical/vfx.js';
 import { createMenu } from './components.js';
 import { $ } from './dom.js';
@@ -439,6 +439,14 @@ export function bindEvents() {
       render();
       return;
     }
+    const optionButton = target?.closest("[data-option-code]");
+    if (optionButton) {
+      const action = selectedAction();
+      if (!action || !optionSelection(action)) return;
+      setStagedOptionCode(optionButton.dataset.optionCode || "");
+      render();
+      return;
+    }
     const directionButton = target?.closest("[data-direction-dx][data-direction-dy]");
     if (directionButton) {
       const action = selectedAction();
@@ -579,6 +587,9 @@ export function bindEvents() {
       } else if (statCellSelection(action)) {
         payload.stat_name = stagedStatName(action);
         payload.cells = stagedStatCells(action);
+      } else if (optionSelection(action)) {
+        payload.option_code = stagedOptionCode(action);
+        if (optionSelection(action).requires_unit) payload.target_unit_id = stagedOptionTargetId(action);
       } else if (bodyDirectionSelection(action)) {
         payload.cells = stagedBodyCells(action);
         payload.direction = stagedBodyDirection(action);
@@ -628,6 +639,9 @@ export function bindEvents() {
     } else if (statCellSelection(action)) {
       payload.stat_name = stagedStatName(action);
       payload.cells = stagedStatCells(action);
+    } else if (optionSelection(action)) {
+      payload.option_code = stagedOptionCode(action);
+      if (optionSelection(action).requires_unit) payload.target_unit_id = stagedOptionTargetId(action);
     } else if (bodyDirectionSelection(action)) {
       payload.cells = stagedBodyCells(action);
       payload.direction = stagedBodyDirection(action);

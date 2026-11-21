@@ -301,6 +301,13 @@ class AIWeatherAndThreatScoring:
 
 
     def offensive_reach_score_at(self, battle: Battle, actor: Unit, destination: Position) -> int:
+        from wujiang.tactical.settlement_reuse import try_reach_score
+        value = try_reach_score(self,battle,actor,destination,lambda: self._offensive_reach_original(battle,actor,destination))
+        if value is not None:
+            return value
+        return self._offensive_reach_original(battle,actor,destination)
+
+    def _offensive_reach_original(self, battle: Battle, actor: Unit, destination: Position) -> int:
         current = actor.position
         actor.position = destination
         try:

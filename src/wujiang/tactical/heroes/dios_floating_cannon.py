@@ -98,7 +98,7 @@ class DiosFloatingCannon(AbstractHero):
     level = 1
     base_stats = Stats(attack=4, defense=1, speed=2, attack_range=3, mana=0)
     raw_skill_text = "吸魔"
-    raw_trait_text = "7×7内被动技能费魔+1；被破坏后下回合重召；击破者血减半"
+    raw_trait_text = "7×7内被动技能费魔+1，效果不叠加；被破坏后下回合重召；击破者血减半"
 
     def __init__(self, player_id: int) -> None:
         super().__init__(player_id, is_summon=True)
@@ -112,8 +112,15 @@ class DiosFloatingCannon(AbstractHero):
 
 class DiosCannonAura(BattleFieldEffect):
     def __init__(self, cannon: DiosFloatingCannon) -> None:
-        super().__init__("浮游炮干扰", "该炮周围7×7的双方单位使用被动技能时费魔+1。")
+        super().__init__("浮游炮干扰", "该炮周围7×7的双方单位使用被动技能时费魔+1；多炮同名效果不叠加。")
         self.source_unit_id = cannon.unit_id
+
+    def covers(self, battle: Battle, actor: Unit) -> bool:
+        cannon = battle.units.get(self.source_unit_id)
+        return bool(_present(cannon) and _present(actor)
+                    and any(abs(cell.x - cannon.position.x) <= 3
+                            and abs(cell.y - cannon.position.y) <= 3
+                            for cell in battle.unit_cells(actor)))
 
     def affected_cells(self, battle: Battle) -> list[Position]:
         cannon = battle.units.get(self.source_unit_id)
@@ -125,11 +132,14 @@ class DiosCannonAura(BattleFieldEffect):
 
     def modify_skill_mana_cost(self, battle: Battle, actor: Unit, skill: Skill,
                                payload: dict[str, Any] | None, cost: float) -> float:
-        cannon = battle.units.get(self.source_unit_id)
-        if (skill.timing in {"passive", "reaction"} and _present(cannon) and _present(actor)
-                and battle.distance_between_units(cannon, actor) <= 3):
-            return cost + 1.0
-        return cost
+        if skill.timing not in {"passive", "reaction"} or not self.covers(battle, actor):
+            return cost
+        for effect in battle.field_effects:
+            if effect is self:
+                break
+            if isinstance(effect, DiosCannonAura) and effect.covers(battle, actor):
+                return cost
+        return cost + 1.0
 
 
 class DiosCannonLifetimeTrait(Trait):
@@ -220,7 +230,7 @@ class DiosFloatingCannonsSkill(Skill):
 
     def __init__(self) -> None:
         super().__init__("dios_floating_cannons", "暗。浮游炮*4",
-                         "大招：在范内选择最多四个不同空格召唤暗。浮游炮。",
+                         "大招：在范内选择最多四个不同空格召唤暗。浮游炮；多炮的7×7被动技能费魔+1效果不叠加。",
                          max_uses_per_battle=1, target_mode="cell")
 
     def available_cells(self, battle: Battle, actor: Unit) -> list[Position]:
@@ -280,17 +290,22 @@ class DiosFloatingCannonsSkill(Skill):
         except ActionError:
             return -1000.0
         value = len(cells) * 35.0
+        units = [unit for unit in battle.all_units() if _present(unit)]
+        existing_auras = [effect for effect in battle.field_effects
+                          if isinstance(effect, DiosCannonAura)]
+        taxed = {unit.unit_id for unit in units
+                 if any(aura.covers(battle, unit) for aura in existing_auras)}
         for cell in cells:
-            for unit in battle.all_units():
-                if not _present(unit):
-                    continue
+            for unit in units:
                 distance = battle.unit_distance_to_cell(unit, cell)
                 if unit.player_id != actor.player_id:
                     value += max(0, 5 - distance) * 5.0
-                    if distance <= 3 and any(skill.timing in {"passive", "reaction"} for skill in unit.skills):
-                        value += 18.0
-                elif distance <= 3 and any(skill.timing in {"passive", "reaction"} for skill in unit.skills):
-                    value -= 12.0
+                if (unit.unit_id not in taxed
+                        and any(skill.timing in {"passive", "reaction"} for skill in unit.skills)
+                        and any(abs(body.x - cell.x) <= 3 and abs(body.y - cell.y) <= 3
+                                for body in battle.unit_cells(unit))):
+                    value += 18.0 if unit.player_id != actor.player_id else -12.0
+                    taxed.add(unit.unit_id)
         return value
 
     def _ai_selections(self, battle: Battle, actor: Unit) -> list[list[Position]]:

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import secrets
+
 from typing import Any, Optional
 
 class RoomBPMixin:
@@ -119,9 +122,12 @@ class RoomBPMixin:
             current = self.seats.get(self.bp_captains.get(team_id, -1))
             if current is not None and current.is_human and current.team_id == team_id:
                 continue
+            ai = next((seat for seat in self._team_seats(team_id) if seat.is_ai), None)
             humans = [seat for seat in self._team_seats(team_id) if seat.is_human]
             if len(humans) == 1:
                 self.bp_captains[team_id] = humans[0].player_id
+            elif not humans and ai:
+                self.bp_captains[team_id] = ai.player_id
 
 
     def _tier_round_steps(self, round_plan: dict[str, Any]) -> list[tuple[str, int]]:
@@ -169,18 +175,18 @@ class RoomBPMixin:
         return int(self.bp_level_caps.get(self.bp_team_size, self.bp_team_size * 5))
 
 
-    def _bp_total_level(self, team_id: int, actions: Optional[list[dict[str, Any]]] = None) -> int:
+    def _bp_total_level(self, team_id: int, actions: Optional[list[dict[str, Any]]] = None, *, known=None) -> int:
         from wujiang.tactical.rooms.multiplayer import (
             hero_lookup,
         )
-        known = hero_lookup()
+        known = known if known is not None else hero_lookup()
         return sum(int(action.get("level", known.get(action["hero_code"], {}).get("level", 0)))
                    for action in (self.bp_actions if actions is None else actions)
                    if action["kind"] == "pick" and action["team_id"] == team_id)
 
 
     def _bp_draft_feasible(self, actions: list[dict[str, Any]],
-                           *, banned_levels: Optional[tuple[int, ...]] = None) -> bool:
+                           *, banned_levels: Optional[tuple[int, ...]] = None, known=None) -> bool:
         from wujiang.tactical.rooms.multiplayer import (
             BP_FORMAT_TIER,
             Counter,
@@ -191,8 +197,8 @@ class RoomBPMixin:
         if self.bp_format == BP_FORMAT_TIER:
             return True
         if self.bp_allow_same_hero:
-            return self._bp_shared_draft_feasible(actions, banned_levels=banned_levels)
-        known = hero_lookup()
+            return self._bp_shared_draft_feasible(actions, banned_levels=banned_levels, known=known)
+        known = known if known is not None else hero_lookup()
         used = {action["hero_code"] for action in actions}
         excluded = set(self.bp_auto_banned_levels if banned_levels is None else banned_levels)
         pool = set(self.bp_hero_pool) if self.bp_hero_pool else set(known)
@@ -200,7 +206,7 @@ class RoomBPMixin:
                                   if code in pool and code not in used and int(hero["level"]) not in excluded)
         needs = tuple(self.bp_team_size - sum(action["kind"] == "pick" and action["team_id"] == team
                                                 for action in actions) for team in TEAM_IDS)
-        budgets = tuple(self._bp_level_cap() - self._bp_total_level(team, actions) for team in TEAM_IDS)
+        budgets = tuple(self._bp_level_cap() - self._bp_total_level(team, actions, known=known) for team in TEAM_IDS)
         if any(need < 0 or budget < 0 for need, budget in zip(needs, budgets)):
             return False
         required_steps = 2 * self.bp_team_size + (6 if self.bp_team_size == 3 else 10)
@@ -232,12 +238,12 @@ class RoomBPMixin:
 
 
     def _bp_shared_draft_feasible(self, actions: list[dict[str, Any]],
-                                  *, banned_levels: Optional[tuple[int, ...]] = None) -> bool:
+                                  *, banned_levels: Optional[tuple[int, ...]] = None, known=None) -> bool:
         from wujiang.tactical.rooms.multiplayer import (
             TEAM_IDS,
             hero_lookup,
         )
-        known = hero_lookup()
+        known = known if known is not None else hero_lookup()
         pool = set(self.bp_hero_pool) if self.bp_hero_pool else set(known)
         excluded = set(self.bp_auto_banned_levels if banned_levels is None else banned_levels)
         banned_codes = {action["hero_code"] for action in actions if action["kind"] == "ban"}
@@ -246,7 +252,7 @@ class RoomBPMixin:
         needs = []
         for team in TEAM_IDS:
             need = self.bp_team_size - sum(action["kind"] == "pick" and action["team_id"] == team for action in actions)
-            budget = self._bp_level_cap() - self._bp_total_level(team, actions)
+            budget = self._bp_level_cap() - self._bp_total_level(team, actions, known=known)
             if need < 0 or budget < 0:
                 return False
             own_picks = {action["hero_code"] for action in actions if action["kind"] == "pick" and action["team_id"] == team}
@@ -404,19 +410,19 @@ class RoomBPMixin:
         if cached and cached[0] == key:
             return cached[1]
         pairs = [pair for pair in combinations(sorted(counts), 2)
-                 if self._bp_draft_feasible([], banned_levels=pair)]
+                 if self._bp_draft_feasible([], banned_levels=pair, known=known)]
         self._bp_pair_cache = (key, pairs)
         return pairs
 
 
-    def _bp_choice_error(self, kind: str, team: int, hero_code: str) -> Optional[str]:
+    def _bp_choice_error(self, kind: str, team: int, hero_code: str, *, known=None) -> Optional[str]:
         from wujiang.tactical.rooms.multiplayer import (
             BP_FORMAT_TIER,
             TEAM_IDS,
             hero_lookup,
             team_name,
         )
-        known = hero_lookup()
+        known = known if known is not None else hero_lookup()
         hero = known.get(hero_code)
         if hero is None:
             return "所选武将不存在。"
@@ -438,17 +444,17 @@ class RoomBPMixin:
                 return taken
         elif any(action["hero_code"] == hero_code for action in self.bp_actions):
             return "该武将已经被禁用或选走。"
-        if kind == "pick" and self._bp_total_level(team) + level > self._bp_level_cap():
+        if kind == "pick" and self._bp_total_level(team, known=known) + level > self._bp_level_cap():
             return f"{team_name(team)}选将总等级不能超过{self._bp_level_cap()}。"
         if kind == "ban" and not any(
             len(self._bp_picks(candidate_team)) < self.bp_team_size
             and self._bp_draft_feasible([*self.bp_actions, {"kind": "pick", "team_id": candidate_team,
-                                                            "hero_code": hero_code, "level": level}])
+                                                            "hero_code": hero_code, "level": level}], known=known)
             for candidate_team in TEAM_IDS
         ):
             return "该武将的等级选后无法补齐阵容，不能禁用。"
         candidate = {"kind": kind, "team_id": team, "hero_code": hero_code, "level": level}
-        if not self._bp_draft_feasible([*self.bp_actions, candidate]):
+        if not self._bp_draft_feasible([*self.bp_actions, candidate], known=known):
             return "这次禁选会使双方无法在等级上限内补齐阵容，请换一名武将。"
         return None
 
@@ -468,18 +474,75 @@ class RoomBPMixin:
         cached = getattr(self, "_bp_legal_cache", None)
         if cached and cached[0] == key:
             return cached[1]
-        used = {action["hero_code"] for action in self.bp_actions
-                if not self.bp_allow_same_hero or action["kind"] == "ban" or action["team_id"] == team}
-        representative = {}
-        for code, hero in hero_lookup().items():
-            level = int(hero["level"])
-            if (not self.bp_hero_pool or code in self.bp_hero_pool) and code not in used and level not in self.bp_auto_banned_levels:
-                representative.setdefault(level, code)
-        legal = [level for level, code in sorted(representative.items())
-                 if self._bp_choice_error(kind, team, code) is None]
+        known = hero_lookup()
+        legal = sorted({int(known[code]["level"]) for code in self._bp_candidates(kind, team, known=known)})
         self._bp_legal_cache = (key, legal)
         return legal
 
+
+    def _bp_candidates(self, kind, team, *, known=None):
+        from wujiang.tactical.rooms.multiplayer import hero_lookup
+        known = known if known is not None else hero_lookup()
+        # Availability and budget feasibility are symmetric within these groups.
+        enemy = set(self._bp_picks(3 - team))
+        groups = {}
+        result = []
+        for code in self.bp_hero_pool or known:
+            if self._bp_hero_taken_error(code, team, kind):
+                continue
+            key = (known[code]["level"], code in enemy)
+            if key not in groups:
+                groups[key] = self._bp_choice_error(kind, team, code, known=known) is None
+            if groups[key]:
+                result.append(code)
+        return result
+
+    def _bp_context(self, team):
+        plan, _ = self._bp_tier_round_at(len(self.bp_actions))
+        rules = [self.bp_format, self.bp_team_size, sorted(self.bp_special_modes), self.bp_allow_same_hero,
+                 plan["level"] if plan else None, self._bp_level_cap() if self.bp_format == "full" else None]
+        return tuple(json.dumps(value) for value in
+                     (rules, sorted(self._bp_picks(team)), sorted(self._bp_picks(3 - team))))
+
+    def _advance_bp_ai(self):
+        while self.status == "bp":
+            self._drop_stuck_tier_steps()
+            if self._bp_phase() != "draft":
+                return
+            kind, team = self._bp_sequence()[len(self.bp_actions)]
+            captain = self.seats.get(self.bp_captains.get(team))
+            if not captain or not captain.is_ai:
+                return
+            self._choose_bp_ai(kind, team, captain)
+
+    def _choose_bp_ai(self, kind, team, captain):
+        from wujiang.platform.http import runtime
+        candidates = self._bp_candidates(kind, team)
+        context = self._bp_context(team if kind == "pick" else 3 - team)
+        store = runtime.MATCH_HISTORY_STORE
+        contextual = store.bp_rates(*context, fallback=True)
+        broad = store.bp_results(context[0])
+
+        def score(code):
+            prior = broad.get(code, {})
+            baseline = (prior.get("wins", 0) + 2) / (prior.get("picks", 0) + 4)
+            local = contextual.get(code, {})
+            return (local.get("wins", 0) + 4 * baseline) / (local.get("picks", 0) + 4)
+
+        best = max(map(score, candidates))
+        code = secrets.choice([code for code in candidates if score(code) == best])
+        self._commit_bp_choice(kind, team, code, captain, candidates)
+
+    def _commit_bp_choice(self, kind, team, code, captain, candidates=None):
+        from wujiang.tactical.rooms.multiplayer import hero_lookup
+        if kind == "pick":
+            rules, allies, enemies = self._bp_context(team)
+            if not hasattr(self, "bp_choice_samples"):
+                self.bp_choice_samples = []
+            self.bp_choice_samples.append(dict(step=len(self.bp_actions), rules=rules, allies=allies,
+                                               enemies=enemies, eligible=candidates or self._bp_candidates(kind, team),
+                                               team=team, hero=code, user_id=captain.account_user_id))
+        self.bp_actions.append(dict(kind=kind, team_id=team, hero_code=code, level=int(hero_lookup()[code]["level"])))
 
     def _bp_phase(self) -> str:
         if self.status != "bp":
@@ -520,6 +583,7 @@ class RoomBPMixin:
         )
         if self.bp_format == BP_FORMAT_TIER:
             self._begin_tier_bp()
+            self._advance_bp_ai()
             return
         known = hero_lookup()
         self.bp_hero_pool = draw_bp_hero_pool(known)
@@ -530,12 +594,14 @@ class RoomBPMixin:
         self.bp_auto_banned_levels = secrets.choice(pairs)
         self.bp_special_modes = self._roll_bp_special_modes()
         self.bp_first_pick_team = secrets.choice(TEAM_IDS)
+        self.bp_choice_samples = []
         self.bp_actions = []
         self.bp_assignments = {}
         self.bp_assign_opened = False
         self.bp_team_ai = {1: True, 2: True}
         self.bp_tier_plan = []
         self.status = "bp"
+        self._advance_bp_ai()
 
 
     def _begin_tier_bp(self) -> None:
@@ -555,6 +621,7 @@ class RoomBPMixin:
         self.bp_auto_banned_levels = ()
         self.bp_hero_pool = ()
         self.bp_special_modes = self._roll_bp_special_modes()
+        self.bp_choice_samples = []
         self.bp_actions = []
         self.bp_assignments = {}
         self.bp_assign_opened = False
@@ -595,10 +662,7 @@ class RoomBPMixin:
 
 
     def bp_choose(self, token: str, hero_code: str) -> None:
-        from wujiang.tactical.rooms.multiplayer import (
-            RoomError,
-            hero_lookup,
-        )
+        from wujiang.tactical.rooms.multiplayer import RoomError
         with self._lock:
             seat = self.require_seat(token)
             if self.mode != "bp" or self.status != "bp":
@@ -612,9 +676,8 @@ class RoomBPMixin:
             error = self._bp_choice_error(kind, team, hero_code)
             if error is not None:
                 raise RoomError(error)
-            level = int(hero_lookup()[hero_code]["level"])
-            candidate = {"kind": kind, "team_id": team, "hero_code": hero_code, "level": level}
-            self.bp_actions.append(candidate)
+            self._commit_bp_choice(kind, team, hero_code, seat)
+            self._advance_bp_ai()
             self.touch()
 
 
@@ -690,7 +753,7 @@ class RoomBPMixin:
                 target.adjust_hero_count(code, 1)
 
 
-    def _bp_public_state(self) -> dict[str, Any]:
+    def _bp_public_state(self, *, with_rates=False, viewer=None) -> dict[str, Any]:
         from wujiang.tactical.rooms.multiplayer import (
             BP_FORMAT_NAMES,
             BP_FORMAT_TIER,
@@ -706,7 +769,16 @@ class RoomBPMixin:
         step = sequence[index] if index < len(sequence) else None
         known = hero_lookup()
         round_plan, round_number = self._bp_tier_round_at(index) if self.bp_format == BP_FORMAT_TIER else (None, None)
+        rates = {}
+        if with_rates and self.status == "bp" and step:
+            from wujiang.platform.http import runtime
+            team = step[1] if step[0] == "pick" else 3 - step[1]
+            context = self._bp_context(team)
+            rates["overall"] = runtime.MATCH_HISTORY_STORE.bp_rates(*context, fallback=True)
+            if viewer and viewer.account_user_id is not None:
+                rates["personal"] = runtime.MATCH_HISTORY_STORE.bp_rates(*context, user_id=viewer.account_user_id, fallback=True)
         return {
+            "rates": rates,
             "team_size": self.bp_team_size,
             "level_cap": self._bp_level_cap(),
             "level_caps": dict(self.bp_level_caps),

@@ -674,11 +674,10 @@ def post_rooms_set_seat_controller(ctx: RequestContext) -> None:
             error_payload["state"] = room.serialize_state(str(player_token or ""), base_url=request_base_url(handler))
         json_response(handler, HTTPStatus.BAD_REQUEST, error_payload)
         return
-    json_response(
-        handler,
-        HTTPStatus.OK,
-        room_state_with_strategy_sync(room, str(player_token or ""), base_url=request_base_url(handler)),
-    )
+    state = room_state_with_strategy_sync(room, str(player_token or ""), base_url=request_base_url(handler))
+    if payload.get("has_hero_catalog") is True and room.mode == "bp":
+        state.pop("heroes", None)
+    json_response(handler, HTTPStatus.OK, state)
     return
 
 

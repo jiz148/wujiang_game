@@ -75,6 +75,21 @@ class DamageProbeService:
         attack_power: float,
         area_cell_hits: int = 1,
     ) -> DamageImpact:
+        from wujiang.tactical.probe_reuse import cached_attack_probe
+        return cached_attack_probe(battle,actor,target,payload,attack_power,area_cell_hits,
+            lambda: DamageProbeService._probe_attack_damage_impact_original(battle,actor,target,payload,
+                attack_power=attack_power,area_cell_hits=area_cell_hits))
+
+    @staticmethod
+    def _probe_attack_damage_impact_original(
+        battle: Battle,
+        actor: Unit,
+        target: Unit,
+        payload: dict[str, Any],
+        *,
+        attack_power: float,
+        area_cell_hits: int = 1,
+    ) -> DamageImpact:
         resolved_payload = battle.resolved_basic_attack_payload(actor, payload)
         attack_tags = {"attack"}
         attack_tags.update(set(resolved_payload.get("attack_tags", [])))
@@ -108,7 +123,8 @@ class DamageProbeService:
             )
             battle.resolve_damage(damage_ctx)
             from wujiang.tactical.direct_expectation import damage_result
-            return DamageImpact(damage_result(damage_ctx, damage_ctx.actual_damage), DamageProbeService.unit_impact_signature(probe_target) != before)
+            return DamageImpact(damage_result(damage_ctx, damage_ctx.actual_damage),
+                                DamageProbeService.damage_changed_target(probe_target, before, damage_ctx))
 
     @staticmethod
     def probe_skill_damage_impact(
@@ -168,7 +184,8 @@ class DamageProbeService:
             if str(skill.code) in {"complete_burn", "blizzard"}:
                 skill.apply_followup_effect(battle, probe_target, damage_ctx)
             from wujiang.tactical.direct_expectation import damage_result
-            return DamageImpact(damage_result(damage_ctx, damage_ctx.damage), DamageProbeService.unit_impact_signature(probe_target) != before)
+            return DamageImpact(damage_result(damage_ctx, damage_ctx.damage),
+                                DamageProbeService.damage_changed_target(probe_target, before, damage_ctx))
 
     @staticmethod
     def probe_skill_raw_damage_impact(
@@ -211,7 +228,8 @@ class DamageProbeService:
             )
             battle.resolve_damage(damage_ctx)
             from wujiang.tactical.direct_expectation import damage_result
-            return DamageImpact(damage_result(damage_ctx, damage_ctx.damage), DamageProbeService.unit_impact_signature(probe_target) != before)
+            return DamageImpact(damage_result(damage_ctx, damage_ctx.damage),
+                                DamageProbeService.damage_changed_target(probe_target, before, damage_ctx))
 
     @staticmethod
     @expected_numeric(independent=True, boolean=True)
@@ -269,6 +287,15 @@ class DamageProbeService:
             unit.cannot_use_skills,
             tuple(DamageProbeService.status_impact_signature(status) for status in unit.statuses),
         )
+
+    @staticmethod
+    def damage_changed_target(unit: Unit, before: tuple[Any, ...], ctx: DamageContext) -> bool:
+        if DamageProbeService.unit_impact_signature(unit) != before:
+            return True
+        if not ctx.modifier_receipts:
+            return False
+        return any(component.ai_damage_impact_without_hp_loss(ctx)
+                   for component in unit.iter_components())
 
     @staticmethod
     def status_impact_signature(status: Any) -> tuple[Any, ...]:

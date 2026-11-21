@@ -301,18 +301,6 @@ class BattleLifecycleMixin:
             if callable(hook):
                 hook(self)
         while True:
-            dead_ids = {unit.unit_id for unit in self.all_units() if not unit.alive}
-            chained_summons = [
-                unit
-                for unit in self.all_units()
-                if unit.alive and unit.summoner_id in dead_ids
-            ]
-            if not chained_summons:
-                break
-            for summon in chained_summons:
-                summon.alive = False
-                self.log(f"{summon.name} \u7684\u53ec\u5524\u8005\u5df2\u88ab\u51fb\u7834\uff0c\u56e0\u6b64\u4e00\u5e76\u6d88\u6563\u3002")
-        while True:
             # A death callback may deal damage and enter cleanup again. Its
             # owner is still registered until remove_unit returns; the nested
             # pass must leave that corpse to the outer pass.
@@ -322,13 +310,23 @@ class BattleLifecycleMixin:
                 break
             for unit in dead_units:
                 self.capture_destruction_position(unit)
+                if unit.alive:
+                    continue
                 if unit.unit_id not in {destroyed.unit_id for destroyed in self.destroyed_units}:
                     self.destroyed_units.append(unit)
                 self.remove_unit(unit)
+                source_unit_id = getattr(unit, "_last_destroying_source_unit_id", None)
+                for effect in list(self.field_effects):
+                    effect.on_unit_destruction_finalized(self, unit, source_unit_id)
+                for observer in list(self.all_units()):
+                    for component in list(observer.iter_components()):
+                        component.on_unit_destruction_finalized(self, unit, source_unit_id)
             # Death traits can destroy additional units. Resolve their real
             # deaths and dependent summons before judging victory.
+            finalized_dead_ids = {body.unit_id for body in dead_units
+                                  if not body.alive and body.unit_id not in self.units}
             chained_summons = [unit for unit in self.all_units()
-                               if unit.alive and unit.summoner_id in {body.unit_id for body in dead_units}]
+                               if unit.alive and unit.summoner_id in finalized_dead_ids]
             for summon in chained_summons:
                 summon.alive = False
                 self.log(f"{summon.name} 的召唤者已被击破，因此一并消散。")
@@ -440,6 +438,10 @@ class BattleLifecycleMixin:
         if (forecasting_active() and getattr(self, "_ai_has_unseen_enemies", False)
                 and alive_players == {getattr(self, "_ai_view_player_id", None)}):
             return  # Unseen enemies omitted from scoring are not a public win.
+        if len(alive_players) == 1:
+            eliminated = ({1, 2} - alive_players).pop()
+            if any(effect.delays_elimination(self, eliminated) for effect in self.field_effects):
+                return
         if len(alive_players) == 1 and self.units:
             self.winner = alive_players.pop()
             losing_player = 2 if self.winner == 1 else 1

@@ -35,7 +35,7 @@ class GreatUnicornSummon(AbstractHero):
     attribute = "光"
     race = "兽"
     level = 1
-    base_stats = Stats(attack=4, defense=6, speed=5, attack_range=1, mana=0)
+    base_stats = Stats(attack=4, defense=5, speed=5, attack_range=1, mana=0)
     footprint_width = 1
     footprint_height = 2
     raw_skill_text = ""
@@ -117,7 +117,7 @@ class GreatUnicornSkill(Skill):
         super().__init__(
             "summon_great_unicorn",
             "大独角兽",
-            "普通技能：召唤并乘骑自己的大独角兽（攻4守6速5范1；1*2；普攻破魔）。",
+            "普通技能：召唤并乘骑自己的大独角兽（攻4守5速5范1；1*2；普攻破魔）。",
             target_mode="self",
         )
 
@@ -161,20 +161,13 @@ class AaronDestroyedSummonBoostStatus(StatModifierStatus):
     def __init__(self) -> None:
         super().__init__(
             "独角兽遗辉",
-            attack_delta=2,
-            defense_delta=2,
-            speed_delta=2,
-            description="召唤物被破坏后的下个回合：攻守速 +2，血魔已补满，主动技能不费魔。",
+            attack_delta=1,
+            defense_delta=1,
+            speed_delta=1,
+            description="召唤物被破坏后的下个进攻回合：攻守速 +1。",
             duration=1,
             tick_scope="owner_turn_end",
         )
-
-    def modify_skill_mana_cost(self, battle: Battle, actor: HeroUnit, skill: Skill, payload: dict[str, Any] | None, cost: float) -> float:
-        owner = self.owner
-        if owner is not None and actor.unit_id == owner.unit_id:
-            return 0.0
-        return cost
-
 
 class AaronDestroyedSummonPendingStatus(StatusEffect):
     def __init__(self) -> None:
@@ -183,7 +176,14 @@ class AaronDestroyedSummonPendingStatus(StatusEffect):
 
 class MorningHolyLightSkill(Skill):
     def ai_damage_target_score(self, target: Unit, hostile_value: float) -> float:
-        damage = min(5.0, target.current_hp) * 100.0 if target.attribute == "暗" else 0.0
+        damage = 0.0
+        owner = self.owner
+        battle_ref = getattr(owner, "_battle_ref", None)
+        battle = battle_ref() if battle_ref is not None else None
+        if target.attribute == "暗" and owner is not None and battle is not None:
+            predicted = battle.damage_rule.calculate_damage(
+                owner.stat("attack") + 1, target.stat("defense"))
+            damage = min(target.current_hp, target.damage_fraction_after_limits(predicted)) * 100.0
         return damage + hostile_value * 0.5
 
     def ai_control_bonus(self, context: AISkillScoreContext, targets: list[Unit]) -> float:
@@ -198,7 +198,7 @@ class MorningHolyLightSkill(Skill):
         super().__init__(
             "morning_holy_light",
             "晨曦圣光",
-            "普通技能：费 1.5 魔，每回合最多 1 次；远程 5*10 或 10*5；破魔；无伤害；命中单位 2 轮不能使用被动技能，暗属性单位额外受到 5 点伤害。",
+            "普通技能：费 1.5 魔，每回合最多 1 次；远程 5*10 或 10*5；破魔；通常无伤害；命中单位 2 轮不能使用被动技能，暗属性单位受到一次普通公式伤害。",
             mana_cost=1.5,
             max_uses_per_turn=1,
             target_mode="cell",
@@ -249,7 +249,7 @@ class MorningHolyLightSkill(Skill):
                     DamageContext(
                         source=actor,
                         target=target,
-                        attack_power=5,
+                        attack_power=actor.stat("attack"),
                         is_skill=True,
                         action_name=self.name,
                         ignore_shield=True,
@@ -294,16 +294,11 @@ class AaronLightAuraTrait(Trait):
         pending = owner.get_status("独角兽遗辉待生效")
         if pending is not None:
             owner.remove_status(pending, battle)
-            recipient = battle.effect_recipient(owner)
-            battle.heal(HealContext(source=owner, target=owner,
-                                    amount=max(0.0, recipient.max_health - recipient.current_hp),
-                                    action_name="独角兽遗辉"))
-            owner.gain_mana(max(0.0, owner.max_mana() - owner.current_mana))
             old_boost = owner.get_status("独角兽遗辉")
             if old_boost is not None:
                 owner.remove_status(old_boost, battle)
             owner.add_status(AaronDestroyedSummonBoostStatus())
-            battle.log(f"{owner.name} 在本回合获得【独角兽遗辉】：攻守速 +2、血魔补满、使用技能不费魔。")
+            battle.log(f"{owner.name} 在本回合获得【独角兽遗辉】：攻守速 +1。")
         cells = square_around_cells(battle, battle.unit_cells(owner), radius=3)
         for unit in battle.effect_units_at_cells(cells):
             battle.heal(HealContext(source=owner, target=unit, amount=0.25, action_name="晨曦光环"))

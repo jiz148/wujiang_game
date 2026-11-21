@@ -202,8 +202,6 @@ class BattleReactionMixin:
                 candidate_ids.append(unit.unit_id)
                 candidates_by_id[unit.unit_id] = unit
                 options_by_unit[unit.unit_id] = options
-        if not candidate_ids:
-            return None
         if forecasting_active():
             # Full-AI rules score under the public "opponent does not chain"
             # assumption. Window display order contributes no outcome utility;
@@ -216,8 +214,27 @@ class BattleReactionMixin:
                 0.5 if forecasting_active() else random.random(),
             )
         )
+        # Some instant skills react to an enemy *receiving* the source side's
+        # damage. Keep the defensive choices first, then expose only the
+        # source-side skills that explicitly opt into this shared window.
+        source_side_ids: list[str] = []
+        for unit in self.player_units(queued_action.source_player_id):
+            if unit.unit_id in candidate_ids or not unit.alive or unit.banished or unit.position is None:
+                continue
+            source_options = [option for option in self.available_reaction_options(unit, queued_action)
+                              if option.action_type == "skill" and getattr(
+                                  unit.skill_map().get(option.action_code), "source_side_reaction", False)]
+            if source_options:
+                source_side_ids.append(unit.unit_id)
+                candidates_by_id[unit.unit_id] = unit
+                options_by_unit[unit.unit_id] = source_options
+        source_side_ids.sort(key=lambda unit_id: (-float(self.units[unit_id].stat("speed")),
+                                                   -int(self.units[unit_id].level), unit_id))
+        candidate_ids.extend(source_side_ids)
+        if not candidate_ids:
+            return None
         return ReactionWindow(
-            reactive_player_id=reactive_player_id,
+            reactive_player_id=candidates_by_id[candidate_ids[0]].player_id,
             queued_action=queued_action,
             pending_reactor_ids=candidate_ids,
             options_by_unit=options_by_unit,
@@ -324,5 +341,8 @@ class BattleReactionMixin:
             self.pending_chain.pending_reactor_ids.pop(0)
         if not self.pending_chain.pending_reactor_ids:
             self.finalize_reaction_window()
+        else:
+            next_unit = self.get_unit(self.pending_chain.pending_reactor_ids[0])
+            self.pending_chain.reactive_player_id = next_unit.player_id
 
 

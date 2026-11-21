@@ -24,7 +24,47 @@ function teamName(team) {
   return Number(team) === 1 ? '红队' : '蓝队';
 }
 
-function createHeroDetails() {
+let personalRates = false;
+let heatVisible = false;
+
+function selectedRates(bp) {
+  return (personalRates && bp.rates?.personal ? bp.rates.personal : bp.rates?.overall) || {};
+}
+
+function rateText(numerator, denominator) {
+  return denominator ? `${(100 * numerator / denominator).toFixed(1)}%` : "—";
+}
+
+const rateScope = {lineup: "双方阵容相同", format: "同赛制综合"};
+
+function rateControls(bp) {
+  const bar = element("div", "", "bp-rate-controls");
+  const addSwitch = (text, checked, change, disabled = false) => {
+    const label = element("label", "", "switch");
+    const input = element("input", "");
+    input.type = "checkbox";
+    input.setAttribute("role", "switch");
+    input.checked = checked;
+    input.disabled = disabled;
+    input.addEventListener("change", () => {
+      change(input.checked);
+      renderBpPanel();
+      $('bp-panel').querySelector?.(`[aria-label="${text}"]`)?.focus();
+    });
+    input.setAttribute("aria-label", text);
+    label.append(input, element("span", "", "switch__track"), element("span", text, "switch__text"));
+    bar.append(label);
+  };
+  const personalAvailable = Boolean(bp.rates?.personal);
+  addSwitch("仅看我的 BP", personalAvailable && personalRates, value => { personalRates = value; }, !personalAvailable);
+  addSwitch("显示热度", heatVisible, value => { heatVisible = value; });
+  const side = bp.current_kind === "ban" ? "对手选取" : "当前方选取";
+  const coverage = Object.keys(selectedRates(bp)).length ? "" : " · 暂无样本";
+  bar.append(element("small", `${side} · 跨特殊规则统计，优先匹配当前阵容${coverage}${heatVisible ? " · 蓝色越深热度越高" : ""}`));
+  return bar;
+}
+
+function createHeroDetails(bp) {
   const panel = element('aside', '', 'bp-hero-details');
   panel.dataset.bpHeroDetails = 'true';
   panel.setAttribute('aria-label', '武将信息');
@@ -43,6 +83,14 @@ function createHeroDetails() {
     activeAnchor = anchor;
     panel.classList.add("has-hero");
     renderHeroDetails(body, hero);
+    if (bp.phase === "draft") {
+      const row = selectedRates(bp)[hero.code] || {};
+      const metrics = element("div", "", "bp-hero-rates");
+      metrics.append(element("strong", `选取率 ${rateText(row.picks, row.available)}`),
+        element("strong", `胜率 ${rateText(row.wins, row.picks)}`),
+        element("small", row.available ? `${rateScope[row.scope] || rateScope.lineup} · 可选 ${row.available} 次 · 选取 ${row.picks} 次 · 获胜 ${row.wins} 次` : "当前条件暂无样本"));
+      body.append(metrics);
+    }
   };
   const bind = (anchor, heroOrGetter) => {
     const reveal = () => show(anchor, typeof heroOrGetter === 'function' ? heroOrGetter() : heroOrGetter);
@@ -200,6 +248,15 @@ function heroBoard(bp, details, commit) {
       const cell = element("button", hero.name, `bp-cell ${tone}${hero.code === selectedHeroCode ? " is-selected" : ""}`);
       cell.type = "button";
       cell.dataset.code = hero.code;
+      const stat = selectedRates(bp)[hero.code];
+      if (stat?.available) {
+        cell.append(element("small", `选 ${rateText(stat.picks, stat.available)} · 胜 ${rateText(stat.wins, stat.picks)}`, "bp-cell__rates"));
+        cell.append(element("small", rateScope[stat.scope] || rateScope.lineup, "bp-cell__rates"));
+      }
+      if (heatVisible && stat?.picks && legal(hero) && tone !== "is-picked") {
+        const intensity = (stat.picks / stat.available + stat.wins / stat.picks) / 2;
+        cell.classList.add(`bp-heat-${Math.min(3, Math.floor(4 * intensity))}`);
+      }
       cell.addEventListener("click", () => {
         const alreadyOpen = selectedHeroCode === hero.code && details.panel.classList.contains("has-hero");
         if (alreadyOpen) {
@@ -302,6 +359,7 @@ function renderDraftStage(panel, bp, seats, details) {
   }
   const layout = element("div", "", "bp-layout");
   const board = element("div", "", "bp-board");
+  if (!reviewing) board.append(rateControls(bp));
   board.append(heroBoard(bp, details, reviewing ? null : commit));
   layout.append(sideColumn(1, bp, seats, details), board, sideColumn(2, bp, seats, details));
   const opened = heroByCode(selectedHeroCode);
@@ -400,6 +458,7 @@ export function renderBpPanel() {
     bp.wins,
     bp.hero_pool_codes,
     bp.special_modes,
+    bp.rates, personalRates, heatVisible,
     (room.seats || []).map((seat) => [seat.player_id, seat.name, seat.team_id]),
   ]);
   if (panel.dataset.bpPhaseKey === phaseKey) return;
@@ -411,6 +470,6 @@ export function renderBpPanel() {
     renderAssign(panel, bp, seats);
     return;
   }
-  const details = createHeroDetails();
+  const details = createHeroDetails(bp);
   renderDraftStage(panel, bp, seats, details);
 }

@@ -203,15 +203,15 @@ class RoomSimulationMixin:
         try:
             self._perform_battle_action(choose_damage_choice_action(self.battle), reason="ai_damage_choice")
         except Exception as error:
+            # A post-commit reporting error must not replay an already accepted
+            # action or accidentally answer the next choice with a fallback.
+            if self.last_action_id != action_id and isinstance(error, ActionError):
+                return  # The choice was committed; a queued action may have fizzled.
             _LOGGER.exception("AI damage choice failed: room=%s match=%s turn=%s slot=%s kind=%s event=%s",
                               self.room_id, self.current_match_id, self.battle.turn_number,
                               self.battle.active_turn_unit_id, prompt.get("kind"),
                               prompt.get("event_index"))
-            # A post-commit reporting error must not replay an already accepted
-            # action or accidentally answer the next choice with a fallback.
             if self.last_action_id != action_id:
-                if isinstance(error, ActionError):
-                    return  # The accepted action only reported a stale actor.
                 raise
             if self.battle.pending_damage_choice is None:
                 raise

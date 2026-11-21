@@ -44,6 +44,15 @@ export function manaPipsMarkup(unit) {
   return pips.join("");
 }
 
+export function statusEffectLabel(status) {
+  const effect = String(status.description || "").trim().replace(/[。；]+$/, "");
+  const remaining = status.remaining_enemy_ends != null
+    ? `剩余${status.remaining_enemy_ends}个敌方回合末`
+    : status.duration ? `剩余${status.duration}轮` : "";
+  const details = [effect, remaining].filter(Boolean).join("；");
+  return `${status.name}${details ? `（${details}）` : ""}`;
+}
+
 export function unitStatusSummary(unit) {
   const entries = [];
   if (!unit) return entries;
@@ -56,12 +65,7 @@ export function unitStatusSummary(unit) {
   if (unit.dodge_charges) {
     entries.push(`回避 ${unit.dodge_charges}`);
   }
-  unit.statuses.forEach((status) => {
-    const remaining = status.remaining_enemy_ends != null
-      ? `(${status.remaining_enemy_ends}个敌方回合末)`
-      : status.duration ? `(${status.duration})` : "";
-    entries.push(`${status.name}${remaining}`);
-  });
+  unit.statuses.forEach((status) => entries.push(statusEffectLabel(status)));
   return entries;
 }
 
@@ -312,6 +316,20 @@ export function displayActions() {
         { code: "damage_rotation_decline", name: "保持位置", kind: "damage_choice",
           target_unit_id: "decline", timing: "reaction", available: true,
           description: "放弃这次战斗轮转。",
+          preview: { cells: [], target_unit_ids: [], requires_target: false } },
+      ];
+    }
+    if (prompt.kind === "optional_skill_use") {
+      return [
+        ...(prompt.options || []).map((option) => ({
+          code: `optional_skill_${option}`, name: `使用${prompt.action_name || "随时技能"}`,
+          kind: "damage_choice", target_unit_id: option, timing: "reaction", available: true,
+          description: "在当前回合结束窗口发动技能。",
+          preview: { cells: [], target_unit_ids: [], requires_target: false },
+        })),
+        { code: "optional_skill_decline", name: "暂不使用", kind: "damage_choice",
+          target_unit_id: "decline", timing: "reaction", available: true,
+          description: "保留这次技能使用权。",
           preview: { cells: [], target_unit_ids: [], requires_target: false } },
       ];
     }

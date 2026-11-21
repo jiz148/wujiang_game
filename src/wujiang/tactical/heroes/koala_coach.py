@@ -67,40 +67,34 @@ class KoalaLargeLeapSkill(DashMoveSkill):
 
 
 class KoalaAngryTableField(BattleFieldEffect):
-    """Live aura: one stack per completed basic attack, never per hit target."""
+    """A fixed group gains attack when one of its members finishes an attack."""
 
-    def __init__(self, source_unit_id: str, source_player_id: int) -> None:
-        super().__init__("愤怒掀桌！", "本回合附近己方每完成一次普攻，附近己方攻+1。", duration=1)
+    def __init__(self, source_unit_id: str, recipient_ids: set[str]) -> None:
+        super().__init__("愤怒掀桌！", "周围5*5己方单位一轮内每攻击一次，受益单位攻+1。", duration=2)
         self.source_unit_id = source_unit_id
-        self.source_player_id = source_player_id
+        self.recipient_ids = recipient_ids
         self.stacks = 0
 
-    def _source(self, battle: Battle) -> Unit | None:
-        source = battle.units.get(self.source_unit_id)
-        return source if _present(source) else None
-
     def affected_cells(self, battle: Battle) -> list[Position]:
-        source = self._source(battle)
-        return _aura_cells(battle, source) if source is not None else []
+        return [cell for unit_id in self.recipient_ids
+                if (unit := battle.units.get(unit_id)) is not None and _present(unit)
+                for cell in battle.unit_cells(unit)]
 
     def modify_unit_stat(self, battle: Battle, unit: Unit,
                          stat_name: str, value: float) -> float:
-        source = self._source(battle)
-        if (stat_name == "attack" and self.stacks and source is not None
-                and unit.player_id == self.source_player_id
-                and _within_aura(battle, source, unit)):
+        if (stat_name == "attack" and self.stacks
+                and unit.unit_id in self.recipient_ids):
             return value + self.stacks
         return value
 
     def on_basic_attack_finished(self, battle: Battle, actor: Unit,
                                  payload: dict[str, Any], damage_contexts: list[DamageContext],
                                  missed: bool) -> None:
-        source = self._source(battle)
-        if source is None or actor.player_id != self.source_player_id or not _within_aura(battle, source, actor):
+        if actor.unit_id not in self.recipient_ids:
             return
         self.stacks += 1
         battle.log_public_event(f"{actor.name} 的普攻令【愤怒掀桌！】叠至{self.stacks}层。",
-                                source=actor, target=source)
+                                source=actor)
 
     def to_public_dict(self, battle: Battle) -> dict[str, Any]:
         data = super().to_public_dict(battle)
@@ -114,11 +108,13 @@ class KoalaAngryTableSkill(Skill):
 
     def __init__(self) -> None:
         super().__init__("koala_angry_table", "愤怒掀桌！",
-                         "每本人轮一次；本回合附近己方每完成一次普攻，附近己方攻+1。",
+                         "每本人轮一次；周围5*5的己方单位（含自身）一轮内每攻击一次，受益单位攻+1。",
                          max_uses_per_turn=1, target_mode="self")
 
     def execute(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> None:
-        battle.add_field_effect(KoalaAngryTableField(actor.unit_id, actor.player_id), source=actor)
+        recipients = {unit.unit_id for unit in battle.player_units(actor.player_id)
+                      if _within_aura(battle, actor, unit)}
+        battle.add_field_effect(KoalaAngryTableField(actor.unit_id, recipients), source=actor)
         battle.log_public_event(f"{actor.name} 发动【愤怒掀桌！】。", source=actor)
 
     def ai_payload_candidates(self, battle: Battle, actor: Unit,

@@ -27,7 +27,8 @@ def record_finished_room_history(room) -> bool:
                 "result": "win" if seat.team_id == winner_team_id else "loss",
             },
         )
-    if not participants_by_user:
+    bp_choices = getattr(room, "bp_choice_samples", ()) if room.mode == "bp" else ()
+    if not participants_by_user and not bp_choices:
         return False
     summary = room.serialize_summary()
     postgame = dict(summary.get("postgame") or {})
@@ -41,6 +42,7 @@ def record_finished_room_history(room) -> bool:
     return runtime.MATCH_HISTORY_STORE.record_match(
         match={
             "match_id": match_id,
+            "bp_choices": bp_choices,
             "room_id": room.room_id,
             "mode": room.mode,
             "mode_name": summary.get("mode_name"),

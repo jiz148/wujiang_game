@@ -107,6 +107,24 @@ def choose_chain_reaction(
                            "target_unit_ids": [target_id]}
                 if reactor.get_skill(code).can_react_with_payload(battle, reactor, queued, payload)[0]:
                     return payload
+    queued = battle.pending_chain.queued_action if battle.pending_chain is not None else None
+    if queued is not None and not queued.payload.get("ignore_shield"):
+        affected_ids = set(queued.target_unit_ids)
+        affected_ids.update(unit.unit_id for unit in battle.effect_units_at_cells(queued.target_cells))
+        for option in options:
+            code = str(option.get("action_code") or "")
+            skill = next((item for item in reactor.skills if item.code == code), None)
+            if not getattr(skill, "ai_reaction_shield", False):
+                continue
+            preview = option.get("preview") or {}
+            target_id = next((str(item) for item in preview.get("target_unit_ids", [])
+                              if str(item) in affected_ids), None)
+            if target_id is None:
+                continue
+            payload = {"type": "chain_react", "unit_id": reactor.unit_id,
+                       "action_code": code, "target_unit_ids": [target_id]}
+            if skill.can_react_with_payload(battle, reactor, queued, payload)[0]:
+                return payload
     return {"type": "chain_skip"}
 
 
@@ -408,6 +426,11 @@ def _move_payload(battle: Battle, actor: Unit, snapshot: dict[str, Any]) -> Opti
             break
     if not cells:
         return None
+    owned_move = getattr(getattr(actor, "ai_policy", None), "lightweight_normal_move_payload", None)
+    if callable(owned_move):
+        owned = owned_move(battle, actor, cells)
+        if owned is not None:
+            return owned
     chosen = _shortlist(battle, actor, cells)[0]
     return {"type": "move", "unit_id": actor.unit_id, "x": chosen.x, "y": chosen.y}
 

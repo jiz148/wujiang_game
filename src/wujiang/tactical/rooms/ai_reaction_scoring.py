@@ -97,6 +97,18 @@ class AIReactionScoring:
         reaction_policy = getattr(reactor, "ai_policy", None)
         reaction_skill = next((skill for skill in reactor.skills if skill.code == code), None)
         skill_scorer = getattr(reaction_skill, "ai_reaction_score", None)
+        is_shield_reaction = (code in self.services.REACTION_SHIELD_CODES
+                              or bool(getattr(reaction_skill, "ai_reaction_shield", False)))
+        if is_shield_reaction and battle.pending_chain is not None \
+                and battle.pending_chain.chosen_reactions:
+            target_ids = battle.payload_target_unit_ids(payload)
+            targets = [battle.units[unit_id] for unit_id in target_ids if unit_id in battle.units]
+            if not targets:
+                proxy = battle.reaction_proxy_target(reactor, queued_action)
+                targets = [proxy] if proxy is not None else []
+            if targets and all(self.services._SHARED_REACTION_SCORING.remaining_loss(
+                    battle, target, queued_action) <= 0 for target in targets):
+                return -1000.0
 
         def object_reaction_score(phase: str) -> float | None:
             if (reaction_policy is not None and reaction_policy.reaction_score_phase == phase
@@ -118,7 +130,7 @@ class AIReactionScoring:
         if selected is not None:
             return selected
         if forecasting_active() and queued_action.actor_id not in battle.units:
-            if code not in self.services.REACTION_SHIELD_CODES | {"block", "counter", "evasion", "natsume_wind_wall"}:
+            if not is_shield_reaction and code not in {"block", "counter", "evasion", "natsume_wind_wall"}:
                 return -1000.0
             threat = self.services.incoming_threat_score(battle, reactor, queued_action)
             if threat <= 0:
@@ -135,7 +147,7 @@ class AIReactionScoring:
             return self.services._FREE_REACTION_SCORING.score(AIReactionScoreContext(
                 battle, reactor, queued_action, option, payload, profile,
                 self.services._SHARED_REACTION_SCORING))
-        if code in self.services.REACTION_SHIELD_CODES:
+        if is_shield_reaction:
             return self.services._SHIELD_REACTION_SCORING.score(AIReactionScoreContext(
                 battle, reactor, queued_action, option, payload, profile,
                 self.services._SHARED_REACTION_SCORING))
@@ -147,7 +159,7 @@ class AIReactionScoring:
         reactor: Unit,
         queued_action: QueuedAction,
     ) -> float:
-        before = self.services.incoming_threat_score(battle, reactor, queued_action)
+        before = self.services._SHARED_REACTION_SCORING.remaining_loss(battle, reactor, queued_action)
         with ai_probe_rollback(battle):
             probe_reactor = battle.get_unit(reactor.unit_id)
             probe_reactor.add_status(
@@ -158,7 +170,8 @@ class AIReactionScoring:
                     expire_with_chain=True,
                 )
             )
-            after = self.services.incoming_threat_score(battle, probe_reactor, queued_action)
+            after = self.services._SHARED_REACTION_SCORING.remaining_loss(
+                battle, probe_reactor, queued_action)
         return max(0.0, before - after)
 
 

@@ -752,9 +752,10 @@ class AncientArmSkill(RemoteDragonBreathSkill):
         super().__init__()
         self.code = "ancient_arm"
         self.name = "机械臂"
-        self.description = "每本人回合一次；范5的2×2区域按当前攻伤双方，命中护盾时半破魔。"
+        self.description = "2轮一次；范5的2×2区域按当前攻伤双方，命中护盾时半破魔。"
         self.mana_cost = 0
-        self.max_uses_per_turn = 1
+        self.max_uses_per_turn = None
+        self.cooldown_turns = 2
 
     def patterns(self, battle: Battle, actor: Unit) -> list[list[Position]]:
         return remote_rectangle_patterns(battle, actor, 2, 2, attack_range=5)
@@ -800,8 +801,8 @@ class AncientVigorSkill(Skill):
             movement = context.move_score(destination, style) - context.move_score(actor.position, style)
         return restored * (260.0 if actor.current_hp <= 0.5 else 175.0) + movement - 8.0
     def __init__(self) -> None:
-        super().__init__("ancient_vigor", "活力锈迹", "每本人回合一次；先回血1/4，实得回血后可沿直线恰好移动4格。",
-                         max_uses_per_turn=1, target_mode="cell")
+        super().__init__("ancient_vigor", "活力锈迹", "2轮一次；先回血1/4，实得回血后可沿直线恰好移动4格。",
+                         cooldown_turns=2, target_mode="cell")
 
     def destinations(self, battle: Battle, actor: Unit) -> list[Position]:
         if actor.position is None or actor.cannot_move:

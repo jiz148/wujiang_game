@@ -1,10 +1,13 @@
 """Electronic teleport, satellite cannon, and wing movement."""
 
 from __future__ import annotations
+from wujiang.tactical.settlement_reuse import AreaDamageSpec, independent_area_skill
 
 from wujiang.tactical.heroes.ai_candidate_plan import DAMAGE_DEDUPED_RANKED_CANDIDATES
 
 from typing import Any
+import os
+from wujiang.tactical.engine.geometry import clipped_rectangle_coordinates
 from wujiang.tactical.engine.core import ActionError
 from wujiang.tactical.engine.core import Battle
 from wujiang.tactical.engine.core import Position
@@ -13,6 +16,7 @@ from wujiang.tactical.engine.core import Trait
 from wujiang.tactical.engine.core import Unit
 from wujiang.tactical.heroes.ai_policy import AISkillScoreContext
 from wujiang.tactical.heroes.common import match_payload_pattern
+from wujiang.tactical.heroes.common import payload_cells, pattern_signature
 from wujiang.tactical.heroes.common import pattern_selection_preview
 from wujiang.tactical.heroes.common import positions_to_dict
 
@@ -62,7 +66,61 @@ class ElectronicDragonTeleportTrait(Trait):
         return True
 
 
+@independent_area_skill('r23')
 class SatelliteCannonSkill(Skill):
+    ai_payload_value_owned = True
+
+    def ai_payload_value(self, battle: Battle, actor: Unit, payload: dict[str, Any]) -> float:
+        try:
+            cells = self.chosen_cells(battle, payload)
+        except (ActionError, KeyError, TypeError, ValueError):
+            return -1000.0
+        score = -8.0
+        for target in battle.effect_units_at_cells(cells):
+            if target.magic_immunity:
+                continue
+            power = actor.stat("attack") + max(0, battle.unit_hit_count_for_cells(target, cells) - 1)
+            damage = min(target.current_hp, max(0.0, battle.damage_rule.calculate_damage(
+                power, target.stat("defense"))))
+            impact = damage * 100.0 + (20.0 if target.total_shields() > 0 else 0.0)
+            score += impact if target.player_id != actor.player_id else -impact * 1.6
+        return score
+
+    def ai_payload_candidates(self, battle: Battle, actor: Unit,
+                              action: dict[str, Any]) -> list[dict[str, Any]]:
+        ranked = []
+        for cells in self.patterns(battle):
+            payload = {"type": "skill", "unit_id": actor.unit_id,
+                       "skill_code": self.code, "cells": positions_to_dict(cells)}
+            value = self.ai_payload_value(battle, actor, payload)
+            if value > 0:
+                ranked.append((value, payload))
+        ranked.sort(key=lambda entry: entry[0], reverse=True)
+        return [payload for _, payload in ranked[:8]]
+
+    def ai_effective_enemy_impact(self, battle: Battle, actor: Unit,
+                                  payload: dict[str, Any], targets: list[Unit] | None = None,
+                                  shared: Any = None, action: dict[str, Any] | None = None) -> bool:
+        try:
+            cells = self.chosen_cells(battle, payload)
+        except (ActionError, KeyError, TypeError, ValueError):
+            return False
+        for target in battle.effect_units_at_cells(cells):
+            if target.player_id == actor.player_id or target.magic_immunity:
+                continue
+            power = actor.stat("attack") + max(0, battle.unit_hit_count_for_cells(target, cells) - 1)
+            if target.total_shields() > 0 or target.dodge_charges > 0 or battle.damage_rule.calculate_damage(
+                    power, target.stat("defense")) > 0:
+                return True
+        return False
+
+    def ai_direct_area_patterns(self, battle: Battle, actor: Unit):
+        return self.patterns(battle)
+
+    def ai_direct_area_spec(self, battle: Battle, actor: Unit, payload: dict[str, Any], cells=None) -> AreaDamageSpec:
+        return AreaDamageSpec(cells if cells is not None else tuple(self.chosen_cells(battle, payload)),
+            {'attack_power':actor.stat('attack'),'is_skill':True,'action_name':self.name,
+             'tags':{'skill',self.code}})
     ai_candidate_plan = DAMAGE_DEDUPED_RANKED_CANDIDATES
     target_cells_are_geometry_only = True
 
@@ -75,6 +133,10 @@ class SatelliteCannonSkill(Skill):
                          max_uses_per_turn=1, target_mode="cell")
 
     def patterns(self, battle: Battle) -> list[list[Position]]:
+        coordinates = (clipped_rectangle_coordinates(battle.width, battle.height, 3, 3)
+                       if os.environ.get('WUJIANG_AI_FIXED_GEOMETRY', '1') != '0' else None)
+        if coordinates is not None:
+            return [[Position(x, y) for x, y in row] for row in coordinates]
         patterns: dict[tuple[Position, ...], list[Position]] = {}
         for start_y in range(-2, battle.height):
             for start_x in range(-2, battle.width):
@@ -88,6 +150,15 @@ class SatelliteCannonSkill(Skill):
     def chosen_cells(self, battle: Battle, payload: dict[str, Any]) -> list[Position]:
         if payload.get("queued_resolution") and payload.get("satellite_cells"):
             return [Position(**cell) for cell in payload["satellite_cells"]]
+        if (getattr(self.patterns, '__func__', None) is _SATELLITE_PATTERNS[0]
+                and _SATELLITE_PATTERNS[0].__code__ is _SATELLITE_PATTERNS[1]
+                and os.environ.get('WUJIANG_AI_FIXED_GEOMETRY', '1') != '0'):
+            key = pattern_signature(payload_cells(payload))
+            coordinates = clipped_rectangle_coordinates(battle.width, battle.height, 3, 3, selection=key)
+            if coordinates is not None:
+                if not coordinates:
+                    raise ActionError('所选格子不符合该技能的形状要求。')
+                return [Position(x, y) for x, y in coordinates]
         return match_payload_pattern(payload, self.patterns(battle))
 
     def can_use(self, battle: Battle, actor: Unit, payload: dict[str, Any] | None = None) -> tuple[bool, str]:
@@ -123,6 +194,9 @@ class SatelliteCannonSkill(Skill):
             if battle.unit_can_be_selected(unit, actor=actor)[0])),
             "secondary_cells": [], "requires_target": True})
         return result
+
+
+_SATELLITE_PATTERNS = SatelliteCannonSkill.patterns, SatelliteCannonSkill.patterns.__code__
 
 
 class ElectronicWingMovementTrait(Trait):

@@ -73,7 +73,7 @@ SELF_BUFF_SKILL_CODES = {
     "beetle_full_force",
     "tianyuan",
 }
-MOVE_SKILL_CODES = {"leap", "fly_leap", "fate_kick", "crazy_sand", "plasma_thruster", "mounted_leap", "jirobo_follow_step"}
+MOVE_SKILL_CODES = {"leap", "fly_leap", "chess_synergy_leap", "fate_kick", "crazy_sand", "plasma_thruster", "mounted_leap", "jirobo_follow_step"}
 MOVE_SKILL_CODES |= {"zero_dash", "fuma_pursuit", "true_blade_air_slash"}
 MOVE_SKILL_CODES.update({"iron_chain_path", "ghost_step", "frey_quick_flash"})
 MOVE_SKILL_CODES.update({"flash_slash", "bird_soul", "bird_soul_free"})
@@ -101,6 +101,7 @@ DAMAGING_SKILL_CODES = {
     "paralyzing_glove",
     "machine_gun",
     "pierce",
+    "chess_synergy_pierce",
     "complete_burn",
     "blizzard",
     "great_funeral",

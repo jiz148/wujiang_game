@@ -48,10 +48,18 @@ for (const hero of heroes) {
     const existingRow = existingQuestionIds.indexOf(item.id);
     const row = existingRow >= 0 ? existingRow + 2 : existingQuestionIds.findIndex((code) => !code) + 2;
     if (row < 2) throw new Error("No free questionnaire row found.");
-    const answer = existingRow >= 0 ? questions.getRange(`F${row}`).values[0][0] ?? "" : "";
+    const existingFields = existingRow >= 0
+      ? questions.getRange(`A${row}:H${row}`).values[0] : Array(8).fill("");
+    const existingAnswer = existingFields[5];
+    const answer = item.answer_authoritative ? (item.saved_answer || existingAnswer || "")
+      : (existingAnswer || item.saved_answer || "");
     questions.getRange(`A${row}:H${row}`).values = [[
-      hero.name, item.area, item.id, item.question, item.options, answer,
-      `源表第${hero.source_row}行；设计基线推定${item.inferred}，非用户回答；依据见docs/武将设计思想.json#${hero.code}。`,
+      hero.name, item.area || existingFields[1] || "", item.id,
+      item.question || existingFields[3] || "",
+      item.options === undefined ? (existingFields[4] || "")
+        : (typeof item.options === "string" ? item.options : JSON.stringify(item.options)), answer,
+      item.inferred === undefined ? (existingFields[6] || "")
+        : `源表第${hero.source_row}行；设计基线推定${item.inferred}，非用户回答；依据见docs/武将设计思想.json#${hero.code}。`,
       hero.source_row,
     ]];
     questions.getRange(`A${row}:H${row}`).format.wrapText = true;
@@ -61,7 +69,9 @@ for (const hero of heroes) {
 }
 if (designOnly) {
   const output = await SpreadsheetFile.exportXlsx(workbook);
-  const temporary = `${workbookPath}.new`;
+  // The exporter also writes a same-stem inspection dump. Keep both generated
+  // files under reports so a stale tracked inspection dump cannot block sync.
+  const temporary = path.join(root, "reports", `design-sync-${process.pid}.xlsx`);
   await output.save(temporary);
   await fs.rename(temporary, workbookPath);
   console.log(`Synchronized design-only ${heroes.map((hero) => hero.code).join(", ")} to 武将设计思想 and 问卷.`);

@@ -15,6 +15,7 @@ UNSAFE_SKILLS = frozenset({
     "mana_pull",
     "fate_kick",
     "pierce",
+    "chess_synergy_pierce",
     "machine_gun",
     "knockback",
 })
@@ -29,6 +30,7 @@ SAFE_CELL_SKILLS = frozenset({
     "mounted_leap",
     "leap",
     "fly_leap",
+    "chess_synergy_leap",
     "plasma_thruster",
     "paralysis_card",
     "poison_card",
@@ -189,6 +191,14 @@ def choose_chain_reaction(
             continue
         code = str(option.get("action_code") or "")
         score = _reaction_score(queued, code, threatened)
+        skill = _skill_object(reactor, code)
+        if getattr(skill, "ai_reaction_shield", False):
+            if queued.payload.get("ignore_shield"):
+                continue
+            selected_ids = set(battle.payload_target_unit_ids(payload))
+            if not selected_ids.intersection(queued.target_unit_ids):
+                continue
+            score = max(score, 70)
         source_code = code.rsplit("__", 1)[-1]
         if score <= 0 and not threatened and ("shield" in source_code or source_code in {"protection", "block", "light_wall"}):
             score = 45
@@ -989,6 +999,11 @@ def _move(battle: Battle, actor: Unit, snapshot: dict[str, Any], *, away: bool) 
             break
     if not cells:
         return None
+    owned_move = getattr(getattr(actor, "ai_policy", None), "lightweight_normal_move_payload", None)
+    if callable(owned_move):
+        owned = owned_move(battle, actor, cells, retreating=away)
+        if owned is not None:
+            return owned
     boarding = getattr(getattr(actor, "ai_policy", None), "tendency_boarding_destination", None)
     if callable(boarding):
         chosen = boarding(battle, actor, cells)

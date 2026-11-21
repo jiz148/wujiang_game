@@ -18,7 +18,7 @@ from wujiang.tactical.heroes.registry import (
 )
 from wujiang.tactical.rooms.equipment import load_equipment_catalog
 from wujiang.tactical.rooms.equipment_effects import EquipmentStatus
-from wujiang.tactical.rooms.synergy import CATEGORY_LABELS, SynergyStatus, synergy_counts, synergy_description
+from wujiang.tactical.rooms.synergy import CATEGORY_LABELS, SynergyField, SynergyStatus, synergy_counts, synergy_description
 
 
 @dataclass(frozen=True)
@@ -53,6 +53,10 @@ class AutoChessConfig:
 
 
 CONFIG = AutoChessConfig()
+
+# Temporarily omit these heroes from new shop draws without removing them from
+# the published roster or from existing auto chess lineups.
+SHOP_DRAW_EXCLUDED_HERO_CODES = frozenset({"excel_r327"})
 
 
 def chess_round_limit(initial_hero_count: int, config: AutoChessConfig = CONFIG) -> int:
@@ -304,11 +308,14 @@ class AutoChessState:
         catalog = hero_catalog()
         by_tier: list[list[str]] = [[] for _ in range(5)]
         for code, hero in catalog.items():
+            if code in SHOP_DRAW_EXCLUDED_HERO_CODES:
+                continue
             # Shop odds retain their five native-level bands; prices are independent.
             by_tier[min(4, (max(1, int(hero["level"])) - 1) // 2)].append(code)
         if not any(by_tier):
             _error("当前没有可出售的公开武将。")
-        owned = sorted({piece.code for piece in player.pieces if piece.code in catalog})
+        owned = sorted({piece.code for piece in player.pieces
+                        if piece.code in catalog and piece.code not in SHOP_DRAW_EXCLUDED_HERO_CODES})
         ordinary_by_tier = [[code for code in tier_codes if code not in owned] for tier_codes in by_tier]
         weights = [weight if ordinary_by_tier[index] else 0
                    for index, weight in enumerate(self.config.shop_weights[player.level - 1])]
@@ -597,6 +604,16 @@ class AutoChessState:
         status = getattr(seat, "connection_status", None)
         return callable(status) and status() == "offline"
 
+    def _battle_position(self, piece: ChessPiece, side: int) -> Position:
+        """Keep a player's left-to-right formation in their own battle view."""
+        x, y = int(piece.x), int(piece.y)
+        if side == 2:
+            offsets = _footprint(piece.code)
+            min_dx = min(dx for dx, _ in offsets)
+            max_dx = max(dx for dx, _ in offsets)
+            x = self.config.board_width - 1 - x - min_dx - max_dx
+        return Position(x, y)
+
     def _lock_present_preparation(self, seat_id: int) -> None:
         player = self._player(seat_id)
         if player.ready:
@@ -614,8 +631,11 @@ class AutoChessState:
         battle.chess_rng = random.Random(self.rng.randrange(2**64))
         units_by_side: dict[int, list[Any]] = {1: [], 2: []}
         catalog = hero_catalog()
+        synergies_by_side = {
+            side: [item for item in synergy_counts(player.fielded(), catalog) if item["tier"]]
+            for side, player in ((1, left), (2, right))
+        }
         for side, player in ((1, left), (2, right)):
-            active_synergies = [item for item in synergy_counts(player.fielded(), catalog) if item["tier"]]
             for piece in player.fielded():
                 unit = create_hero(piece.code, side)
                 unit.owner_seat_id = side
@@ -633,17 +653,17 @@ class AutoChessState:
                             unit.max_health += float(amount)
                             unit.current_hp += float(amount)
                     unit.add_status(EquipmentStatus(code, item["attributes"], item["effect"]))
-                for synergy in active_synergies:
-                    if str(catalog[piece.code][synergy["category"]]) == synergy["name"]:
-                        unit.add_status(SynergyStatus(synergy["category"], synergy["name"], synergy["tier"]))
                 unit.chess_star = int(piece.star)
                 unit.chess_upgrades = {key: int(value) for key, value in piece.upgrades.items()}
                 unit.current_mana = unit.max_mana()
-                x = int(piece.x) + (0 if side == 1 else self.config.board_width - self.config.deployment_width)
-                battle.add_unit(unit, Position(x, int(piece.y)))
+                battle.add_unit(unit, self._battle_position(piece, side))
                 units_by_side[side].append(unit)
         if not units_by_side[1] or not units_by_side[2]:
             return None
+        if any(synergies_by_side.values()):
+            synergy_field = SynergyField(synergies_by_side)
+            battle.add_field_effect(synergy_field)
+            synergy_field.apply_initial(battle)
         sorted_left = sort_units_for_classic(units_by_side[1])
         sorted_right = sort_units_for_classic(units_by_side[2])
         turn_order = interleaved_classic_turn_order(sorted_left, sorted_right)

@@ -14,6 +14,9 @@ from wujiang.tactical.heroes.mechanics.status_replacement import replace_status_
 
 
 def damage_followup_effect_applies(ctx: DamageContext, *, allow_on_shield_break: bool = False) -> bool:
+    if (not ctx.is_skill and "attack" in ctx.tags
+            and ctx.target.basic_attack_non_damage_effects_blocked()):
+        return False
     if not ctx.cancelled:
         return True
     if ctx.preserve_followup_effects:
@@ -38,6 +41,11 @@ def apply_piercing_status_effect(
 ) -> bool:
     target = battle.effect_recipient(target)
     if not target.alive or target.position is None or target.banished:
+        return False
+    action = battle.resolving_action
+    if (target.player_id != source.player_id and target.basic_attack_non_damage_effects_blocked()
+            and action is not None
+            and action.payload.get("origin_action_type", action.action_type) in {"attack", "basic_attack"}):
         return False
     if target.direct_effects_blocked():
         return False

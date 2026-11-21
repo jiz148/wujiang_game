@@ -54,6 +54,7 @@ class GladiatorMovedByAllyTrait(Trait):
 class GladiatorCooperationStatus(StatModifierStatus):
     def __init__(self) -> None:
         super().__init__("剑斗协同增益", attack_delta=1, mana_delta=1,
+                         description="攻+1、魔上限+1。",
                          duration=2, tick_scope="owner_turn_end")
 
     def on_removed(self, battle: Battle) -> None:
@@ -95,6 +96,7 @@ class AndrewMovedByAllyTrait(Trait):
 class AndrewCooperationStatus(StatModifierStatus):
     def __init__(self) -> None:
         super().__init__("安德鲁协同增益", defense_delta=1, mana_delta=1,
+                         description="守+1、魔上限+1。",
                          duration=2, tick_scope="owner_turn_end")
 
     def on_removed(self, battle: Battle) -> None:
@@ -104,7 +106,9 @@ class AndrewCooperationStatus(StatModifierStatus):
 
 class GladiatorRoarStatus(StatModifierStatus):
     def __init__(self) -> None:
-        super().__init__("咆哮守护", defense_delta=1, duration=1, tick_scope="any_turn_end")
+        super().__init__("咆哮守护", defense_delta=1,
+                         description="守+1；可把范内友军受到的单体攻击或技能转向自己。",
+                         duration=1, tick_scope="any_turn_end")
 
     def redirect_queued_action(self, battle: Battle, queued_action: Any) -> None:
         owner = self.owner

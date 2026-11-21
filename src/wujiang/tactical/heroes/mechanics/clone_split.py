@@ -85,6 +85,15 @@ class SplitSkill(Skill):
     clone_count = 3
     ai_summon_base_bonus = 10.0
 
+    def can_use(self, battle: Battle, actor: HeroUnit,
+                payload: dict[str, Any] | None = None) -> tuple[bool, str]:
+        ok, reason = super().can_use(battle, actor, payload)
+        if not ok:
+            return ok, reason
+        if len(self.legal_destinations(battle, actor)) < self.clone_count:
+            return False, "没有足够的合法分身落格。"
+        return True, ""
+
     def ai_clone_placement_enemies(self, battle: Battle, actor: HeroUnit) -> list[Unit]:
         return []
 

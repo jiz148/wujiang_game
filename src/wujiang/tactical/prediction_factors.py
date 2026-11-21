@@ -28,16 +28,16 @@ from wujiang.tactical.prediction import (ForecastRandom, forecasting_active, not
 # Normalize CRLF so checkout line endings do not change the contract.
 _SOURCES = {
     "wujiang.tactical.engine.battle_chain": "92423819da6af746a527b536ddcef63427566db4d899df4bd4dd121b310406b9",
-    "wujiang.tactical.engine.battle_combat": "2b441bd3cfe57a9374190717530ef11920831278430b86b6046a1437d4872262",
+    "wujiang.tactical.engine.battle_combat": "7058921d6c7841b7995e12f4a3729a15520f4d4591633e32ea7a60fd231eec44",
     "wujiang.tactical.engine.battle_declarations": "f939f10eb72796e89124c06a74ce1b9e44caea2ff186d3aa67b5cc156888d6fd",
     "wujiang.tactical.engine.battle_execution": "e7ba8e6f2a54080ec6467cbeffd9dddef18a30d7b3937be6a15057840f49227d",
     "wujiang.tactical.engine.battle_geometry": "c6588645f7143a6bfe9641635fa07f517d51b3061681dbdc1dc9193bcd1ac542",
-    "wujiang.tactical.engine.battle_lifecycle": "5822c10d51c525b3e9c7069e59eaa44fd465a3840ac9d65d4328595faf08506e",
-    "wujiang.tactical.engine.battle_movement": "36e4a8c6f13e0f7428a1c6f271b96d31f8ecceebc53cc9032bc2eb3756b09c0c",
+    "wujiang.tactical.engine.battle_lifecycle": "fdad67ec4aadb6c93ba741e743825a42f609de763f55c2bf384ea24a71e0ddc4",
+    "wujiang.tactical.engine.battle_movement": "b2e15b7d10c25ec528b451b986bd0128232b390101926c48e96c20ce031f8f20",
     "wujiang.tactical.engine.battle_presentation": "e8023ba92e089249ab073b5718954e908cbc43f0dd7ea7cc4888dc02f123fe4b",
-    "wujiang.tactical.engine.battle_reactions": "14277aa960a6d8c74459b0c5116c1ebeeee77dc0515e853c8a6aef3be3374242",
+    "wujiang.tactical.engine.battle_reactions": "f217daf941f77cc8dc996244174bb90fea165b6f21e085b0e44ae09e651632b0",
     "wujiang.tactical.engine.battle_turns": "465139922eca22200579af19f720cc4c3c96635dc23336894587ac196e64c5cc",
-    "wujiang.tactical.engine.battle_units": "9a1b5a90ca01c83b533af651e2566b7ff0737c7e0da595354be51c40b3fefbd2",
+    "wujiang.tactical.engine.battle_units": "5ba309c6e345df600c3efb970d82022c9168a1cf0ea86f628e9e9fb20785cddd",
     "wujiang.tactical.heroes.ai_policy": "0aae5235f35c4105ff1e82212ccd903250069e87d4ff995bce11ccf088ee9c55",
     "wujiang.tactical.heroes.ai_score_policies": "2cb7b62e336c72b9634ef07a24e2a7d79a6df7a68687b0b4d0b01f62686c3cee",
     "wujiang.tactical.heroes.ai_candidate_plan": "1bf261a8aa847fc003b28a0f85bee138f94380f01f1985ca97cc70c5bb49742f",
@@ -73,7 +73,7 @@ _SOURCES = {
     "wujiang.tactical.rooms.ai_move_candidates": "04d0737ac9734a45ecfa0ec8987889848b93e3fdceed00a239cd15efce4e1c43",
     "wujiang.tactical.rooms.ai_attack_candidates": "be63f28ac05e9a770b3647755cd688e969d99c0c85a18d2c1252a59bfa9ce871",
     "wujiang.tactical.rooms.ai_skill_candidates": "55ff1d7509893b5441e10a8735e56cc415d482b3b7a20ad3bdfb0892fad428c4",
-    "wujiang.tactical.rooms.ai_reaction_candidates": "aa8d471617f9a89d248f36461f7c9addede34193377f49062bc8333f44193841",
+    "wujiang.tactical.rooms.ai_reaction_candidates": "0f4984bf8b249430cb247baa212ffedee8a86286e2da942180712995014d2fbd",
     "wujiang.tactical.rooms.ai_damage_probes": "28d4e5eeb34d6318c99f1a1ccfcd6a9754356182e403d0281282bf737bc02b21",
     "wujiang.tactical.rooms.ai_attack_scoring": "837e6e89e0104843afed88cbad97897062c09d2b4cd37b713f3d68b1fb6569bb",
     "wujiang.tactical.rooms.ai_effect_early_scoring": "3658dd3609ed9368b1413378e251c0690cd2086c07ab8dc0c3f39f1330b930ac",
@@ -93,9 +93,9 @@ _SOURCES = {
     "wujiang.tactical.rooms.ai_skill_catalog": "581b30515c308e3bc071ad15d6d1c42c0e718d4f9d82a189205011a5ecdcaf72",
     "wujiang.tactical.rooms.ai_types": "b0578a994f172e60aa47e388be5688b3afe064108fe867098deb516574e759dd",
     "wujiang.tactical.rooms.ai_probe": "72fba98cc9f2814dda6dfada6a9c0446358535c5da0c783f5381cfd40e682885",
-    "wujiang.tactical.engine.core": "d9ba0d6aae17f49897663a6ffdd2638d48800f7e4e1f0e296fc2051dc9487eda",
+    "wujiang.tactical.engine.core": "fcd117c2e332f8b81edca312f47ab8623a59609522083bdcb13a1bdf52b462a5",
     "wujiang.tactical.heroes.common": "c02240947e6550675d4a0292a87ef05ef5db953743e360dcb0cca7f8da88769e",
-    "wujiang.tactical.heroes.excel_roster": "e32124761f4088d139db1407985b103419ba64d364c831f031cd6506d1898684",
+    "wujiang.tactical.heroes.excel_roster": "0410ae7668a3932b735d307d67869d7b8f871f5dfdd03d1e81ca2feda4198198",
     "wujiang.tactical.heroes.mechanics.hell_rebirth": "45bbacb070446b5d9065e750afb6385a4d8e92871d8d78606713abbe87c78dd5",
     "wujiang.tactical.heroes.mechanics.hell_dog_hunter": "48081f03870d2bf4b79e4fd23a273a84f9007c848ad65a3b0e50b2486b9f5474",
     "wujiang.tactical.heroes.mechanics.hell_dragon": "eb7d076b25869778f474d502686f951f098a102148f9b11e732b002e5de19f99",
@@ -393,7 +393,7 @@ def _certified(battle, targets, queued, *, settled=False):
     if any(callable(value) for value in vars(battle).values()):
         return _reject("instance_resolver")
     from wujiang.tactical.rooms import synergy, equipment_effects
-    if not _original(synergy.synergy_stat) or not _original(equipment_effects._rng):
+    if not _original(synergy.synergy_description) or not _original(equipment_effects._rng):
         return _reject("changed_synergy")
     source = battle.units.get(queued.actor_id)
     if source is None or not area_query(queued) or queued.payload.get("segment_count", 1) != 1:

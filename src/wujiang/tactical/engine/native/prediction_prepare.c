@@ -348,6 +348,139 @@ static PyObject *restore_slots(PyObject *self, PyObject *args) {
     Py_RETURN_NONE;
 }
 
+typedef struct {
+    PyObject *owner, *data, *fields, *excluded;
+    uint64_t version;
+} StatFieldRow;
+typedef struct {
+    Py_ssize_t size;
+    StatFieldRow *rows;
+} StatFieldGuard;
+
+static uint64_t stat_dict_version(PyObject *data) {
+    /* This artifact is pinned to the full interpreter ABI. CPython 3.12's
+     * mutation counter follows ma_used. Avoid deprecated member access; later
+     * versions use the complete selected-field comparison on every call. */
+#if PY_VERSION_HEX >= 0x030c0000 && PY_VERSION_HEX < 0x030d0000
+    uint64_t version;
+    memcpy(&version, ((char *)data) + offsetof(PyDictObject, ma_used) + sizeof(Py_ssize_t), sizeof(version));
+    return version;
+#else
+    return 0;
+#endif
+}
+
+static void free_stat_fields(PyObject *capsule) {
+    StatFieldGuard *guard = PyCapsule_GetPointer(capsule, "wujiang.stat.fields");
+    if (guard == NULL) { PyErr_Clear(); return; }
+    for (Py_ssize_t i = 0; i < guard->size; i++) {
+        Py_XDECREF(guard->rows[i].owner); Py_XDECREF(guard->rows[i].data); Py_XDECREF(guard->rows[i].fields);
+        Py_XDECREF(guard->rows[i].excluded);
+    }
+    PyMem_Free(guard->rows); PyMem_Free(guard);
+}
+
+static PyObject *make_field_guard(PyObject *self, PyObject *args) {
+    PyObject *rows;
+    if (!PyArg_ParseTuple(args, "O!:make_field_guard", &PyList_Type, &rows)) return NULL;
+    StatFieldGuard *guard = PyMem_Calloc(1, sizeof(*guard));
+    if (guard == NULL) return PyErr_NoMemory();
+    guard->size = PyList_GET_SIZE(rows);
+    guard->rows = PyMem_Calloc((size_t)(guard->size + 1), sizeof(*guard->rows));
+    if (guard->rows == NULL) { PyMem_Free(guard); return PyErr_NoMemory(); }
+    PyObject *capsule = PyCapsule_New(guard, "wujiang.stat.fields", free_stat_fields);
+    if (capsule == NULL) { PyMem_Free(guard->rows); PyMem_Free(guard); return NULL; }
+    for (Py_ssize_t i = 0; i < guard->size; i++) {
+        PyObject *row = PyList_GET_ITEM(rows, i);
+        if (!PyTuple_CheckExact(row) || PyTuple_GET_SIZE(row) != 3 || !PyDict_CheckExact(PyTuple_GET_ITEM(row, 1))
+                || !PyTuple_CheckExact(PyTuple_GET_ITEM(row, 2))) {
+            Py_DECREF(capsule); PyErr_SetString(PyExc_TypeError, "owner/dictionary/fields rows required"); return NULL;
+        }
+        PyObject *fields = PyTuple_GET_ITEM(row, 2);
+        for (Py_ssize_t j = 0; j < PyTuple_GET_SIZE(fields); j++) {
+            PyObject *field = PyTuple_GET_ITEM(fields, j);
+            if (!PyTuple_CheckExact(field) || PyTuple_GET_SIZE(field) != 2 || !PyUnicode_CheckExact(PyTuple_GET_ITEM(field, 0))) {
+                Py_DECREF(capsule); PyErr_SetString(PyExc_TypeError, "named field pairs required"); return NULL;
+            }
+        }
+        guard->rows[i].owner = Py_NewRef(PyTuple_GET_ITEM(row, 0));
+        guard->rows[i].data = Py_NewRef(PyTuple_GET_ITEM(row, 1));
+        guard->rows[i].fields = Py_NewRef(fields);
+        guard->rows[i].version = 0; /* First check must validate all fields. */
+    }
+    return capsule;
+}
+
+static PyObject *make_excluding_field_guard(PyObject *self, PyObject *args) {
+    PyObject *rows, *plain;
+    if (!PyArg_ParseTuple(args, "O!:make_excluding_field_guard", &PyList_Type, &rows)) return NULL;
+    plain = PyList_New(PyList_GET_SIZE(rows));
+    if (plain == NULL) return NULL;
+    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(rows); i++) {
+        PyObject *row = PyList_GET_ITEM(rows, i);
+        if (!PyTuple_CheckExact(row) || PyTuple_GET_SIZE(row) != 4 || !PyTuple_CheckExact(PyTuple_GET_ITEM(row, 3))) {
+            Py_DECREF(plain); PyErr_SetString(PyExc_TypeError, "owner/dictionary/fields/exclusions rows required"); return NULL;
+        }
+        PyObject *excluded = PyTuple_GET_ITEM(row, 3);
+        for (Py_ssize_t j = 0; j < PyTuple_GET_SIZE(excluded); j++) {
+            if (!PyUnicode_CheckExact(PyTuple_GET_ITEM(excluded, j))) {
+                Py_DECREF(plain); PyErr_SetString(PyExc_TypeError, "plain exclusion names required"); return NULL;
+            }
+            for (Py_ssize_t k = 0; k < j; k++) {
+                int same = PyObject_RichCompareBool(PyTuple_GET_ITEM(excluded,j),PyTuple_GET_ITEM(excluded,k),Py_EQ);
+                if (same < 0 || same) {
+                    Py_DECREF(plain); if (same) PyErr_SetString(PyExc_ValueError,"duplicate exclusion"); return NULL;
+                }
+            }
+        }
+        PyObject *entry = PyTuple_GetSlice(row, 0, 3);
+        if (entry == NULL) { Py_DECREF(plain); return NULL; }
+        PyList_SET_ITEM(plain, i, entry);
+    }
+    PyObject *wrapped = PyTuple_Pack(1, plain);
+    Py_DECREF(plain);
+    if (wrapped == NULL) return NULL;
+    PyObject *capsule = make_field_guard(self, wrapped);
+    Py_DECREF(wrapped);
+    if (capsule == NULL) return NULL;
+    StatFieldGuard *guard = PyCapsule_GetPointer(capsule, "wujiang.stat.fields");
+    if (guard == NULL) { Py_DECREF(capsule); return NULL; }
+    for (Py_ssize_t i = 0; i < guard->size; i++)
+        guard->rows[i].excluded = Py_NewRef(PyTuple_GET_ITEM(PyList_GET_ITEM(rows,i),3));
+    return capsule;
+}
+
+static PyObject *field_guard_matches(PyObject *self, PyObject *args) {
+    PyObject *capsule, *missing;
+    if (!PyArg_ParseTuple(args, "OO:field_guard_matches", &capsule, &missing)) return NULL;
+    StatFieldGuard *guard = PyCapsule_GetPointer(capsule, "wujiang.stat.fields");
+    if (guard == NULL) return NULL;
+    for (Py_ssize_t i = 0; i < guard->size; i++) {
+        StatFieldRow *row = &guard->rows[i];
+        PyObject **pointer = _PyObject_GetDictPtr(row->owner);
+        if (pointer == NULL || *pointer != row->data) Py_RETURN_FALSE;
+        uint64_t version = stat_dict_version(row->data);
+        if (version != 0 && row->version == version) continue;
+        if (row->excluded != NULL) {
+            Py_ssize_t required = PyTuple_GET_SIZE(row->fields);
+            for (Py_ssize_t j = 0; j < PyTuple_GET_SIZE(row->excluded); j++) {
+                int present = PyDict_Contains(row->data,PyTuple_GET_ITEM(row->excluded,j));
+                if (present < 0) return NULL;
+                required += present;
+            }
+            if (PyDict_GET_SIZE(row->data) != required) Py_RETURN_FALSE;
+        }
+        for (Py_ssize_t j = 0; j < PyTuple_GET_SIZE(row->fields); j++) {
+            PyObject *field = PyTuple_GET_ITEM(row->fields, j);
+            PyObject *value = PyDict_GetItemWithError(row->data, PyTuple_GET_ITEM(field, 0));
+            if (PyErr_Occurred()) return NULL;
+            if ((value == NULL ? missing : value) != PyTuple_GET_ITEM(field, 1)) Py_RETURN_FALSE;
+        }
+        row->version = version;
+    }
+    Py_RETURN_TRUE;
+}
+
 static PyObject *graph_matches(PyObject *self, PyObject *args) {
     PyObject *namespaces, *slots, *containers, *deque_type;
     if (!PyArg_ParseTuple(args, "O!O!O!O:graph_matches", &PyList_Type, &namespaces, &PyList_Type, &slots,
@@ -504,13 +637,20 @@ static int empty_component(PyObject *value, PyObject *checker, PyObject *checked
     PyObject *plan = empty_class_plan(checker, checked, plans, value, 0);
     if (plan == NULL) return -1;
     if (plan == Py_False) { Py_DECREF(plan); return 0; }
-    if (!PyTuple_CheckExact(plan) || PyTuple_GET_SIZE(plan) != 2) {
+    if (!PyTuple_CheckExact(plan) || (PyTuple_GET_SIZE(plan) != 2 && PyTuple_GET_SIZE(plan) != 3)) {
         Py_DECREF(plan); PyErr_SetString(PyExc_TypeError, "class proof pair required"); return -1;
     }
     PyObject *data = PyObject_GenericGetDict(value, NULL);
     if (data == NULL) { Py_DECREF(plan); return -1; }
     int result = 0;
     if (!PyDict_CheckExact(data)) goto done;
+    /* An object-owned certificate proves ONLY the None/empty branch of its
+     * current provider code. Inspect the live field on every pass; a real
+     * dynamic child keeps ordinary discovery and complete rollback. */
+    if (PyTuple_GET_SIZE(plan) == 3) {
+        PyObject *field = PyTuple_GET_ITEM(plan, 2);
+        if (!PyUnicode_CheckExact(field) || PyDict_GetItemWithError(data, field) != Py_None) goto done;
+    }
     if (PyDict_GetItemWithError(data, PyTuple_GET_ITEM(names, 12)) != NULL
             || PyDict_GetItemWithError(data, PyTuple_GET_ITEM(names, 13)) != NULL
             || PyDict_GetItemWithError(data, hook) != NULL) goto done;
@@ -716,6 +856,9 @@ static PyMethodDef methods[] = {
     {"containers_match", containers_match, METH_VARARGS, "Validate every saved container by ordered reference identity."},
     {"restore_graph", restore_graph, METH_VARARGS, "Restore changed graph containers in reverse capture order."},
     {"graph_matches", graph_matches, METH_VARARGS, "Validate all namespace, slot and container identities in order."},
+    {"make_field_guard", make_field_guard, METH_VARARGS, "Capture owned scalar dependencies, without caching any battle result."},
+    {"make_excluding_field_guard", make_excluding_field_guard, METH_VARARGS, "Check every namespace field except explicit local outputs."},
+    {"field_guard_matches", field_guard_matches, METH_VARARGS, "Recheck namespaces and selected fields; version hits only for the pinned ABI."},
     {"restore_namespaces", restore_namespaces, METH_VARARGS, "Restore original namespace identities."},
     {"restore_slots", restore_slots, METH_VARARGS, "Restore slots, skipping unchanged plain C member writes only."},
     {"type_versions", type_versions, METH_VARARGS, "Capture complete CPython type lookup invalidation tags."},

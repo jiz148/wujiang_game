@@ -102,7 +102,7 @@ class WyvernMount(AbstractHero):
     attribute = "风"
     race = "兽"
     level = 1
-    base_stats = Stats(attack=1, defense=4, speed=8, attack_range=1, mana=0)
+    base_stats = Stats(attack=1, defense=4, speed=7, attack_range=1, mana=0)
     footprint_width = 1
     footprint_height = 2
     raw_skill_text = ""

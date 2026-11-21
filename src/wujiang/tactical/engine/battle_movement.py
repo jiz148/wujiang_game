@@ -440,8 +440,14 @@ class BattleMovementMixin:
             raise ActionError("附着期间不能独立移动。")
         if unit.direct_effects_blocked() and (forced or (via_skill and self.resolving_action is not None and self.resolving_action.actor_id != unit.unit_id)):
             raise ActionError(f"{unit.name} 不受外部位移效果影响。")
-        if unit.skill_non_damage_effects_blocked() and via_skill:
+        if (unit.skill_non_damage_effects_blocked() and via_skill
+                and (self.resolving_action is None or self.resolving_action.actor_id != unit.unit_id)):
             raise ActionError(f"{unit.name} 不受技能位移效果影响。")
+        action = self.resolving_action
+        if (forced and unit.basic_attack_non_damage_effects_blocked() and action is not None
+                and action.actor_id != unit.unit_id
+                and action.payload.get("origin_action_type", action.action_type) in {"attack", "basic_attack"}):
+            raise ActionError(f"{unit.name} 不受普攻的非伤害位移效果影响。")
         if via_skill and getattr(unit, "standable_terrain", False):
             raise ActionError("地形单位不受技能位移效果影响。")
         carried_riders = [(rider, rider.position) for rider in self.riders_for(unit)]
@@ -459,6 +465,12 @@ class BattleMovementMixin:
             raise ActionError(f"{unit.name} 当前不能进行常规移动。")
         if max_distance is None:
             max_distance = unit.remaining_normal_move_distance(self) if not via_skill and not forced else int(unit.stat("speed"))
+        if path is None and not via_skill and not forced and not triggered_by_reaction:
+            for component in unit.iter_components():
+                bonus_path = component.normal_move_bonus_path(self, unit, destination)
+                if bonus_path is not None:
+                    path = bonus_path[1:]
+                    break
         use_movement_cost = not via_skill and not forced
         path = (
             self.explicit_path(
@@ -484,6 +496,10 @@ class BattleMovementMixin:
             )
         )
         destination = path[-1]
+        if not via_skill and not forced and not triggered_by_reaction:
+            if any(not component.normal_move_path_allowed(self, unit, path)
+                   for component in unit.iter_components()):
+                raise ActionError("该单位的移动路线不符合加速条件。")
         ctx = MoveContext(
             unit=unit,
             start=unit.position,
@@ -538,7 +554,9 @@ class BattleMovementMixin:
             self.clear_mounted_state(unit)
         if unit.mounted_on_unit_id is None and not unit.is_mount and len(self.unit_cells(unit)) == 1:
             for ship in self.units_at(unit.position, ignore=unit):
-                if ship.allows_multiple_riders and ship.player_id == unit.player_id:
+                if (ship.player_id == unit.player_id
+                        and (ship.allows_multiple_riders
+                             or (ship.is_mount and ship.mount_owner_id == unit.unit_id))):
                     self.set_mounted_state(unit, ship)
                     break
         unit.moved_this_turn = unit.moved_this_turn or len(path) > 1
@@ -615,6 +633,10 @@ class BattleMovementMixin:
             component.on_targeted(self, ctx)
         for effect in list(self.field_effects):
             effect.on_after_target_modifiers(self, ctx)
+        if (not ctx.cancelled and ctx.is_skill and not ctx.damage_target
+                and target.skill_non_damage_effects_blocked()):
+            ctx.cancelled = True
+            ctx.reason = f"{target.name} 不受技能非伤害效果影响。"
         if ctx.cancelled:
             return ctx
         if (

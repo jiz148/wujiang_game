@@ -15,6 +15,7 @@ from wujiang.tactical.heroes.mechanics.next_five_geometry import square_around_c
 class SektoruCooperationStatus(StatModifierStatus):
     def __init__(self) -> None:
         super().__init__("塞克托鲁协同增益", attack_delta=1, mana_delta=1,
+                         description="攻+1、魔上限+1。",
                          duration=2, tick_scope="owner_turn_end")
         self.is_skill_effect = False
 

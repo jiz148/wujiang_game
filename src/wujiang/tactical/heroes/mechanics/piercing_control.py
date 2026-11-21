@@ -5,13 +5,16 @@ from __future__ import annotations
 from wujiang.tactical.engine.core import Battle, Unit
 
 def piercing_nondamage_recipient(battle: Battle, actor: Unit, target: Unit, *,
-                                 action_name: str, code: str) -> Unit | None:
+                                 action_name: str, code: str,
+                                 cannot_evade: bool = False,
+                                 ignore_magic_immunity: bool = False) -> Unit | None:
     target = battle.effect_recipient(target)
     if target.skill_non_damage_effects_blocked():
         battle.log_public_event(f"{target.name} 未受【{action_name}】的无伤效果影响。", source=actor, target=target)
         return None
     result = battle.validate_target(actor, target, action_name=action_name, is_skill=True,
         is_hostile=target.player_id != actor.player_id, ignore_shield=True,
+        cannot_evade=cannot_evade, ignore_magic_immunity=ignore_magic_immunity,
         resolve_defenses=False, record_effect_on_validation=False,
         tags={"skill", code, "control"})
     target = result.target

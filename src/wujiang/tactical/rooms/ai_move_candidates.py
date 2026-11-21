@@ -45,8 +45,9 @@ class MoveCandidateBuilder:
         enemies = living_hostile_combatants(battle, actor.player_id)
         if not enemies:
             return cells[:self.services.FAST_AI_MOVE_LIMIT]
-        preferred, _ = offensive_positioning_plan(battle, actor)
+        preferred, shapes, _ = offensive_positioning_plan(battle, actor)
         origin = actor.position
+        target_cells = [target_cell for enemy in enemies for target_cell in battle.unit_cells(enemy)] if shapes else []
 
         def rank(cell: Position) -> tuple[float, int]:
             enemy_distance = min(self.services.distance_to_position(battle, enemy, cell) for enemy in enemies)
@@ -58,6 +59,17 @@ class MoveCandidateBuilder:
             return (abs(enemy_distance - preferred), step)
 
         shortlist = sorted(cells, key=rank)
+        if preferred > 1 and target_cells:
+            # Keep directional firing positions as well as the distance picks.
+            # The full move scorer will compare these bounded candidates.
+            def shape_rank(cell: Position) -> tuple[int, float, int]:
+                hits = sum(any((target.x - cell.x, target.y - cell.y) in shape
+                               for target in target_cells) for shape in shapes)
+                return (-hits, rank(cell)[0], cell.distance_to(origin))
+
+            shaped = sorted(cells, key=shape_rank)
+            half = max(1, self.services.FAST_AI_MOVE_LIMIT // 2)
+            shortlist = list(dict.fromkeys([*shortlist[:half], *shaped, *shortlist]))
         move_policy = getattr(actor, "ai_policy", None)
         focused = move_policy.focused_move_shortlist(battle, actor, cells) if move_policy is not None else None
         if focused is not None:

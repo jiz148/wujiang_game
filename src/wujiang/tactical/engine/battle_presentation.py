@@ -440,6 +440,8 @@ class BattlePresentationMixin:
                 max_distance=unit.remaining_normal_move_distance(self),
                 use_movement_cost=True,
             )
+            if all(component.normal_move_destination_allowed(self, unit, pos)
+                   for component in unit.iter_components())
         ]
         forced_movement = False
         for component in unit.iter_components():

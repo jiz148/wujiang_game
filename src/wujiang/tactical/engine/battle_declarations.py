@@ -31,6 +31,8 @@ class BattleDeclarationMixin:
         queued_payload.pop("action_failed_by_wuchang_mist", None)
         queued_payload.pop("floating_crane_checked", None)
         queued_payload.pop("action_failed_by_floating_crane", None)
+        queued_payload.pop("synergy_failure_checked", None)
+        queued_payload.pop("action_failed_by_synergy", None)
         queued_payload.pop("separate_attack_segments", None)
         queued_payload.pop("separate_attack_index", None)
         queued_payload.pop("piercing_followup", None)
@@ -66,11 +68,24 @@ class BattleDeclarationMixin:
                     max_distance=remaining_move,
                     use_movement_cost=True,
                 )
+                if any(not component.normal_move_path_allowed(self, actor, path)
+                       for component in actor.iter_components()):
+                    raise ActionError("该单位的移动路线不符合加速条件。")
                 queued_payload["path"] = [step.to_dict() for step in path[1:]]
                 queued_payload["x"] = path[-1].x
                 queued_payload["y"] = path[-1].y
             elif payload.get("x") is None or payload.get("y") is None:
                 raise ActionError("移动需要指定目标位置。")
+            destination = Position(int(queued_payload["x"]), int(queued_payload["y"]))
+            if any(not component.normal_move_destination_allowed(self, actor, destination)
+                   for component in actor.iter_components()):
+                raise ActionError("该位置不符合移动加速条件。")
+            if not explicit_steps:
+                for component in actor.iter_components():
+                    bonus_path = component.normal_move_bonus_path(self, actor, destination)
+                    if bonus_path is not None:
+                        queued_payload["path"] = [step.to_dict() for step in bonus_path[1:]]
+                        break
             for component in actor.iter_components():
                 forced_paths = component.forced_normal_move_paths(self, actor)
                 if forced_paths is None:
@@ -254,7 +269,9 @@ class BattleDeclarationMixin:
             queued_payload["ignore_shield"] = skill.ignores_shield_for_payload(self, actor, payload) or any(
                 component.all_skills_pierce_shields for component in actor.iter_components()
             )
-            queued_payload["half_ignore_shield"] = skill.half_ignores_shield_for_payload(self, actor, payload)
+            queued_payload["half_ignore_shield"] = skill.half_ignores_shield_for_payload(self, actor, payload) or any(
+                getattr(component, "all_damage_half_pierce", False) for component in actor.iter_components()
+            )
             queued_payload["ignore_stealth"] = skill.ignores_stealth_for_payload(self, actor, payload)
             queued_payload["cannot_evade"] = skill.cannot_evade_for_payload(self, actor, payload)
             if skill.ignores_magic_immunity_for_payload(self, actor, payload):

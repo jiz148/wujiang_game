@@ -371,14 +371,27 @@ class BattleChainMixin:
         )
         with self.suppress_logs() if self.queued_action_hides_logs(queued_action) else nullcontext():
             actor = self.units.get(queued_action.actor_id)
+            destroyed_actor = (next((unit for unit in self.destroyed_units
+                                     if unit.unit_id == queued_action.actor_id), None)
+                               if actor is None else None)
             if actor is None and queued_action.payload.get("after_death_effect"):
-                actor = next((unit for unit in self.destroyed_units if unit.unit_id == queued_action.actor_id), None)
+                actor = destroyed_actor
             if actor is None or (not actor.alive and not queued_action.payload.get("after_death_effect")) or actor.banished:
-                self.stale_queued_action_count += 1
+                # A unit killed during the chain legitimately loses its queued
+                # action. Only an unexplained disappearance or banishment is a
+                # stale actor requiring AI recovery.
+                known_destroyed = (actor is not None and not actor.alive) or (
+                    destroyed_actor is not None and not destroyed_actor.alive
+                )
+                if not known_destroyed or (actor is not None and actor.banished):
+                    self.stale_queued_action_count += 1
                 self._separate_attack_sequences.pop(queued_action.payload.get("declaration_id"), None)
-                self.log(f"【{queued_action.display_name}】未能结算，因为行动者已不在战场。")
+                reason = "已被破坏" if known_destroyed else "已不在战场"
+                self.log(f"【{queued_action.display_name}】未能结算，因为行动者{reason}。")
                 return
-            if queued_action.action_type in {"attack", "skill"}:
+            from wujiang.tactical.prediction import direct_scoring
+            from wujiang.tactical.direct_queries import empty_hook_pass
+            if queued_action.action_type in {"attack", "skill"} and not (direct_scoring() and empty_hook_pass(self, 'redirect_queued_action')):
                 for observer in list(self.all_units()):
                     for component in list(observer.iter_components()):
                         redirect = getattr(component, "redirect_queued_action", None)
@@ -434,7 +447,7 @@ class BattleChainMixin:
                     actor.actions_taken_this_turn.append("attack")
                     actor.consume_attack_attempt_buffs(self)
                     actor.notify_basic_attack_finished(self, payload, [], missed=True)
-                    self.log(f"{actor.name} 的攻击因前移失败而落空。")
+                    self.log(f"{actor.name} 的攻击因【{payload.get('basic_attack_failed_reason') or '前移失败'}】而落空。")
                     return
                 if not actor.can_take_turn_actions(self) or actor.cannot_attack:
                     payload["basic_attack_cancelled"] = True
@@ -479,12 +492,14 @@ class BattleChainMixin:
                 self.resolve_from_declared_origin(actor, payload, lambda: self.basic_attack_with_payload(actor, target, payload))
                 return
             if queued_action.action_type == "skill":
-                if payload.get("action_failed_by_wuchang_mist") or payload.get("action_failed_by_floating_crane"):
+                if (payload.get("action_failed_by_wuchang_mist") or payload.get("action_failed_by_floating_crane")
+                        or payload.get("action_failed_by_synergy")):
                     skill = actor.get_skill(payload["skill_code"])
                     skill.on_target_missed(self, actor, payload)
                     skill.finalize_use(self, actor)
                     actor.actions_taken_this_turn.append(f"skill:{skill.code}")
-                    weather_name = "无常之雾" if payload.get("action_failed_by_wuchang_mist") else "浮鹤城"
+                    weather_name = ("无常之雾" if payload.get("action_failed_by_wuchang_mist") else
+                                    "浮鹤城" if payload.get("action_failed_by_floating_crane") else "钢羁绊")
                     self.log(f"{actor.name} 的【{skill.name}】因【{weather_name}】失败。")
                     return
                 resolved_payload = dict(payload)
@@ -563,6 +578,7 @@ class BattleChainMixin:
                         for component in list(target.iter_components()):
                             component.on_target_action_declared(self, actor, queued_action.action_type, queued_action.payload)
             if (queued_action.payload.get("action_failed_by_wuchang_mist") or queued_action.payload.get("action_failed_by_floating_crane")
+                    or queued_action.payload.get("action_failed_by_synergy")
                     or (queued_action.action_type == "skill" and reaction_window_timing == "after")):
                 self.resolve_queued_action(queued_action)
                 self.advance_followup_actions()

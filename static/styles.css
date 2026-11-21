@@ -7055,12 +7055,33 @@ body.battle-mode .ghost-piece {
   font-weight: 800;
   line-height: 1.2;
   white-space: nowrap;
-  transform: translate(var(--cue-x-shift, -50%), calc(-100% - 12px));
+  transform: translate(-50%, calc(-100% - 12px));
   animation: battle-action-cue-rise var(--cue-duration, 680ms) ease-out both;
 }
 
+.battle-action-cue::after {
+  content: '';
+  position: absolute;
+  left: calc(50% + var(--cue-anchor-offset, 0px));
+  bottom: -5px;
+  width: 8px;
+  height: 8px;
+  background: #303942;
+  border-right: 1px solid rgba(255, 227, 177, 0.72);
+  border-bottom: 1px solid rgba(255, 227, 177, 0.72);
+  transform: translateX(-50%) rotate(45deg);
+}
+
 .battle-action-cue.is-below {
-  transform: translate(var(--cue-x-shift, -50%), 16px);
+  transform: translate(-50%, 16px);
+}
+
+.battle-action-cue.is-below::after {
+  top: -5px;
+  bottom: auto;
+  border: 0;
+  border-top: 1px solid rgba(255, 227, 177, 0.72);
+  border-left: 1px solid rgba(255, 227, 177, 0.72);
 }
 
 .battle-action-cue.is-move { border-color: rgba(142, 220, 204, 0.85); }
@@ -11298,6 +11319,24 @@ body.screen-autochess .chess-shell {
 .bp-cell.is-dim {
   opacity: 0.5;
 }
+
+.bp-rate-controls, .bp-hero-rates {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .5rem 1rem;
+  padding: .65rem .8rem;
+  background: var(--surface-2);
+  border-radius: .65rem;
+}
+.bp-rate-controls { margin-bottom: .6rem; }
+.bp-cell__rates { display: block; font-size: .68rem; font-variant-numeric: tabular-nums; }
+.bp-hero-rates { margin-top: .6rem; font-variant-numeric: tabular-nums; }
+.bp-hero-rates small, .bp-rate-controls small { color: var(--text-2); }
+.bp-cell.bp-heat-0 { background: #435c76; color: white; }
+.bp-cell.bp-heat-1 { background: #375b86; color: white; }
+.bp-cell.bp-heat-2 { background: #275690; color: white; }
+.bp-cell.bp-heat-3 { background: #164b99; color: white; }
 
 @media (max-width: 980px) {
   .bp-layout {

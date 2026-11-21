@@ -4,6 +4,31 @@ from __future__ import annotations
 from functools import lru_cache
 
 
+@lru_cache(maxsize=16)
+def _clipped_rectangles(board_width, board_height, width, height):
+    # Preserve first occurrence, y-major anchors and y-major cell order.
+    patterns = {}
+    for start_y in range(1 - height, board_height):
+        for start_x in range(1 - width, board_width):
+            cells = tuple((x, y) for y in range(max(0, start_y), min(board_height, start_y + height))
+                          for x in range(max(0, start_x), min(board_width, start_x + width)))
+            if cells:
+                patterns[cells] = cells
+    ordered = tuple(patterns.values())
+    return ordered, {tuple(sorted(cells)): cells for cells in ordered}
+
+
+def clipped_rectangle_coordinates(board_width, board_height, width, height, *, selection=None):
+    """Bounded immutable templates or a selected shape; None means fallback."""
+    if any(type(value) is not int or value <= 0 for value in (board_width, board_height, width, height)):
+        return None
+    work = (board_width + width - 1) * (board_height + height - 1) * width * height
+    if board_width * board_height > 1024 or work > 65536:
+        return None
+    patterns, lookup = _clipped_rectangles(board_width, board_height, width, height)
+    return patterns if selection is None else lookup.get(selection, ())
+
+
 @lru_cache(maxsize=4096)
 def body_coordinates(x: int, y: int, offsets: tuple[tuple[int, int], ...]) -> tuple[tuple[int, int], ...]:
     return tuple((x + dx, y + dy) for dx, dy in offsets)
